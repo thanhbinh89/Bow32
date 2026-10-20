@@ -1,0 +1,9 @@
+// Lint waivers for Bow32 (Verilator configuration file).
+//
+// Third party code (Ibex and its primitives) is linted upstream; we only
+// care about warnings in Bow32's own RTL.
+
+`verilator_config
+
+lint_off -file "*/lowrisc_ibex/*"
+lint_off -rule PINCONNECTEMPTY

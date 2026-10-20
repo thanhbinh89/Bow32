@@ -1,0 +1,212 @@
+// Copyright Bow32 contributors.
+// SPDX-License-Identifier: Apache-2.0
+//
+// Bow32 SoC top level (technology independent).
+//
+//   Ibex (instr) --+                          +--> ROM    8 KiB
+//                  +--> main xbar (2 x 4) ----+--> FLASH  128 KiB (memory window)
+//   Ibex (data) ---+                          +--> SRAM   16 KiB
+//                                             +--> periph xbar (1 x 4)
+//                                                    +--> SYSCTRL (+ reset manager)
+//                                                    +--> FLASH_CTRL
+//                                                    +--> UART0
+//                                                    +--> UART1
+//
+// Addresses and port numbers come from bow32_memmap_pkg (generated from
+// hw/top/data/bow32_memmap.yaml). See docs/architecture.md.
+
+module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
+  parameter int unsigned        ClkFreqHz     = 50_000_000,
+  // Boot configuration exposed to the ROM through SYSCTRL
+  parameter int unsigned        BootBaud      = 115_200,
+  parameter int unsigned        BootWaitMs    = 300,
+  // UART0 RX low for this many cycles resets the SoC into the bootloader
+  parameter int unsigned        BreakCycles   = ClkFreqHz / 100,
+  // Memory initialisation ($readmemh, one 32 bit word per line)
+  parameter                     RomInitFile   = "",
+  parameter                     FlashInitFile = "",
+  // CPU options
+  parameter ibex_pkg::regfile_e IbexRegFile   = ibex_pkg::RegFileFF
+) (
+  input  logic clk_i,
+  input  logic rst_ni,        // asynchronous board reset, active low
+
+  input  logic uart0_rx_i,
+  output logic uart0_tx_o,
+  input  logic uart1_rx_i,
+  output logic uart1_tx_o,
+
+  // Status (for LEDs / debug)
+  output logic sys_rst_no,
+  output logic core_sleep_o
+);
+
+  // ---------------------------------------------------------------------------
+  // Clock and reset
+  // ---------------------------------------------------------------------------
+  logic por_rst_n, sys_rst_n, sys_rst_req;
+
+  bow_rstmgr u_rstmgr (
+    .clk_i,
+    .por_ni        (rst_ni),
+    .sys_rst_req_i (sys_rst_req),
+    .por_rst_no    (por_rst_n),
+    .sys_rst_no    (sys_rst_n)
+  );
+
+  assign sys_rst_no = sys_rst_n;
+
+  // ---------------------------------------------------------------------------
+  // Interrupts
+  // ---------------------------------------------------------------------------
+  logic        uart0_irq, uart1_irq, flash_irq;
+  logic [14:0] irq_fast;
+
+  always_comb begin
+    irq_fast               = '0;
+    irq_fast[IrqFastUart0] = uart0_irq;
+    irq_fast[IrqFastUart1] = uart1_irq;
+    irq_fast[IrqFastFlash] = flash_irq;
+  end
+
+  // ---------------------------------------------------------------------------
+  // CPU
+  // ---------------------------------------------------------------------------
+  localparam int unsigned HostInstr = 0;
+  localparam int unsigned HostData  = 1;
+  localparam int unsigned NumHosts  = 2;
+
+  bus_req_t [NumHosts-1:0] host_req;
+  bus_rsp_t [NumHosts-1:0] host_rsp;
+
+  bow_cpu_ibex #(
+    .BootAddr (BootAddr),
+    .RegFile  (IbexRegFile)
+  ) u_cpu (
+    .clk_i,
+    .rst_ni         (sys_rst_n),
+    .instr_req_o    (host_req[HostInstr]),
+    .instr_rsp_i    (host_rsp[HostInstr]),
+    .data_req_o     (host_req[HostData]),
+    .data_rsp_i     (host_rsp[HostData]),
+    .irq_software_i (1'b0),
+    .irq_timer_i    (1'b0),
+    .irq_external_i (1'b0),
+    .irq_fast_i     (irq_fast),
+    .core_sleep_o
+  );
+
+  // ---------------------------------------------------------------------------
+  // Main crossbar
+  // ---------------------------------------------------------------------------
+  bus_req_t [MainNumDevices-1:0] main_req;
+  bus_rsp_t [MainNumDevices-1:0] main_rsp;
+
+  bow_bus_xbar #(
+    .NumHosts   (NumHosts),
+    .NumDevices (MainNumDevices),
+    .DevBase    (MainDevBase),
+    .DevMask    (MainDevMask)
+  ) u_main_xbar (
+    .clk_i,
+    .rst_ni     (sys_rst_n),
+    .host_req_i (host_req),
+    .host_rsp_o (host_rsp),
+    .dev_req_o  (main_req),
+    .dev_rsp_i  (main_rsp)
+  );
+
+  bow_rom #(
+    .SizeBytes   (RomSize),
+    .MemInitFile (RomInitFile)
+  ) u_rom (
+    .clk_i,
+    .rst_ni    (sys_rst_n),
+    .bus_req_i (main_req[MainDevRom]),
+    .bus_rsp_o (main_rsp[MainDevRom])
+  );
+
+  bow_sram #(
+    .SizeBytes (SramSize)
+  ) u_sram (
+    .clk_i,
+    .rst_ni    (sys_rst_n),
+    .bus_req_i (main_req[MainDevSram]),
+    .bus_rsp_o (main_rsp[MainDevSram])
+  );
+
+  // ---------------------------------------------------------------------------
+  // Peripheral bus
+  // ---------------------------------------------------------------------------
+  bus_req_t [PeriphNumDevices-1:0] periph_req;
+  bus_rsp_t [PeriphNumDevices-1:0] periph_rsp;
+
+  bow_bus_xbar #(
+    .NumHosts   (1),
+    .NumDevices (PeriphNumDevices),
+    .DevBase    (PeriphDevBase),
+    .DevMask    (PeriphDevMask)
+  ) u_periph_xbar (
+    .clk_i,
+    .rst_ni     (sys_rst_n),
+    .host_req_i (main_req[MainDevPeriph]),
+    .host_rsp_o (main_rsp[MainDevPeriph]),
+    .dev_req_o  (periph_req),
+    .dev_rsp_i  (periph_rsp)
+  );
+
+  bow_sysctrl #(
+    .ChipId      (ChipId),
+    .ClkFreqHz   (ClkFreqHz),
+    .BootBaud    (BootBaud),
+    .BootWaitMs  (BootWaitMs),
+    .BreakCycles (BreakCycles)
+  ) u_sysctrl (
+    .clk_i,
+    .rst_ni        (por_rst_n),
+    .bus_req_i     (periph_req[PeriphDevSysctrl]),
+    .bus_rsp_o     (periph_rsp[PeriphDevSysctrl]),
+    .uart0_rx_i,
+    .sys_rst_req_o (sys_rst_req)
+  );
+
+  bow_flash #(
+    .SizeBytes   (FlashSize),
+    .MemInitFile (FlashInitFile)
+  ) u_flash (
+    .clk_i,
+    .rst_ni    (sys_rst_n),
+    .mem_req_i (main_req[MainDevFlash]),
+    .mem_rsp_o (main_rsp[MainDevFlash]),
+    .reg_req_i (periph_req[PeriphDevFlashCtrl]),
+    .reg_rsp_o (periph_rsp[PeriphDevFlashCtrl]),
+    .irq_o     (flash_irq)
+  );
+
+  localparam logic [15:0] BootBaudDiv = 16'((ClkFreqHz + BootBaud / 2) / BootBaud);
+
+  bow_uart #(
+    .ResetBaudDiv (BootBaudDiv)
+  ) u_uart0 (
+    .clk_i,
+    .rst_ni    (sys_rst_n),
+    .bus_req_i (periph_req[PeriphDevUart0]),
+    .bus_rsp_o (periph_rsp[PeriphDevUart0]),
+    .rx_i      (uart0_rx_i),
+    .tx_o      (uart0_tx_o),
+    .irq_o     (uart0_irq)
+  );
+
+  bow_uart #(
+    .ResetBaudDiv (BootBaudDiv)
+  ) u_uart1 (
+    .clk_i,
+    .rst_ni    (sys_rst_n),
+    .bus_req_i (periph_req[PeriphDevUart1]),
+    .bus_rsp_o (periph_rsp[PeriphDevUart1]),
+    .rx_i      (uart1_rx_i),
+    .tx_o      (uart1_tx_o),
+    .irq_o     (uart1_irq)
+  );
+
+endmodule

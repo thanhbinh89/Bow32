@@ -1,0 +1,38 @@
+# Bow32 memory map -- the single source of truth.
+#
+# Generated from this file (never edit those by hand):
+#   hw/top/rtl/bow32_memmap_pkg.sv     SystemVerilog constants for the SoC top
+#   sw/common/include/bow32_memmap.h   C defines for firmware
+#   sw/common/link/bow32_memory.ld     MEMORY{} block for the linker scripts
+#   docs/memory_map.md                 Human readable table
+#
+# Regenerate with `make gen`; CI runs `make gen-check` to make sure the
+# generated files are up to date.
+#
+# Rules: every 'size' is a power of two and every 'base' is aligned to its
+# 'size'. Regions on the same bus must not overlap.
+
+soc:
+  name: bow32
+  chip_id: 0xB0320100        # 'B032' + version 1.0
+  boot_addr: 0x00000000      # Ibex boot_addr_i: reset PC = boot_addr + 0x80
+
+# Devices on the main crossbar (bow_bus_xbar, hosts: Ibex instr + data).
+main_bus:
+  - {name: rom,    base: 0x00000000, size: 0x00002000, desc: "Boot ROM (8 KiB, romcode)"}
+  - {name: flash,  base: 0x08000000, size: 0x00020000, desc: "Internal flash (128 KiB)"}
+  - {name: sram,   base: 0x20000000, size: 0x00004000, desc: "SRAM (16 KiB)"}
+  - {name: periph, base: 0x40000000, size: 0x00010000, desc: "Peripheral bus (16 x 4 KiB slots)"}
+
+# Devices on the peripheral bus (second bow_bus_xbar behind 'periph').
+periph_bus:
+  - {name: sysctrl,    base: 0x40000000, size: 0x1000, desc: "System control, reset manager, boot config"}
+  - {name: flash_ctrl, base: 0x40001000, size: 0x1000, desc: "Flash controller registers"}
+  - {name: uart0,      base: 0x40002000, size: 0x1000, desc: "UART0 (console / bootloader)"}
+  - {name: uart1,      base: 0x40003000, size: 0x1000, desc: "UART1 (general purpose)"}
+
+# Ibex fast interrupts: irq_fast_i[line] -> mcause = 0x80000000 | (16 + line)
+irq_fast:
+  - {name: uart0, line: 0, desc: "UART0 RX not empty / TX empty"}
+  - {name: uart1, line: 1, desc: "UART1 RX not empty / TX empty"}
+  - {name: flash, line: 2, desc: "Flash end of operation"}

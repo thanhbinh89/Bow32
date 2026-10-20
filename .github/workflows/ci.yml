@@ -1,0 +1,52 @@
+# Copyright Bow32 contributors.
+# SPDX-License-Identifier: Apache-2.0
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            verilator gcc-riscv64-unknown-elf python3-yaml python3-serial
+          verilator --version
+          riscv64-unknown-elf-gcc --version | head -1
+
+      - name: Generated files up to date
+        run: make gen-check
+
+      - name: Firmware
+        run: make sw
+
+      - name: Host tool tests
+        run: make test-tools
+
+      - name: Lint
+        run: make lint
+
+      - name: System simulation
+        run: make test
+
+      - name: Upload logs and firmware
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bow32-ci
+          path: |
+            build/sim/*.log
+            build/sw/*/*.bin
+            build/sw/*/*.vmem
+            build/sw/*/*.dis
