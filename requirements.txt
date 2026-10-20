@@ -1,0 +1,3 @@
+# Host tools (tools/*.py)
+pyserial>=3.5    # bow32_flash.py
+PyYAML>=5.4      # gen_memmap.py

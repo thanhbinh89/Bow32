@@ -1,0 +1,22 @@
+# Build outputs (firmware, simulation, FPGA)
+/build/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Vivado / simulators leftovers when run outside build/
+*.jou
+*.log
+*.str
+.Xil/
+*.fst
+*.vcd
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
