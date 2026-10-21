@@ -6,8 +6,11 @@
 #   make bitstream            Vivado synthesis + implementation -> bow32_kv260.bit
 #   make firmware             + bow32.bit.bin / bow32.dtbo / shell.json for xmutil
 #   make FLASH_VMEM=...       preload an application image into the flash
+#   make jtag                 load bow32_kv260.bit into a running Kria over JTAG
+#                             (JTAG_SERIAL=... when several boards are connected)
 #
-# Tools: Vivado (vivado, bootgen in PATH), dtc (device-tree-compiler).
+# Tools: Vivado (vivado, bootgen in PATH), dtc (device-tree-compiler),
+# xsdb (Vitis) for `make jtag`.
 # Outputs: build/fpga/kv260/
 
 REPO       := $(abspath ../../..)
@@ -17,7 +20,9 @@ FLASH_VMEM ?=
 VIVADO     ?= vivado
 BOOTGEN    ?= bootgen
 DTC        ?= dtc
+XSDB       ?= xsdb
 JOBS       ?= 4
+JTAG_SERIAL ?=
 
 FW_DIR := $(OUT)/firmware/bow32
 BIT    := $(OUT)/bow32_kv260.bit
@@ -46,7 +51,10 @@ firmware: bitstream
 	fi
 	@echo "Copy $(FW_DIR) to /lib/firmware/xilinx/bow32 on the Kria (docs/fpga_kria.md)"
 
+jtag:
+	$(XSDB) $(CURDIR)/tcl/jtag_load.tcl $(BIT) $(JTAG_SERIAL)
+
 clean:
 	rm -rf $(OUT)
 
-.PHONY: all rom bitstream firmware clean
+.PHONY: all rom bitstream firmware jtag clean
