@@ -1,9 +1,9 @@
 # Chạy Bow32 trên AMD Kria KV260
 
 > **Trạng thái:** flow Vivado và overlay đã được viết theo tài liệu Kria nhưng
-> **chưa được chạy thử trên board/Vivado thật** trong lần tạo dự án này. Hãy
-> kiểm tra kỹ phần chân PMOD trước khi nối dây, và báo lại lỗi (nếu có) để
-> sửa script.
+> **chưa được chạy thử trên board/Vivado thật** trong lần tạo dự án này. Chân
+> PMOD đã được đối chiếu với schematic carrier KV260 (xem mục nối dây J2); hãy
+> báo lại lỗi (nếu có) để sửa script.
 
 ## Tổng quan
 
@@ -39,19 +39,54 @@ sửa XDC theo user guide của carrier (KR260: UG1092) và gọi `make fpga BOA
 
 ### Nối dây PMOD J2
 
-| Tín hiệu Bow32 | Chân FPGA | `PMOD_tri_io` | Nối tới adapter |
-|----------------|-----------|---------------|-----------------|
-| `uart0_tx_o` | H12 | [0] | RX |
-| `uart0_rx_i` | E10 | [1] | TX |
-| `uart1_tx_o` | D10 | [2] | RX (adapter 2) |
-| `uart1_rx_i` | C11 | [3] | TX (adapter 2) |
-| GND | — | — | GND |
+J2 là header cái 2 × 6 chân (góc vuông) ở mép board, cạnh cổng micro-USB.
+Bow32 chỉ dùng hàng chân lẻ:
 
-Các chân package lấy theo `PMOD_tri_io[0..3]` trong thiết kế tham chiếu của
-AMD cho KV260. **Trước khi nối**, đối chiếu số chân vật lý trên J2 với bảng
-PMOD trong *Kria KV260 Vision AI Starter Kit User Guide (UG1089)* hoặc schematic
-carrier. Không nối chân VCC của adapter. Đầu ra TX được đặt `DRIVE 4`,
-`SLEW SLOW` để hạn dòng nếu lỡ nối nhầm.
+```
+   J2 nhìn thẳng từ ngoài mép board (mặt linh kiện hướng lên)
+
+             ┌───────┬───────┬───────┬───────┬───────┬───────┐
+   hàng trên │   1   │   3   │   5   │   7   │   9   │  11   │
+   chân lẻ   │ U0 TX │ U0 RX │ U1 TX │ U1 RX │  GND  │  3V3  │
+             ├───────┼───────┼───────┼───────┼───────┼───────┤
+   hàng dưới │   2   │   4   │   6   │   8   │  10   │  12   │
+   chân chẵn │   -   │   -   │   -   │   -   │  GND  │  3V3  │
+             └───────┴───────┴───────┴───────┴───────┴───────┘
+             ══════════════════════ PCB ══════════════════════
+```
+
+| Tín hiệu Bow32 | Chân J2 | Net carrier | SOM240_1 | Chân FPGA | Nối tới adapter |
+|----------------|---------|-------------|----------|-----------|-----------------|
+| `uart0_tx_o` | 1 | HDA11 | A17 | H12 | RX |
+| `uart0_rx_i` | 3 | HDA12 | D20 | E10 | TX |
+| `uart1_tx_o` | 5 | HDA13 | D21 | D10 | RX (adapter 2) |
+| `uart1_rx_i` | 7 | HDA14 | D22 | C11 | TX (adapter 2) |
+| GND | 9 hoặc 10 | GND | — | — | GND |
+| 3,3 V | 11, 12 | PMOD_3V3 | — | — | **không nối** |
+
+* Nguồn đối chiếu: schematic carrier KV260 (AMD XTP682; bản đầu `038-05058-01`
+  rev B05 và KV260_v2 `038-05058-03` rev A1 giống nhau ở phần này), trang 17
+  (J2 → `PMOD_HDAxx` → điện trở 0 Ω → `HDAxx`) và trang 6 (`HDAxx` → chân
+  SOM240_1). Chân FPGA lấy từ board file K26 của Vivado
+  (`data/xhub/boards/XilinxBoardStore/boards/Xilinx/k26c/1.4/part0_pins.xml`).
+* Số chân J2 theo schematic: chân lẻ một hàng, chân chẵn một hàng. Theo chuẩn
+  Pmod, hàng chân lẻ là hàng trên (Pmod pin 1–6), hàng chân chẵn là hàng dưới
+  (Pmod pin 7–12). Trái/phải trong hình tuỳ hướng nhìn, nên hãy định vị bằng
+  cột nguồn: 3V3 (11, 12) sát một đầu, GND (9, 10) ngay cạnh, chân 1 và 2 ở đầu
+  kia.
+* `PMOD_3V3` lấy từ `PL_3V3` qua load switch U42, luôn bật khi PL có nguồn.
+  Không nối chân VCC của adapter. Đầu ra TX được đặt `DRIVE 4`, `SLEW SLOW` để
+  hạn dòng nếu lỡ nối nhầm.
+* Chân 1 và 2 có sẵn RC 20 Ω + 33 pF xuống GND (R274/C370, R275/C371), không
+  ảnh hưởng ở 115200 baud.
+
+Kiểm tra bằng đồng hồ trước khi nối adapter (board đã `xmutil loadapp bow32`,
+xem mục 3):
+
+1. Tìm cột nguồn: ở một đầu J2, cột ngoài cùng (chân 11, 12) đo được +3,3 V so
+   với cột kế bên (chân 9, 10 = GND).
+2. Tìm hàng: so với GND, chân 1, 3, 5, 7 ≈ 3,3 V (TX nghỉ ở mức cao, RX có
+   pull-up), chân 2, 4, 6, 8 ≈ 0 V (Vivado mặc định kéo xuống chân không dùng).
 
 ## 2. Build bitstream (máy tính có Vivado)
 
@@ -96,8 +131,25 @@ Overlay (`overlay/pl.dtsi`) nạp `bow32.bit.bin` vào PL và bật `pl_clk0` �
 100 MHz. Mỗi lần `loadapp`, PL được cấu hình lại → flash Bow32 (BRAM) trở về
 nội dung trong bitstream.
 
-Cách khác: Vivado Hardware Manager qua JTAG (cáp micro-USB của KV260) khi Linux
-đã boot — PS phải đang cấp `pl_clk0`.
+### Cách khác: nạp qua JTAG (`make fpga-jtag`)
+
+Không cần Linux (board boot tới U-Boot là đủ), chỉ cần cáp micro-USB của KV260
+và `xsdb` (đi kèm Vitis):
+
+```bash
+make fpga-jtag                          # hw/fpga/kv260/tcl/jtag_load.tcl
+make fpga-jtag JTAG_SERIAL=<serial>     # nhiều board chung một hw_server
+```
+
+Đừng nạp bằng *Program Device* của Vivado. Khi nạp qua PCAP (`xmutil`), PMU
+firmware còn nhả PROG_B của PL, bật nguồn/gỡ cách ly PS-PL và nhả `pl_resetn0`;
+nạp JTAG trần thì không. Nếu từ lúc boot PL chưa được nạp qua PCAP lần nào, CSU
+giữ PROG_B thấp (PL không giữ được cấu hình) và `pl_resetn0` thấp (Bow32 nằm im
+trong reset), nên UART không ra gì. Script làm đủ các bước đó quanh lần nạp
+JTAG và kiểm tra `pl_clk0` = 100 MHz.
+
+Mở monitor UART **trước** khi nạp: banner chỉ in một lần, ngay khi Bow32 ra khỏi
+reset.
 
 ## 4. Kiểm tra
 
@@ -122,15 +174,44 @@ python3 tools/bow32_flash.py -p /dev/ttyUSB0 monitor
 ```
 
 Muốn nạp lại: chỉ cần chạy lại lệnh `flash` — tool gửi BREAK để reset Bow32 vào
-loader.
+loader. `monitor` là terminal tương tác (phím gõ được gửi xuống board), Ctrl-C để
+thoát.
+
+### Xoá ứng dụng, quay về bootloader
+
+```bash
+T=tools/bow32_flash.py
+python3 $T -p /dev/ttyUSB0 erase --all     # BREAK -> loader, xoá toàn bộ flash
+python3 $T -p /dev/ttyUSB0 reset           # khởi động lại: "flash image invalid" -> loader
+```
+
+Adapter không gửi được BREAK (ví dụ CH343/CH9102 dạng `/dev/ttyACM*`, tool báo
+`the adapter cannot send a BREAK` hoặc `cannot reach the boot ROM loader`): vào
+loader bằng cách khác rồi thêm `--no-break`:
+
+1. Trong `monitor` gõ `B` (ứng dụng `hello`) → `boot: loader requested by firmware`,
+   thoát monitor bằng Ctrl-C.
+2. `python3 $T -p /dev/ttyACM0 --no-break erase --all`, rồi
+   `python3 $T -p /dev/ttyACM0 --no-break reset`.
+
+Ứng dụng không có phím `B` thì chạy lệnh `--no-break` trước, rồi nạp lại PL
+(`make fpga-jtag` hoặc `xmutil loadapp`) trong lúc tool đang chờ (~10 s): ROM chờ
+host 300 ms sau reset.
+
+Flash của Bow32 là BRAM: nạp lại PL thì flash trở về nội dung trong bitstream
+(ảnh `FLASH_VMEM` nếu build với tuỳ chọn này). Muốn mỗi lần nạp PL đều vào thẳng
+bootloader, build lại không có `FLASH_VMEM` (`make fpga`).
 
 ## Xử lý sự cố
 
 | Triệu chứng | Kiểm tra |
 |-------------|----------|
 | Không thấy gì trên UART | TX/RX bị đảo? GND? đúng 3.3 V? đúng chân PMOD? baud 115200? `pl_clk0` có chạy (overlay đã nạp)? |
+| Nạp bằng *Program Device* của Vivado, UART im lặng | PL bị PS giữ reset → dùng `make fpga-jtag` hoặc `xmutil` (mục 3) |
+| Mở monitor sau khi nạp, không thấy banner | banner chỉ in một lần → mở monitor trước khi nạp, hoặc gõ phím: `hello` echo lại, `B` khởi động lại vào loader |
+| `Permission denied` khi mở `/dev/ttyUSB*`, `/dev/ttyACM*` | user chưa ở nhóm `dialout`: `sudo usermod -aG dialout $USER` rồi đăng nhập lại |
 | Ký tự rác | sai baud ⇒ tần số `pl_clk0` khác 100 MHz (kiểm tra `assigned-clock-rates` trong overlay) |
-| `cannot reach the boot ROM loader` | adapter không hỗ trợ BREAK → dùng `--no-break` rồi `xmutil unloadapp && xmutil loadapp bow32` trong lúc tool đang chờ |
+| `cannot reach the boot ROM loader`, `cannot send a BREAK` | adapter không hỗ trợ BREAK → xem "Xoá ứng dụng, quay về bootloader" (mục 4) |
 | Timing không đạt | xem `timing_summary.rpt`; giảm clock (sửa `PlClkHz`/BUFGCE_DIVIDE) |
 | Synthesis báo thiếu `bow32_ps_wrapper` | block design chưa được tạo — xem log `ps_bd.tcl` trong `vivado.log` |
 

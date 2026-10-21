@@ -21,6 +21,7 @@ help:
 	@echo "  make test-tools  unit tests of the host tools (tools/tests)"
 	@echo "  make run TEST=x  run one test (boot|load|break|flash|irq), WAVES=1 for waves"
 	@echo "  make fpga        Vivado build for the Kria $(BOARD)     -> build/fpga/$(BOARD)/"
+	@echo "  make fpga-jtag   load the bitstream into a running Kria over JTAG (xsdb)"
 	@echo "  make gen         regenerate memory map files from hw/top/data/bow32_memmap.yaml"
 	@echo "  make gen-check   check that generated files are up to date"
 	@echo "  make clean       remove build/"
@@ -53,6 +54,9 @@ run: deps
 fpga: deps
 	$(MAKE) -C hw/fpga/$(BOARD) all
 
+fpga-jtag:
+	$(MAKE) -C hw/fpga/$(BOARD) jtag
+
 gen:
 	$(PYTHON) tools/gen_memmap.py
 
@@ -62,4 +66,4 @@ gen-check:
 clean:
 	rm -rf build
 
-.PHONY: help deps sw lint sim test test-tools run fpga gen gen-check clean
+.PHONY: help deps sw lint sim test test-tools run fpga fpga-jtag gen gen-check clean

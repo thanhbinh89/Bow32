@@ -3,20 +3,20 @@
 #
 # Bow32 pin constraints for the Kria KV260 carrier card.
 #
-# The four UART signals use the PMOD connector J2 (3.3 V, bank HDA). The
-# package pins below are those of PMOD_tri_io[0..3] in AMD's KV260 reference
-# designs. BEFORE wiring anything, check the J2 pin numbers against UG1089
-# (KV260 user guide, PMOD table) or the carrier schematic - see
+# The four UART signals use the odd pins 1/3/5/7 of the PMOD connector J2
+# (3.3 V, bank HDA); J2 pins 9/10 are GND, 11/12 are 3.3 V. Each line below
+# gives J2 pin -> carrier net -> SOM240_1 pin, checked against the KV260
+# carrier schematic (XTP682, pages 6 and 17) and the K26 board file - see
 # docs/fpga_kria.md. Use a 3.3 V USB-UART adapter: adapter RX <- uart*_tx_o,
 # adapter TX -> uart*_rx_i, and connect GND.
 
 # ---- UART0: console + boot loader -------------------------------------------
-set_property PACKAGE_PIN H12 [get_ports uart0_tx_o]   ;# PMOD_tri_io[0]
-set_property PACKAGE_PIN E10 [get_ports uart0_rx_i]   ;# PMOD_tri_io[1]
+set_property PACKAGE_PIN H12 [get_ports uart0_tx_o]   ;# J2.1  HDA11  som240_1_a17
+set_property PACKAGE_PIN E10 [get_ports uart0_rx_i]   ;# J2.3  HDA12  som240_1_d20
 
 # ---- UART1 -------------------------------------------------------------------
-set_property PACKAGE_PIN D10 [get_ports uart1_tx_o]   ;# PMOD_tri_io[2]
-set_property PACKAGE_PIN C11 [get_ports uart1_rx_i]   ;# PMOD_tri_io[3]
+set_property PACKAGE_PIN D10 [get_ports uart1_tx_o]   ;# J2.5  HDA13  som240_1_d21
+set_property PACKAGE_PIN C11 [get_ports uart1_rx_i]   ;# J2.7  HDA14  som240_1_d22
 
 set_property IOSTANDARD LVCMOS33 [get_ports {uart0_* uart1_*}]
 set_property PULLUP true         [get_ports {uart0_rx_i uart1_rx_i}]

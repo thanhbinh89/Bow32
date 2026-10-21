@@ -9,7 +9,7 @@ Examples:
   bow32_flash.py -p /dev/ttyUSB0 read 0x08000000 64
   bow32_flash.py -p /dev/ttyUSB0 erase --all
   bow32_flash.py -p /dev/ttyUSB0 boot
-  bow32_flash.py -p /dev/ttyUSB0 monitor                            # simple serial console
+  bow32_flash.py -p /dev/ttyUSB0 monitor                            # interactive serial console
 
 Entering the loader: by default the tool sends a UART BREAK, which makes
 Bow32 reset into the loader (SYSCTRL BRK_CTRL). Use --no-break if your
@@ -90,7 +90,11 @@ class Loader:
     def connect(self, use_break=True, attempts=50):
         if use_break:
             # BREAK >= 10 ms resets Bow32 into the loader.
-            self.ser.send_break(duration=0.05)
+            try:
+                self.ser.send_break(duration=0.05)
+            except Exception as e:  # termios.error / SerialException
+                raise LoaderError("the adapter cannot send a BREAK; enter the loader another "
+                                  f"way ('B' in hello, reload the PL) and use --no-break [{e}]")
             time.sleep(0.05)
         self.ser.reset_input_buffer()
         last = None
@@ -186,15 +190,19 @@ def cmd_flash(ld, args):
 
 
 def cmd_monitor(ser):
+    # Interactive: keys typed are sent to the board (e.g. 'B' in hello).
+    from serial.tools.miniterm import Miniterm
+
+    term = Miniterm(ser, eol="lf")
+    term.exit_character = "\x03"  # Ctrl-C
+    term.set_rx_encoding("utf-8", "replace")
+    term.set_tx_encoding("utf-8")
     print(f"--- monitor on {ser.port} @ {ser.baudrate}, Ctrl-C to quit ---")
-    try:
-        while True:
-            data = ser.read(256)
-            if data:
-                sys.stdout.write(data.decode("utf-8", "replace"))
-                sys.stdout.flush()
-    except KeyboardInterrupt:
-        print()
+    term.start()
+    term.join(True)
+    term.join()
+    term.close()
+    print()
 
 
 def main():
@@ -227,7 +235,7 @@ def main():
     p.add_argument("length", type=auto_int)
     sub.add_parser("boot", help="start the image in flash")
     sub.add_parser("reset", help="reset the SoC (normal boot)")
-    sub.add_parser("monitor", help="serial console (no loader)")
+    sub.add_parser("monitor", help="interactive serial console (no loader)")
     args = ap.parse_args()
 
     if args.cmd == "monitor":

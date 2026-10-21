@@ -59,8 +59,8 @@ bow_gpio u_gpio (
 ```
 
 Thêm port ở `bow32_top`, nối ở board top (`bow32_kv260_top.sv`) và XDC (ví dụ
-4 chân PMOD còn lại `B10 E12 D11 B11`). Có ngắt: thêm vào `irq_fast` trong YAML
-và gán `irq_fast[IrqFastGpio]`.
+4 chân PMOD còn lại `B10 E12 D11 B11` = J2 chân 2, 4, 6, 8). Có ngắt: thêm vào
+`irq_fast` trong YAML và gán `irq_fast[IrqFastGpio]`.
 
 ## 4. Phần mềm
 
