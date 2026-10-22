@@ -7,7 +7,8 @@ theo [adding_an_ip.md](adding_an_ip.md) và kiểm chứng bằng test mô phỏ
 
 - [ ] **Timer / CLINT** (`mtime`, `mtimecmp`) → nối `irq_timer_i`; viết `delay`
       bằng ngắt và một scheduler nhỏ.
-- [ ] **GPIO** dùng 4 chân PMOD còn lại (LED, nút bấm, ngắt theo cạnh).
+- [x] **GPIO / IOPAD**: 2 port × 8 chân, ngắt theo cạnh, open-drain, chức năng thay thế;
+      6 chân ra PMOD ([ip/gpio.md](ip/gpio.md)).
 - [ ] **Watchdog** reset SoC qua `bow_rstmgr` (thêm `RST_CAUSE.WDOG`).
 - [ ] UART: parity, oversampling 16×, ngắt theo mức FIFO.
 

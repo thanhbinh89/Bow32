@@ -15,6 +15,7 @@
 #include "bow32_csr.h"
 #include "bow_sysctrl.h"
 #include "bow_uart.h"
+#include "bow_gpio.h"
 #include "bow_flash.h"
 #include "bow_time.h"
 #include "bow_printf.h"

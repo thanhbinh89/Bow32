@@ -23,7 +23,9 @@ Tệp này được sinh tự động từ `hw/top/data/bow32_memmap.yaml`. Sử
 | 0 | `sysctrl` | `0x40000000` | `0x40000FFF` | 4 KiB | System control, reset manager, boot config |
 | 1 | `flash_ctrl` | `0x40001000` | `0x40001FFF` | 4 KiB | Flash controller registers |
 | 2 | `uart0` | `0x40002000` | `0x40002FFF` | 4 KiB | UART0 (console / bootloader) |
-| 3 | `uart1` | `0x40003000` | `0x40003FFF` | 4 KiB | UART1 (general purpose) |
+| 3 | `uart1` | `0x40003000` | `0x40003FFF` | 4 KiB | UART1 (general purpose, pins PB0/PB1) |
+| 4 | `gpioa` | `0x40004000` | `0x40004FFF` | 4 KiB | GPIO port A (8 pins) |
+| 5 | `gpiob` | `0x40005000` | `0x40005FFF` | 4 KiB | GPIO port B (8 pins, PB0/PB1 = UART1 TX/RX) |
 
 Truy cập vào địa chỉ không được ánh xạ trả về bus error (Ibex sinh exception *load/store/instruction access fault*).
 
@@ -34,3 +36,5 @@ Truy cập vào địa chỉ không được ánh xạ trả về bus error (Ibe
 | 0 | `0x80000010` | `uart0` | UART0 RX not empty / TX empty |
 | 1 | `0x80000011` | `uart1` | UART1 RX not empty / TX empty |
 | 2 | `0x80000012` | `flash` | Flash end of operation |
+| 3 | `0x80000013` | `gpioa` | GPIO port A pin edge |
+| 4 | `0x80000014` | `gpiob` | GPIO port B pin edge |

@@ -6,11 +6,13 @@
 //   Ibex (instr) --+                          +--> ROM    8 KiB
 //                  +--> main xbar (2 x 4) ----+--> FLASH  128 KiB (memory window)
 //   Ibex (data) ---+                          +--> SRAM   16 KiB
-//                                             +--> periph xbar (1 x 4)
+//                                             +--> periph xbar (1 x 6)
 //                                                    +--> SYSCTRL (+ reset manager)
 //                                                    +--> FLASH_CTRL
 //                                                    +--> UART0
-//                                                    +--> UART1
+//                                                    +--> UART1 --(alternate function)--+
+//                                                    +--> GPIOA  8 pins                 |
+//                                                    +--> GPIOB  8 pins, PB0/PB1 <------+
 //
 // Addresses and port numbers come from bow32_memmap_pkg (generated from
 // hw/top/data/bow32_memmap.yaml). See docs/architecture.md.
@@ -31,14 +33,21 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
   input  logic clk_i,
   input  logic rst_ni,        // asynchronous board reset, active low
 
-  input  logic uart0_rx_i,
-  output logic uart0_tx_o,
-  input  logic uart1_rx_i,
-  output logic uart1_tx_o,
+  input  logic       uart0_rx_i,
+  output logic       uart0_tx_o,
+
+  // GPIO pads: pad = *_oe_o ? *_o : Z, *_i = pad level. After reset all pins
+  // are inputs except PB0/PB1, which carry UART1 TX/RX (GPIOB.AF = 0x03).
+  input  logic [7:0] gpioa_i,
+  output logic [7:0] gpioa_o,
+  output logic [7:0] gpioa_oe_o,
+  input  logic [7:0] gpiob_i,
+  output logic [7:0] gpiob_o,
+  output logic [7:0] gpiob_oe_o,
 
   // Status (for LEDs / debug)
-  output logic sys_rst_no,
-  output logic core_sleep_o
+  output logic       sys_rst_no,
+  output logic       core_sleep_o
 );
 
   // ---------------------------------------------------------------------------
@@ -59,7 +68,7 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
   // ---------------------------------------------------------------------------
   // Interrupts
   // ---------------------------------------------------------------------------
-  logic        uart0_irq, uart1_irq, flash_irq;
+  logic        uart0_irq, uart1_irq, flash_irq, gpioa_irq, gpiob_irq;
   logic [14:0] irq_fast;
 
   always_comb begin
@@ -67,6 +76,8 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
     irq_fast[IrqFastUart0] = uart0_irq;
     irq_fast[IrqFastUart1] = uart1_irq;
     irq_fast[IrqFastFlash] = flash_irq;
+    irq_fast[IrqFastGpioa] = gpioa_irq;
+    irq_fast[IrqFastGpiob] = gpiob_irq;
   end
 
   // ---------------------------------------------------------------------------
@@ -197,6 +208,8 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
     .irq_o     (uart0_irq)
   );
 
+  logic uart1_rx, uart1_tx;
+
   bow_uart #(
     .ResetBaudDiv (BootBaudDiv)
   ) u_uart1 (
@@ -204,9 +217,53 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
     .rst_ni    (sys_rst_n),
     .bus_req_i (periph_req[PeriphDevUart1]),
     .bus_rsp_o (periph_rsp[PeriphDevUart1]),
-    .rx_i      (uart1_rx_i),
-    .tx_o      (uart1_tx_o),
+    .rx_i      (uart1_rx),
+    .tx_o      (uart1_tx),
     .irq_o     (uart1_irq)
   );
+
+  // ---------------------------------------------------------------------------
+  // GPIO ports (IOPAD). UART1 is the alternate function of PB0 (TX) and PB1 (RX).
+  // ---------------------------------------------------------------------------
+  bow_gpio #(
+    .Width (8)
+  ) u_gpioa (
+    .clk_i,
+    .rst_ni    (sys_rst_n),
+    .bus_req_i (periph_req[PeriphDevGpioa]),
+    .bus_rsp_o (periph_rsp[PeriphDevGpioa]),
+    .gpio_i    (gpioa_i),
+    .gpio_o    (gpioa_o),
+    .gpio_oe_o (gpioa_oe_o),
+    .af_out_i  ('0),
+    .af_oe_i   ('0),
+    .af_in_o   (),
+    .irq_o     (gpioa_irq)
+  );
+
+  logic [7:0] gpiob_af_in;
+
+  bow_gpio #(
+    .Width   (8),
+    .AfMask  (8'h03),
+    .AfReset (8'h03)
+  ) u_gpiob (
+    .clk_i,
+    .rst_ni    (sys_rst_n),
+    .bus_req_i (periph_req[PeriphDevGpiob]),
+    .bus_rsp_o (periph_rsp[PeriphDevGpiob]),
+    .gpio_i    (gpiob_i),
+    .gpio_o    (gpiob_o),
+    .gpio_oe_o (gpiob_oe_o),
+    .af_out_i  ({7'h0, uart1_tx}),
+    .af_oe_i   (8'h01),
+    .af_in_o   (gpiob_af_in),
+    .irq_o     (gpiob_irq)
+  );
+
+  assign uart1_rx = gpiob_af_in[1];
+
+  logic unused_af;
+  assign unused_af = ^{gpiob_af_in[7:2], gpiob_af_in[0]};
 
 endmodule

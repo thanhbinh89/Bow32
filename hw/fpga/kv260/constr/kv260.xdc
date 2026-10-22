@@ -3,26 +3,38 @@
 #
 # Bow32 pin constraints for the Kria KV260 carrier card.
 #
-# The four UART signals use the odd pins 1/3/5/7 of the PMOD connector J2
-# (3.3 V, bank HDA); J2 pins 9/10 are GND, 11/12 are 3.3 V. Each line below
-# gives J2 pin -> carrier net -> SOM240_1 pin, checked against the KV260
-# carrier schematic (XTP682, pages 6 and 17) and the K26 board file - see
-# docs/fpga_kria.md. Use a 3.3 V USB-UART adapter: adapter RX <- uart*_tx_o,
-# adapter TX -> uart*_rx_i, and connect GND.
+# All user pins are on the PMOD connector J2 (3.3 V, bank HDA); J2 pins 9/10
+# are GND, 11/12 are 3.3 V. Each line gives J2 pin -> carrier net -> SOM240_1
+# pin, checked against the KV260 carrier schematic (XTP682, pages 6 and 17)
+# and the K26 board file - see docs/fpga_kria.md.
+#   odd row : 1 UART0 TX, 3 UART0 RX, 5 PB0 (UART1 TX), 7 PB1 (UART1 RX)
+#   even row: 2 PA0, 4 PA1, 6 PA2, 8 PA3
+# Use a 3.3 V USB-UART adapter: adapter RX <- TX pin, adapter TX -> RX pin,
+# and connect GND.
 
 # ---- UART0: console + boot loader -------------------------------------------
 set_property PACKAGE_PIN H12 [get_ports uart0_tx_o]   ;# J2.1  HDA11  som240_1_a17
 set_property PACKAGE_PIN E10 [get_ports uart0_rx_i]   ;# J2.3  HDA12  som240_1_d20
 
-# ---- UART1 -------------------------------------------------------------------
-set_property PACKAGE_PIN D10 [get_ports uart1_tx_o]   ;# J2.5  HDA13  som240_1_d21
-set_property PACKAGE_PIN C11 [get_ports uart1_rx_i]   ;# J2.7  HDA14  som240_1_d22
-
-set_property IOSTANDARD LVCMOS33 [get_ports {uart0_* uart1_*}]
-set_property PULLUP true         [get_ports {uart0_rx_i uart1_rx_i}]
+set_property IOSTANDARD LVCMOS33 [get_ports {uart0_*}]
+set_property PULLUP true         [get_ports uart0_rx_i]
 # Weak, slow outputs limit the current if a pin is ever wired to another output.
-set_property DRIVE 4             [get_ports {uart0_tx_o uart1_tx_o}]
-set_property SLEW SLOW           [get_ports {uart0_tx_o uart1_tx_o}]
+set_property DRIVE 4             [get_ports uart0_tx_o]
+set_property SLEW SLOW           [get_ports uart0_tx_o]
+
+# ---- GPIO pads (bidirectional) ----------------------------------------------
+set_property PACKAGE_PIN B10 [get_ports {gpioa_io[0]}]   ;# J2.2  HDA15     som240_1_b20  PA0
+set_property PACKAGE_PIN E12 [get_ports {gpioa_io[1]}]   ;# J2.4  HDA16_CC  som240_1_b21  PA1
+set_property PACKAGE_PIN D11 [get_ports {gpioa_io[2]}]   ;# J2.6  HDA17     som240_1_b22  PA2
+set_property PACKAGE_PIN B11 [get_ports {gpioa_io[3]}]   ;# J2.8  HDA18     som240_1_c22  PA3
+set_property PACKAGE_PIN D10 [get_ports {gpiob_io[0]}]   ;# J2.5  HDA13     som240_1_d21  PB0 = UART1 TX
+set_property PACKAGE_PIN C11 [get_ports {gpiob_io[1]}]   ;# J2.7  HDA14     som240_1_d22  PB1 = UART1 RX
+
+set_property IOSTANDARD LVCMOS33 [get_ports {gpioa_io[*] gpiob_io[*]}]
+# Inputs float high (button to GND, idle UART line); 8 mA drives an LED.
+set_property PULLUP true         [get_ports {gpioa_io[*] gpiob_io[*]}]
+set_property DRIVE 8             [get_ports {gpioa_io[*] gpiob_io[*]}]
+set_property SLEW SLOW           [get_ports {gpioa_io[*] gpiob_io[*]}]
 
 # ---- SOM fan ------------------------------------------------------------------
 set_property PACKAGE_PIN A12      [get_ports fan_en_b]
@@ -33,9 +45,9 @@ set_property DRIVE 4              [get_ports fan_en_b]
 # ---- Timing ---------------------------------------------------------------------
 # pl_clk0 is constrained by the Zynq UltraScale+ PS IP; the 50 MHz SoC clock
 # out of BUFGCE_DIV is derived automatically.
-# UART pins are asynchronous and synchronised inside the SoC.
-set_false_path -from [get_ports {uart0_rx_i uart1_rx_i}]
-set_false_path -to   [get_ports {uart0_tx_o uart1_tx_o fan_en_b}]
+# UART and GPIO pins are asynchronous and synchronised inside the SoC.
+set_false_path -from [get_ports {uart0_rx_i gpioa_io[*] gpiob_io[*]}]
+set_false_path -to   [get_ports {uart0_tx_o gpioa_io[*] gpiob_io[*] fan_en_b}]
 
 # ---- Bitstream ------------------------------------------------------------------
 set_property BITSTREAM.GENERAL.COMPRESS TRUE [current_design]

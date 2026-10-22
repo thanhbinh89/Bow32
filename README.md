@@ -14,13 +14,15 @@ Bow32 là một vi điều khiển (MCU) 32-bit đơn giản, xây dựng quanh 
                  |  |  RV32IMC  |       |   main crossbar  |---> FLASH 128KiB|  0x0800_0000
                  |  | (2-stage) |------>|  2 hosts x 4 dev |---> SRAM  16KiB |  0x2000_0000
                  |  +-----------+ data  +------------------+        |        |
-                 |        ^ irq_fast[2:0]                           v        |
+                 |        ^ irq_fast[4:0]                           v        |
                  |        |                               +----------------+ |
                  |        +-------------------------------| periph xbar    | |  0x4000_0000
                  |                                        |  SYSCTRL       | |  + reset manager
                  |                                        |  FLASH_CTRL    | |
    uart0 <-------+----------------------------------------|  UART0         | |  console / bootloader
-   uart1 <-------+----------------------------------------|  UART1         | |
+                 |                                   +----|  UART1         | |
+   gpioa[7:0] <--+-----------------------------------|----|  GPIOA         | |  0x4000_4000
+   gpiob[7:0] <--+-----------------------------------+--->|  GPIOB         | |  PB0/PB1 = UART1
                  |                                        +----------------+ |
                  +-----------------------------------------------------------+
 ```
@@ -35,9 +37,10 @@ Bow32 là một vi điều khiển (MCU) 32-bit đơn giản, xây dựng quanh 
 | Flash nội | 128 KiB, mô phỏng ngữ nghĩa NOR flash: erase theo page 1 KiB / mass erase, program chỉ xoá bit 1→0, khoá bằng key, có ngắt EOP |
 | Boot ROM | 8 KiB, kiểm tra header + CRC32 của ảnh trong flash, **UART loader** để nạp chương trình vào flash |
 | UART ×2 | 8N1, baud lập trình được, FIFO TX/RX 16 byte, ngắt |
+| GPIO (IOPAD) ×2 | 2 port × 8 chân: hướng, push-pull/open-drain, set/clear/toggle nguyên tử, ngắt theo cạnh, **chức năng thay thế** (UART1 trên PB0/PB1); 6 chân ra PMOD của KV260 |
 | SYSCTRL | Chip ID, tần số clock, nguyên nhân reset, soft reset, **UART BREAK → reset vào bootloader** |
 | Công cụ | `bow32_flash.py` (nạp qua UART), `bow32_image.py` (header/CRC), `gen_memmap.py` (memory map một nguồn) |
-| Kiểm chứng | Lint Verilator `-Wall`, 5 test mô phỏng hệ thống (boot, nạp qua UART, BREAK, flash, ngắt) chạy trong CI |
+| Kiểm chứng | Lint Verilator `-Wall`, 6 test mô phỏng hệ thống (boot, nạp qua UART, BREAK, flash, ngắt, GPIO) chạy trong CI |
 | FPGA | Flow Vivado bằng script cho Kria KV260, overlay để nạp bằng `xmutil` trên Linux |
 
 ## Bắt đầu nhanh
@@ -87,6 +90,7 @@ Bow32/
 │   │   ├── mem/                  #   RAM 1 port, SRAM, ROM
 │   │   ├── flash/                #   flash nội + controller
 │   │   ├── uart/                 #   UART
+│   │   ├── gpio/                 #   GPIO / IOPAD (2 port, chức năng thay thế)
 │   │   ├── sysctrl/              #   system controller + reset manager
 │   │   └── common/               #   FIFO, synchronizer
 │   ├── top/
@@ -100,7 +104,7 @@ Bow32/
 ├── sw/
 │   ├── common/                   # HAL, crt0, linker script, header
 │   ├── bootrom/                  # romcode: boot + UART loader
-│   ├── apps/                     # hello, uart_irq, flash_demo
+│   ├── apps/                     # hello, uart_irq, flash_demo, gpio_demo
 │   └── mk/                       # Makefile dùng chung
 ├── tools/                        # công cụ Python phía host
 ├── docs/                         # tài liệu (tiếng Việt)
@@ -114,7 +118,7 @@ Bow32/
 | [docs/architecture.md](docs/architecture.md) | Kiến trúc tổng thể, clock/reset, ngắt, quyết định thiết kế |
 | [docs/memory_map.md](docs/memory_map.md) | Bản đồ bộ nhớ (sinh tự động) |
 | [docs/bus.md](docs/bus.md) | Giao thức bus, crossbar, cách gắn thiết bị mới |
-| [docs/ip/](docs/ip/) | Đặc tả từng IP và thanh ghi: CPU, UART, flash, sysctrl, bộ nhớ |
+| [docs/ip/](docs/ip/) | Đặc tả từng IP và thanh ghi: CPU, UART, GPIO, flash, sysctrl, bộ nhớ |
 | [docs/boot.md](docs/boot.md) | Quy trình boot, định dạng ảnh, giao thức UART loader |
 | [docs/simulation.md](docs/simulation.md) | Chạy mô phỏng, xem waveform, viết test mới |
 | [docs/fpga_kria.md](docs/fpga_kria.md) | Build và chạy trên Kria KV260 |

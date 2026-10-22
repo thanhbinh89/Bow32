@@ -14,6 +14,10 @@ RTL: `hw/ip/uart/rtl/` · Driver: `sw/common/include/bow_uart.h`, `sw/common/src
 | UART0 | `0x4000_2000` | `irq_fast[0]` |
 | UART1 | `0x4000_3000` | `irq_fast[1]` |
 
+UART0 có chân riêng (console, boot loader, BREAK). UART1 là chức năng thay thế
+của PB0 (TX) / PB1 (RX), bật sau reset; phần mềm có thể chuyển hai chân này sang
+GPIO bằng `GPIOB.AF` ([gpio.md](gpio.md)).
+
 ## Thanh ghi
 
 | Offset | Tên | Quyền | Bit |

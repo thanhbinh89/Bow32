@@ -13,6 +13,7 @@
 -F ../ip/flash/flash.f
 -F ../ip/uart/uart.f
 -F ../ip/sysctrl/sysctrl.f
+-F ../ip/gpio/gpio.f
 -F ../ip/cpu/cpu.f
 
 rtl/bow32_memmap_pkg.sv

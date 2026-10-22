@@ -4,7 +4,7 @@
 # System simulation with Verilator (>= 5.0, uses --binary --timing).
 #
 #   make build                 compile the testbench
-#   make run TEST=boot         run one test (boot | load | break | flash | irq)
+#   make run TEST=boot         run one test (boot | load | break | flash | irq | gpio)
 #   make test                  run all tests
 #   make run TEST=load WAVES=1 also dump build/sim/waves.fst (open with GTKWave)
 
@@ -15,7 +15,7 @@ VERILATOR ?= verilator
 WAVES     ?= 0
 
 TEST  ?= boot
-TESTS := boot load break flash irq
+TESTS := boot load break flash irq gpio
 
 ROM_VMEM := $(SW_BUILD)/bootrom/bootrom.vmem
 
@@ -24,6 +24,7 @@ FLASH_boot  := $(SW_BUILD)/hello/hello.vmem
 FLASH_break := $(SW_BUILD)/hello/hello.vmem
 FLASH_flash := $(SW_BUILD)/flash_demo/flash_demo.vmem
 FLASH_irq   := $(SW_BUILD)/uart_irq/uart_irq.vmem
+FLASH_gpio  := $(SW_BUILD)/gpio_demo/gpio_demo.vmem
 IMAGE_load  := $(SW_BUILD)/hello/hello.vmem
 
 # Separate model directories with and without waveform tracing.

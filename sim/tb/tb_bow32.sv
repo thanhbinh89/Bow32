@@ -8,7 +8,7 @@
 // download an image over UART0 exactly like tools/bow32_flash.py.
 //
 // Plusargs:
-//   +TEST=<name>      boot | load | break | flash | irq   (see run_test below)
+//   +TEST=<name>      boot | load | break | flash | irq | gpio   (see run_test below)
 //   +ROM=<vmem>       boot ROM image (required)
 //   +FLASH=<vmem>     image preloaded into the flash (backdoor)
 //   +IMAGE=<vmem>     image downloaded over UART by the 'load' test
@@ -39,9 +39,11 @@ module tb_bow32;
   always @(posedge clk) cycle <= cycle + 1;
 
   // ------------------------------------------------------------------- DUT
-  logic uart0_rx = 1'b1, uart0_tx;
-  logic uart1_rx = 1'b1, uart1_tx;
-  logic sys_rst_n, core_sleep;
+  logic       uart0_rx = 1'b1, uart0_tx;
+  logic       uart1_rx = 1'b1;  // UART1 is the alternate function of PB0 (TX) / PB1 (RX)
+  logic       sys_rst_n, core_sleep;
+  logic [7:0] gpioa_o, gpioa_oe, gpiob_o, gpiob_oe;
+  wire  [7:0] pad_a, pad_b;
 
   bow32_top #(
     .ClkFreqHz   (ClkFreqHz),
@@ -53,11 +55,34 @@ module tb_bow32;
     .rst_ni       (rst_n),
     .uart0_rx_i   (uart0_rx),
     .uart0_tx_o   (uart0_tx),
-    .uart1_rx_i   (uart1_rx),
-    .uart1_tx_o   (uart1_tx),
+    .gpioa_i      (pad_a),
+    .gpioa_o      (gpioa_o),
+    .gpioa_oe_o   (gpioa_oe),
+    .gpiob_i      (pad_b),
+    .gpiob_o      (gpiob_o),
+    .gpiob_oe_o   (gpiob_oe),
     .sys_rst_no   (sys_rst_n),
     .core_sleep_o (core_sleep)
   );
+
+  // ------------------------------------------------------------- GPIO pads
+  // Every pad has a pull-up, like the PMOD pins on the KV260. A pad is driven
+  // by the chip when *_oe = 1, else by the "external circuit" of a test
+  // (ext_*_en / ext_*_val), else it floats high. The UART host below drives
+  // PB1 (UART1 RX) and listens to PB0 (UART1 TX).
+  logic [7:0] ext_a_en = '0, ext_a_val = '0;
+  logic [7:0] ext_b_en = 8'h02, ext_b_val = '0;
+  wire  [7:0] ext_b = {ext_b_val[7:2], uart1_rx, ext_b_val[0]};
+  wire        uart1_tx = pad_b[0];
+
+  assign pad_a = (gpioa_oe & gpioa_o) | (~gpioa_oe & ~(ext_a_en & ~ext_a_val));
+  assign pad_b = (gpiob_oe & gpiob_o) | (~gpiob_oe & ~(ext_b_en & ~ext_b));
+
+  always @(posedge clk) begin
+    if ((gpioa_oe & ext_a_en) != 0 || (gpiob_oe & ext_b_en) != 0) begin
+      $fatal(1, "GPIO pad driven by the chip and the testbench at the same time");
+    end
+  end
 
   // -------------------------------------------------------- UART monitors
   byte unsigned rxq0[$];          // bytes received from UART0 (protocol)
@@ -289,9 +314,70 @@ module tb_bow32;
     expect_text(0, "Hello from Bow32!");
   endtask
 
+  // GPIO test: commands for sw/apps/gpio_demo on UART0. gpio_check() runs
+  // after each answer: it looks at the pads and plays the external circuit.
+  string gpio_cmd[$], gpio_rsp[$];
+
+  function automatic void gpio_add(string cmd, string rsp = "ok\n> ");
+    gpio_cmd.push_back(cmd);
+    gpio_rsp.push_back(rsp);
+  endfunction
+
+  function automatic void gpio_setup();
+    gpio_cmd.delete();
+    gpio_rsp.delete();
+    gpio_add("d a 0f");                // 0  PA0..PA3 outputs
+    gpio_add("o a 05");                // 1
+    gpio_add("t a 0f");                // 2  then drive PA7..PA4 = 1001
+    gpio_add("r");                     // 3  IN
+    gpio_add("i a 10 f");              // 4  falling edge on PA4, then pull PA4 low
+    gpio_add("", "irq A: pins=10");    // 5
+    gpio_add("m a 08");                // 6  open-drain PA3, OUT = 1: released
+    gpio_add("c a 08");                // 7  OUT = 0: driven low
+    gpio_add("f b 00");                // 8  PB0/PB1: UART1 -> GPIO
+    gpio_add("o b 01");                // 9
+    gpio_add("d b 01");                // 10 PB0 drives 1
+    gpio_add("c b 01");                // 11 PB0 drives 0
+    gpio_add("f b 03");                // 12 back to UART1
+    gpio_add("u", "hello from PB0");   // 13 on UART1
+  endfunction
+
+  function automatic void gpio_expect(bit ok, string what);
+    if (!ok) begin
+      $fatal(1, "GPIO: %s failed (PA=%02x oe=%02x  PB=%02x oe=%02x)", what, pad_a, gpioa_oe,
+             pad_b, gpiob_oe);
+    end
+    $display("[%0t] tb   | GPIO %s", $time, what);
+  endfunction
+
+  function automatic void gpio_check(int unsigned step, int unsigned from);
+    string answer;
+    answer = log0.substr(from, log0.len() - 1);
+    case (step)
+      0: gpio_expect(gpioa_oe == 8'h0f, "PA0..PA3 outputs");
+      1: gpio_expect(pad_a == 8'hf5, "PA = f5 (PA7..PA4 pulled up)");
+      2: begin
+        gpio_expect(pad_a == 8'hfa, "toggle: PA = fa");
+        ext_a_en[7:4]  = 4'hf;
+        ext_a_val[7:4] = 4'h9;
+      end
+      3: gpio_expect(contains(answer, "A: in=9a"), "IN reads the driven pins");
+      4: ext_a_val[4] = 1'b0;
+      5: gpio_expect(1'b1, "falling edge interrupt on PA4");
+      6: gpio_expect(gpioa_oe == 8'h07 && pad_a[3], "open-drain 1: PA3 released");
+      7: gpio_expect(gpioa_oe == 8'h0f && !pad_a[3], "open-drain 0: PA3 driven low");
+      8: gpio_expect(gpiob_oe == 8'h00 && pad_b[1:0] == 2'b11, "AF off: PB0/PB1 inputs");
+      10: gpio_expect(gpiob_oe == 8'h01 && pad_b[0], "PB0 as GPIO = 1");
+      11: gpio_expect(!pad_b[0], "PB0 as GPIO = 0");
+      12: gpio_expect(gpiob_oe == 8'h01 && pad_b[0], "AF on: PB0 = UART1 TX (idle)");
+      13: gpio_expect(1'b1, "UART1 works again on PB0");
+      default: ;
+    endcase
+  endfunction
+
   task automatic run_test();
     byte unsigned rsp[$], none[$];
-    int unsigned  mark;
+    int unsigned  mark, mark1, step;
     case (test)
       // ROM finds a valid image in flash, waits 1 ms, starts it.
       "boot": begin
@@ -330,6 +416,21 @@ module tb_bow32;
         uart_send_str(1, "bow32\n");
         expect_text(1, "BOW32", mark);
         expect_text(0, "irqs=");
+      end
+      // GPIO ports: outputs, inputs, edge interrupt, open-drain, alternate function.
+      "gpio": begin
+        gpio_setup();
+        expect_text(0, "type h for help");
+        step = 0;
+        while (step < gpio_cmd.size()) begin
+          mark  = log0.len();
+          mark1 = log1.len();
+          uart_send_str(0, {gpio_cmd[step], "\r"});
+          if (step == 13) expect_text(1, gpio_rsp[step], mark1);
+          else expect_text(0, gpio_rsp[step], mark);
+          gpio_check(step, mark);
+          step++;
+        end
       end
       default: $fatal(1, "unknown +TEST=%s", test);
     endcase
