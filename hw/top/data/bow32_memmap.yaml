@@ -29,10 +29,14 @@ periph_bus:
   - {name: sysctrl,    base: 0x40000000, size: 0x1000, desc: "System control, reset manager, boot config"}
   - {name: flash_ctrl, base: 0x40001000, size: 0x1000, desc: "Flash controller registers"}
   - {name: uart0,      base: 0x40002000, size: 0x1000, desc: "UART0 (console / bootloader)"}
-  - {name: uart1,      base: 0x40003000, size: 0x1000, desc: "UART1 (general purpose)"}
+  - {name: uart1,      base: 0x40003000, size: 0x1000, desc: "UART1 (general purpose, pins PB0/PB1)"}
+  - {name: gpioa,      base: 0x40004000, size: 0x1000, desc: "GPIO port A (8 pins)"}
+  - {name: gpiob,      base: 0x40005000, size: 0x1000, desc: "GPIO port B (8 pins, PB0/PB1 = UART1 TX/RX)"}
 
 # Ibex fast interrupts: irq_fast_i[line] -> mcause = 0x80000000 | (16 + line)
 irq_fast:
   - {name: uart0, line: 0, desc: "UART0 RX not empty / TX empty"}
   - {name: uart1, line: 1, desc: "UART1 RX not empty / TX empty"}
   - {name: flash, line: 2, desc: "Flash end of operation"}
+  - {name: gpioa, line: 3, desc: "GPIO port A pin edge"}
+  - {name: gpiob, line: 4, desc: "GPIO port B pin edge"}

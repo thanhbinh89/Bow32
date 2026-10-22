@@ -8,7 +8,7 @@ nó cấu hình `ibex_top` và nối cố định các tính năng không dùng:
 | Port Ibex | Bow32 |
 |-----------|-------|
 | `boot_addr_i` | `BootAddr` (memory map, `0x0`) |
-| `irq_fast_i[14:0]` | ngắt ngoại vi (UART0/1, flash) |
+| `irq_fast_i[14:0]` | ngắt ngoại vi (UART0/1, flash, GPIOA/B) |
 | `irq_timer_i`, `irq_external_i`, `irq_software_i` | 0 (chưa có CLINT/PLIC) |
 | `debug_req_i` | 0 (chưa có debug module) |
 | `fetch_enable_i` | `IbexMuBiOn` |

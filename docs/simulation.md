@@ -25,6 +25,7 @@ make run TEST=load WAVES=1   # + build/sim/waves.fst  (gtkwave build/sim/waves.f
 | `break` | ROM + `hello` | BREAK trên UART0 reset SoC, `RST_CAUSE = BREAK`, loader trả lời |
 | `flash` | ROM + `flash_demo` | program/erase từ ứng dụng, lỗi khi lập trình bit 0→1, soft reset, dữ liệu còn sau reset |
 | `irq` | ROM + `uart_irq` | ngắt nhanh UART1, WFI, ISR |
+| `gpio` | ROM + `gpio_demo` | gửi lệnh qua UART0 rồi kiểm tra pad: xuất, set/clear/toggle, đọc `IN`, ngắt cạnh xuống, open-drain, tắt/bật chức năng thay thế PB0/PB1 (UART1) |
 
 Một test PASS khi in `TEST PASSED`; lỗi dùng `$fatal` (mã thoát ≠ 0). Có
 watchdog `+TIMEOUT=<cycles>` (mặc định 20 M chu kỳ).
@@ -45,7 +46,9 @@ watchdog `+TIMEOUT=<cycles>` (mặc định 20 M chu kỳ).
 1. Viết firmware trong `sw/apps/<tên>/` (copy `hello`).
 2. Thêm một nhánh trong `run_test()` của testbench: dùng `expect_text(port, "...")`,
    `uart_send(port, byte)`, `uart_send_str(port, "...")`, `uart0_break(cycles)`,
-   `boot_cmd(cmd, payload, rsp)`.
+   `boot_cmd(cmd, payload, rsp)`. Chân GPIO: đọc `pad_a`/`pad_b`, `gpioa_oe`/`gpiob_oe`;
+   lái từ bên ngoài bằng `ext_a_en`/`ext_a_val` (pad có pull-up, testbench báo lỗi nếu
+   chip và testbench cùng lái một chân).
 3. Thêm tên test vào `TESTS` và biến `FLASH_<test>` trong `sim/Makefile`.
 
 ## Lưu ý khi viết testbench cho Verilator

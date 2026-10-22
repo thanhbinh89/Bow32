@@ -13,11 +13,11 @@
   │  Kria Ubuntu / PetaLinux │──100 MHz──>│ BUFGCE_DIV /2 ─> 50 MHz        │
   │  xmutil / fpga manager   │ pl_resetn0 │                                │
   │                          │──────────> │  bow32_top                     │
-  └──────────────────────────┘            │   UART0 ─┐   UART1 ─┐          │
-                                          └──────────┼──────────┼──────────┘
-                                                PMOD J2 (3.3 V)
-                                                     │          │
-                                             USB-UART #1   USB-UART #2 (tuỳ chọn)
+  └──────────────────────────┘            │   UART0 ─┐   GPIO ─┐ PA0..PA3  │
+                                          └──────────┼─────────┼ PB0/PB1 ──┘
+                                                PMOD J2 (3.3 V)│ (= UART1)
+                                                     │         │
+                                             USB-UART #1   LED, nút nhấn, USB-UART #2
 ```
 
 * PS chỉ dùng làm nguồn clock (`pl_clk0` = 100 MHz) và reset (`pl_resetn0`);
@@ -35,34 +35,39 @@ sửa XDC theo user guide của carrier (KR260: UG1092) và gọi `make fpga BOA
 
 * Kria KV260 + thẻ SD Kria Ubuntu 22.04 (hoặc PetaLinux) đã boot được.
 * 1–2 adapter USB-UART **3.3 V** (CP2102, FT232, CH340...).
-* Dây jumper.
+* Dây jumper; để thử GPIO (tuỳ chọn): LED + điện trở 330 Ω, nút nhấn.
 
 ### Nối dây PMOD J2
 
 J2 là header cái 2 × 6 chân (góc vuông) ở mép board, cạnh cổng micro-USB.
-Bow32 chỉ dùng hàng chân lẻ:
+Hàng chân lẻ: UART0 và PB0/PB1 (sau reset là UART1). Hàng chân chẵn: PA0..PA3.
 
 ```
    J2 nhìn thẳng từ ngoài mép board (mặt linh kiện hướng lên)
 
              ┌───────┬───────┬───────┬───────┬───────┬───────┐
    hàng trên │   1   │   3   │   5   │   7   │   9   │  11   │
-   chân lẻ   │ U0 TX │ U0 RX │ U1 TX │ U1 RX │  GND  │  3V3  │
+   chân lẻ   │ U0 TX │ U0 RX │  PB0  │  PB1  │  GND  │  3V3  │
              ├───────┼───────┼───────┼───────┼───────┼───────┤
    hàng dưới │   2   │   4   │   6   │   8   │  10   │  12   │
-   chân chẵn │   -   │   -   │   -   │   -   │  GND  │  3V3  │
+   chân chẵn │  PA0  │  PA1  │  PA2  │  PA3  │  GND  │  3V3  │
              └───────┴───────┴───────┴───────┴───────┴───────┘
              ══════════════════════ PCB ══════════════════════
+             PB0 / PB1 = UART1 TX / RX sau reset (GPIOB.AF)
 ```
 
-| Tín hiệu Bow32 | Chân J2 | Net carrier | SOM240_1 | Chân FPGA | Nối tới adapter |
-|----------------|---------|-------------|----------|-----------|-----------------|
-| `uart0_tx_o` | 1 | HDA11 | A17 | H12 | RX |
-| `uart0_rx_i` | 3 | HDA12 | D20 | E10 | TX |
-| `uart1_tx_o` | 5 | HDA13 | D21 | D10 | RX (adapter 2) |
-| `uart1_rx_i` | 7 | HDA14 | D22 | C11 | TX (adapter 2) |
+| Tín hiệu Bow32 | Chân J2 | Net carrier | SOM240_1 | Chân FPGA | Nối tới |
+|----------------|---------|-------------|----------|-----------|---------|
+| `uart0_tx_o` | 1 | HDA11 | A17 | H12 | RX adapter |
+| `uart0_rx_i` | 3 | HDA12 | D20 | E10 | TX adapter |
+| PB0 = UART1 TX | 5 | HDA13 | D21 | D10 | RX adapter 2 (tuỳ chọn) |
+| PB1 = UART1 RX | 7 | HDA14 | D22 | C11 | TX adapter 2 (tuỳ chọn) |
+| PA0 | 2 | HDA15 | B20 | B10 | LED / nút / dây nối (mục 5) |
+| PA1 | 4 | HDA16_CC | B21 | E12 | |
+| PA2 | 6 | HDA17 | B22 | D11 | |
+| PA3 | 8 | HDA18 | C22 | B11 | |
 | GND | 9 hoặc 10 | GND | — | — | GND |
-| 3,3 V | 11, 12 | PMOD_3V3 | — | — | **không nối** |
+| 3,3 V | 11, 12 | PMOD_3V3 | — | — | **không nối VCC của adapter** |
 
 * Nguồn đối chiếu: schematic carrier KV260 (AMD XTP682; bản đầu `038-05058-01`
   rev B05 và KV260_v2 `038-05058-03` rev A1 giống nhau ở phần này), trang 17
@@ -75,18 +80,21 @@ Bow32 chỉ dùng hàng chân lẻ:
   cột nguồn: 3V3 (11, 12) sát một đầu, GND (9, 10) ngay cạnh, chân 1 và 2 ở đầu
   kia.
 * `PMOD_3V3` lấy từ `PL_3V3` qua load switch U42, luôn bật khi PL có nguồn.
-  Không nối chân VCC của adapter. Đầu ra TX được đặt `DRIVE 4`, `SLEW SLOW` để
+  Không nối chân VCC của adapter. UART0 TX được đặt `DRIVE 4`, `SLEW SLOW` để
   hạn dòng nếu lỡ nối nhầm.
+* 6 chân GPIO là pad hai chiều (`IOBUF`) có pull-up, `DRIVE 8`, `SLEW SLOW`. Sau
+  reset PA0..PA3 là chân vào, PB0/PB1 là UART1.
 * Chân 1 và 2 có sẵn RC 20 Ω + 33 pF xuống GND (R274/C370, R275/C371), không
-  ảnh hưởng ở 115200 baud.
+  ảnh hưởng ở 115200 baud hay khi dùng làm GPIO.
 
-Kiểm tra bằng đồng hồ trước khi nối adapter (board đã `xmutil loadapp bow32`,
-xem mục 3):
+Kiểm tra bằng đồng hồ trước khi nối adapter (board đã nạp bitstream, xem mục 3):
 
 1. Tìm cột nguồn: ở một đầu J2, cột ngoài cùng (chân 11, 12) đo được +3,3 V so
    với cột kế bên (chân 9, 10 = GND).
-2. Tìm hàng: so với GND, chân 1, 3, 5, 7 ≈ 3,3 V (TX nghỉ ở mức cao, RX có
-   pull-up), chân 2, 4, 6, 8 ≈ 0 V (Vivado mặc định kéo xuống chân không dùng).
+2. Sau reset, cả 8 chân tín hiệu đều ≈ 3,3 V: TX nghỉ ở mức cao, các chân vào có
+   pull-up. UART0 nằm ở hàng chân lẻ (chân 1 và 3). Theo chuẩn Pmod, đó là hàng
+   trên. Khi đã thấy banner, có thể xác nhận hàng chân chẵn bằng `gpio_demo`
+   (mục 5): `d a 0f` đưa PA0..PA3 về 0 V.
 
 ## 2. Build bitstream (máy tính có Vivado)
 
@@ -202,6 +210,37 @@ Flash của Bow32 là BRAM: nạp lại PL thì flash trở về nội dung tron
 (ảnh `FLASH_VMEM` nếu build với tuỳ chọn này). Muốn mỗi lần nạp PL đều vào thẳng
 bootloader, build lại không có `FLASH_VMEM` (`make fpga`).
 
+## 5. Chạy thử GPIO
+
+Firmware `sw/apps/gpio_demo/` là một shell lệnh trên UART0 để đọc/ghi mọi thanh
+ghi GPIO ([docs/ip/gpio.md](ip/gpio.md)). Nạp theo một trong hai cách:
+
+```bash
+make sw
+# a) nạp sẵn vào flash trong bitstream
+make fpga FLASH_VMEM=$PWD/build/sw/gpio_demo/gpio_demo.vmem && make fpga-jtag
+# b) bitstream có GPIO đang chạy + UART loader
+python3 tools/bow32_flash.py -p /dev/ttyUSB0 flash build/sw/gpio_demo/gpio_demo.bin
+```
+
+Mở `monitor` (banner `gpio_demo: GPIOA/GPIOB (IOPAD), type h for help`), gõ lệnh
+rồi Enter. `<p>` là `a`/`b`, số là mặt nạ chân dạng hex:
+
+| Thử | Nối dây | Lệnh | Kết quả |
+|-----|---------|------|---------|
+| Đọc chân | không cần | `r` | `A: in=0f ...` (PA0..PA3 có pull-up; PA4..PA7 không có chân = 0), `B: in=03 ...` |
+| LED | PA0 (chân 2) → 330 Ω → LED → GND (chân 10) | `d a 01`, `s a 01`, `c a 01`, `b a 01` | sáng, tắt, nhấp nháy 2 Hz (`b` để dừng) |
+| Nút nhấn | nút giữa PA2 (chân 6) và GND | `i a 04 f` | mỗi lần nhấn in `irq A: pins=04 ...` (phím dội có thể báo vài lần) |
+| Ra → vào, không cần linh kiện | dây nối PA1 (chân 4) ↔ PA3 (chân 8) | `d a 02`, `i a 08`, `t a 02` | `irq A: pins=08 in=0a`; `r` thấy bit 3 theo bit 1 |
+| Open-drain | giữ dây PA1 ↔ PA3 | `m a 02`, `s a 02`, `r`, `c a 02`, `r` | PA1 thả nổi → pull-up kéo lên 1; `c` kéo xuống 0 |
+| PB0/PB1 làm GPIO | **tháo adapter UART1** (nếu có) | `f b 0`, `d b 3`, `t b 3` | chân 5 và 7 đổi mức; `f b 3` trả lại UART1 |
+
+* LED nối kiểu trên có thể sáng mờ khi PA0 đang là chân vào (dòng qua pull-up).
+  Nối LED từ 3V3 (chân 11) → điện trở → LED → PA0 thì không bị: chân xuống 0 =
+  LED sáng.
+* Không cho một chân xuất khi bên ngoài cũng đang lái nó (adapter TX, chân xuất
+  khác): tranh chấp mức. Dùng open-drain nếu cần nối chung một dây.
+
 ## Xử lý sự cố
 
 | Triệu chứng | Kiểm tra |
@@ -211,6 +250,8 @@ bootloader, build lại không có `FLASH_VMEM` (`make fpga`).
 | Mở monitor sau khi nạp, không thấy banner | banner chỉ in một lần → mở monitor trước khi nạp, hoặc gõ phím: `hello` echo lại, `B` khởi động lại vào loader |
 | `Permission denied` khi mở `/dev/ttyUSB*`, `/dev/ttyACM*` | user chưa ở nhóm `dialout`: `sudo usermod -aG dialout $USER` rồi đăng nhập lại |
 | Ký tự rác | sai baud ⇒ tần số `pl_clk0` khác 100 MHz (kiểm tra `assigned-clock-rates` trong overlay) |
+| Chân GPIO không đổi mức | `DIR` chưa đặt bit (chân vẫn là chân vào)? PB0/PB1 còn là UART1 (`AF`)? PA4..PA7, PB2..PB7 không có chân trên KV260 |
+| Không thấy UART1 trên chân 5/7 | phần mềm đã tắt `GPIOB.AF` (PB0/PB1 đang là GPIO) |
 | `cannot reach the boot ROM loader`, `cannot send a BREAK` | adapter không hỗ trợ BREAK → xem "Xoá ứng dụng, quay về bootloader" (mục 4) |
 | Timing không đạt | xem `timing_summary.rpt`; giảm clock (sửa `PlClkHz`/BUFGCE_DIVIDE) |
 | Synthesis báo thiếu `bow32_ps_wrapper` | block design chưa được tạo — xem log `ps_bd.tcl` trong `vivado.log` |

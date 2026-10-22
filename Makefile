@@ -19,7 +19,7 @@ help:
 	@echo "  make sim         build the Verilator testbench"
 	@echo "  make test        run all system simulation tests"
 	@echo "  make test-tools  unit tests of the host tools (tools/tests)"
-	@echo "  make run TEST=x  run one test (boot|load|break|flash|irq), WAVES=1 for waves"
+	@echo "  make run TEST=x  run one test (boot|load|break|flash|irq|gpio), WAVES=1 for waves"
 	@echo "  make fpga        Vivado build for the Kria $(BOARD)     -> build/fpga/$(BOARD)/"
 	@echo "  make fpga-jtag   load the bitstream into a running Kria over JTAG (xsdb)"
 	@echo "  make gen         regenerate memory map files from hw/top/data/bow32_memmap.yaml"

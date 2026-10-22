@@ -14,14 +14,16 @@
  │  │ RV32IMC       │      │       │ decode + RR  │──> bow_rom    │  │
  │  │               │ data ├──────>│ arbiter/dev  │──> bow_flash ─┼──┤ (mem port)
  │  └───────▲───────┘      │       └──────────────┘──> bow_sram   │  │
- │          │irq_fast[2:0] │              │                       │  │
+ │          │irq_fast[4:0] │              │                       │  │
  └──────────┼──────────────┼──────────────┼───────────────────────┘  │
             │              │       bow_bus_xbar (periph, 1 host)     │
             │              │       ┌──────────────┐                  │
             │              └───────│ SYSCTRL      │<── uart0_rx (BREAK detect)
             │                      │ FLASH_CTRL   │── reg port của bow_flash
             ├──────────────────────│ UART0        │<─> uart0_rx/tx
-            └──────────────────────│ UART1        │<─> uart1_rx/tx
+            ├──────────────────────│ UART1        │──┐ chức năng thay thế
+            ├──────────────────────│ GPIOA        │<─┼─> gpioa[7:0]
+            └──────────────────────│ GPIOB        │<─┴─> gpiob[7:0]  (PB0/PB1 = UART1 TX/RX)
                                    └──────────────┘
 ```
 
@@ -64,9 +66,9 @@ giữ `gnt = 0`. Chi tiết: [bus.md](bus.md).
 * `bow_rstmgr` tạo hai miền reset (assert bất đồng bộ, nhả đồng bộ):
   * **POR** (`por_rst_n`): chỉ reset SYSCTRL — giữ *reset cause*, `BOOT_FLAG`,
     bộ phát hiện BREAK qua các lần reset hệ thống.
-  * **System** (`sys_rst_n`): CPU, bus, bộ nhớ, UART, flash controller. Được kích
-    khi POR, khi phần mềm ghi `SYSCTRL.RST_CTRL`, hoặc khi UART0 RX bị giữ mức
-    thấp ≥ 10 ms (BREAK).
+  * **System** (`sys_rst_n`): CPU, bus, bộ nhớ, UART, GPIO, flash controller.
+    Được kích khi POR, khi phần mềm ghi `SYSCTRL.RST_CTRL`, hoặc khi UART0 RX
+    bị giữ mức thấp ≥ 10 ms (BREAK). GPIO trở về chân vào, PB0/PB1 về UART1.
 * Nội dung SRAM và flash **không** bị xoá khi reset (giống MCU thật).
 
 ## Ngắt
@@ -76,6 +78,8 @@ giữ `gnt = 0`. Chi tiết: [bus.md](bus.md).
 | UART0 (RX có dữ liệu / TX rỗng) | `irq_fast_i[0]` | `0x80000010` |
 | UART1 | `irq_fast_i[1]` | `0x80000011` |
 | Flash (kết thúc thao tác) | `irq_fast_i[2]` | `0x80000012` |
+| GPIOA (cạnh trên chân) | `irq_fast_i[3]` | `0x80000013` |
+| GPIOB | `irq_fast_i[4]` | `0x80000014` |
 
 `irq_timer_i`, `irq_external_i`, `irq_software_i` đang nối 0 — chỗ trống để học
 thêm CLINT/PLIC (xem [roadmap.md](roadmap.md)).
