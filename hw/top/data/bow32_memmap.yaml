@@ -23,6 +23,8 @@ main_bus:
   - {name: flash,  base: 0x08000000, size: 0x00020000, desc: "Internal flash (128 KiB)"}
   - {name: sram,   base: 0x20000000, size: 0x00004000, desc: "SRAM (16 KiB)"}
   - {name: periph, base: 0x40000000, size: 0x00010000, desc: "Peripheral bus (16 x 4 KiB slots)"}
+  - {name: isp_buf, base: 0x30000000, size: 0x00020000, desc: "ISP capture buffer (32K x 24 bit, read only)"}
+  - {name: axil,   base: 0x50000000, size: 0x00010000, desc: "AXI4-Lite window (FPGA block design, e.g. CSI-2 RX)"}
 
 # Devices on the peripheral bus (second bow_bus_xbar behind 'periph').
 periph_bus:
@@ -32,6 +34,8 @@ periph_bus:
   - {name: uart1,      base: 0x40003000, size: 0x1000, desc: "UART1 (general purpose, pins PB0/PB1)"}
   - {name: gpioa,      base: 0x40004000, size: 0x1000, desc: "GPIO port A (8 pins)"}
   - {name: gpiob,      base: 0x40005000, size: 0x1000, desc: "GPIO port B (8 pins, PB0/PB1 = UART1 TX/RX)"}
+  - {name: isp,        base: 0x40006000, size: 0x1000, desc: "ISP registers (image signal processor)"}
+  - {name: i2c0,       base: 0x40007000, size: 0x1000, desc: "I2C master 0 (camera control)"}
 
 # Ibex fast interrupts: irq_fast_i[line] -> mcause = 0x80000000 | (16 + line)
 irq_fast:
@@ -40,3 +44,5 @@ irq_fast:
   - {name: flash, line: 2, desc: "Flash end of operation"}
   - {name: gpioa, line: 3, desc: "GPIO port A pin edge"}
   - {name: gpiob, line: 4, desc: "GPIO port B pin edge"}
+  - {name: isp,   line: 5, desc: "ISP frame done / capture done / error"}
+  - {name: i2c0,  line: 6, desc: "I2C0 command done"}

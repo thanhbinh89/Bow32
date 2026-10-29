@@ -3,7 +3,9 @@
 Bow32 là một vi điều khiển (MCU) 32-bit đơn giản, xây dựng quanh lõi
 [lowRISC Ibex](https://github.com/lowRISC/ibex) (RV32IMC), được thiết kế để
 **học kiến trúc SoC từ RTL tới firmware** và kiểm chứng trên board
-**AMD Kria KV260 (SOM K26)**.
+**AMD Kria KV260 (SOM K26)**. Bow32 có một **ISP (image signal processor)**
+tự viết cho camera RAW10, chạy thử với Raspberry Pi camera v2 (IMX219) của
+KV260 ở **1080p30** hoặc **720p60**.
 
 ```
                  +-----------------------------------------------------------+
@@ -12,19 +14,23 @@ Bow32 là một vi điều khiển (MCU) 32-bit đơn giản, xây dựng quanh 
                  |  +-----------+ instr +------------------+                 |
                  |  |   Ibex    |------>|                  |---> ROM   8 KiB |  0x0000_0000
                  |  |  RV32IMC  |       |   main crossbar  |---> FLASH 128KiB|  0x0800_0000
-                 |  | (2-stage) |------>|  2 hosts x 4 dev |---> SRAM  16KiB |  0x2000_0000
-                 |  +-----------+ data  +------------------+        |        |
-                 |        ^ irq_fast[4:0]                           v        |
-                 |        |                               +----------------+ |
-                 |        +-------------------------------| periph xbar    | |  0x4000_0000
-                 |                                        |  SYSCTRL       | |  + reset manager
-                 |                                        |  FLASH_CTRL    | |
-   uart0 <-------+----------------------------------------|  UART0         | |  console / bootloader
-                 |                                   +----|  UART1         | |
-   gpioa[7:0] <--+-----------------------------------|----|  GPIOA         | |  0x4000_4000
-   gpiob[7:0] <--+-----------------------------------+--->|  GPIOB         | |  PB0/PB1 = UART1
-                 |                                        +----------------+ |
-                 +-----------------------------------------------------------+
+                 |  | (2-stage) |------>|  2 hosts x 6 dev |---> SRAM  16KiB |  0x2000_0000
+                 |  +-----------+ data  +------------------+---> ISP buffer  |  0x3000_0000
+                 |        ^ irq_fast[6:0]          |  +--------> AXI4-Lite --+--> m_axil_*  0x5000_0000
+                 |        |                        v                         |
+                 |        |                       +----------------+         |
+                 |        +-----------------------| periph xbar    |         |  0x4000_0000
+                 |                                |  SYSCTRL       |         |  + reset manager
+                 |                                |  FLASH_CTRL    |         |
+   uart0 <-------+--------------------------------|  UART0         |         |  console / bootloader
+                 |                           +----|  UART1         |         |
+   gpioa[7:0] <--+---------------------------|----|  GPIOA         |         |  PA7 = camera enable
+   gpiob[7:0] <--+---------------------------+--->|  GPIOB         |         |  PB0/PB1 = UART1
+                 |                                |  ISP regs -----+---+     |  0x4000_6000
+   i2c0 <--------+--------------------------------|  I2C0          |   |     |  0x4000_7000
+                 |                                +----------------+   v     |
+   cam_* RAW10 --+---------> ISP: BLC DPC WB demosaic CCM gamma CSC stats ---+--> isp_* RGB/YUV
+   (vid_clk)     +-----------------------------------------------------------+
 ```
 
 ## Tính năng
@@ -39,9 +45,12 @@ Bow32 là một vi điều khiển (MCU) 32-bit đơn giản, xây dựng quanh 
 | UART ×2 | 8N1, baud lập trình được, FIFO TX/RX 16 byte, ngắt |
 | GPIO (IOPAD) ×2 | 2 port × 8 chân: hướng, push-pull/open-drain, set/clear/toggle nguyên tử, ngắt theo cạnh, **chức năng thay thế** (UART1 trên PB0/PB1); 6 chân ra PMOD của KV260 |
 | SYSCTRL | Chip ID, tần số clock, nguyên nhân reset, soft reset, **UART BREAK → reset vào bootloader** |
-| Công cụ | `bow32_flash.py` (nạp qua UART), `bow32_image.py` (header/CRC), `gen_memmap.py` (memory map một nguồn) |
-| Kiểm chứng | Lint Verilator `-Wall`, 6 test mô phỏng hệ thống (boot, nạp qua UART, BREAK, flash, ngắt, GPIO) chạy trong CI |
-| FPGA | Flow Vivado bằng script cho Kria KV260, overlay để nạp bằng `xmutil` trên Linux |
+| **ISP** | RAW10 Bayer → RGB888 / YUV444, 1 pixel/clock (200 MHz trên KV260): BLC, DPC, white balance, demosaic, CCM, gamma, CSC; thống kê AE/AWB/AF + histogram; capture có lọc thu nhỏ; test pattern; 2 miền clock ([docs/ip/isp.md](docs/ip/isp.md)) |
+| I2C master | 100/400 kHz, START lặp lại, clock stretching; điều khiển cảm biến camera |
+| Cầu AXI4-Lite | cửa sổ `0x5000_0000` tới IP AXI trong block design (MIPI CSI-2 RX của AMD), có timeout |
+| Công cụ | `bow32_flash.py` (nạp qua UART), `bow32_cam.py` (chụp ảnh → PNG, xem trực tiếp), `bow32_image.py` (header/CRC), `gen_memmap.py` (memory map một nguồn), `isp_model.py` (mô hình ISP bit-exact) |
+| Kiểm chứng | Lint Verilator `-Wall`, 7 test mô phỏng hệ thống (boot, nạp qua UART, BREAK, flash, ngắt, GPIO, camera) + test ISP bit-exact so với mô hình Python, chạy trong CI |
+| FPGA | Flow Vivado bằng script cho Kria KV260 (bản cơ bản và bản camera `kv260_cam`), overlay để nạp bằng `xmutil` trên Linux |
 
 ## Bắt đầu nhanh
 
@@ -65,6 +74,16 @@ python3 tools/bow32_flash.py -p /dev/ttyUSB0 flash build/sw/hello/hello.bin
 python3 tools/bow32_flash.py -p /dev/ttyUSB0 monitor
 ```
 
+Camera (Raspberry Pi camera v2 trên J9, bitstream `kv260_cam`), xem
+[docs/camera_kv260.md](docs/camera_kv260.md):
+
+```bash
+make fpga BOARD=kv260_cam
+python3 tools/bow32_flash.py -p /dev/ttyUSB0 flash build/sw/camera/camera.bin
+python3 tools/bow32_cam.py -p /dev/ttyUSB0 --fast 921600 cmd cam "ae on" "awb on"
+python3 tools/bow32_cam.py -p /dev/ttyUSB0 -b 921600 snap -o frame.png
+```
+
 ### Công cụ cần có
 
 | Công cụ | Phiên bản | Dùng cho |
@@ -72,7 +91,7 @@ python3 tools/bow32_flash.py -p /dev/ttyUSB0 monitor
 | RISC-V GCC bare-metal (`riscv64-unknown-elf-`, `riscv32-unknown-elf-` hoặc `riscv-none-elf-`) | ≥ 12 | firmware |
 | Verilator | ≥ 5.0 (CI dùng 5.020) | lint, mô phỏng |
 | Python | ≥ 3.8 | công cụ host |
-| Vivado (kèm `bootgen`) | 2022.2 trở lên, có hỗ trợ K26 | FPGA |
+| Vivado (kèm `bootgen`) | 2022.2 trở lên, có hỗ trợ K26 (bản camera: IP MIPI CSI-2 RX Subsystem) | FPGA |
 | `dtc` (device-tree-compiler) | | overlay cho Kria |
 
 Ubuntu 24.04: `sudo apt install gcc-riscv64-unknown-elf verilator python3-serial python3-yaml device-tree-compiler`
@@ -91,24 +110,28 @@ Bow32/
 │   │   ├── flash/                #   flash nội + controller
 │   │   ├── uart/                 #   UART
 │   │   ├── gpio/                 #   GPIO / IOPAD (2 port, chức năng thay thế)
+│   │   ├── isp/                  #   ISP: rtl/ + dv/ (test bit-exact với mô hình)
+│   │   ├── i2c/                  #   I2C master
+│   │   ├── axil/                 #   cầu Bow32 bus -> AXI4-Lite
 │   │   ├── sysctrl/              #   system controller + reset manager
-│   │   └── common/               #   FIFO, synchronizer
+│   │   └── common/               #   FIFO, synchronizer, CDC, RAM 2 port
 │   ├── top/
 │   │   ├── data/bow32_memmap.yaml#   memory map: NGUỒN DUY NHẤT
 │   │   └── rtl/                  #   bow32_top.sv + package sinh tự động
 │   ├── fpga/
 │   │   ├── common/               #   primitive cho Xilinx, đọc filelist bằng Tcl
-│   │   └── kv260/                #   top board, XDC, Tcl Vivado, overlay Linux
+│   │   ├── kv260/                #   top board, XDC, Tcl Vivado, overlay Linux
+│   │   └── kv260_cam/            #   bản camera: + block design MIPI CSI-2 RX
 │   └── lint/                     # waiver Verilator
 ├── sim/                          # testbench hệ thống (Verilator)
 ├── sw/
 │   ├── common/                   # HAL, crt0, linker script, header
 │   ├── bootrom/                  # romcode: boot + UART loader
-│   ├── apps/                     # hello, uart_irq, flash_demo, gpio_demo
+│   ├── apps/                     # hello, uart_irq, flash_demo, gpio_demo, camera
 │   └── mk/                       # Makefile dùng chung
-├── tools/                        # công cụ Python phía host
+├── tools/                        # công cụ Python phía host (+ isp/isp_model.py)
 ├── docs/                         # tài liệu (tiếng Việt)
-└── .github/workflows/ci.yml      # CI: gen-check, sw, lint, test
+└── .github/workflows/ci.yml      # CI: gen-check, sw, lint, test, ISP dv
 ```
 
 ## Tài liệu
@@ -118,7 +141,9 @@ Bow32/
 | [docs/architecture.md](docs/architecture.md) | Kiến trúc tổng thể, clock/reset, ngắt, quyết định thiết kế |
 | [docs/memory_map.md](docs/memory_map.md) | Bản đồ bộ nhớ (sinh tự động) |
 | [docs/bus.md](docs/bus.md) | Giao thức bus, crossbar, cách gắn thiết bị mới |
-| [docs/ip/](docs/ip/) | Đặc tả từng IP và thanh ghi: CPU, UART, GPIO, flash, sysctrl, bộ nhớ |
+| [docs/ip/](docs/ip/) | Đặc tả từng IP và thanh ghi: CPU, UART, GPIO, flash, sysctrl, bộ nhớ, ISP, I2C, cầu AXI4-Lite |
+| [docs/ip/isp.md](docs/ip/isp.md) | ISP: pipeline, công thức từng stage, thống kê, capture, thanh ghi |
+| [docs/camera_kv260.md](docs/camera_kv260.md) | Chạy camera trên KV260: bitstream, ứng dụng `camera`, chụp ảnh về PC |
 | [docs/boot.md](docs/boot.md) | Quy trình boot, định dạng ảnh, giao thức UART loader |
 | [docs/simulation.md](docs/simulation.md) | Chạy mô phỏng, xem waveform, viết test mới |
 | [docs/fpga_kria.md](docs/fpga_kria.md) | Build và chạy trên Kria KV260 |

@@ -14,6 +14,9 @@
 -F ../ip/uart/uart.f
 -F ../ip/sysctrl/sysctrl.f
 -F ../ip/gpio/gpio.f
+-F ../ip/isp/isp.f
+-F ../ip/i2c/i2c.f
+-F ../ip/axil/axil.f
 -F ../ip/cpu/cpu.f
 
 rtl/bow32_memmap_pkg.sv

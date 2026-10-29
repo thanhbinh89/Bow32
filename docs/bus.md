@@ -54,7 +54,9 @@ bow_bus_xbar #(
 
 * Device `d` được chọn khi `(addr & DevMask[d]) == DevBase[d]`.
 * Mỗi device có `bow_rr_arbiter` riêng; con trỏ ưu tiên chỉ dịch khi device
-  thực sự `gnt`.
+  thực sự `gnt`. Một grant chưa được device nhận thì bị **khoá** cho tới khi
+  `gnt`: device chậm (cầu AXI4-Lite, flash đang bận) luôn thấy cùng một request,
+  host khác không chen vào giữa được.
 * Không trúng device nào → được `gnt` ngay, chu kỳ sau trả `err = 1`.
 * `NumHosts = 1` → crossbar thành bộ giải mã địa chỉ (dùng cho peripheral bus).
 
@@ -76,7 +78,10 @@ assign bus_rsp_o.rdata  = rdata_q;
 assign bus_rsp_o.err    = 1'b0;
 ```
 
-Device chậm (ví dụ `bow_flash` khi đang erase): `gnt = !busy`.
+Device chậm (ví dụ `bow_flash` khi đang erase): `gnt = !busy`. Device có thời
+gian trả lời không biết trước (ví dụ `bow_axil_bridge`): giữ `gnt = 0` cho tới
+khi có dữ liệu, rồi `gnt = 1` một chu kỳ và trả `rvalid` ở chu kỳ sau
+([ip/axil_bridge.md](ip/axil_bridge.md)).
 
 Hướng dẫn đầy đủ để thêm một IP vào SoC: [adding_an_ip.md](adding_an_ip.md).
 

@@ -1,0 +1,39 @@
+// Copyright Bow32 contributors.
+// SPDX-License-Identifier: Apache-2.0
+//
+// Device tree overlay for loading Bow32 + camera on a Kria K26 SOM running Linux
+// (Kria Ubuntu / PetaLinux) with `xmutil loadapp bow32_cam`.
+//
+//  * fragment@0: program the PL with bow32_cam.bit.bin (from /lib/firmware)
+//  * fragment@1: enable PL clock 0 (pl_clk0) at 100 MHz
+//
+// Compile: dtc -@ -O dtb -o bow32_cam.dtbo pl.dtsi
+
+/dts-v1/;
+/plugin/;
+
+/ {
+	fragment@0 {
+		target = <&fpga_full>;
+		__overlay__ {
+			#address-cells = <2>;
+			#size-cells = <2>;
+			firmware-name = "bow32_cam.bit.bin";
+			resets = <&zynqmp_reset 116>;
+		};
+	};
+
+	fragment@1 {
+		target = <&amba>;
+		__overlay__ {
+			bow32_clocking0: clocking0 {
+				#clock-cells = <0>;
+				assigned-clock-rates = <100000000>;
+				assigned-clocks = <&zynqmp_clk 71>;
+				clock-output-names = "fabric_clk";
+				clocks = <&zynqmp_clk 71>;
+				compatible = "xlnx,fclk";
+			};
+		};
+	};
+};

@@ -4,15 +4,22 @@
 // Bow32 SoC top level (technology independent).
 //
 //   Ibex (instr) --+                          +--> ROM    8 KiB
-//                  +--> main xbar (2 x 4) ----+--> FLASH  128 KiB (memory window)
+//                  +--> main xbar (2 x 6) ----+--> FLASH  128 KiB (memory window)
 //   Ibex (data) ---+                          +--> SRAM   16 KiB
-//                                             +--> periph xbar (1 x 6)
-//                                                    +--> SYSCTRL (+ reset manager)
-//                                                    +--> FLASH_CTRL
-//                                                    +--> UART0
+//                                             +--> ISP capture buffer -------------+
+//                                             +--> AXI4-Lite bridge --> m_axil_*   |
+//                                             +--> periph xbar (1 x 8)             |
+//                                                    +--> SYSCTRL (+ reset manager)|
+//                                                    +--> FLASH_CTRL               |
+//                                                    +--> UART0                    |
 //                                                    +--> UART1 --(alternate function)--+
-//                                                    +--> GPIOA  8 pins                 |
-//                                                    +--> GPIOB  8 pins, PB0/PB1 <------+
+//                                                    +--> GPIOA  8 pins            |    |
+//                                                    +--> GPIOB  8 pins, PB0/PB1 <-+----+
+//                                                    +--> ISP registers ------+    |
+//                                                    +--> I2C0 --> scl/sda    |    |
+//                                                                             |    |
+//   cam_* (RAW10 AXI4-Stream, vid_clk_i) --> ISP (bow_isp) <------------------+----+
+//                                             +--> isp_* (RGB888/YUV444 AXI4-Stream)
 //
 // Addresses and port numbers come from bow32_memmap_pkg (generated from
 // hw/top/data/bow32_memmap.yaml). See docs/architecture.md.
@@ -28,7 +35,13 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
   parameter                     RomInitFile   = "",
   parameter                     FlashInitFile = "",
   // CPU options
-  parameter ibex_pkg::regfile_e IbexRegFile   = ibex_pkg::RegFileFF
+  parameter ibex_pkg::regfile_e IbexRegFile   = ibex_pkg::RegFileFF,
+  // ISP: maximum line width and capture buffer size (24 bit words, the
+  // isp_buf window of the memory map holds up to 32768)
+  parameter int unsigned        IspMaxWidth   = 2048,
+  parameter int unsigned        IspBufWords   = 32768,
+  // AXI4-Lite window: address bits passed to the AXI device
+  parameter int unsigned        AxilAddrWidth = 16
 ) (
   input  logic clk_i,
   input  logic rst_ni,        // asynchronous board reset, active low
@@ -44,6 +57,49 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
   input  logic [7:0] gpiob_i,
   output logic [7:0] gpiob_o,
   output logic [7:0] gpiob_oe_o,
+
+  // I2C0 pads, open drain: *_oe_o = 1 pulls the line low, *_i = line level
+  input  logic       i2c0_scl_i,
+  output logic       i2c0_scl_oe_o,
+  input  logic       i2c0_sda_i,
+  output logic       i2c0_sda_oe_o,
+
+  // Video clock domain: camera input (RAW10, tuser = start of frame,
+  // tlast = end of line) and ISP output (UG934 order: RGB {R,B,G},
+  // YUV444 {V,U,Y}). The ISP output must accept one pixel per clock.
+  input  logic        vid_clk_i,
+  input  logic        vid_rst_ni,
+  input  logic        cam_tvalid_i,
+  output logic        cam_tready_o,
+  input  logic [9:0]  cam_tdata_i,
+  input  logic        cam_tuser_i,
+  input  logic        cam_tlast_i,
+  output logic        isp_tvalid_o,
+  input  logic        isp_tready_i,
+  output logic [23:0] isp_tdata_o,
+  output logic        isp_tuser_o,
+  output logic        isp_tlast_o,
+
+  // AXI4-Lite master (axil window of the memory map, clk_i domain)
+  output logic [AxilAddrWidth-1:0] m_axil_awaddr_o,
+  output logic [2:0]               m_axil_awprot_o,
+  output logic                     m_axil_awvalid_o,
+  input  logic                     m_axil_awready_i,
+  output logic [31:0]              m_axil_wdata_o,
+  output logic [3:0]               m_axil_wstrb_o,
+  output logic                     m_axil_wvalid_o,
+  input  logic                     m_axil_wready_i,
+  input  logic [1:0]               m_axil_bresp_i,
+  input  logic                     m_axil_bvalid_i,
+  output logic                     m_axil_bready_o,
+  output logic [AxilAddrWidth-1:0] m_axil_araddr_o,
+  output logic [2:0]               m_axil_arprot_o,
+  output logic                     m_axil_arvalid_o,
+  input  logic                     m_axil_arready_i,
+  input  logic [31:0]              m_axil_rdata_i,
+  input  logic [1:0]               m_axil_rresp_i,
+  input  logic                     m_axil_rvalid_i,
+  output logic                     m_axil_rready_o,
 
   // Status (for LEDs / debug)
   output logic       sys_rst_no,
@@ -68,7 +124,7 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
   // ---------------------------------------------------------------------------
   // Interrupts
   // ---------------------------------------------------------------------------
-  logic        uart0_irq, uart1_irq, flash_irq, gpioa_irq, gpiob_irq;
+  logic        uart0_irq, uart1_irq, flash_irq, gpioa_irq, gpiob_irq, isp_irq, i2c0_irq;
   logic [14:0] irq_fast;
 
   always_comb begin
@@ -78,6 +134,8 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
     irq_fast[IrqFastFlash] = flash_irq;
     irq_fast[IrqFastGpioa] = gpioa_irq;
     irq_fast[IrqFastGpiob] = gpiob_irq;
+    irq_fast[IrqFastIsp]   = isp_irq;
+    irq_fast[IrqFastI2c0]  = i2c0_irq;
   end
 
   // ---------------------------------------------------------------------------
@@ -265,5 +323,77 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
 
   logic unused_af;
   assign unused_af = ^{gpiob_af_in[7:2], gpiob_af_in[0]};
+
+  // ---------------------------------------------------------------------------
+  // Camera path: ISP (registers on the peripheral bus, capture buffer on the
+  // main bus) and I2C0 for the sensor control
+  // ---------------------------------------------------------------------------
+  bow_isp #(
+    .MaxWidth (IspMaxWidth),
+    .BufWords (IspBufWords)
+  ) u_isp (
+    .clk_i,
+    .rst_ni          (sys_rst_n),
+    .reg_req_i       (periph_req[PeriphDevIsp]),
+    .reg_rsp_o       (periph_rsp[PeriphDevIsp]),
+    .buf_req_i       (main_req[MainDevIspBuf]),
+    .buf_rsp_o       (main_rsp[MainDevIspBuf]),
+    .irq_o           (isp_irq),
+    .vid_clk_i,
+    .vid_rst_ni,
+    .s_axis_tvalid_i (cam_tvalid_i),
+    .s_axis_tready_o (cam_tready_o),
+    .s_axis_tdata_i  (cam_tdata_i),
+    .s_axis_tuser_i  (cam_tuser_i),
+    .s_axis_tlast_i  (cam_tlast_i),
+    .m_axis_tvalid_o (isp_tvalid_o),
+    .m_axis_tready_i (isp_tready_i),
+    .m_axis_tdata_o  (isp_tdata_o),
+    .m_axis_tuser_o  (isp_tuser_o),
+    .m_axis_tlast_o  (isp_tlast_o)
+  );
+
+  bow_i2c u_i2c0 (
+    .clk_i,
+    .rst_ni    (sys_rst_n),
+    .bus_req_i (periph_req[PeriphDevI2c0]),
+    .bus_rsp_o (periph_rsp[PeriphDevI2c0]),
+    .scl_i     (i2c0_scl_i),
+    .scl_oe_o  (i2c0_scl_oe_o),
+    .sda_i     (i2c0_sda_i),
+    .sda_oe_o  (i2c0_sda_oe_o),
+    .irq_o     (i2c0_irq)
+  );
+
+  // ---------------------------------------------------------------------------
+  // AXI4-Lite window (devices of the FPGA block design)
+  // ---------------------------------------------------------------------------
+  bow_axil_bridge #(
+    .AddrWidth (AxilAddrWidth)
+  ) u_axil (
+    .clk_i,
+    .rst_ni    (sys_rst_n),
+    .bus_req_i (main_req[MainDevAxil]),
+    .bus_rsp_o (main_rsp[MainDevAxil]),
+    .m_axil_awaddr_o,
+    .m_axil_awprot_o,
+    .m_axil_awvalid_o,
+    .m_axil_awready_i,
+    .m_axil_wdata_o,
+    .m_axil_wstrb_o,
+    .m_axil_wvalid_o,
+    .m_axil_wready_i,
+    .m_axil_bresp_i,
+    .m_axil_bvalid_i,
+    .m_axil_bready_o,
+    .m_axil_araddr_o,
+    .m_axil_arprot_o,
+    .m_axil_arvalid_o,
+    .m_axil_arready_i,
+    .m_axil_rdata_i,
+    .m_axil_rresp_i,
+    .m_axil_rvalid_i,
+    .m_axil_rready_o
+  );
 
 endmodule

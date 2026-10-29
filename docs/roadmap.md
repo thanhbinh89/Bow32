@@ -15,7 +15,8 @@ theo [adding_an_ip.md](adding_an_ip.md) và kiểm chứng bằng test mô phỏ
 ## Mức 2 — hệ thống
 
 - [ ] **PLIC** đơn giản → `irq_external_i`, nhiều nguồn ngắt có ưu tiên.
-- [ ] **SPI master** + **I2C master** (cảm biến qua PMOD).
+- [ ] **SPI master** (cảm biến / màn hình qua PMOD).
+- [x] **I2C master** ([ip/i2c.md](ip/i2c.md)): điều khiển cảm biến camera.
 - [ ] **DMA** (host thứ 3 trên crossbar: tăng `NumHosts`).
 - [ ] Flash: wait-state đọc + prefetch buffer; bật `ICache` của Ibex để thấy hiệu quả.
 - [ ] Bộ đếm hiệu năng (`MHPMCounterNum`) và đo CoreMark.
@@ -31,13 +32,26 @@ theo [adding_an_ip.md](adding_an_ip.md) và kiểm chứng bằng test mô phỏ
 ## Mức 4 — tích hợp với Kria
 
 - [ ] UART của Bow32 ↔ PS qua AXI UART Lite: điều khiển từ Linux, không cần adapter.
-- [ ] Cầu **Bow32 bus → AXI4-Lite** để Bow32 truy cập DDR / IP AXI của Xilinx.
+- [x] Cầu **Bow32 bus → AXI4-Lite** ([ip/axil_bridge.md](ip/axil_bridge.md)): Bow32 điều khiển IP AXI của Xilinx (CSI-2 RX).
+- [ ] AXI4 master (DMA) để Bow32 ghi ảnh / dữ liệu vào DDR của PS.
 - [ ] Flash không bay hơi: backing store trên QSPI/eMMC thông qua PS.
 - [ ] Bus TL-UL (OpenTitan) hoặc AXI làm interconnect chính, so sánh độ phức tạp.
 
+## Mức 5 — xử lý ảnh / camera
+
+- [x] **ISP** RAW10 → RGB/YUV 1 pixel/clock, thống kê AE/AWB/AF, capture
+      ([ip/isp.md](ip/isp.md)); camera IMX219 1080p30 / 720p60 trên KV260
+      ([camera_kv260.md](camera_kv260.md)).
+- [ ] **Bộ thu MIPI CSI-2 của Bow32** thay IP AMD: D-PHY RX (IOB/ISERDES của
+      UltraScale+, phát hiện SoT, căn byte, căn lane), lớp packet (header,
+      ECC, CRC-16), unpack RAW10, xuất AXI4-Stream giống hiện tại.
+- [ ] Hiển thị: đưa `isp_*` ra DisplayPort (live video của PS) hoặc HDMI.
+- [ ] ISP nâng cao: demosaic thích nghi theo cạnh, khử nhiễu, sharpen, lens
+      shading, thống kê theo lưới, 2 pixel/clock.
+
 ## Chất lượng / quy trình
 
-- [ ] Testbench riêng cho từng IP (`hw/ip/<ip>/dv/`), coverage.
+- [ ] Testbench riêng cho từng IP (`hw/ip/<ip>/dv/`), coverage (đã có cho ISP: so bit-exact với mô hình Python).
 - [ ] Mô tả thanh ghi bằng file dữ liệu (hjson/YAML) và sinh RTL + header (giống `reggen` của OpenTitan).
 - [ ] Formal (SymbiYosys) cho crossbar và FIFO.
 - [ ] Đồng mô phỏng UART ↔ PTY để chạy `bow32_flash.py` thật với mô hình Verilator.

@@ -3,7 +3,9 @@
 Testbench hệ thống: `sim/tb/tb_bow32.sv` (SystemVerilog thuần, Verilator ≥ 5.0
 với `--binary --timing`). Testbench đóng vai máy tính host: theo dõi cả hai
 đường UART TX, gõ phím vào RX, và hiện thực giao thức UART loader giống hệt
-`bow32_flash.py`.
+`bow32_flash.py`. Nó cũng mô hình phía camera của KV260: switch I2C TCA9546A +
+thanh ghi IMX219 trên bus I2C, luồng RAW10 của bộ thu MIPI CSI-2 (clock video
+riêng ~107 MHz, không đồng bộ với CPU) và thanh ghi AXI4-Lite của bộ thu.
 
 ```bash
 make sw            # firmware: build/sw/
@@ -26,6 +28,7 @@ make run TEST=load WAVES=1   # + build/sim/waves.fst  (gtkwave build/sim/waves.f
 | `flash` | ROM + `flash_demo` | program/erase từ ứng dụng, lỗi khi lập trình bit 0→1, soft reset, dữ liệu còn sau reset |
 | `irq` | ROM + `uart_irq` | ngắt nhanh UART1, WFI, ISR |
 | `gpio` | ROM + `gpio_demo` | gửi lệnh qua UART0 rồi kiểm tra pad: xuất, set/clear/toggle, đọc `IN`, ngắt cạnh xuống, open-drain, tắt/bật chức năng thay thế PB0/PB1 (UART1) |
+| `camera` | ROM + `camera` | dò IMX219 qua I2C (PA7, TCA9546A, clock stretching), CSI-2 RX qua AXI4-Lite (bus error khi `SLVERR`/timeout), mode 64×48, sọc màu của cảm biến → ISP → capture → ảnh RGB qua UART (CRC + kiểm tra màu từng sọc), AE và AWB hội tụ, flip (BGGR), TPG của ISP ở YUV |
 
 Một test PASS khi in `TEST PASSED`; lỗi dùng `$fatal` (mã thoát ≠ 0). Có
 watchdog `+TIMEOUT=<cycles>` (mặc định 20 M chu kỳ).
@@ -41,6 +44,18 @@ watchdog `+TIMEOUT=<cycles>` (mặc định 20 M chu kỳ).
 | `+TIMEOUT=<n>` | giới hạn chu kỳ |
 | `+WAVES` | ghi waveform (cần build với `WAVES=1`) |
 
+## Test riêng của ISP
+
+`hw/ip/isp/dv/` so ISP với mô hình Python bit-exact (`tools/isp/isp_model.py`):
+cấu hình và ảnh ngẫu nhiên theo seed, cả luồng camera và TPG, hai clock không
+đồng bộ, đầu vào có khoảng trống ngẫu nhiên. So sánh từng pixel đầu ra, thống
+kê, histogram và buffer capture.
+
+```bash
+make -C hw/ip/isp/dv test                       # seed 1..6, camera + TPG
+make -C hw/ip/isp/dv run SEED=7 TPG=1 WIDTH=160 HEIGHT=90
+```
+
 ## Thêm test
 
 1. Viết firmware trong `sw/apps/<tên>/` (copy `hello`).
@@ -48,7 +63,9 @@ watchdog `+TIMEOUT=<cycles>` (mặc định 20 M chu kỳ).
    `uart_send(port, byte)`, `uart_send_str(port, "...")`, `uart0_break(cycles)`,
    `boot_cmd(cmd, payload, rsp)`. Chân GPIO: đọc `pad_a`/`pad_b`, `gpioa_oe`/`gpiob_oe`;
    lái từ bên ngoài bằng `ext_a_en`/`ext_a_val` (pad có pull-up, testbench báo lỗi nếu
-   chip và testbench cùng lái một chân).
+   chip và testbench cùng lái một chân). Camera: thanh ghi cảm biến `imx_reg[]`,
+   `cam_frames`, kích thước frame ra của ISP `out_w`/`out_h`, nhận ảnh của lệnh
+   `dump` bằng `receive_image()`.
 3. Thêm tên test vào `TESTS` và biến `FLASH_<test>` trong `sim/Makefile`.
 
 ## Lưu ý khi viết testbench cho Verilator

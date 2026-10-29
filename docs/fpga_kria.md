@@ -31,6 +31,10 @@
 Dùng KR260 hoặc carrier khác: copy `hw/fpga/kv260/` thành thư mục board mới,
 sửa XDC theo user guide của carrier (KR260: UG1092) và gọi `make fpga BOARD=<tên>`.
 
+Bản này cũng nối PA7 vào RPI_ENABLE (F11) và I2C0 vào switch I2C của camera
+(G11/F10); ISP chạy ở clock SoC với test pattern. Camera thật (MIPI CSI-2) cần
+bitstream `kv260_cam`: xem [camera_kv260.md](camera_kv260.md).
+
 ## 1. Phần cứng cần có
 
 * Kria KV260 + thẻ SD Kria Ubuntu 22.04 (hoặc PetaLinux) đã boot được.
@@ -250,7 +254,7 @@ rồi Enter. `<p>` là `a`/`b`, số là mặt nạ chân dạng hex:
 | Mở monitor sau khi nạp, không thấy banner | banner chỉ in một lần → mở monitor trước khi nạp, hoặc gõ phím: `hello` echo lại, `B` khởi động lại vào loader |
 | `Permission denied` khi mở `/dev/ttyUSB*`, `/dev/ttyACM*` | user chưa ở nhóm `dialout`: `sudo usermod -aG dialout $USER` rồi đăng nhập lại |
 | Ký tự rác | sai baud ⇒ tần số `pl_clk0` khác 100 MHz (kiểm tra `assigned-clock-rates` trong overlay) |
-| Chân GPIO không đổi mức | `DIR` chưa đặt bit (chân vẫn là chân vào)? PB0/PB1 còn là UART1 (`AF`)? PA4..PA7, PB2..PB7 không có chân trên KV260 |
+| Chân GPIO không đổi mức | `DIR` chưa đặt bit (chân vẫn là chân vào)? PB0/PB1 còn là UART1 (`AF`)? PA4..PA6, PB2..PB7 không có chân trên KV260 (PA7 = bật camera) |
 | Không thấy UART1 trên chân 5/7 | phần mềm đã tắt `GPIOB.AF` (PB0/PB1 đang là GPIO) |
 | `cannot reach the boot ROM loader`, `cannot send a BREAK` | adapter không hỗ trợ BREAK → xem "Xoá ứng dụng, quay về bootloader" (mục 4) |
 | Timing không đạt | xem `timing_summary.rpt`; giảm clock (sửa `PlClkHz`/BUFGCE_DIVIDE) |
@@ -261,3 +265,4 @@ rồi Enter. `<p>` là `a`/`b`, số là mặt nạ chân dạng hex:
 * Nối UART của Bow32 vào PS (AXI UART Lite hoặc EMIO UART) để điều khiển từ Linux, không cần adapter.
 * ILA để quan sát bus Bow32 trong Vivado Hardware Manager.
 * Lưu flash không bay hơi qua PS (DDR/QSPI) — xem [roadmap.md](roadmap.md).
+* Camera + ISP: [camera_kv260.md](camera_kv260.md).

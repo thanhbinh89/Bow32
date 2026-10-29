@@ -20,6 +20,9 @@
 #include "bow_time.h"
 #include "bow_printf.h"
 #include "bow_crc32.h"
+#include "bow_i2c.h"
+#include "bow_isp.h"
+#include "bow_probe.h"
 
 #define BOW_REG32(addr) (*(volatile uint32_t *)(uintptr_t)(addr))
 

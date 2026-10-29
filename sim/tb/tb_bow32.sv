@@ -7,8 +7,12 @@
 // can type on both RX lines, and implements the boot ROM loader protocol to
 // download an image over UART0 exactly like tools/bow32_flash.py.
 //
+// It also models the camera side of the KV260 camera build: the I2C devices
+// (TCA9546A switch + IMX219 sensor registers), the RAW10 stream of the MIPI
+// CSI-2 receiver and the receiver's AXI4-Lite registers.
+//
 // Plusargs:
-//   +TEST=<name>      boot | load | break | flash | irq | gpio   (see run_test below)
+//   +TEST=<name>      boot | load | break | flash | irq | gpio | camera   (see run_test below)
 //   +ROM=<vmem>       boot ROM image (required)
 //   +FLASH=<vmem>     image preloaded into the flash (backdoor)
 //   +IMAGE=<vmem>     image downloaded over UART by the 'load' test
@@ -35,6 +39,11 @@ module tb_bow32;
   logic rst_n = 1'b1;  // pulsed low at the start of the test
   always #(ClkPeriodNs / 2) clk = ~clk;
 
+  // Video clock of the ISP, unrelated to the CPU clock (200 MHz on the KV260)
+  localparam real VidPeriodNs = 9.3;
+  logic vclk = 1'b0;
+  always #(VidPeriodNs / 2) vclk = ~vclk;
+
   longint unsigned cycle = 0;
   always @(posedge clk) cycle <= cycle + 1;
 
@@ -44,6 +53,29 @@ module tb_bow32;
   logic       sys_rst_n, core_sleep;
   logic [7:0] gpioa_o, gpioa_oe, gpiob_o, gpiob_oe;
   wire  [7:0] pad_a, pad_b;
+
+  // I2C: open drain with pull-ups, pulled low by the DUT or a device model
+  logic       i2c_scl_oe, i2c_sda_oe;
+  logic       slv_scl_low = 1'b0, slv_sda_low = 1'b0;
+  wire        i2c_scl = !(i2c_scl_oe || slv_scl_low);
+  wire        i2c_sda = !(i2c_sda_oe || slv_sda_low);
+
+  // Camera stream (CSI-2 receiver output) and ISP output
+  logic       cam_tvalid = 1'b0, cam_tuser = 1'b0, cam_tlast = 1'b0, cam_tready;
+  logic [9:0] cam_tdata = '0;
+  logic       isp_tvalid, isp_tuser, isp_tlast;
+  logic [23:0] isp_tdata;
+
+  // AXI4-Lite window
+  logic [15:0] axil_awaddr, axil_araddr;
+  logic [2:0]  axil_awprot, axil_arprot;
+  logic        axil_awvalid, axil_wvalid, axil_bready, axil_arvalid, axil_rready;
+  logic [31:0] axil_wdata;
+  logic [3:0]  axil_wstrb;
+  logic        axil_awready = 1'b0, axil_wready = 1'b0, axil_bvalid = 1'b0;
+  logic        axil_arready = 1'b0, axil_rvalid = 1'b0;
+  logic [1:0]  axil_bresp = 2'b00, axil_rresp = 2'b00;
+  logic [31:0] axil_rdata = '0;
 
   bow32_top #(
     .ClkFreqHz   (ClkFreqHz),
@@ -61,6 +93,41 @@ module tb_bow32;
     .gpiob_i      (pad_b),
     .gpiob_o      (gpiob_o),
     .gpiob_oe_o   (gpiob_oe),
+    .i2c0_scl_i   (i2c_scl),
+    .i2c0_scl_oe_o(i2c_scl_oe),
+    .i2c0_sda_i   (i2c_sda),
+    .i2c0_sda_oe_o(i2c_sda_oe),
+    .vid_clk_i    (vclk),
+    .vid_rst_ni   (rst_n),
+    .cam_tvalid_i (cam_tvalid),
+    .cam_tready_o (cam_tready),
+    .cam_tdata_i  (cam_tdata),
+    .cam_tuser_i  (cam_tuser),
+    .cam_tlast_i  (cam_tlast),
+    .isp_tvalid_o (isp_tvalid),
+    .isp_tready_i (1'b1),
+    .isp_tdata_o  (isp_tdata),
+    .isp_tuser_o  (isp_tuser),
+    .isp_tlast_o  (isp_tlast),
+    .m_axil_awaddr_o  (axil_awaddr),
+    .m_axil_awprot_o  (axil_awprot),
+    .m_axil_awvalid_o (axil_awvalid),
+    .m_axil_awready_i (axil_awready),
+    .m_axil_wdata_o   (axil_wdata),
+    .m_axil_wstrb_o   (axil_wstrb),
+    .m_axil_wvalid_o  (axil_wvalid),
+    .m_axil_wready_i  (axil_wready),
+    .m_axil_bresp_i   (axil_bresp),
+    .m_axil_bvalid_i  (axil_bvalid),
+    .m_axil_bready_o  (axil_bready),
+    .m_axil_araddr_o  (axil_araddr),
+    .m_axil_arprot_o  (axil_arprot),
+    .m_axil_arvalid_o (axil_arvalid),
+    .m_axil_arready_i (axil_arready),
+    .m_axil_rdata_i   (axil_rdata),
+    .m_axil_rresp_i   (axil_rresp),
+    .m_axil_rvalid_i  (axil_rvalid),
+    .m_axil_rready_o  (axil_rready),
     .sys_rst_no   (sys_rst_n),
     .core_sleep_o (core_sleep)
   );
@@ -274,6 +341,338 @@ module tb_bow32;
     for (int i = 0; i < total; i++) bytes.push_back(image[i / 4][8 * (i % 4) +: 8]);
   endtask
 
+
+  // ======================================================== camera board models
+  // ------------------------------------------------------------- I2C devices
+  // TCA9546A switch at 0x74 (one control byte = channel enables) and, behind
+  // its channel 2, the IMX219 at 0x10: 16 bit register address, then data
+  // bytes with auto increment. The sensor only answers when it is powered
+  // (PA7 = RPI_ENABLE driven high). The sensor stretches SCL now and then.
+  localparam logic [6:0] TcaAddr = 7'h74;
+  localparam logic [6:0] ImxAddr = 7'h10;
+
+  typedef enum int {I2cIdle, I2cAddr, I2cAckA, I2cRx, I2cAckRx, I2cTx, I2cAckTx} i2c_state_e;
+
+  logic [7:0]  imx_reg [65536];
+  logic [7:0]  tca_ctrl = 8'h00;
+  i2c_state_e  i2c_st = I2cIdle;
+  logic        scl_q = 1'b1, sda_q = 1'b1;
+  int unsigned i2c_bit = 0, i2c_nbytes = 0, i2c_stretch = 0, i2c_dev = 0;
+  logic [7:0]  i2c_sh = '0;
+  bit          i2c_rw = 1'b0, i2c_nack = 1'b0;
+  logic [15:0] imx_ptr = '0;
+
+  wire cam_powered = gpioa_oe[7] && gpioa_o[7];
+
+  initial begin
+    for (int i = 0; i < 65536; i++) imx_reg[i] = 8'h00;
+    imx_reg[16'h0000] = 8'h02;   // chip id 0x0219
+    imx_reg[16'h0001] = 8'h19;
+  end
+
+  function automatic logic [7:0] i2c_tx_byte();
+    logic [7:0] b;
+    if (i2c_dev == 1) return tca_ctrl;
+    b = imx_reg[imx_ptr];
+    imx_ptr++;
+    return b;
+  endfunction
+
+  function automatic void i2c_rx_byte(logic [7:0] b);
+    if (i2c_dev == 1) begin
+      tca_ctrl = b;
+    end else if (i2c_nbytes == 0) begin
+      imx_ptr[15:8] = b;
+    end else if (i2c_nbytes == 1) begin
+      imx_ptr[7:0] = b;
+    end else begin
+      if (imx_ptr == 16'h0100 && imx_reg[16'h0100][0] != b[0]) begin
+        if (b[0]) $display("[%0t] tb   | IMX219 streaming", $time);
+        else $display("[%0t] tb   | IMX219 standby", $time);
+      end
+      imx_reg[imx_ptr] = b;
+      imx_ptr++;
+    end
+    i2c_nbytes++;
+  endfunction
+
+  // Sampled with the CPU clock: an I2C quarter bit is >= 30 cycles.
+  always @(posedge clk) begin
+    logic [7:0] b;
+    if (i2c_stretch != 0) begin
+      i2c_stretch--;
+      if (i2c_stretch == 0) slv_scl_low = 1'b0;
+    end
+    if (i2c_scl && scl_q && sda_q && !i2c_sda) begin            // (repeated) START
+      i2c_st      = I2cAddr;
+      i2c_bit     = 0;
+      i2c_nbytes  = 0;
+      slv_sda_low = 1'b0;
+    end else if (i2c_scl && scl_q && !sda_q && i2c_sda) begin   // STOP
+      i2c_st      = I2cIdle;
+      slv_sda_low = 1'b0;
+    end else if (!scl_q && i2c_scl) begin                        // SCL rising: sample
+      case (i2c_st)
+        I2cAddr, I2cRx: begin
+          i2c_sh = {i2c_sh[6:0], i2c_sda};
+          i2c_bit++;
+        end
+        I2cTx:    i2c_bit++;
+        I2cAckTx: i2c_nack = i2c_sda;
+        default: ;
+      endcase
+    end else if (scl_q && !i2c_scl) begin                        // SCL falling: drive
+      case (i2c_st)
+        I2cAddr: if (i2c_bit == 8) begin
+          i2c_rw  = i2c_sh[0];
+          i2c_dev = (i2c_sh[7:1] == TcaAddr) ? 1 :
+                    (i2c_sh[7:1] == ImxAddr && tca_ctrl[2] && cam_powered) ? 2 : 0;
+          if (i2c_dev != 0) begin
+            slv_sda_low = 1'b1;                                   // ACK
+            i2c_st      = I2cAckA;
+          end else begin
+            i2c_st = I2cIdle;                                     // NACK: not for us
+          end
+        end
+        I2cAckA, I2cAckTx: begin
+          if (i2c_st == I2cAckTx && i2c_nack) begin
+            slv_sda_low = 1'b0;
+            i2c_st      = I2cIdle;
+          end else if (i2c_rw) begin
+            b           = i2c_tx_byte();
+            i2c_sh      = b;
+            slv_sda_low = !b[7];
+            i2c_bit     = 0;
+            i2c_st      = I2cTx;
+          end else begin
+            slv_sda_low = 1'b0;
+            i2c_bit     = 0;
+            i2c_st      = I2cRx;
+          end
+        end
+        I2cRx: if (i2c_bit == 8) begin
+          i2c_rx_byte(i2c_sh);
+          slv_sda_low = 1'b1;
+          i2c_st      = I2cAckRx;
+        end
+        I2cAckRx: begin
+          slv_sda_low = 1'b0;
+          i2c_bit     = 0;
+          i2c_st      = I2cRx;
+          if (i2c_dev == 2 && (i2c_nbytes % 4) == 3) begin       // clock stretching
+            slv_scl_low = 1'b1;
+            i2c_stretch = 150;
+          end
+        end
+        I2cTx: begin
+          if (i2c_bit == 8) begin
+            slv_sda_low = 1'b0;                                   // master ACK/NACK
+            i2c_st      = I2cAckTx;
+          end else begin
+            slv_sda_low = !i2c_sh[7 - i2c_bit];
+          end
+        end
+        default: ;
+      endcase
+    end
+    scl_q = i2c_scl;
+    sda_q = i2c_sda;
+  end
+
+  // ------------------------------------------------ CSI-2 RX register model
+  // AXI4-Lite device with random ready/response delays. Registers of the
+  // AMD MIPI CSI-2 RX subsystem that the firmware uses (PG232); offsets
+  // 0x4000-0x7FFF answer SLVERR, 0x8000-0xFFFF never answer (bridge timeout).
+  logic [31:0] csi_ccr = '0, csi_isr = '0, csi_pkt = '0;
+  logic [31:0] csi_mem [1024];
+  int unsigned cf_w = 0, cf_h = 0;   // current camera frame size
+
+  initial for (int i = 0; i < 1024; i++) csi_mem[i] = '0;
+
+  function automatic logic [31:0] csi_read(logic [15:0] a);
+    case (a & 16'h1FFC)
+      16'h0000: return csi_ccr;
+      16'h0004: return 32'h0000_0009;                 // 2 active lanes, 2 max
+      16'h0010: return {csi_pkt[15:0], 16'h0000};     // packet count, no reset pending
+      16'h0024: return csi_isr;
+      16'h0060: return {16'(cf_h), 16'(cf_w * 10 / 8)};
+      16'h0064: return 32'h0000_002B;                 // RAW10
+      default:  return csi_mem[a[11:2]];
+    endcase
+  endfunction
+
+  function automatic void csi_write(logic [15:0] a, logic [31:0] d);
+    case (a & 16'h1FFC)
+      16'h0000: csi_ccr = d;
+      16'h0024: csi_isr = csi_isr & ~d;
+      default:  csi_mem[a[11:2]] = d;
+    endcase
+  endfunction
+
+  initial begin : axil_model
+    logic [15:0] a;
+    forever begin
+      @(posedge clk);
+      #1;
+      if (axil_awvalid && axil_wvalid) begin
+        a = axil_awaddr;
+        if (a >= 16'h8000) begin
+          while (axil_awvalid) @(posedge clk);          // no answer
+        end else begin
+          repeat ($urandom % 4) @(posedge clk);
+          #1;
+          axil_awready = 1'b1;
+          axil_wready  = 1'b1;
+          @(posedge clk);
+          #1;
+          axil_awready = 1'b0;
+          axil_wready  = 1'b0;
+          if (a < 16'h4000) csi_write(a, axil_wdata);
+          repeat ($urandom % 4) @(posedge clk);
+          #1;
+          axil_bresp  = (a >= 16'h4000) ? 2'b10 : 2'b00;
+          axil_bvalid = 1'b1;
+          do @(posedge clk); while (!axil_bready);
+          #1;
+          axil_bvalid = 1'b0;
+        end
+      end else if (axil_arvalid) begin
+        a = axil_araddr;
+        if (a >= 16'h8000) begin
+          while (axil_arvalid) @(posedge clk);
+        end else begin
+          repeat ($urandom % 4) @(posedge clk);
+          #1;
+          axil_arready = 1'b1;
+          @(posedge clk);
+          #1;
+          axil_arready = 1'b0;
+          repeat ($urandom % 4) @(posedge clk);
+          #1;
+          axil_rdata  = (a >= 16'h4000) ? 32'hDEAD_BEEF : csi_read(a);
+          axil_rresp  = (a >= 16'h4000) ? 2'b10 : 2'b00;
+          axil_rvalid = 1'b1;
+          do @(posedge clk); while (!axil_rready);
+          #1;
+          axil_rvalid = 1'b0;
+        end
+      end
+    end
+  end
+
+  // ------------------------------------------------------ camera stream model
+  // Output of the CSI-2 receiver while the sensor streams (0x0100 = 1) and
+  // the receiver is enabled (CCR.EN): RAW10 frames of x/y_output_size
+  // pixels, tuser = start of frame, tlast = end of line, random gaps,
+  // back-pressure from the ISP honoured. Pixels: colour bars when the
+  // sensor test pattern is on (0x0600 = 2), else a smooth scene whose level
+  // follows exposure x analog gain, with a colour cast (R 5/8, B 13/16).
+  int unsigned cf_tp = 0, cf_exp = 0, cf_again = 0;
+  logic [1:0]  cf_orient = '0;
+  int unsigned cam_frames = 0;
+
+  function automatic logic [9:0] cam_pixel(int unsigned x, int unsigned y);
+    int unsigned c, bar;
+    longint unsigned lin, v;
+    bit on;
+    c = {y[0] ^ cf_orient[1], x[0] ^ cf_orient[0]};     // 0 R, 1 Gr, 2 Gb, 3 B
+    if (cf_tp == 2) begin
+      bar = (x * 8) / cf_w;
+      on  = (c == 0) ? (bar inside {0, 1, 4, 5}) : (c == 3) ? (bar inside {0, 2, 4, 6}) : (bar < 4);
+      return on ? 10'h3C0 : 10'h040;
+    end
+    lin = 32 + (x * 192) / cf_w + (y * 32) / cf_h;
+    if (c == 0) lin = lin * 5 / 8;
+    if (c == 3) lin = lin * 13 / 16;
+    v = lin * cf_exp * (65536 / (256 - cf_again)) / (256 * 512);
+    return 10'(64 + (v > 959 ? 959 : v));
+  endfunction
+
+  initial begin : cam_model
+    int unsigned x, y, gap;
+    forever begin
+      @(posedge vclk);
+      if (imx_reg[16'h0100][0] && csi_ccr[0] && cam_powered) begin
+        cf_w      = {imx_reg[16'h016c], imx_reg[16'h016d]};
+        cf_h      = {imx_reg[16'h016e], imx_reg[16'h016f]};
+        cf_tp     = {imx_reg[16'h0600], imx_reg[16'h0601]};
+        cf_exp    = {imx_reg[16'h015a], imx_reg[16'h015b]};
+        cf_again  = imx_reg[16'h0157] > 232 ? 232 : imx_reg[16'h0157];
+        cf_orient = imx_reg[16'h0172][1:0];
+        if (cam_frames == 0) check_sensor_setup();
+        y = 0;
+        while (y < cf_h) begin
+          x = 0;
+          while (x < cf_w) begin
+            #0.5;
+            cam_tvalid = 1'b1;
+            cam_tdata  = cam_pixel(x, y);
+            cam_tuser  = (x == 0) && (y == 0);
+            cam_tlast  = (x == cf_w - 1);
+            do @(posedge vclk); while (!cam_tready);
+            #0.5;
+            cam_tvalid = 1'b0;
+            gap = ($urandom % 8 == 0) ? 1 + $urandom % 2 : 0;
+            repeat (gap) @(posedge vclk);
+            x++;
+          end
+          repeat (40) @(posedge vclk);       // horizontal blanking
+          y++;
+        end
+        cam_frames++;
+        csi_isr[31] = 1'b1;                  // frame received
+        csi_pkt     = csi_pkt + cf_h + 2;
+        repeat (2500) @(posedge vclk);       // vertical blanking
+      end
+    end
+  end
+
+  // The firmware must have programmed a consistent frame format.
+  function automatic void check_sensor_setup();
+    int unsigned x0, x1, y0, y1;
+    x0 = {imx_reg[16'h0164], imx_reg[16'h0165]};
+    x1 = {imx_reg[16'h0166], imx_reg[16'h0167]};
+    y0 = {imx_reg[16'h0168], imx_reg[16'h0169]};
+    y1 = {imx_reg[16'h016a], imx_reg[16'h016b]};
+    if (x1 - x0 + 1 != cf_w || y1 - y0 + 1 != cf_h || x0[0] || y0[0]) begin
+      $fatal(1, "IMX219: crop %0d..%0d x %0d..%0d does not match output %0dx%0d", x0, x1, y0, y1,
+             cf_w, cf_h);
+    end
+    if (imx_reg[16'h018c] != 8'h0a || imx_reg[16'h0114] != 8'h01 || imx_reg[16'h030d] != 8'h72) begin
+      $fatal(1, "IMX219: RAW10 / 2 lane / PLL setup missing");
+    end
+    $display("[%0t] tb   | IMX219 frame %0dx%0d crop (%0d,%0d) exp %0d gain %0d tp %0d orient %0d",
+             $time, cf_w, cf_h, x0, y0, cf_exp, cf_again, cf_tp, cf_orient);
+  endfunction
+
+  // ------------------------------------------------------ ISP output monitor
+  // Every line of a frame must have the same length; remembers the geometry
+  // of the last complete frame.
+  int unsigned out_x = 0, out_y = 0, out_line_w = 0, out_w = 0, out_h = 0, out_frames = 0;
+
+  always @(posedge vclk) begin
+    if (isp_tvalid) begin
+      if (isp_tuser) begin
+        if (out_x != 0) $fatal(1, "ISP output: start of frame inside a line");
+        if (out_y != 0) begin
+          out_w = out_line_w;
+          out_h = out_y;
+          out_frames++;
+        end
+        out_y = 0;
+      end
+      out_x++;
+      if (isp_tlast) begin
+        if (out_y != 0 && out_x != out_line_w) begin
+          $fatal(1, "ISP output: line %0d has %0d pixels, expected %0d", out_y, out_x, out_line_w);
+        end
+        out_line_w = out_x;
+        out_x = 0;
+        out_y++;
+      end
+    end
+  end
+
   // ---------------------------------------------------------------- tests
   string test, rom_file, flash_file, image_file;
 
@@ -375,6 +774,101 @@ module tb_bow32;
     endcase
   endfunction
 
+
+  // Camera test: commands for sw/apps/camera on UART0 and the text expected
+  // in the answer. "dump" receives and checks an image; "" only waits.
+  string cam_cmd[$], cam_rsp[$];
+
+  function automatic void cam_add(string cmd, string rsp = "ok\n> ");
+    cam_cmd.push_back(cmd);
+    cam_rsp.push_back(rsp);
+  endfunction
+
+  function automatic void cam_setup();
+    cam_cmd.delete();
+    cam_rsp.delete();
+    cam_add("rd 50008000", "bus error");          // 0  AXI device does not answer: timeout
+    cam_add("rd 50004000", "bus error");          // 1  SLVERR
+    cam_add("rd 50000004", "50000004: 00000009"); // 2  CSI-2 RX PCR: 2 lanes
+    cam_add("mode 64 48");                        // 3  small frames for the simulation
+    cam_add("tp 2");                              // 4  sensor colour bars
+    cam_add("cam", "streaming 64x48 RGGB");       // 5
+    cam_add("stat", "in 64x48");                  // 6
+    cam_add("csi", "frame received");             // 7
+    cam_add("cap 0 0 32 24 1", "captured 32x24"); // 8
+    cam_add("dump", "END\nok\n> ");               // 9  RGB colour bars
+    cam_add("tp 0");                              // 10 scene with a colour cast
+    cam_add("ae on");                             // 11
+    cam_add("awb on");                            // 12
+    cam_add("", "ae: locked");                    // 13
+    cam_add("", "awb: locked");                   // 14
+    cam_add("flip 1 1");                          // 15 BGGR
+    cam_add("stat", "in 64x48");                  // 16
+    cam_add("awb off");                           // 17
+    cam_add("tpg 0", "tpg 0 64x48");              // 18 ISP test pattern
+    cam_add("fmt yuv");                           // 19
+    cam_add("cap 0 0 32 24 1", "captured 32x24"); // 20
+    cam_add("dump", "END\nok\n> ");               // 21 YUV colour bars
+  endfunction
+
+  // Image transfer of `dump`: "IMG <w> <h> <fmt> <len> <crc>" line + raw bytes.
+  byte unsigned img_px[$];
+  int unsigned  img_w, img_h;
+  string        img_fmt;
+
+  task automatic receive_image();
+    string        line;
+    int unsigned  len, n;
+    logic [31:0]  crc;
+    byte unsigned b;
+    line = "";
+    img_px.delete();
+    forever begin
+      while (rxq0.size() == 0) @(posedge clk);
+      b = rxq0.pop_front();
+      if (b == 8'h0a) begin
+        if (line.len() > 4 && line.substr(0, 3) == "IMG ") break;
+        line = "";
+      end else if (b != 8'h0d) begin
+        line = {line, string'(b)};
+      end
+    end
+    n = $sscanf(line, "IMG %d %d %s %d %h", img_w, img_h, img_fmt, len, crc);
+    if (n != 5 || len != 3 * img_w * img_h) $fatal(1, "bad image header '%s'", line);
+    while (img_px.size() < len) begin
+      while (rxq0.size() == 0) @(posedge clk);
+      img_px.push_back(rxq0.pop_front());
+    end
+    if (crc32(img_px) != crc) $fatal(1, "image CRC mismatch");
+    $display("[%0t] tb   | received %0dx%0d %s image, crc %08x ok", $time, img_w, img_h, img_fmt, crc);
+  endtask
+
+  // Colour bars white yellow cyan green magenta red blue black: centre pixel of
+  // every bar in the middle row. RGB: each component on/off; YUV: the luma.
+  function automatic void check_bars();
+    int unsigned i;
+    int c0, c1, c2, yexp;
+    bit r, g, b, ok;
+    for (int k = 0; k < 8; k++) begin
+      i  = 3 * ((img_h / 2) * img_w + k * img_w / 8 + img_w / 16);
+      c0 = img_px[i];
+      c1 = img_px[i + 1];
+      c2 = img_px[i + 2];
+      r  = k inside {0, 1, 4, 5};
+      g  = k < 4;
+      b  = k inside {0, 2, 4, 6};
+      if (img_fmt == "rgb") begin
+        ok = (r ? c0 > 160 : c0 < 80) && (g ? c1 > 160 : c1 < 80) && (b ? c2 > 160 : c2 < 80);
+      end else begin
+        yexp = (54 * r + 183 * g + 19 * b) * 255 / 256;
+        ok = (c0 > yexp - 24) && (c0 < yexp + 24);
+        if (k == 0 || k == 7) ok = ok && (c1 > 112) && (c1 < 144) && (c2 > 112) && (c2 < 144);
+      end
+      if (!ok) $fatal(1, "colour bar %0d wrong: %0d %0d %0d (%s)", k, c0, c1, c2, img_fmt);
+    end
+    $display("[%0t] tb   | %s colour bars ok", $time, img_fmt);
+  endfunction
+
   task automatic run_test();
     byte unsigned rsp[$], none[$];
     int unsigned  mark, mark1, step;
@@ -431,6 +925,35 @@ module tb_bow32;
           gpio_check(step, mark);
           step++;
         end
+      end
+      // Camera path: I2C sensor control, CSI-2 RX registers over AXI4-Lite,
+      // camera stream -> ISP -> capture -> image over UART, AE/AWB loops.
+      "camera": begin
+        cam_setup();
+        expect_text(0, "camera: IMX219 found (id 0219)");
+        expect_text(0, "csi2rx: found (2 lanes)");
+        expect_text(0, "> ");
+        step = 0;
+        mark = log0.len();
+        while (step < cam_cmd.size()) begin
+          // an empty command waits for more text after the previous command
+          if (cam_cmd[step] != "") begin
+            mark = log0.len();
+            rxq0.delete();
+            uart_send_str(0, {cam_cmd[step], "\r"});
+          end
+          if (cam_cmd[step] == "dump") begin
+            receive_image();
+            check_bars();
+          end
+          expect_text(0, cam_rsp[step], mark);
+          if (step == 6 && (out_w != 64 || out_h != 48)) begin
+            $fatal(1, "ISP output frame %0dx%0d, expected 64x48", out_w, out_h);
+          end
+          step++;
+        end
+        $display("[%0t] tb   | camera frames %0d, ISP output frames %0d (%0dx%0d)", $time,
+                 cam_frames, out_frames, out_w, out_h);
       end
       default: $fatal(1, "unknown +TEST=%s", test);
     endcase
