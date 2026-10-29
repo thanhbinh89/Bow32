@@ -40,6 +40,9 @@ jobs:
       - name: System simulation
         run: make test
 
+      - name: ISP unit test (bit-exact vs. Python model)
+        run: make -C hw/ip/isp/dv test
+
       - name: Upload logs and firmware
         if: always()
         uses: actions/upload-artifact@v4
@@ -47,6 +50,7 @@ jobs:
           name: bow32-ci
           path: |
             build/sim/*.log
+            build/isp_dv/*/sim.log
             build/sw/*/*.bin
             build/sw/*/*.vmem
             build/sw/*/*.dis

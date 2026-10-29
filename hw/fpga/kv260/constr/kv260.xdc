@@ -36,6 +36,21 @@ set_property PULLUP true         [get_ports {gpioa_io[*] gpiob_io[*]}]
 set_property DRIVE 8             [get_ports {gpioa_io[*] gpiob_io[*]}]
 set_property SLEW SLOW           [get_ports {gpioa_io[*] gpiob_io[*]}]
 
+# ---- Raspberry Pi camera connector J9: control signals --------------------------
+# RPI_ENABLE (camera power enable) and the PL I2C bus, which goes through the
+# TCA9546A I2C switch (address 0x74, channel 2 = camera). See docs/camera_kv260.md.
+set_property PACKAGE_PIN F11 [get_ports cam_en_io]    ;# HDA09     som240_1_a15  RPI_ENABLE (PA7)
+set_property PACKAGE_PIN G11 [get_ports i2c_scl_io]   ;# HDA00_CC  som240_1_d16  -> TCA9546A SCL
+set_property PACKAGE_PIN F10 [get_ports i2c_sda_io]   ;# HDA01     som240_1_d17  -> TCA9546A SDA
+
+set_property IOSTANDARD LVCMOS33 [get_ports {cam_en_io i2c_scl_io i2c_sda_io}]
+set_property DRIVE 4             [get_ports {cam_en_io i2c_scl_io i2c_sda_io}]
+set_property SLEW SLOW           [get_ports {cam_en_io i2c_scl_io i2c_sda_io}]
+# The board has I2C pull-ups; the weak internal ones only keep the lines high
+# when nothing is connected. The camera stays off while PA7 is an input.
+set_property PULLUP true         [get_ports {i2c_scl_io i2c_sda_io}]
+set_property PULLDOWN true       [get_ports cam_en_io]
+
 # ---- SOM fan ------------------------------------------------------------------
 set_property PACKAGE_PIN A12      [get_ports fan_en_b]
 set_property IOSTANDARD LVCMOS33  [get_ports fan_en_b]
@@ -46,8 +61,8 @@ set_property DRIVE 4              [get_ports fan_en_b]
 # pl_clk0 is constrained by the Zynq UltraScale+ PS IP; the 50 MHz SoC clock
 # out of BUFGCE_DIV is derived automatically.
 # UART and GPIO pins are asynchronous and synchronised inside the SoC.
-set_false_path -from [get_ports {uart0_rx_i gpioa_io[*] gpiob_io[*]}]
-set_false_path -to   [get_ports {uart0_tx_o gpioa_io[*] gpiob_io[*] fan_en_b}]
+set_false_path -from [get_ports {uart0_rx_i gpioa_io[*] gpiob_io[*] cam_en_io i2c_scl_io i2c_sda_io}]
+set_false_path -to   [get_ports {uart0_tx_o gpioa_io[*] gpiob_io[*] cam_en_io i2c_scl_io i2c_sda_io fan_en_b}]
 
 # ---- Bitstream ------------------------------------------------------------------
 set_property BITSTREAM.GENERAL.COMPRESS TRUE [current_design]

@@ -15,6 +15,8 @@ Tệp này được sinh tự động từ `hw/top/data/bow32_memmap.yaml`. Sử
 | 1 | `flash` | `0x08000000` | `0x0801FFFF` | 128 KiB | Internal flash (128 KiB) |
 | 2 | `sram` | `0x20000000` | `0x20003FFF` | 16 KiB | SRAM (16 KiB) |
 | 3 | `periph` | `0x40000000` | `0x4000FFFF` | 64 KiB | Peripheral bus (16 x 4 KiB slots) |
+| 4 | `isp_buf` | `0x30000000` | `0x3001FFFF` | 128 KiB | ISP capture buffer (32K x 24 bit, read only) |
+| 5 | `axil` | `0x50000000` | `0x5000FFFF` | 64 KiB | AXI4-Lite window (FPGA block design, e.g. CSI-2 RX) |
 
 ## Peripheral bus
 
@@ -26,6 +28,8 @@ Tệp này được sinh tự động từ `hw/top/data/bow32_memmap.yaml`. Sử
 | 3 | `uart1` | `0x40003000` | `0x40003FFF` | 4 KiB | UART1 (general purpose, pins PB0/PB1) |
 | 4 | `gpioa` | `0x40004000` | `0x40004FFF` | 4 KiB | GPIO port A (8 pins) |
 | 5 | `gpiob` | `0x40005000` | `0x40005FFF` | 4 KiB | GPIO port B (8 pins, PB0/PB1 = UART1 TX/RX) |
+| 6 | `isp` | `0x40006000` | `0x40006FFF` | 4 KiB | ISP registers (image signal processor) |
+| 7 | `i2c0` | `0x40007000` | `0x40007FFF` | 4 KiB | I2C master 0 (camera control) |
 
 Truy cập vào địa chỉ không được ánh xạ trả về bus error (Ibex sinh exception *load/store/instruction access fault*).
 
@@ -38,3 +42,5 @@ Truy cập vào địa chỉ không được ánh xạ trả về bus error (Ibe
 | 2 | `0x80000012` | `flash` | Flash end of operation |
 | 3 | `0x80000013` | `gpioa` | GPIO port A pin edge |
 | 4 | `0x80000014` | `gpiob` | GPIO port B pin edge |
+| 5 | `0x80000015` | `isp` | ISP frame done / capture done / error |
+| 6 | `0x80000016` | `i2c0` | I2C0 command done |

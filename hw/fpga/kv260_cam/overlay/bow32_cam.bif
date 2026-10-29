@@ -1,0 +1,4 @@
+all:
+{
+    [destination_device = pl] bow32_kv260_cam.bit
+}

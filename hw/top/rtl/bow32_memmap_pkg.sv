@@ -9,11 +9,13 @@ package bow32_memmap_pkg;
   localparam logic [31:0] BootAddr = 32'h00000000;
 
   // main_bus
-  localparam int unsigned MainNumDevices = 4;
+  localparam int unsigned MainNumDevices = 6;
   localparam int unsigned MainDevRom = 0;
   localparam int unsigned MainDevFlash = 1;
   localparam int unsigned MainDevSram = 2;
   localparam int unsigned MainDevPeriph = 3;
+  localparam int unsigned MainDevIspBuf = 4;
+  localparam int unsigned MainDevAxil = 5;
   localparam logic [31:0] RomBase = 32'h00000000;
   localparam logic [31:0] RomSize = 32'h00002000;
   localparam logic [31:0] FlashBase = 32'h08000000;
@@ -22,17 +24,23 @@ package bow32_memmap_pkg;
   localparam logic [31:0] SramSize = 32'h00004000;
   localparam logic [31:0] PeriphBase = 32'h40000000;
   localparam logic [31:0] PeriphSize = 32'h00010000;
-  localparam logic [MainNumDevices-1:0][31:0] MainDevBase = {PeriphBase, SramBase, FlashBase, RomBase};
-  localparam logic [MainNumDevices-1:0][31:0] MainDevMask = {~(PeriphSize - 32'd1), ~(SramSize - 32'd1), ~(FlashSize - 32'd1), ~(RomSize - 32'd1)};
+  localparam logic [31:0] IspBufBase = 32'h30000000;
+  localparam logic [31:0] IspBufSize = 32'h00020000;
+  localparam logic [31:0] AxilBase = 32'h50000000;
+  localparam logic [31:0] AxilSize = 32'h00010000;
+  localparam logic [MainNumDevices-1:0][31:0] MainDevBase = {AxilBase, IspBufBase, PeriphBase, SramBase, FlashBase, RomBase};
+  localparam logic [MainNumDevices-1:0][31:0] MainDevMask = {~(AxilSize - 32'd1), ~(IspBufSize - 32'd1), ~(PeriphSize - 32'd1), ~(SramSize - 32'd1), ~(FlashSize - 32'd1), ~(RomSize - 32'd1)};
 
   // periph_bus
-  localparam int unsigned PeriphNumDevices = 6;
+  localparam int unsigned PeriphNumDevices = 8;
   localparam int unsigned PeriphDevSysctrl = 0;
   localparam int unsigned PeriphDevFlashCtrl = 1;
   localparam int unsigned PeriphDevUart0 = 2;
   localparam int unsigned PeriphDevUart1 = 3;
   localparam int unsigned PeriphDevGpioa = 4;
   localparam int unsigned PeriphDevGpiob = 5;
+  localparam int unsigned PeriphDevIsp = 6;
+  localparam int unsigned PeriphDevI2c0 = 7;
   localparam logic [31:0] SysctrlBase = 32'h40000000;
   localparam logic [31:0] SysctrlSize = 32'h00001000;
   localparam logic [31:0] FlashCtrlBase = 32'h40001000;
@@ -45,8 +53,12 @@ package bow32_memmap_pkg;
   localparam logic [31:0] GpioaSize = 32'h00001000;
   localparam logic [31:0] GpiobBase = 32'h40005000;
   localparam logic [31:0] GpiobSize = 32'h00001000;
-  localparam logic [PeriphNumDevices-1:0][31:0] PeriphDevBase = {GpiobBase, GpioaBase, Uart1Base, Uart0Base, FlashCtrlBase, SysctrlBase};
-  localparam logic [PeriphNumDevices-1:0][31:0] PeriphDevMask = {~(GpiobSize - 32'd1), ~(GpioaSize - 32'd1), ~(Uart1Size - 32'd1), ~(Uart0Size - 32'd1), ~(FlashCtrlSize - 32'd1), ~(SysctrlSize - 32'd1)};
+  localparam logic [31:0] IspBase = 32'h40006000;
+  localparam logic [31:0] IspSize = 32'h00001000;
+  localparam logic [31:0] I2c0Base = 32'h40007000;
+  localparam logic [31:0] I2c0Size = 32'h00001000;
+  localparam logic [PeriphNumDevices-1:0][31:0] PeriphDevBase = {I2c0Base, IspBase, GpiobBase, GpioaBase, Uart1Base, Uart0Base, FlashCtrlBase, SysctrlBase};
+  localparam logic [PeriphNumDevices-1:0][31:0] PeriphDevMask = {~(I2c0Size - 32'd1), ~(IspSize - 32'd1), ~(GpiobSize - 32'd1), ~(GpioaSize - 32'd1), ~(Uart1Size - 32'd1), ~(Uart0Size - 32'd1), ~(FlashCtrlSize - 32'd1), ~(SysctrlSize - 32'd1)};
 
   // Ibex fast interrupt lines
   localparam int unsigned IrqFastUart0 = 0;
@@ -54,5 +66,7 @@ package bow32_memmap_pkg;
   localparam int unsigned IrqFastFlash = 2;
   localparam int unsigned IrqFastGpioa = 3;
   localparam int unsigned IrqFastGpiob = 4;
+  localparam int unsigned IrqFastIsp = 5;
+  localparam int unsigned IrqFastI2c0 = 6;
 
 endpackage

@@ -14,7 +14,7 @@
  │  │ RV32IMC       │      │       │ decode + RR  │──> bow_rom    │  │
  │  │               │ data ├──────>│ arbiter/dev  │──> bow_flash ─┼──┤ (mem port)
  │  └───────▲───────┘      │       └──────────────┘──> bow_sram   │  │
- │          │irq_fast[4:0] │              │                       │  │
+ │          │irq_fast[6:0] │              │                       │  │
  └──────────┼──────────────┼──────────────┼───────────────────────┘  │
             │              │       bow_bus_xbar (periph, 1 host)     │
             │              │       ┌──────────────┐                  │
@@ -22,10 +22,20 @@
             │                      │ FLASH_CTRL   │── reg port của bow_flash
             ├──────────────────────│ UART0        │<─> uart0_rx/tx
             ├──────────────────────│ UART1        │──┐ chức năng thay thế
-            ├──────────────────────│ GPIOA        │<─┼─> gpioa[7:0]
-            └──────────────────────│ GPIOB        │<─┴─> gpiob[7:0]  (PB0/PB1 = UART1 TX/RX)
-                                   └──────────────┘
+            ├──────────────────────│ GPIOA        │<─┼─> gpioa[7:0]   (PA7 = bật camera trên KV260)
+            ├──────────────────────│ GPIOB        │<─┴─> gpiob[7:0]  (PB0/PB1 = UART1 TX/RX)
+            ├──────────────────────│ ISP (regs)   │──┐
+            └──────────────────────│ I2C0         │<─┼─> scl/sda (open drain)
+                                   └──────────────┘  │
+   main xbar ──> ISP capture buffer (0x3000_0000) ───┤
+   main xbar ──> bow_axil_bridge ──> m_axil_* (AXI4-Lite, 0x5000_0000)
+                                                     │
+   cam_* (RAW10, vid_clk_i) ──> bow_isp ─────────────┴──> isp_* (RGB888 / YUV444, vid_clk_i)
 ```
+
+Từ phiên bản có camera, main crossbar có 6 device (thêm buffer capture của ISP
+và cửa sổ AXI4-Lite) và peripheral bus có 8 slot (thêm ISP, I2C0). Đặc tả:
+[ip/isp.md](ip/isp.md), [ip/i2c.md](ip/i2c.md), [ip/axil_bridge.md](ip/axil_bridge.md).
 
 Mã nguồn: `hw/top/rtl/bow32_top.sv`. Địa chỉ và số cổng lấy từ package sinh tự
 động `bow32_memmap_pkg` (xem [memory_map.md](memory_map.md)).
@@ -53,16 +63,20 @@ Một giao thức duy nhất cho toàn SoC: chính là bus native của Ibex (t�
 OBI) — `req/gnt` để bắt tay, `rvalid` **đúng 1 chu kỳ** sau `gnt`. Thiết bị chậm
 giữ `gnt = 0`. Chi tiết: [bus.md](bus.md).
 
-* **Main crossbar**: 2 host (instr, data) × 4 device. Mỗi device có arbiter
+* **Main crossbar**: 2 host (instr, data) × 6 device. Mỗi device có arbiter
   round-robin riêng → instruction fetch từ flash và load/store vào SRAM có thể
-  diễn ra cùng chu kỳ.
+  diễn ra cùng chu kỳ. Grant chưa được nhận thì bị khoá (thiết bị chậm như cầu
+  AXI4-Lite luôn thấy một request ổn định).
 * **Peripheral bus**: cũng là `bow_bus_xbar` với 1 host, chia vùng 64 KiB thành
   các slot 4 KiB.
 * Địa chỉ không ánh xạ → `err = 1` → Ibex sinh *access fault*.
 
 ## Clock và reset
 
-* Một miền clock duy nhất (`clk_i`, 50 MHz trên Kria).
+* Miền clock CPU `clk_i` (50 MHz trên Kria) cho CPU, bus và mọi ngoại vi.
+* Miền clock video `vid_clk_i` chỉ dùng trong pipeline pixel của ISP (200 MHz
+  trong bản build camera, bằng `clk_i` trong bản cơ bản). Mọi tín hiệu qua lại
+  hai miền đều qua bộ đồng bộ (xem [ip/isp.md](ip/isp.md)).
 * `bow_rstmgr` tạo hai miền reset (assert bất đồng bộ, nhả đồng bộ):
   * **POR** (`por_rst_n`): chỉ reset SYSCTRL — giữ *reset cause*, `BOOT_FLAG`,
     bộ phát hiện BREAK qua các lần reset hệ thống.
@@ -80,6 +94,8 @@ giữ `gnt = 0`. Chi tiết: [bus.md](bus.md).
 | Flash (kết thúc thao tác) | `irq_fast_i[2]` | `0x80000012` |
 | GPIOA (cạnh trên chân) | `irq_fast_i[3]` | `0x80000013` |
 | GPIOB | `irq_fast_i[4]` | `0x80000014` |
+| ISP (frame / capture xong, lỗi) | `irq_fast_i[5]` | `0x80000015` |
+| I2C0 (lệnh xong) | `irq_fast_i[6]` | `0x80000016` |
 
 `irq_timer_i`, `irq_external_i`, `irq_software_i` đang nối 0 — chỗ trống để học
 thêm CLINT/PLIC (xem [roadmap.md](roadmap.md)).
@@ -95,6 +111,9 @@ thêm CLINT/PLIC (xem [roadmap.md](roadmap.md)).
 | Memory map sinh từ YAML | Một nguồn duy nhất cho RTL, C, linker script, tài liệu |
 | Ibex là git submodule pin theo commit | Nâng cấp có kiểm soát, xem [ip_upgrade.md](ip_upgrade.md) |
 | Filelist `.f` thay vì FuseSoC | Ít công cụ phụ thuộc; Verilator đọc trực tiếp, Vivado đọc qua `filelist.tcl` |
+| ISP 1 pixel/clock, không back-pressure bên trong | Pipeline thẳng, mỗi stage là một module nhỏ dễ đọc; camera luôn có blanking |
+| ISP có mô hình Python bit-exact | Mọi công thức kiểm chứng được từng bit; sửa RTL thì sửa mô hình |
+| CSI-2 RX tạm dùng IP của AMD (trong block design) | Có camera chạy ngay; bộ thu riêng của Bow32 là bước học sau |
 
 ## Quy ước mã nguồn
 
