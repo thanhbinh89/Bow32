@@ -6,6 +6,35 @@
 ## [Unreleased]
 
 ### Added
+- **Bộ thu MIPI CSI-2** `bow_csi2rx` (`hw/ip/csi2rx`), thay MIPI CSI-2 RX
+  Subsystem của AMD: phần số của D-PHY (máy trạng thái LP bật bộ thu HS và
+  termination, cổng byte clock, phát hiện mất clock, tìm sync 0xB8 và căn byte
+  mỗi lane), ghép 1–2 lane, lớp packet (ECC header sửa 1 bit, CRC-16, lọc
+  VC/DT, FS/FE), unpack RAW10/RAW8, FIFO 2 clock, đầu ra AXI4-Stream RAW10
+  1 pixel/clock cho ISP. Bộ đếm lỗi, log 64 packet, 64 word thô mỗi lane, đo
+  `FRAME_TIME`/`LINE_TIME`/`BYTECLK`. Thanh ghi `CSI2RX` ở `0x4000_8000`, ngắt
+  `irq_fast[7]` ([docs/ip/csi2rx.md](docs/ip/csi2rx.md)).
+- `bow_fifo_async` (FIFO 2 clock, con trỏ gray) trong `hw/ip/common`.
+- D-PHY I/O cho UltraScale+ `hw/fpga/common/rtl/bow_dphy_io_xusp.sv`
+  (`IBUFDS_DPHY`, `IDELAYE3` COUNT, `ISERDESE3` 1:8, 2 × `BUFGCE_DIV`) và test
+  mức chân với unisim `make -C hw/fpga/common/dv test` (xsim, cần Vivado).
+- Driver `bow_csi2rx.h/.c`: start/stop quanh stream, bộ đếm, link check, hiệu
+  chỉnh eye của tap IDELAY lúc chạy, log packet, word thô, in trạng thái.
+- Ứng dụng `csi2_test`: shell bring-up (`stat`, `cal`, `log`, `raw`, `delay`,
+  `mode`, `tp`, `fmt`, `irq`, `rd`/`wr`) và `test [quick]` (11 check; trên
+  board 16: 1080p30 và 720p60).
+- Ứng dụng `camera`: lệnh `cal [step]`, `csilog [fs|fe]`, `csi` theo bộ thu mới;
+  hiệu chỉnh eye ở `cam` đầu tiên.
+- Mô hình Python `tools/csi2/csi2_model.py` (viết từ đặc tả, không từ RTL) +
+  19 unit test; testbench IP `hw/ip/csi2rx/dv` với mô hình máy phát D-PHY
+  `csi2_tx_model.sv` (30 case mặc định, 210/210 với 40 seed); `make test-ip`;
+  CI chạy test IP của bộ thu.
+- Test mô phỏng `csi2`: `csi2_test test quick` rồi cài lỗi (ECC, CRC, SoT/skew)
+  và kiểm tra đúng số đếm.
+- Kết quả trên KV260 + camera v2: `csi2_test: PASS (16/16)`, 2 lane ×
+  912 Mbit/s, byte clock 114,06 MHz, frame 33326 µs (1080p30) / 16653 µs
+  (720p60), không lỗi ECC/CRC/SoT trong nhiều phút, eye ~260 tap (~0,94 ns) mỗi
+  lane; Vivado 2025.2: WNS +1,023 ns, bus skew 7/7 đạt, 0 lỗi DRC.
 - **ISP** `bow_isp` (`hw/ip/isp`): RAW10 Bayer → RGB888 / YUV444, 1 pixel/clock,
   hai miền clock (CPU / video). Pipeline BLC, DPC (5×5), white balance,
   demosaic bilinear (3×3), CCM, gamma (3 LUT), CSC; thống kê (tổng RGB, luma,
@@ -40,12 +69,33 @@
   gửi được BREAK.
 
 ### Changed
+- `kv260_cam`: chân D-PHY J9 vào `bow_dphy_io_xusp` + `bow_csi2rx`; block design
+  `bow32_cam` chỉ còn PS + `clk_wiz` + 2 `proc_sys_reset` (không cần IP hay
+  license MIPI); XDC mới (HS clock 2,193 ns, nhóm clock bất đồng bộ, false path
+  cho data và CE, `CLOCK_DELAY_GROUP`, 7 `set_bus_skew`); `build.tcl` ghi thêm
+  báo cáo clocks / clock_interaction / check_timing / methodology / drc /
+  bus_skew + `clockInfo.txt` và cảnh báo khi bus skew hoặc clock delay group sai.
+- `bow32_top`: bỏ port `cam_t*`, thêm port `dphy_*` và tham số `CsiLanes`,
+  `CsiPhy`, `VidClkHz`; peripheral bus 9 slot. Bản `kv260` cơ bản có CSI2RX
+  không có D-PHY (`CsiPhy = 0`, mọi lane LP-11).
+- Driver IMX219 chuyển từ `sw/apps/camera` sang `sw/common` (`imx219.h/.c`):
+  probe stream 100 µs để lane vào LP-11, format RAW8/RAW10, màu cho test
+  pattern màu đơn, pattern 0–4.
+- Test `camera`: luồng D-PHY qua `csi2_tx_model.sv` + mô hình IMX219 (LP-00 sau
+  khi bật nguồn; FS, 2 dòng embedded, các dòng, FE; mỗi packet một burst),
+  clock video 107,5 MHz.
+- Cửa sổ AXI4-Lite `0x5000_0000`: không còn thiết bị trong `kv260_cam` (truy cập
+  timeout → bus error).
 - `bow32_top`: thêm port I2C0, miền clock video + luồng camera/ISP, master
   AXI4-Lite; main crossbar 2×6, peripheral bus 8 slot.
 - `bow_rr_arbiter` khoá grant cho tới khi device nhận request.
 - UART1 là chức năng thay thế của PB0 (TX) / PB1 (RX), bật sau reset:
   `bow32_top` bỏ port `uart1_rx_i/uart1_tx_o`, thêm `gpioa_*` / `gpiob_*`. Trên
   KV260 UART1 vẫn ở J2 chân 5/7.
+
+### Removed
+- MIPI CSI-2 RX Subsystem của AMD trong block design `bow32_cam` và driver của
+  nó (`sw/apps/camera/csi2rx.c/.h`).
 
 ### Fixed
 - `kv260_cam` build được với Vivado 2025.2 (`tcl/cam_bd.tcl`):

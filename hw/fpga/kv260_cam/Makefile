@@ -1,7 +1,8 @@
 # Copyright Bow32 contributors.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Bow32 + Raspberry Pi camera (MIPI CSI-2 RX) on the Kria KV260.
+# Bow32 + Raspberry Pi camera on the Kria KV260 (Bow32 MIPI CSI-2 receiver,
+# D-PHY on the UltraScale+ I/O primitives: no vendor MIPI IP).
 #
 #   make bitstream            Vivado synthesis + implementation -> bow32_kv260_cam.bit
 #   make firmware             + bow32_cam.bit.bin / bow32_cam.dtbo / shell.json for xmutil
@@ -10,8 +11,8 @@
 #   make jtag                 load bow32_kv260_cam.bit into a running Kria over JTAG
 #                             (JTAG_SERIAL=... when several boards are connected)
 #
-# Tools: Vivado with the MIPI CSI-2 RX Subsystem IP (vivado, bootgen in PATH),
-# dtc (device-tree-compiler), xsdb (Vitis) for `make jtag`.
+# Tools: Vivado (vivado, bootgen in PATH), dtc (device-tree-compiler),
+# xsdb (Vitis) for `make jtag`.
 # Outputs: build/fpga/kv260_cam/ (bd_ports.txt: ports of the block design)
 # See docs/camera_kv260.md.
 

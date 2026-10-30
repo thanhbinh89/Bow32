@@ -4,17 +4,15 @@
 # Block design "bow32_cam": the Xilinx IP around Bow32 for the camera build.
 #
 #   zynq_ultra_ps_e   pl_clk0 = 100 MHz, pl_resetn0 (no AXI interface)
-#   clk_wiz           clk_out1 200 MHz: D-PHY reference (dphy_clk_200M) + video
-#                     clk_out2  50 MHz: Bow32 SoC + AXI4-Lite of the receiver
+#   clk_wiz           clk_out1 200 MHz: video clock (ISP, D-PHY state machines)
+#                     clk_out2  50 MHz: Bow32 SoC
 #   proc_sys_reset    one per clock domain
-#   mipi_csi2_rx      AMD MIPI CSI-2 RX Subsystem: 2 lanes, 912 Mbit/s/lane
-#                     (IMX219), RAW10, 1 pixel per clock, all virtual channels
+#
+# There is no vendor MIPI IP: the D-PHY pins go straight to bow_dphy_io_xusp
+# and the Bow32 CSI-2 receiver in the RTL (rtl/bow32_kv260_cam_top.sv).
 #
 # External ports (names fixed: bow32_kv260_cam_top.sv connects to them):
 #   sys_clk sys_resetn vid_clk vid_resetn
-#   mipi_phy_if_raspi  D-PHY pins            (constr/kv260_cam.xdc)
-#   cam_axis           RAW10 AXI4-Stream     -> Bow32 ISP
-#   csi_axil           AXI4-Lite registers   <- Bow32 AXI4-Lite window
 # The port list of the generated wrapper is written to bd_ports.txt.
 #
 # Sourced by build.tcl inside an open project.
@@ -30,16 +28,6 @@ proc latest_ip {pattern} {
   }
   puts "INFO: using $v"
   return $v
-}
-
-# Set optional IP parameters one by one: their names change between Vivado
-# versions, a missing one only gives a warning.
-proc set_optional {cell params} {
-  foreach {name value} $params {
-    if {[catch {set_property CONFIG.$name $value $cell} err]} {
-      puts "WARNING: [get_property NAME $cell]: parameter $name not set ($err)"
-    }
-  }
 }
 
 # ------------------------------------------------------------------- PS
@@ -59,7 +47,9 @@ set_property -dict [list \
 # --------------------------------------------------------------- clocks
 # The input frequency is propagated from pl_clk0 (99.999 MHz with the
 # 33.333 MHz PS reference): an explicit 100.000 fails validate_bd_design.
-# The outputs are then 199.998 MHz and 49.9995 MHz.
+# The outputs are then 199.998 MHz and 49.9995 MHz. Keep VidClkHz in
+# rtl/bow32_kv260_cam_top.sv equal to clk_out1: the CSI-2 driver derives the
+# D-PHY timings (settle, clock miss) from it (CSI2RX INFO).
 set clk [create_bd_cell -type ip -vlnv [latest_ip xilinx.com:ip:clk_wiz:*] clk_wiz_0]
 set_property -dict [list \
   CONFIG.PRIM_SOURCE                {No_buffer} \
@@ -85,71 +75,6 @@ foreach {r c} [list $rst_vid clk_out1 $rst_sys clk_out2] {
   connect_bd_net [get_bd_pins $clk/locked]    [get_bd_pins $r/dcm_locked]
 }
 
-# ------------------------------------------------- MIPI CSI-2 RX subsystem
-set csi [create_bd_cell -type ip -vlnv [latest_ip xilinx.com:ip:mipi_csi2_rx_subsystem:*] mipi_csi2_rx]
-
-# Essential parameters: an error here stops the build. They are set before
-# the optional ones (the pin locations need the lane count) and again after
-# them, because some optional ones reset them (in Vivado 2025.2
-# C_EN_CSI_V2_0 puts the pixel format back to RAW8).
-set csi_params {
-  CMN_NUM_LANES  2
-  CMN_NUM_PIXELS 1
-  CMN_PXL_FORMAT RAW10
-  CMN_VC         All
-  DPY_LINE_RATE  912
-}
-proc set_config {cell params} {
-  set d {}
-  foreach {name value} $params {
-    lappend d CONFIG.$name $value
-  }
-  set_property -dict $d $cell
-}
-set_config $csi $csi_params
-
-# Same values as AMD's KV260 camera platforms. The *_IO_LOC_NAME parameters
-# are derived from *_IO_LOC in recent versions (Vivado ignores them with a
-# warning); constr/kv260_cam.xdc has the pins in any case.
-set_optional $csi {
-  C_DPHY_LANES            2
-  C_HS_LINE_RATE          912
-  SupportLevel            1
-  CSI_BUF_DEPTH           4096
-  C_CSI_FILTER_USERDATATYPE false
-  C_EN_CSI_V2_0           false
-  DPY_EN_REG_IF           true
-  C_HS_SETTLE_NS          145
-  C_STRETCH_LINE_RATE     1500
-  HP_IO_BANK_SELECTION    66
-  CLK_LANE_IO_LOC         D7
-  CLK_LANE_IO_LOC_NAME    IO_L13P_T2L_N0_GC_QBC_66
-  DATA_LANE0_IO_LOC       E5
-  DATA_LANE0_IO_LOC_NAME  IO_L14P_T2L_N2_GC_66
-  DATA_LANE1_IO_LOC       G6
-  DATA_LANE1_IO_LOC_NAME  IO_L15P_T2L_N4_AD11P_66
-}
-
-set_config $csi $csi_params
-foreach {name value} $csi_params {
-  if {[get_property CONFIG.$name $csi] ne $value} {
-    error "mipi_csi2_rx: CONFIG.$name is [get_property CONFIG.$name $csi], expected $value"
-  }
-}
-# A pin location the IP refused would only show up at placement (or as a
-# dead camera): check the ones this Vivado has.
-foreach {name value} {CLK_LANE_IO_LOC D7 DATA_LANE0_IO_LOC E5 DATA_LANE1_IO_LOC G6} {
-  if {[llength [list_property $csi CONFIG.$name]] && [get_property CONFIG.$name $csi] ne $value} {
-    error "mipi_csi2_rx: CONFIG.$name is [get_property CONFIG.$name $csi], expected $value"
-  }
-}
-
-connect_bd_net [get_bd_pins $clk/clk_out1] [get_bd_pins $csi/dphy_clk_200M]
-connect_bd_net [get_bd_pins $clk/clk_out1] [get_bd_pins $csi/video_aclk]
-connect_bd_net [get_bd_pins $clk/clk_out2] [get_bd_pins $csi/lite_aclk]
-connect_bd_net [get_bd_pins $rst_vid/peripheral_aresetn] [get_bd_pins $csi/video_aresetn]
-connect_bd_net [get_bd_pins $rst_sys/peripheral_aresetn] [get_bd_pins $csi/lite_aresetn]
-
 # --------------------------------------------------------- external ports
 # make_bd_pins_external silently skips a pin that is already connected
 # (Vivado 2025.2), so the port is created and connected explicitly.
@@ -161,25 +86,11 @@ proc export_pin {pin name} {
   }
   connect_bd_net $pin $port
 }
-proc export_intf {pin name} {
-  make_bd_intf_pins_external $pin
-  set_property NAME $name [get_bd_intf_ports -of_objects [get_bd_intf_nets -of_objects $pin]]
-}
 
-export_pin  [get_bd_pins $clk/clk_out2]               sys_clk
-export_pin  [get_bd_pins $clk/clk_out1]               vid_clk
-export_pin  [get_bd_pins $rst_sys/peripheral_aresetn] sys_resetn
-export_pin  [get_bd_pins $rst_vid/peripheral_aresetn] vid_resetn
-export_intf [get_bd_intf_pins $csi/mipi_phy_if]       mipi_phy_if_raspi
-export_intf [get_bd_intf_pins $csi/video_out]         cam_axis
-export_intf [get_bd_intf_pins $csi/csirxss_s_axi]     csi_axil
-
-# Clock association of the exported interfaces (their FREQ_HZ follows).
-set_optional [get_bd_ports vid_clk] {ASSOCIATED_BUSIF cam_axis}
-set_optional [get_bd_ports sys_clk] {ASSOCIATED_BUSIF csi_axil}
-
-# The receiver registers are the only slave of the external AXI4-Lite port.
-assign_bd_address
+export_pin [get_bd_pins $clk/clk_out2]               sys_clk
+export_pin [get_bd_pins $clk/clk_out1]               vid_clk
+export_pin [get_bd_pins $rst_sys/peripheral_aresetn] sys_resetn
+export_pin [get_bd_pins $rst_vid/peripheral_aresetn] vid_resetn
 
 validate_bd_design
 save_bd_design
@@ -190,7 +101,7 @@ set wrapper [make_wrapper -files $bd_file -top]
 add_files -norecurse $wrapper
 
 # Port list of the wrapper, to compare with bow32_kv260_cam_top.sv if the
-# synthesis reports an unknown port (names can differ between IP versions).
+# synthesis reports an unknown port.
 set fh [open $wrapper r]
 set lines [split [read $fh] "\n"]
 close $fh

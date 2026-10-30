@@ -13,9 +13,11 @@ typedef struct {
   uint8_t val;
 } imx219_reg_t;
 
+static uint32_t format_bits = 10; /* RAW10 or RAW8 */
+
 /* Common settings: standby, access to the manufacturer registers, 2 CSI-2
- * lanes, 24 MHz clock, RAW10 and the PLL for 912 Mbit/s per lane (pixel
- * rate 182.4 MHz). The frame format follows in imx219_configure(). */
+ * lanes, 24 MHz clock and the PLL for 912 Mbit/s per lane (pixel rate
+ * 182.4 MHz). Output format and frame format follow in imx219_configure(). */
 static const imx219_reg_t imx219_common[] = {
     {0x0100, 0x00},                                     /* mode select: standby */
     {0x30eb, 0x05}, {0x30eb, 0x0c}, {0x300a, 0xff},     /* access sequence */
@@ -25,13 +27,11 @@ static const imx219_reg_t imx219_common[] = {
     {0x012a, 0x18}, {0x012b, 0x00},                     /* EXCK_FREQ = 24 MHz */
     {0x0170, 0x01}, {0x0171, 0x01},                     /* x/y odd increment */
     {0x0174, 0x00}, {0x0175, 0x00},                     /* no binning */
-    {0x018c, 0x0a}, {0x018d, 0x0a},                     /* CSI data format RAW10 */
     {0x0301, 0x05},                                     /* VTPXCK_DIV */
     {0x0303, 0x01},                                     /* VTSYCK_DIV */
     {0x0304, 0x03},                                     /* PREPLLCK_VT_DIV: 24 / 3 */
     {0x0305, 0x03},                                     /* PREPLLCK_OP_DIV */
     {0x0306, 0x00}, {0x0307, 0x39},                     /* PLL_VT_MPY = 57 */
-    {0x0309, 0x0a},                                     /* OPPXCK_DIV = 10 (RAW10) */
     {0x030b, 0x01},                                     /* OPSYCK_DIV */
     {0x030c, 0x00}, {0x030d, 0x72},                     /* PLL_OP_MPY = 114 */
     {0x455e, 0x00}, {0x471e, 0x4b}, {0x4767, 0x0f},     /* undocumented, from the */
@@ -89,7 +89,16 @@ int imx219_probe(uint16_t *id) {
 
   uint8_t a[2] = {0x00, 0x00}, d[2];
   r = bow_i2c_write_read(I2C0, IMX219_I2C_ADDR, a, 2, d, 2);
-  if (r == I2C_OK) *id = (uint16_t)(d[0] << 8 | d[1]);
+  if (r != I2C_OK) return r;
+  *id = (uint16_t)(d[0] << 8 | d[1]);
+  if (*id != IMX219_CHIP_ID) return I2C_OK;
+
+  /* Stream briefly so that the lanes go to LP-11 (stop state). */
+  r = imx219_stream(true);
+  if (r != I2C_OK) return r;
+  bow_delay_us(100);
+  r = imx219_stream(false);
+  bow_delay_us(100);
   return r;
 }
 
@@ -99,8 +108,25 @@ uint32_t imx219_fll_for_fps(uint32_t height, uint32_t fps) {
   return fll > 0xFFFF ? 0xFFFF : fll;
 }
 
+/* CSI_DATA_FORMAT_A (0x018c/0x018d) and OPPXCK_DIV (0x0309) = bits per pixel */
+static int write_format(void) {
+  uint8_t f[2] = {(uint8_t)format_bits, (uint8_t)format_bits};
+  int r = write_burst(0x018c, f, sizeof(f));
+  if (r == I2C_OK) r = imx219_write(0x0309, (uint8_t)format_bits);
+  return r;
+}
+
+int imx219_set_format(uint32_t bits) {
+  if (bits != 8 && bits != 10) return IMX219_EINVAL;
+  format_bits = bits;
+  return write_format();
+}
+
+uint32_t imx219_format(void) { return format_bits; }
+
 int imx219_configure(uint32_t width, uint32_t height, uint32_t fll) {
   int r = write_table(imx219_common, sizeof(imx219_common) / sizeof(imx219_common[0]));
+  if (r == I2C_OK) r = write_format();
   if (r != I2C_OK) return r;
 
   /* Centred crop, even start so that the Bayer order stays RGGB. */
@@ -137,3 +163,13 @@ int imx219_set_orientation(bool hflip, bool vflip) {
 }
 
 int imx219_set_test_pattern(uint32_t pattern) { return write16(0x0600, pattern); }
+
+int imx219_set_test_colour(uint32_t r, uint32_t gr, uint32_t b, uint32_t gb) {
+  const uint32_t c[4] = {r, gr, b, gb}; /* 0x0602 TESTP_RED, GREENR, BLUE, GREENB */
+  uint8_t v[8];
+  for (int i = 0; i < 4; i++) {
+    v[2 * i] = (uint8_t)((c[i] >> 8) & 0x03u);
+    v[2 * i + 1] = (uint8_t)c[i];
+  }
+  return write_burst(0x0602, v, sizeof(v));
+}

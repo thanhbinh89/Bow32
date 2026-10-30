@@ -16,10 +16,11 @@
 // The other GPIO pins have no pad on this board: they read back the level the
 // chip drives (0 when not driven).
 //
-// This build has no MIPI CSI-2 receiver (see hw/fpga/kv260_cam): the camera
-// input of the ISP is idle (use its test pattern generator), the ISP runs on
-// the SoC clock and the AXI4-Lite window answers every access with a bus
-// error after the bridge timeout.
+// This build has no D-PHY (see hw/fpga/kv260_cam): the D-PHY inputs of the
+// CSI-2 receiver are tied to LP-11 (CsiPhy = 0, CSI2RX INFO.PHY reads 0), so
+// the camera input of the ISP stays idle (use its test pattern generator).
+// The ISP and the receiver run on the SoC clock and the AXI4-Lite window
+// answers every access with a bus error after the bridge timeout.
 
 module bow32_kv260_top #(
   parameter RomInitFile   = "",
@@ -72,7 +73,9 @@ module bow32_kv260_top #(
     .BootWaitMs    (300),
     .RomInitFile   (RomInitFile),
     .FlashInitFile (FlashInitFile),
-    .IbexRegFile   (ibex_pkg::RegFileFPGA)
+    .IbexRegFile   (ibex_pkg::RegFileFPGA),
+    .CsiPhy        (1'b0),
+    .VidClkHz      (SysClkHz)
   ) u_soc (
     .clk_i        (clk_sys),
     .rst_ni       (pl_resetn0),
@@ -88,19 +91,26 @@ module bow32_kv260_top #(
     .i2c0_scl_oe_o(scl_oe),
     .i2c0_sda_i   (sda_i),
     .i2c0_sda_oe_o(sda_oe),
-    // no camera receiver: ISP on the SoC clock, input idle, output sink
+    // no camera: ISP and CSI-2 receiver on the SoC clock, output sink
     .vid_clk_i    (clk_sys),
     .vid_rst_ni   (pl_resetn0),
-    .cam_tvalid_i (1'b0),
-    .cam_tready_o (),
-    .cam_tdata_i  ('0),
-    .cam_tuser_i  (1'b0),
-    .cam_tlast_i  (1'b0),
     .isp_tvalid_o (),
     .isp_tready_i (1'b1),
     .isp_tdata_o  (),
     .isp_tuser_o  (),
     .isp_tlast_o  (),
+    // no D-PHY: no byte clock, all lanes in LP-11
+    .dphy_byte_clk_i  (1'b0),
+    .dphy_byte_ce_o   (),
+    .dphy_byte_rst_o  (),
+    .dphy_clk_lp_i    (2'b11),
+    .dphy_clk_hs_en_o (),
+    .dphy_lp_i        ('1),
+    .dphy_hs_en_o     (),
+    .dphy_rx_data_i   ('0),
+    .dphy_dly_tap_o   (),
+    .dphy_dly_load_o  (),
+    .dphy_dly_tap_i   ('0),
     // no AXI4-Lite device: the bridge times out
     .m_axil_awaddr_o  (),
     .m_axil_awprot_o  (),
