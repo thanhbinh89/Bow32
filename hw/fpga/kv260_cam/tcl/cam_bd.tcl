@@ -57,10 +57,12 @@ set_property -dict [list \
 ] $ps
 
 # --------------------------------------------------------------- clocks
+# The input frequency is propagated from pl_clk0 (99.999 MHz with the
+# 33.333 MHz PS reference): an explicit 100.000 fails validate_bd_design.
+# The outputs are then 199.998 MHz and 49.9995 MHz.
 set clk [create_bd_cell -type ip -vlnv [latest_ip xilinx.com:ip:clk_wiz:*] clk_wiz_0]
 set_property -dict [list \
   CONFIG.PRIM_SOURCE                {No_buffer} \
-  CONFIG.PRIM_IN_FREQ               {100.000} \
   CONFIG.NUM_OUT_CLKS               {2} \
   CONFIG.CLKOUT1_USED               {true} \
   CONFIG.CLKOUT1_REQUESTED_OUT_FREQ {200.000} \
@@ -86,18 +88,29 @@ foreach {r c} [list $rst_vid clk_out1 $rst_sys clk_out2] {
 # ------------------------------------------------- MIPI CSI-2 RX subsystem
 set csi [create_bd_cell -type ip -vlnv [latest_ip xilinx.com:ip:mipi_csi2_rx_subsystem:*] mipi_csi2_rx]
 
-# Essential parameters: an error here stops the build.
-set_property -dict [list \
-  CONFIG.CMN_NUM_LANES  {2} \
-  CONFIG.CMN_NUM_PIXELS {1} \
-  CONFIG.CMN_PXL_FORMAT {RAW10} \
-  CONFIG.CMN_VC         {All} \
-  CONFIG.DPY_LINE_RATE  {912} \
-] $csi
+# Essential parameters: an error here stops the build. They are set before
+# the optional ones (the pin locations need the lane count) and again after
+# them, because some optional ones reset them (in Vivado 2025.2
+# C_EN_CSI_V2_0 puts the pixel format back to RAW8).
+set csi_params {
+  CMN_NUM_LANES  2
+  CMN_NUM_PIXELS 1
+  CMN_PXL_FORMAT RAW10
+  CMN_VC         All
+  DPY_LINE_RATE  912
+}
+proc set_config {cell params} {
+  set d {}
+  foreach {name value} $params {
+    lappend d CONFIG.$name $value
+  }
+  set_property -dict $d $cell
+}
+set_config $csi $csi_params
 
-# Same values as AMD's KV260 camera platforms. The pin location parameters
-# exist up to Vivado 2023/2024; newer versions take the pins from the XDC
-# (constr/kv260_cam.xdc has them in any case).
+# Same values as AMD's KV260 camera platforms. The *_IO_LOC_NAME parameters
+# are derived from *_IO_LOC in recent versions (Vivado ignores them with a
+# warning); constr/kv260_cam.xdc has the pins in any case.
 set_optional $csi {
   C_DPHY_LANES            2
   C_HS_LINE_RATE          912
@@ -117,6 +130,20 @@ set_optional $csi {
   DATA_LANE1_IO_LOC_NAME  IO_L15P_T2L_N4_AD11P_66
 }
 
+set_config $csi $csi_params
+foreach {name value} $csi_params {
+  if {[get_property CONFIG.$name $csi] ne $value} {
+    error "mipi_csi2_rx: CONFIG.$name is [get_property CONFIG.$name $csi], expected $value"
+  }
+}
+# A pin location the IP refused would only show up at placement (or as a
+# dead camera): check the ones this Vivado has.
+foreach {name value} {CLK_LANE_IO_LOC D7 DATA_LANE0_IO_LOC E5 DATA_LANE1_IO_LOC G6} {
+  if {[llength [list_property $csi CONFIG.$name]] && [get_property CONFIG.$name $csi] ne $value} {
+    error "mipi_csi2_rx: CONFIG.$name is [get_property CONFIG.$name $csi], expected $value"
+  }
+}
+
 connect_bd_net [get_bd_pins $clk/clk_out1] [get_bd_pins $csi/dphy_clk_200M]
 connect_bd_net [get_bd_pins $clk/clk_out1] [get_bd_pins $csi/video_aclk]
 connect_bd_net [get_bd_pins $clk/clk_out2] [get_bd_pins $csi/lite_aclk]
@@ -124,9 +151,15 @@ connect_bd_net [get_bd_pins $rst_vid/peripheral_aresetn] [get_bd_pins $csi/video
 connect_bd_net [get_bd_pins $rst_sys/peripheral_aresetn] [get_bd_pins $csi/lite_aresetn]
 
 # --------------------------------------------------------- external ports
+# make_bd_pins_external silently skips a pin that is already connected
+# (Vivado 2025.2), so the port is created and connected explicitly.
+# validate_bd_design propagates the clock frequencies to the ports.
 proc export_pin {pin name} {
-  make_bd_pins_external $pin
-  set_property NAME $name [get_bd_ports -of_objects [get_bd_nets -of_objects $pin]]
+  set port [create_bd_port -dir [get_property DIR $pin] -type [get_property TYPE $pin] $name]
+  if {[llength [list_property $port CONFIG.POLARITY]]} {
+    set_property CONFIG.POLARITY [get_property CONFIG.POLARITY $pin] $port
+  }
+  connect_bd_net $pin $port
 }
 proc export_intf {pin name} {
   make_bd_intf_pins_external $pin
@@ -141,9 +174,7 @@ export_intf [get_bd_intf_pins $csi/mipi_phy_if]       mipi_phy_if_raspi
 export_intf [get_bd_intf_pins $csi/video_out]         cam_axis
 export_intf [get_bd_intf_pins $csi/csirxss_s_axi]     csi_axil
 
-# Clock frequencies and clock association of the exported interfaces.
-set_optional [get_bd_intf_ports cam_axis] {FREQ_HZ 200000000}
-set_optional [get_bd_intf_ports csi_axil] {FREQ_HZ 50000000}
+# Clock association of the exported interfaces (their FREQ_HZ follows).
 set_optional [get_bd_ports vid_clk] {ASSOCIATED_BUSIF cam_axis}
 set_optional [get_bd_ports sys_clk] {ASSOCIATED_BUSIF csi_axil}
 

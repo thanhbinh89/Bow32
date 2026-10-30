@@ -149,7 +149,11 @@ class Camera:
         self._read_until(b"\n", 2.0)
         time.sleep(0.01)
         self.ser.baudrate = baud
-        time.sleep(0.05)     # the firmware waits 100 ms before it answers
+        # The firmware waits 100 ms, then ends the command with "ok" and a
+        # prompt at the new rate. Wait for them: a "\r" sent earlier is only
+        # read after them and its prompt would be taken as the answer of the
+        # next command.
+        self._read_until(PROMPT, 2.0)
         self.sync()
 
     def snap(self, cap=None, timeout=60.0):

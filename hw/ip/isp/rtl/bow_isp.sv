@@ -549,23 +549,59 @@ module bow_isp import bow_bus_pkg::*; import bow_isp_pkg::*; #(
     .eof_o    (cs_eof)
   );
 
-  // Output stream (UG934 order: component 0 in the LSBs)
+  // Output stream (UG934 order: component 0 in the LSBs).
+  // An abort can cut a frame in the middle of an output line. The rest of
+  // that line is then sent as zero pixels, so that every output line has
+  // `width` pixels; the frame itself just ends early. The next frame cannot
+  // reach the output before: the window generators need 3 of its lines first.
+  logic              line_open_q, pad_q;
+  logic [CoordW-1:0] out_x_q;          // x of the next pixel of an open line
+  logic [CoordW-1:0] last_x;
+  logic              cs_eol;
+
+  assign last_x = cfg.width - CoordW'(1);
+  assign cs_eol = (cs_x == last_x);
+
   always_ff @(posedge vid_clk_i or negedge vrst_n) begin
     if (!vrst_n) begin
       m_axis_tvalid_o <= 1'b0;
       m_axis_tdata_o  <= '0;
       m_axis_tuser_o  <= 1'b0;
       m_axis_tlast_o  <= 1'b0;
-    end else begin
-      m_axis_tvalid_o <= cs_valid;
+      line_open_q     <= 1'b0;
+      pad_q           <= 1'b0;
+      out_x_q         <= '0;
+    end else if (cs_valid) begin
+      m_axis_tvalid_o <= 1'b1;
       m_axis_tuser_o  <= cs_sof;
-      m_axis_tlast_o  <= (cs_x == cfg.width - CoordW'(1));
+      m_axis_tlast_o  <= cs_eol;
       m_axis_tdata_o  <= cfg.csc_en ? {cs_out[2], cs_out[1], cs_out[0]}    // V U Y
                                     : {cs_out[0], cs_out[2], cs_out[1]};   // R B G
+      line_open_q     <= !cs_eol;
+      out_x_q         <= cs_x + CoordW'(1);
+      pad_q           <= abort && !cs_eol;
+    end else if (pad_q || (abort && line_open_q)) begin
+      m_axis_tvalid_o <= 1'b1;
+      m_axis_tuser_o  <= 1'b0;
+      m_axis_tlast_o  <= (out_x_q == last_x);
+      m_axis_tdata_o  <= '0;
+      line_open_q     <= (out_x_q != last_x);
+      out_x_q         <= out_x_q + CoordW'(1);
+      pad_q           <= (out_x_q != last_x);
+    end else begin
+      m_axis_tvalid_o <= 1'b0;
     end
   end
 
   assign err_out = m_axis_tvalid_o && !m_axis_tready_i;
+
+`ifndef SYNTHESIS
+  always @(posedge vid_clk_i) begin
+    if (vrst_n && pad_q && cs_valid) begin
+      $error("bow_isp: a frame reached the output while an aborted line was completed");
+    end
+  end
+`endif
 
   // =========================================================================
   // Capture into the buffer
@@ -644,7 +680,8 @@ module bow_isp import bow_bus_pkg::*; import bow_isp_pkg::*; #(
     end
   end
 
-  assign busy = in_active || !fa_empty || w5_busy || !fb_empty || w3_busy || (tail_q != '0);
+  assign busy = in_active || !fa_empty || w5_busy || !fb_empty || w3_busy || (tail_q != '0) ||
+                pad_q;
 
   logic unused;
   assign unused = ^{w5_eol, w3_eol, cap_busy, buf_req_i.addr[31:BufAW+2], buf_req_i.addr[1:0],

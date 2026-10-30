@@ -81,7 +81,15 @@ cùng pixel `width-1` của mỗi dòng; frame kết thúc sau `height` dòng. S
 (tlast sớm/muộn, SOF giữa frame) → **huỷ frame** (reset các stage sau,
 `STATUS.ERR_INPUT`). Kích thước thật của luồng vào luôn được đo
 (`IN_SIZE`), rất hữu ích khi bring-up camera. Khi ISP tắt (`CTRL.EN = 0`),
-`tready = 1` (luồng bị bỏ).
+`tready = 1` (luồng bị bỏ); tắt giữa frame cũng huỷ frame đó.
+
+Frame bị huỷ có thể dừng giữa một dòng đầu ra: phần còn lại của dòng được gửi
+bằng pixel 0, `tlast` ở pixel `width-1`, nên mọi dòng ra đều đủ `width` pixel;
+frame đó chỉ kết thúc sớm (ít dòng hơn), `tuser` kế tiếp là frame mới.
+
+`IN_SIZE` là số dòng giữa hai SOF gần nhất: ngay sau khi đổi nguồn hoặc
+khởi động lại luồng, nó có thể cho chiều cao của frame bị cắt (ví dụ
+`1920x29`), từ frame thứ hai thì đúng.
 
 ### BLC — black level (`bow_isp_blc`)
 
