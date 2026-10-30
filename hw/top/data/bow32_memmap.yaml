@@ -24,7 +24,7 @@ main_bus:
   - {name: sram,   base: 0x20000000, size: 0x00004000, desc: "SRAM (16 KiB)"}
   - {name: periph, base: 0x40000000, size: 0x00010000, desc: "Peripheral bus (16 x 4 KiB slots)"}
   - {name: isp_buf, base: 0x30000000, size: 0x00020000, desc: "ISP capture buffer (32K x 24 bit, read only)"}
-  - {name: axil,   base: 0x50000000, size: 0x00010000, desc: "AXI4-Lite window (FPGA block design, e.g. CSI-2 RX)"}
+  - {name: axil,   base: 0x50000000, size: 0x00010000, desc: "AXI4-Lite window (devices of the FPGA block design)"}
 
 # Devices on the peripheral bus (second bow_bus_xbar behind 'periph').
 periph_bus:
@@ -36,6 +36,7 @@ periph_bus:
   - {name: gpiob,      base: 0x40005000, size: 0x1000, desc: "GPIO port B (8 pins, PB0/PB1 = UART1 TX/RX)"}
   - {name: isp,        base: 0x40006000, size: 0x1000, desc: "ISP registers (image signal processor)"}
   - {name: i2c0,       base: 0x40007000, size: 0x1000, desc: "I2C master 0 (camera control)"}
+  - {name: csi2rx,     base: 0x40008000, size: 0x1000, desc: "MIPI CSI-2 receiver (D-PHY RX + CSI-2 RX)"}
 
 # Ibex fast interrupts: irq_fast_i[line] -> mcause = 0x80000000 | (16 + line)
 irq_fast:
@@ -46,3 +47,4 @@ irq_fast:
   - {name: gpiob, line: 4, desc: "GPIO port B pin edge"}
   - {name: isp,   line: 5, desc: "ISP frame done / capture done / error"}
   - {name: i2c0,  line: 6, desc: "I2C0 command done"}
+  - {name: csi2rx, line: 7, desc: "CSI-2 RX frame start / frame end / error / log or raw capture done"}

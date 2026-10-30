@@ -37,6 +37,8 @@
 #define BOW32_ISP_SIZE 0x00001000u
 #define BOW32_I2C0_BASE 0x40007000u
 #define BOW32_I2C0_SIZE 0x00001000u
+#define BOW32_CSI2RX_BASE 0x40008000u
+#define BOW32_CSI2RX_SIZE 0x00001000u
 
 /* Ibex fast interrupt lines (mcause = 0x80000000 | (16 + line)) */
 #define BOW32_IRQ_FAST_UART0 0
@@ -46,5 +48,6 @@
 #define BOW32_IRQ_FAST_GPIOB 4
 #define BOW32_IRQ_FAST_ISP 5
 #define BOW32_IRQ_FAST_I2C0 6
+#define BOW32_IRQ_FAST_CSI2RX 7
 
 #endif /* BOW32_MEMMAP_H_ */

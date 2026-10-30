@@ -16,7 +16,7 @@ Tệp này được sinh tự động từ `hw/top/data/bow32_memmap.yaml`. Sử
 | 2 | `sram` | `0x20000000` | `0x20003FFF` | 16 KiB | SRAM (16 KiB) |
 | 3 | `periph` | `0x40000000` | `0x4000FFFF` | 64 KiB | Peripheral bus (16 x 4 KiB slots) |
 | 4 | `isp_buf` | `0x30000000` | `0x3001FFFF` | 128 KiB | ISP capture buffer (32K x 24 bit, read only) |
-| 5 | `axil` | `0x50000000` | `0x5000FFFF` | 64 KiB | AXI4-Lite window (FPGA block design, e.g. CSI-2 RX) |
+| 5 | `axil` | `0x50000000` | `0x5000FFFF` | 64 KiB | AXI4-Lite window (devices of the FPGA block design) |
 
 ## Peripheral bus
 
@@ -30,6 +30,7 @@ Tệp này được sinh tự động từ `hw/top/data/bow32_memmap.yaml`. Sử
 | 5 | `gpiob` | `0x40005000` | `0x40005FFF` | 4 KiB | GPIO port B (8 pins, PB0/PB1 = UART1 TX/RX) |
 | 6 | `isp` | `0x40006000` | `0x40006FFF` | 4 KiB | ISP registers (image signal processor) |
 | 7 | `i2c0` | `0x40007000` | `0x40007FFF` | 4 KiB | I2C master 0 (camera control) |
+| 8 | `csi2rx` | `0x40008000` | `0x40008FFF` | 4 KiB | MIPI CSI-2 receiver (D-PHY RX + CSI-2 RX) |
 
 Truy cập vào địa chỉ không được ánh xạ trả về bus error (Ibex sinh exception *load/store/instruction access fault*).
 
@@ -44,3 +45,4 @@ Truy cập vào địa chỉ không được ánh xạ trả về bus error (Ibe
 | 4 | `0x80000014` | `gpiob` | GPIO port B pin edge |
 | 5 | `0x80000015` | `isp` | ISP frame done / capture done / error |
 | 6 | `0x80000016` | `i2c0` | I2C0 command done |
+| 7 | `0x80000017` | `csi2rx` | CSI-2 RX frame start / frame end / error / log or raw capture done |

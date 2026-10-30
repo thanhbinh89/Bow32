@@ -19,7 +19,7 @@ ISP của Bow32 biến ảnh **RAW10 Bayer** của cảm biến thành ảnh **R
 
 | Thông số | Giá trị |
 |----------|---------|
-| Đầu vào | AXI4-Stream video RAW10, `tdata[9:0]`, `tuser` = start of frame, `tlast` = end of line (giống đầu ra MIPI CSI-2 RX của AMD, UG934) |
+| Đầu vào | AXI4-Stream video RAW10, `tdata[9:0]`, `tuser` = start of frame, `tlast` = end of line: đầu ra của bộ thu CSI-2 `bow_csi2rx` ([csi2rx.md](csi2rx.md)), cùng khung với UG934 của AMD |
 | Đầu ra | AXI4-Stream 24 bit, thứ tự UG934: RGB `{R, B, G}`, YUV 4:4:4 `{V, U, Y}`; phải nhận 1 pixel/clock |
 | Kích thước | rộng 16…`MaxWidth` (2048), cao 8…4095, lẻ/chẵn tuỳ ý (cảm biến dùng chẵn) |
 | Thông lượng | 1 pixel/clock; trên KV260 clock video 200 MHz |
@@ -37,9 +37,9 @@ connector J9 (MIPI CSI-2, 2 lane). Theo driver Linux, IMX219 chạy 2 lane ×
 | **1080p30** (mặc định) | crop giữa 1920×1080 | 1763 dòng | 30,0 | 1920 px / 18,9 µs = 102 Mpx/s | Full HD |
 | **720p60** | crop giữa 1280×720 | 881 dòng | 60,0 | 68 Mpx/s | HD, gấp đôi fps |
 
-Trong một dòng, CSI-2 RX đưa pixel ra tối đa 182,4 Mpx/s (bằng tốc độ link).
-ISP ở 200 MHz × 1 pixel/clock nhanh hơn tốc độ đó, nên chỉ cần buffer dòng nhỏ
-trong CSI-2 RX. Mode tuỳ ý `mode <w> <h> [fps]` cũng được (crop giữa, không
+Trong một dòng, bộ thu CSI-2 đưa pixel ra tối đa 182,4 Mpx/s (bằng tốc độ
+link). ISP ở 200 MHz × 1 pixel/clock nhanh hơn tốc độ đó, nên FIFO 1024 pixel
+trong bộ thu là đủ ([csi2rx.md](csi2rx.md)). Mode tuỳ ý `mode <w> <h> [fps]` cũng được (crop giữa, không
 binning). Ví dụ testbench dùng 64×48.
 
 ## Hai miền clock
@@ -209,7 +209,7 @@ kích thước `SIZE`, blanking `TPG_BLANK`:
 | 3 | màu đơn `TPG_COLOR` |
 
 `TPG_CTRL[4]` = chuyển động (offset +4 mỗi frame). TPG giúp kiểm tra toàn bộ
-ISP trên board mà chưa cần camera (bitstream `kv260` không có CSI-2 RX).
+ISP trên board mà chưa cần camera (bitstream `kv260` không có D-PHY).
 
 ## Bản đồ thanh ghi (`0x4000_6000`)
 
@@ -276,7 +276,7 @@ uint32_t rgb = ISP_BUF[0];                  /* 0x00RRGGBB */
 | Mức | Cách chạy | Kiểm tra |
 |-----|-----------|----------|
 | Unit, bit-exact | `make -C hw/ip/isp/dv test` | cấu hình + ảnh ngẫu nhiên (và TPG): luồng ra, thống kê, histogram, buffer capture khớp **từng bit** với `tools/isp/isp_model.py`; 2 clock bất đồng bộ, đầu vào có khoảng trống ngẫu nhiên |
-| Hệ thống | `make run TEST=camera` | firmware thật: I2C tới IMX219 mô hình, luồng camera, CSI-2 RX qua AXI4-Lite, sọc màu RGB/YUV nhận qua UART, AE/AWB hội tụ |
+| Hệ thống | `make run TEST=camera` | firmware thật: I2C tới IMX219 mô hình, luồng D-PHY của cảm biến qua bộ thu CSI-2 của Bow32, sọc màu RGB/YUV nhận qua UART, AE/AWB hội tụ |
 
 `make -C hw/ip/isp/dv run SEED=7 TPG=1 WIDTH=160 HEIGHT=90` chạy một case và
 giữ file trong `build/isp_dv/`.

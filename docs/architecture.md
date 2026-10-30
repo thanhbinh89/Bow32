@@ -14,7 +14,7 @@
  │  │ RV32IMC       │      │       │ decode + RR  │──> bow_rom    │  │
  │  │               │ data ├──────>│ arbiter/dev  │──> bow_flash ─┼──┤ (mem port)
  │  └───────▲───────┘      │       └──────────────┘──> bow_sram   │  │
- │          │irq_fast[6:0] │              │                       │  │
+ │          │irq_fast[7:0] │              │                       │  │
  └──────────┼──────────────┼──────────────┼───────────────────────┘  │
             │              │       bow_bus_xbar (periph, 1 host)     │
             │              │       ┌──────────────┐                  │
@@ -25,17 +25,23 @@
             ├──────────────────────│ GPIOA        │<─┼─> gpioa[7:0]   (PA7 = bật camera trên KV260)
             ├──────────────────────│ GPIOB        │<─┴─> gpiob[7:0]  (PB0/PB1 = UART1 TX/RX)
             ├──────────────────────│ ISP (regs)   │──┐
-            └──────────────────────│ I2C0         │<─┼─> scl/sda (open drain)
-                                   └──────────────┘  │
-   main xbar ──> ISP capture buffer (0x3000_0000) ───┤
+            ├──────────────────────│ I2C0         │<─┼─> scl/sda (open drain)
+            └──────────────────────│ CSI2RX       │──┼──┐
+                                   └──────────────┘  │  │
+   main xbar ──> ISP capture buffer (0x3000_0000) ───┤  │
    main xbar ──> bow_axil_bridge ──> m_axil_* (AXI4-Lite, 0x5000_0000)
-                                                     │
-   cam_* (RAW10, vid_clk_i) ──> bow_isp ─────────────┴──> isp_* (RGB888 / YUV444, vid_clk_i)
+                                                     │  │
+   dphy_* (D-PHY I/O) ──> bow_csi2rx ────────────────┼──┘
+                              │ RAW10 (m_axis)       │
+                              └──> bow_isp ──────────┴──> isp_* (RGB888 / YUV444, vid_clk_i)
 ```
 
 Từ phiên bản có camera, main crossbar có 6 device (thêm buffer capture của ISP
-và cửa sổ AXI4-Lite) và peripheral bus có 8 slot (thêm ISP, I2C0). Đặc tả:
-[ip/isp.md](ip/isp.md), [ip/i2c.md](ip/i2c.md), [ip/axil_bridge.md](ip/axil_bridge.md).
+và cửa sổ AXI4-Lite) và peripheral bus có 9 slot (thêm ISP, I2C0, CSI2RX).
+Bộ thu MIPI CSI-2 (`bow_csi2rx`) nhận các tín hiệu D-PHY `dphy_*` (trên KV260
+từ `bow_dphy_io_xusp` ở board top) và đưa RAW10 vào ISP. Đặc tả:
+[ip/isp.md](ip/isp.md), [ip/csi2rx.md](ip/csi2rx.md), [ip/i2c.md](ip/i2c.md),
+[ip/axil_bridge.md](ip/axil_bridge.md).
 
 Mã nguồn: `hw/top/rtl/bow32_top.sv`. Địa chỉ và số cổng lấy từ package sinh tự
 động `bow32_memmap_pkg` (xem [memory_map.md](memory_map.md)).
@@ -74,9 +80,15 @@ giữ `gnt = 0`. Chi tiết: [bus.md](bus.md).
 ## Clock và reset
 
 * Miền clock CPU `clk_i` (50 MHz trên Kria) cho CPU, bus và mọi ngoại vi.
-* Miền clock video `vid_clk_i` chỉ dùng trong pipeline pixel của ISP (200 MHz
-  trong bản build camera, bằng `clk_i` trong bản cơ bản). Mọi tín hiệu qua lại
-  hai miền đều qua bộ đồng bộ (xem [ip/isp.md](ip/isp.md)).
+* Miền clock video `vid_clk_i` dùng trong pipeline pixel của ISP và trong máy
+  trạng thái LP / đầu ra pixel của bộ thu CSI-2 (200 MHz trong bản build
+  camera, bằng `clk_i` trong bản cơ bản).
+* Miền **byte clock** của bộ thu CSI-2 = HS clock của camera / 4 (114 MHz ở
+  912 Mbit/s), lấy từ lane clock của D-PHY và chỉ chạy khi có HS: tìm sync,
+  ghép lane, giải packet, unpack. Bản cơ bản không có D-PHY nên clock này
+  nối 0.
+* Mọi tín hiệu qua lại giữa các miền đều qua bộ đồng bộ, bus gray hoặc RAM
+  2 clock (xem [ip/isp.md](ip/isp.md), [ip/csi2rx.md](ip/csi2rx.md)).
 * `bow_rstmgr` tạo hai miền reset (assert bất đồng bộ, nhả đồng bộ):
   * **POR** (`por_rst_n`): chỉ reset SYSCTRL — giữ *reset cause*, `BOOT_FLAG`,
     bộ phát hiện BREAK qua các lần reset hệ thống.
@@ -96,6 +108,7 @@ giữ `gnt = 0`. Chi tiết: [bus.md](bus.md).
 | GPIOB | `irq_fast_i[4]` | `0x80000014` |
 | ISP (frame / capture xong, lỗi) | `irq_fast_i[5]` | `0x80000015` |
 | I2C0 (lệnh xong) | `irq_fast_i[6]` | `0x80000016` |
+| CSI2RX (FS, FE, lỗi, LOG/RAW xong) | `irq_fast_i[7]` | `0x80000017` |
 
 `irq_timer_i`, `irq_external_i`, `irq_software_i` đang nối 0 — chỗ trống để học
 thêm CLINT/PLIC (xem [roadmap.md](roadmap.md)).
@@ -113,7 +126,8 @@ thêm CLINT/PLIC (xem [roadmap.md](roadmap.md)).
 | Filelist `.f` thay vì FuseSoC | Ít công cụ phụ thuộc; Verilator đọc trực tiếp, Vivado đọc qua `filelist.tcl` |
 | ISP 1 pixel/clock, không back-pressure bên trong | Pipeline thẳng, mỗi stage là một module nhỏ dễ đọc; camera luôn có blanking |
 | ISP có mô hình Python bit-exact | Mọi công thức kiểm chứng được từng bit; sửa RTL thì sửa mô hình |
-| CSI-2 RX tạm dùng IP của AMD (trong block design) | Có camera chạy ngay; bộ thu riêng của Bow32 là bước học sau |
+| Bộ thu MIPI CSI-2 tự viết thay MIPI CSI-2 RX Subsystem của AMD (bản camera đầu tiên dùng IP này) | Mục tiêu học: D-PHY, SerDes, CDC, protocol đều đọc được trong RTL; không cần IP/license của hãng; mọi thứ quan sát được (bộ đếm lỗi, log packet, word thô, bản đồ eye); phần IP độc lập công nghệ, chỉ `bow_dphy_io_xusp` dùng primitive UltraScale+ |
+| Eye của D-PHY hiệu chỉnh bằng phần mềm lúc chạy | Clock tới ISERDES trễ 0,4–1,4 ns so với data tuỳ PVT: static timing không đạt được; IDELAY + quét tap trong driver là đủ |
 
 ## Quy ước mã nguồn
 

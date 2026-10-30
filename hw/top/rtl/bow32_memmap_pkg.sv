@@ -32,7 +32,7 @@ package bow32_memmap_pkg;
   localparam logic [MainNumDevices-1:0][31:0] MainDevMask = {~(AxilSize - 32'd1), ~(IspBufSize - 32'd1), ~(PeriphSize - 32'd1), ~(SramSize - 32'd1), ~(FlashSize - 32'd1), ~(RomSize - 32'd1)};
 
   // periph_bus
-  localparam int unsigned PeriphNumDevices = 8;
+  localparam int unsigned PeriphNumDevices = 9;
   localparam int unsigned PeriphDevSysctrl = 0;
   localparam int unsigned PeriphDevFlashCtrl = 1;
   localparam int unsigned PeriphDevUart0 = 2;
@@ -41,6 +41,7 @@ package bow32_memmap_pkg;
   localparam int unsigned PeriphDevGpiob = 5;
   localparam int unsigned PeriphDevIsp = 6;
   localparam int unsigned PeriphDevI2c0 = 7;
+  localparam int unsigned PeriphDevCsi2rx = 8;
   localparam logic [31:0] SysctrlBase = 32'h40000000;
   localparam logic [31:0] SysctrlSize = 32'h00001000;
   localparam logic [31:0] FlashCtrlBase = 32'h40001000;
@@ -57,8 +58,10 @@ package bow32_memmap_pkg;
   localparam logic [31:0] IspSize = 32'h00001000;
   localparam logic [31:0] I2c0Base = 32'h40007000;
   localparam logic [31:0] I2c0Size = 32'h00001000;
-  localparam logic [PeriphNumDevices-1:0][31:0] PeriphDevBase = {I2c0Base, IspBase, GpiobBase, GpioaBase, Uart1Base, Uart0Base, FlashCtrlBase, SysctrlBase};
-  localparam logic [PeriphNumDevices-1:0][31:0] PeriphDevMask = {~(I2c0Size - 32'd1), ~(IspSize - 32'd1), ~(GpiobSize - 32'd1), ~(GpioaSize - 32'd1), ~(Uart1Size - 32'd1), ~(Uart0Size - 32'd1), ~(FlashCtrlSize - 32'd1), ~(SysctrlSize - 32'd1)};
+  localparam logic [31:0] Csi2rxBase = 32'h40008000;
+  localparam logic [31:0] Csi2rxSize = 32'h00001000;
+  localparam logic [PeriphNumDevices-1:0][31:0] PeriphDevBase = {Csi2rxBase, I2c0Base, IspBase, GpiobBase, GpioaBase, Uart1Base, Uart0Base, FlashCtrlBase, SysctrlBase};
+  localparam logic [PeriphNumDevices-1:0][31:0] PeriphDevMask = {~(Csi2rxSize - 32'd1), ~(I2c0Size - 32'd1), ~(IspSize - 32'd1), ~(GpiobSize - 32'd1), ~(GpioaSize - 32'd1), ~(Uart1Size - 32'd1), ~(Uart0Size - 32'd1), ~(FlashCtrlSize - 32'd1), ~(SysctrlSize - 32'd1)};
 
   // Ibex fast interrupt lines
   localparam int unsigned IrqFastUart0 = 0;
@@ -68,5 +71,6 @@ package bow32_memmap_pkg;
   localparam int unsigned IrqFastGpiob = 4;
   localparam int unsigned IrqFastIsp = 5;
   localparam int unsigned IrqFastI2c0 = 6;
+  localparam int unsigned IrqFastCsi2rx = 7;
 
 endpackage

@@ -8,11 +8,13 @@
 // download an image over UART0 exactly like tools/bow32_flash.py.
 //
 // It also models the camera side of the KV260 camera build: the I2C devices
-// (TCA9546A switch + IMX219 sensor registers), the RAW10 stream of the MIPI
-// CSI-2 receiver and the receiver's AXI4-Lite registers.
+// (TCA9546A switch + IMX219 sensor registers), the MIPI CSI-2 stream of the
+// IMX219 on the D-PHY ports of the receiver (hw/ip/csi2rx/dv/csi2_tx_model.sv
+// replaces the sensor and the receive I/O of the board) and a device on the
+// AXI4-Lite master port.
 //
 // Plusargs:
-//   +TEST=<name>      boot | load | break | flash | irq | gpio | camera   (see run_test below)
+//   +TEST=<name>      boot | load | break | flash | irq | gpio | camera | csi2 (see run_test below)
 //   +ROM=<vmem>       boot ROM image (required)
 //   +FLASH=<vmem>     image preloaded into the flash (backdoor)
 //   +IMAGE=<vmem>     image downloaded over UART by the 'load' test
@@ -22,6 +24,7 @@
 `timescale 1ns / 1ps
 
 module tb_bow32;
+  import csi2_tx_pkg::*;
 
   // ---------------------------------------------------------------- config
   localparam int unsigned ClkFreqHz   = 50_000_000;
@@ -34,13 +37,17 @@ module tb_bow32;
   localparam byte unsigned SofRsp = 8'hB5;
   localparam int unsigned  FlashBase = 32'h0800_0000;
 
+  string test, rom_file, flash_file, image_file;
+
   // ----------------------------------------------------------- clock/reset
   logic clk = 1'b0;
   logic rst_n = 1'b1;  // pulsed low at the start of the test
   always #(ClkPeriodNs / 2) clk = ~clk;
 
-  // Video clock of the ISP, unrelated to the CPU clock (200 MHz on the KV260)
-  localparam real VidPeriodNs = 9.3;
+  // Video clock of the ISP and of the CSI-2 receiver PHY logic, unrelated to
+  // the CPU clock (200 MHz on the KV260)
+  localparam real         VidPeriodNs = 9.3;
+  localparam int unsigned VidClkHz    = 107_526_882;        // 1 / 9.3 ns
   logic vclk = 1'b0;
   always #(VidPeriodNs / 2) vclk = ~vclk;
 
@@ -60,11 +67,14 @@ module tb_bow32;
   wire        i2c_scl = !(i2c_scl_oe || slv_scl_low);
   wire        i2c_sda = !(i2c_sda_oe || slv_sda_low);
 
-  // Camera stream (CSI-2 receiver output) and ISP output
-  logic       cam_tvalid = 1'b0, cam_tuser = 1'b0, cam_tlast = 1'b0, cam_tready;
-  logic [9:0] cam_tdata = '0;
-  logic       isp_tvalid, isp_tuser, isp_tlast;
-  logic [23:0] isp_tdata;
+  // D-PHY receive I/O of the CSI-2 receiver (csi2_tx_model below) and ISP output
+  logic            dphy_byte_clk, dphy_byte_ce, dphy_byte_rst, dphy_clk_hs_en;
+  logic [1:0]      dphy_clk_lp, dphy_hs_en, dphy_dly_load;
+  logic [1:0][1:0] dphy_lp;
+  logic [1:0][7:0] dphy_rx_data;
+  logic [1:0][8:0] dphy_dly_tap, dphy_dly_tap_rb;
+  logic            isp_tvalid, isp_tuser, isp_tlast;
+  logic [23:0]     isp_tdata;
 
   // AXI4-Lite window
   logic [15:0] axil_awaddr, axil_araddr;
@@ -81,7 +91,10 @@ module tb_bow32;
     .ClkFreqHz   (ClkFreqHz),
     .BootBaud    (Baud),
     .BootWaitMs  (1),
-    .BreakCycles (BreakCycles)
+    .BreakCycles (BreakCycles),
+    .CsiLanes    (2),
+    .CsiPhy      (1'b1),
+    .VidClkHz    (VidClkHz)
   ) dut (
     .clk_i        (clk),
     .rst_ni       (rst_n),
@@ -99,16 +112,22 @@ module tb_bow32;
     .i2c0_sda_oe_o(i2c_sda_oe),
     .vid_clk_i    (vclk),
     .vid_rst_ni   (rst_n),
-    .cam_tvalid_i (cam_tvalid),
-    .cam_tready_o (cam_tready),
-    .cam_tdata_i  (cam_tdata),
-    .cam_tuser_i  (cam_tuser),
-    .cam_tlast_i  (cam_tlast),
     .isp_tvalid_o (isp_tvalid),
     .isp_tready_i (1'b1),
     .isp_tdata_o  (isp_tdata),
     .isp_tuser_o  (isp_tuser),
     .isp_tlast_o  (isp_tlast),
+    .dphy_byte_clk_i  (dphy_byte_clk),
+    .dphy_byte_ce_o   (dphy_byte_ce),
+    .dphy_byte_rst_o  (dphy_byte_rst),
+    .dphy_clk_lp_i    (dphy_clk_lp),
+    .dphy_clk_hs_en_o (dphy_clk_hs_en),
+    .dphy_lp_i        (dphy_lp),
+    .dphy_hs_en_o     (dphy_hs_en),
+    .dphy_rx_data_i   (dphy_rx_data),
+    .dphy_dly_tap_o   (dphy_dly_tap),
+    .dphy_dly_load_o  (dphy_dly_load),
+    .dphy_dly_tap_i   (dphy_dly_tap_rb),
     .m_axil_awaddr_o  (axil_awaddr),
     .m_axil_awprot_o  (axil_awprot),
     .m_axil_awvalid_o (axil_awvalid),
@@ -151,10 +170,30 @@ module tb_bow32;
     end
   end
 
+  // ------------------------------------------------------------- helpers
+  function automatic bit contains(string hay, string needle);
+    int n;
+    n = needle.len();
+    for (int i = 0; i + n <= hay.len(); i++) begin
+      if (hay.substr(i, i + n - 1) == needle) return 1'b1;
+    end
+    return 1'b0;
+  endfunction
+
   // -------------------------------------------------------- UART monitors
   byte unsigned rxq0[$];          // bytes received from UART0 (protocol)
   string        log0 = "", log1 = "";
   string        line0 = "", line1 = "";
+
+  // csi2 test: a failed check of the firmware, or a command answered with
+  // "error" (every command of this test must succeed), stops the simulation
+  // at once
+  function automatic void check_line0(string line);
+    if (test == "csi2" && (contains(line, "[FAIL]") || contains(line, "csi2_test: FAIL") ||
+                           (line.len() >= 5 && line.substr(0, 4) == "error"))) begin
+      $fatal(1, "csi2_test reported a failure: %s", line);
+    end
+  endfunction
 
   function automatic void log_char(int unsigned port, byte unsigned b);
     string s;
@@ -162,6 +201,7 @@ module tb_bow32;
     if (b == 8'h0a) begin
       if (port == 0) begin
         $display("[%0t] uart0| %s", $time, line0);
+        check_line0(line0);
         line0 = "";
       end else begin
         $display("[%0t] uart1| %s", $time, line1);
@@ -242,16 +282,6 @@ module tb_bow32;
     while (brk_req != 0) @(posedge clk);
   endtask
 
-  // ------------------------------------------------------------- helpers
-  function automatic bit contains(string hay, string needle);
-    int n;
-    n = needle.len();
-    for (int i = 0; i + n <= hay.len(); i++) begin
-      if (hay.substr(i, i + n - 1) == needle) return 1'b1;
-    end
-    return 1'b0;
-  endfunction
-
   // Wait until `text` shows up on the UART (port 0/1), starting at log offset `from`.
   task automatic expect_text(int unsigned port, string text, int unsigned from = 0);
     string tail;
@@ -263,6 +293,21 @@ module tb_bow32;
     end
     $display("[%0t] tb   | seen on uart%0d: \"%s\"", $time, port, text);
   endtask
+
+  // Rest of the UART0 line that starts with `text` (first one from log
+  // offset `from`), "" if there is none.
+  function automatic string log0_line(string text, int unsigned from);
+    int n, j;
+    n = text.len();
+    for (int i = from; i + n <= log0.len(); i++) begin
+      if (log0.substr(i, i + n - 1) == text) begin
+        j = i + n;
+        while (j < log0.len() && log0[j] != 8'h0a) j++;
+        return (j > i + n) ? log0.substr(i + n, j - 1) : "";
+      end
+    end
+    return "";
+  endfunction
 
   function automatic logic [31:0] crc32(byte unsigned data[$]);
     logic [31:0] crc;
@@ -361,6 +406,7 @@ module tb_bow32;
   logic [7:0]  i2c_sh = '0;
   bit          i2c_rw = 1'b0, i2c_nack = 1'b0;
   logic [15:0] imx_ptr = '0;
+  int unsigned imx_starts = 0;   // stream-on writes (0x0100 bit 0: 0 -> 1)
 
   wire cam_powered = gpioa_oe[7] && gpioa_o[7];
 
@@ -387,8 +433,12 @@ module tb_bow32;
       imx_ptr[7:0] = b;
     end else begin
       if (imx_ptr == 16'h0100 && imx_reg[16'h0100][0] != b[0]) begin
-        if (b[0]) $display("[%0t] tb   | IMX219 streaming", $time);
-        else $display("[%0t] tb   | IMX219 standby", $time);
+        if (b[0]) begin
+          imx_starts++;
+          $display("[%0t] tb   | IMX219 streaming", $time);
+        end else begin
+          $display("[%0t] tb   | IMX219 standby", $time);
+        end
       end
       imx_reg[imx_ptr] = b;
       imx_ptr++;
@@ -479,34 +529,23 @@ module tb_bow32;
     sda_q = i2c_sda;
   end
 
-  // ------------------------------------------------ CSI-2 RX register model
-  // AXI4-Lite device with random ready/response delays. Registers of the
-  // AMD MIPI CSI-2 RX subsystem that the firmware uses (PG232); offsets
-  // 0x4000-0x7FFF answer SLVERR, 0x8000-0xFFFF never answer (bridge timeout).
-  logic [31:0] csi_ccr = '0, csi_isr = '0, csi_pkt = '0;
-  logic [31:0] csi_mem [1024];
-  int unsigned cf_w = 0, cf_h = 0;   // current camera frame size
+  // ------------------------------------------------------ AXI4-Lite device
+  // A device of the FPGA block design behind the AXI4-Lite window, with
+  // random ready/response delays: 1024 read/write words (aliased up to
+  // 0x3FFF), offset 0x0004 reads 0x00000009 (fixed); offsets 0x4000-0x7FFF
+  // answer SLVERR, 0x8000-0xFFFF never answer (bridge timeout).
+  logic [31:0] axil_mem [1024];
 
-  initial for (int i = 0; i < 1024; i++) csi_mem[i] = '0;
+  initial for (int i = 0; i < 1024; i++) axil_mem[i] = '0;
 
-  function automatic logic [31:0] csi_read(logic [15:0] a);
-    case (a & 16'h1FFC)
-      16'h0000: return csi_ccr;
-      16'h0004: return 32'h0000_0009;                 // 2 active lanes, 2 max
-      16'h0010: return {csi_pkt[15:0], 16'h0000};     // packet count, no reset pending
-      16'h0024: return csi_isr;
-      16'h0060: return {16'(cf_h), 16'(cf_w * 10 / 8)};
-      16'h0064: return 32'h0000_002B;                 // RAW10
-      default:  return csi_mem[a[11:2]];
-    endcase
+  function automatic logic [31:0] axil_read(logic [15:0] a);
+    return (a[11:2] == 10'd1) ? 32'h0000_0009 : axil_mem[a[11:2]];
   endfunction
 
-  function automatic void csi_write(logic [15:0] a, logic [31:0] d);
-    case (a & 16'h1FFC)
-      16'h0000: csi_ccr = d;
-      16'h0024: csi_isr = csi_isr & ~d;
-      default:  csi_mem[a[11:2]] = d;
-    endcase
+  function automatic void axil_write(logic [15:0] a, logic [31:0] d, logic [3:0] strb);
+    for (int i = 0; i < 4; i++) begin
+      if (strb[i]) axil_mem[a[11:2]][8*i +: 8] = d[8*i +: 8];
+    end
   endfunction
 
   initial begin : axil_model
@@ -527,7 +566,7 @@ module tb_bow32;
           #1;
           axil_awready = 1'b0;
           axil_wready  = 1'b0;
-          if (a < 16'h4000) csi_write(a, axil_wdata);
+          if (a < 16'h4000) axil_write(a, axil_wdata, axil_wstrb);
           repeat ($urandom % 4) @(posedge clk);
           #1;
           axil_bresp  = (a >= 16'h4000) ? 2'b10 : 2'b00;
@@ -549,7 +588,7 @@ module tb_bow32;
           axil_arready = 1'b0;
           repeat ($urandom % 4) @(posedge clk);
           #1;
-          axil_rdata  = (a >= 16'h4000) ? 32'hDEAD_BEEF : csi_read(a);
+          axil_rdata  = (a >= 16'h4000) ? 32'hDEAD_BEEF : axil_read(a);
           axil_rresp  = (a >= 16'h4000) ? 2'b10 : 2'b00;
           axil_rvalid = 1'b1;
           do @(posedge clk); while (!axil_rready);
@@ -560,22 +599,68 @@ module tb_bow32;
     end
   end
 
-  // ------------------------------------------------------ camera stream model
-  // Output of the CSI-2 receiver while the sensor streams (0x0100 = 1) and
-  // the receiver is enabled (CCR.EN): RAW10 frames of x/y_output_size
-  // pixels, tuser = start of frame, tlast = end of line, random gaps,
-  // back-pressure from the ISP honoured. Pixels: colour bars when the
-  // sensor test pattern is on (0x0600 = 2), else a smooth scene whose level
-  // follows exposure x analog gain, with a colour cast (R 5/8, B 13/16).
+  // ------------------------------------------------------ IMX219 CSI-2 stream
+  // csi2_tx_model plays the sensor and the D-PHY receive I/O of the board
+  // (2 data lanes). The sensor:
+  //   * keeps all lanes at LP-00 after power-up until the first stream-on
+  //     (0x0100 = 1), then LP-11 whenever it does not stream;
+  //   * takes the output format (0x018c) and size (0x016c..0x016f) at
+  //     stream-on, the test pattern and its colour, exposure, analog gain
+  //     and orientation at every frame start;
+  //   * sends per frame: FS (frame number 1..4), 2 embedded data lines (DT
+  //     0x12, WC = width), the lines RAW10 (DT 0x2B) or RAW8 (DT 0x2A), FE;
+  //     one packet per HS burst, the data lanes go to LP-11 after every
+  //     burst; the clock lane enters HS before the FS and goes back to LP-11
+  //     after the FE (vertical blanking), like the real IMX219;
+  //   * finishes the current frame after a stream-off.
+  // The timing is compressed: bursts back to back and a short vertical
+  // blanking, not the line / frame length of 0x0160 / 0x0162. A stream-on
+  // with output size 0 (the probe of the firmware, power-up registers)
+  // sends no frame. Pixels: cam_pixel().
+  localparam int unsigned VblankNs = 20_000;
+  localparam logic [7:0]  BadSync  = 8'hB9;      // sync byte with its first bit flipped
+
+  csi2_tx_model #(.Lanes(2)) u_csi (
+    .byte_clk_o  (dphy_byte_clk),
+    .byte_ce_i   (dphy_byte_ce),
+    .byte_rst_i  (dphy_byte_rst),
+    .clk_lp_o    (dphy_clk_lp),
+    .clk_hs_en_i (dphy_clk_hs_en),
+    .lp_o        (dphy_lp),
+    .hs_en_i     (dphy_hs_en),
+    .rx_data_o   (dphy_rx_data),
+    .dly_tap_i   (dphy_dly_tap),
+    .dly_load_i  (dphy_dly_load),
+    .dly_tap_o   (dphy_dly_tap_rb)
+  );
+
+  // Frame format of the stream (stream-on) and of the frame (frame start)
+  int unsigned cf_w = 0, cf_h = 0, cf_bits = 10, cf_num = 0;
   int unsigned cf_tp = 0, cf_exp = 0, cf_again = 0;
   logic [1:0]  cf_orient = '0;
+  logic [9:0]  cf_colour [4] = '{0, 0, 0, 0};    // test pattern 1: R, Gr, B, Gb
   int unsigned cam_frames = 0;
 
+  // Error injection into the line packets of the next frame (csi2 test):
+  // line 8 with a header bit flipped (the ECC corrects it), line 16 with a
+  // payload bit flipped (CRC error), and from line 24 on the first line on
+  // which a bad sync byte on lane 1 cannot lead to a later false lock (lane
+  // 1 sync error; skew: only lane 0 locked, the burst is dropped).
+  bit inj_req = 1'b0, inj_frame = 1'b0, inj_sent = 1'b0;
+
+  function automatic bit imx_streaming();
+    return imx_reg[16'h0100][0] && cam_powered;
+  endfunction
+
+  // Pixels: colour bars (0x0600 = 2), a solid colour (1), else a smooth
+  // scene whose level follows exposure x analog gain, with a colour cast
+  // (R 5/8, B 13/16).
   function automatic logic [9:0] cam_pixel(int unsigned x, int unsigned y);
     int unsigned c, bar;
     longint unsigned lin, v;
     bit on;
     c = {y[0] ^ cf_orient[1], x[0] ^ cf_orient[0]};     // 0 R, 1 Gr, 2 Gb, 3 B
+    if (cf_tp == 1) return cf_colour[(c == 2) ? 3 : (c == 3) ? 2 : c];
     if (cf_tp == 2) begin
       bar = (x * 8) / cf_w;
       on  = (c == 0) ? (bar inside {0, 1, 4, 5}) : (c == 3) ? (bar inside {0, 2, 4, 6}) : (bar < 4);
@@ -588,48 +673,113 @@ module tb_bow32;
     return 10'(64 + (v > 959 ? 959 : v));
   endfunction
 
-  initial begin : cam_model
-    int unsigned x, y, gap;
-    forever begin
-      @(posedge vclk);
-      if (imx_reg[16'h0100][0] && csi_ccr[0] && cam_powered) begin
-        cf_w      = {imx_reg[16'h016c], imx_reg[16'h016d]};
-        cf_h      = {imx_reg[16'h016e], imx_reg[16'h016f]};
-        cf_tp     = {imx_reg[16'h0600], imx_reg[16'h0601]};
-        cf_exp    = {imx_reg[16'h015a], imx_reg[16'h015b]};
-        cf_again  = imx_reg[16'h0157] > 232 ? 232 : imx_reg[16'h0157];
-        cf_orient = imx_reg[16'h0172][1:0];
-        if (cam_frames == 0) check_sensor_setup();
-        y = 0;
-        while (y < cf_h) begin
-          x = 0;
-          while (x < cf_w) begin
-            #0.5;
-            cam_tvalid = 1'b1;
-            cam_tdata  = cam_pixel(x, y);
-            cam_tuser  = (x == 0) && (y == 0);
-            cam_tlast  = (x == cf_w - 1);
-            do @(posedge vclk); while (!cam_tready);
-            #0.5;
-            cam_tvalid = 1'b0;
-            gap = ($urandom % 8 == 0) ? 1 + $urandom % 2 : 0;
-            repeat (gap) @(posedge vclk);
-            x++;
-          end
-          repeat (40) @(posedge vclk);       // horizontal blanking
-          y++;
-        end
-        cam_frames++;
-        csi_isr[31] = 1'b1;                  // frame received
-        csi_pkt     = csi_pkt + cf_h + 2;
-        repeat (2500) @(posedge vclk);       // vertical blanking
+  // Payload of line y in the output format of the stream
+  function automatic csi2_bytes_t line_payload(int unsigned y);
+    logic [9:0]  px [$];
+    csi2_bytes_t b;
+    px.delete();
+    b.delete();
+    for (int unsigned x = 0; x < cf_w; x++) px.push_back(cam_pixel(x, y));
+    if (cf_bits == 10) return csi2_raw10(px);
+    foreach (px[i]) b.push_back(px[i][9:2]);
+    return b;
+  endfunction
+
+  // Embedded data line: format code 0x0A, the frame number, filler 0x07
+  function automatic csi2_bytes_t emb_payload();
+    csi2_bytes_t b;
+    b.delete();
+    for (int unsigned i = 0; i < cf_w; i++) begin
+      b.push_back((i == 0) ? 8'h0A : (i == 1) ? 8'(cf_num) : 8'h07);
+    end
+    return b;
+  endfunction
+
+  // Would the sync search of the receiver (a zero byte, then 0xB8, at any
+  // bit offset; bow_dphy_align) lock on lane 1 of a burst with this packet
+  // although the lane's sync byte is `sync`? Bits after the HS-zero: the
+  // sync byte, the odd packet bytes, then the HS-trail constant.
+  function automatic bit lane1_locks(csi2_bytes_t pkt, logic [7:0] sync);
+    byte unsigned lane [$];
+    logic [15:0]  w;
+    logic         trail;
+    lane.delete();
+    lane.push_back(sync);
+    for (int unsigned k = 1; k < pkt.size(); k += 2) lane.push_back(pkt[k]);
+    w = '0;
+    foreach (lane[i]) begin
+      for (int j = 0; j < 8; j++) begin
+        w = {lane[i][j], w[15:1]};          // w[15] = newest bit
+        if (w == 16'hB800) return 1'b1;
       end
     end
-  end
+    trail = ~lane[lane.size() - 1][7];
+    for (int j = 0; j < 16; j++) begin
+      w = {trail, w[15:1]};
+      if (w == 16'hB800) return 1'b1;
+    end
+    return 1'b0;
+  endfunction
+
+  // Queue one frame in the TX model (with the injected errors if requested)
+  function automatic void push_frame();
+    csi2_flags_t f, fl;
+    csi2_bytes_t pay, pkt;
+    int unsigned dt;
+    bit          bad_done;
+    logic [15:0] crc;
+    f         = csi2_flags();
+    dt        = (cf_bits == 8) ? 32'h2A : 32'h2B;
+    inj_frame = inj_req;
+    inj_req   = 1'b0;
+    bad_done  = 1'b0;
+    u_csi.push_short(0, 8'h00, cf_num, f);                              // FS
+    for (int unsigned i = 0; i < 2; i++) u_csi.push_long(0, 8'h12, emb_payload(), f);
+    for (int unsigned y = 0; y < cf_h; y++) begin
+      pay = line_payload(y);
+      fl  = f;
+      if (inj_frame && y == 8) fl.hdr_flip_a = 8'sd9;                   // WC bit 1
+      if (inj_frame && y == 16) fl.pay_flip = 3;
+      if (inj_frame && y >= 24 && !bad_done) begin
+        pkt = csi2_header(0, dt, pay.size());
+        foreach (pay[i]) pkt.push_back(pay[i]);
+        crc = csi2_crc(pay);
+        pkt.push_back(crc[7:0]);
+        pkt.push_back(crc[15:8]);
+        if (!lane1_locks(pkt, BadSync)) begin
+          fl.sync[1] = BadSync;
+          bad_done   = 1'b1;
+        end
+      end
+      u_csi.push_long(0, dt, pay, fl);
+    end
+    u_csi.push_short(0, 8'h01, cf_num, f);                              // FE
+    if (inj_frame && !bad_done) $fatal(1, "IMX219: no line for the bad sync byte");
+  endfunction
+
+  // Registers taken at stream-on
+  function automatic void stream_setup();
+    cf_w    = {imx_reg[16'h016c], imx_reg[16'h016d]};
+    cf_h    = {imx_reg[16'h016e], imx_reg[16'h016f]};
+    cf_bits = (imx_reg[16'h018c] == 8'h08) ? 8 : 10;
+    cf_num  = 0;
+  endfunction
+
+  // Registers taken at every frame start
+  function automatic void frame_setup();
+    cf_tp     = {imx_reg[16'h0600], imx_reg[16'h0601]};
+    cf_exp    = {imx_reg[16'h015a], imx_reg[16'h015b]};
+    cf_again  = imx_reg[16'h0157] > 232 ? 232 : imx_reg[16'h0157];
+    cf_orient = imx_reg[16'h0172][1:0];
+    for (int i = 0; i < 4; i++) begin
+      cf_colour[i] = {imx_reg[16'h0602 + 2 * i][1:0], imx_reg[16'h0603 + 2 * i]};
+    end
+    cf_num    = cf_num % 4 + 1;
+  endfunction
 
   // The firmware must have programmed a consistent frame format.
   function automatic void check_sensor_setup();
-    int unsigned x0, x1, y0, y1;
+    int unsigned x0, x1, y0, y1, fmt, fll, exposure;
     x0 = {imx_reg[16'h0164], imx_reg[16'h0165]};
     x1 = {imx_reg[16'h0166], imx_reg[16'h0167]};
     y0 = {imx_reg[16'h0168], imx_reg[16'h0169]};
@@ -638,12 +788,56 @@ module tb_bow32;
       $fatal(1, "IMX219: crop %0d..%0d x %0d..%0d does not match output %0dx%0d", x0, x1, y0, y1,
              cf_w, cf_h);
     end
-    if (imx_reg[16'h018c] != 8'h0a || imx_reg[16'h0114] != 8'h01 || imx_reg[16'h030d] != 8'h72) begin
-      $fatal(1, "IMX219: RAW10 / 2 lane / PLL setup missing");
+    // CSI_DATA_FORMAT_A (0x018c/0x018d) and OPPXCK_DIV (0x0309) = bits per pixel
+    fmt = imx_reg[16'h018c];
+    if (!(fmt inside {8, 10}) || imx_reg[16'h018d] != fmt || imx_reg[16'h0309] != fmt) begin
+      $fatal(1, "IMX219: output format 0x018c/0x018d/0x0309 = %0d/%0d/%0d, not RAW10 or RAW8", fmt,
+             imx_reg[16'h018d], imx_reg[16'h0309]);
     end
-    $display("[%0t] tb   | IMX219 frame %0dx%0d crop (%0d,%0d) exp %0d gain %0d tp %0d orient %0d",
-             $time, cf_w, cf_h, x0, y0, cf_exp, cf_again, cf_tp, cf_orient);
+    if (imx_reg[16'h0114] != 8'h01 || imx_reg[16'h030d] != 8'h72) begin
+      $fatal(1, "IMX219: 2 lane / PLL setup missing");
+    end
+    // the sensor would stretch the frame to exposure + 4 lines
+    fll      = {imx_reg[16'h0160], imx_reg[16'h0161]};
+    exposure = {imx_reg[16'h015a], imx_reg[16'h015b]};
+    if (exposure + 4 > fll) $fatal(1, "IMX219: exposure %0d > frame length %0d - 4", exposure, fll);
+    $display("[%0t] tb   | IMX219 stream %0dx%0d RAW%0d crop (%0d,%0d) FLL %0d exp %0d", $time,
+             cf_w, cf_h, cf_bits, x0, y0, fll, exposure);
   endfunction
+
+  // The sensor: standby, stream-on (format), frames until a stream-off. The
+  // clock lane stays in HS during a frame: continuous clock mode of the TX
+  // model for the frame, back to bursts (clock exit) after the FE.
+  int unsigned imx_cur_start = 0;
+  bit          imx_powered_up = 1'b0;
+
+  initial begin : imx_stream
+    forever begin
+      while (!imx_streaming()) #1000;
+      if (!imx_powered_up) begin
+        u_csi.idle(1000);              // the lanes leave LP-00
+        imx_powered_up = 1'b1;
+      end
+      imx_cur_start = imx_starts;
+      stream_setup();
+      if (cf_w == 0 || cf_h == 0) begin
+        while (imx_streaming() && imx_starts == imx_cur_start) #1000;
+      end else begin
+        check_sensor_setup();
+        while (imx_streaming() && imx_starts == imx_cur_start) begin
+          frame_setup();
+          while (u_csi.busy()) #100;
+          u_csi.contclk = 1'b1;
+          push_frame();
+          while (u_csi.busy()) #100;
+          u_csi.contclk = 1'b0;
+          cam_frames++;
+          if (inj_frame) inj_sent = 1'b1;
+          #(VblankNs);
+        end
+      end
+    end
+  end
 
   // ------------------------------------------------------ ISP output monitor
   // Every line of a frame must have the same length; remembers the geometry
@@ -674,8 +868,6 @@ module tb_bow32;
   end
 
   // ---------------------------------------------------------------- tests
-  string test, rom_file, flash_file, image_file;
-
   task automatic test_load();
     byte unsigned img[$], p[$], rsp[$], none[$];
     logic [31:0]  dev_crc;
@@ -776,39 +968,49 @@ module tb_bow32;
 
 
   // Camera test: commands for sw/apps/camera on UART0 and the text expected
-  // in the answer. "dump" receives and checks an image; "" only waits.
-  string cam_cmd[$], cam_rsp[$];
+  // in the answer (rsp, then rsp2 after it if not empty). "dump" receives and
+  // checks an image; "" only waits; isp = 1: the ISP output must be 64x48.
+  string cam_cmd[$], cam_rsp[$], cam_rsp2[$];
+  bit    cam_isp[$];
 
-  function automatic void cam_add(string cmd, string rsp = "ok\n> ");
+  function automatic void cam_add(string cmd, string rsp = "ok\n> ", string rsp2 = "", bit isp = 1'b0);
     cam_cmd.push_back(cmd);
     cam_rsp.push_back(rsp);
+    cam_rsp2.push_back(rsp2);
+    cam_isp.push_back(isp);
   endfunction
 
   function automatic void cam_setup();
     cam_cmd.delete();
     cam_rsp.delete();
-    cam_add("rd 50008000", "bus error");          // 0  AXI device does not answer: timeout
-    cam_add("rd 50004000", "bus error");          // 1  SLVERR
-    cam_add("rd 50000004", "50000004: 00000009"); // 2  CSI-2 RX PCR: 2 lanes
-    cam_add("mode 64 48");                        // 3  small frames for the simulation
-    cam_add("tp 2");                              // 4  sensor colour bars
-    cam_add("cam", "streaming 64x48 RGGB");       // 5
-    cam_add("stat", "in 64x48");                  // 6
-    cam_add("csi", "frame received");             // 7
-    cam_add("cap 0 0 32 24 1", "captured 32x24"); // 8
-    cam_add("dump", "END\nok\n> ");               // 9  RGB colour bars
-    cam_add("tp 0");                              // 10 scene with a colour cast
-    cam_add("ae on");                             // 11
-    cam_add("awb on");                            // 12
-    cam_add("", "ae: locked");                    // 13
-    cam_add("", "awb: locked");                   // 14
-    cam_add("flip 1 1");                          // 15 BGGR
-    cam_add("stat", "in 64x48");                  // 16
-    cam_add("awb off");                           // 17
-    cam_add("tpg 0", "tpg 0 64x48");              // 18 ISP test pattern
-    cam_add("fmt yuv");                           // 19
-    cam_add("cap 0 0 32 24 1", "captured 32x24"); // 20
-    cam_add("dump", "END\nok\n> ");               // 21 YUV colour bars
+    cam_rsp2.delete();
+    cam_isp.delete();
+    cam_add("rd 50008000", "bus error");          // AXI device does not answer: timeout
+    cam_add("rd 50004000", "bus error");          // SLVERR
+    cam_add("wr 50004000 1", "bus error");        // SLVERR on a write
+    cam_add("rd 50000004", "50000004: 00000009"); // fixed register of the AXI device
+    cam_add("wr 50000010 a5c3e1f0");
+    cam_add("rd 50000010", "50000010: a5c3e1f0"); // written through the bridge
+    cam_add("mode 64 48");                        // small frames for the simulation
+    cam_add("tp 2");                              // sensor colour bars
+    // first start: eye calibration (step 16, every tap good in this test)
+    cam_add("cam", "csi2rx: calibrated taps 248/248 eye 512/512\nstreaming 64x48 RGGB");
+    cam_add("stat", "in 64x48", "", 1'b1);
+    cam_add("csi", "csi2rx: link ok\n", "lines/frame 48 wc 80 dt 2b");
+    cam_add("cap 0 0 32 24 1", "captured 32x24");
+    cam_add("dump", "END\nok\n> ");               // RGB colour bars
+    cam_add("tp 0");                              // scene with a colour cast
+    cam_add("ae on");
+    cam_add("awb on");
+    cam_add("", "ae: locked");
+    cam_add("", "awb: locked");
+    cam_add("flip 1 1");                          // BGGR
+    cam_add("stat", "in 64x48", "", 1'b1);
+    cam_add("awb off");
+    cam_add("tpg 0", "tpg 0 64x48");              // ISP test pattern (stream stops)
+    cam_add("fmt yuv");
+    cam_add("cap 0 0 32 24 1", "captured 32x24");
+    cam_add("dump", "END\nok\n> ");               // YUV colour bars
   endfunction
 
   // Image transfer of `dump`: "IMG <w> <h> <fmt> <len> <crc>" line + raw bytes.
@@ -869,6 +1071,66 @@ module tb_bow32;
     $display("[%0t] tb   | %s colour bars ok", $time, img_fmt);
   endfunction
 
+  // csi2 test: eye of the TX model lane 0 100..300, lane 1 180..400; with
+  // calibration step 32 the firmware finds taps 208/288 and eyes 192/224.
+  function automatic void check_calibration(int unsigned from);
+    string       s;
+    int unsigned t0, t1, e0, e1;
+    s = log0_line("[PASS] calibrate taps ", from);
+    if ($sscanf(s, "%d/%d eye %d/%d", t0, t1, e0, e1) != 4) $fatal(1, "no calibration result");
+    if (t0 < 192 || t0 > 224 || t1 < 272 || t1 > 304 || e0 < 160 || e0 > 224 || e1 < 192 ||
+        e1 > 256) begin
+      $fatal(1, "calibrated taps %0d/%0d eye %0d/%0d, expected about 208/288 eye 192/224", t0, t1,
+             e0, e1);
+    end
+    $display("[%0t] tb   | calibration: taps %0d/%0d eye %0d/%0d ok", $time, t0, t1, e0, e1);
+  endfunction
+
+  task automatic inject_errors();
+    longint unsigned t0;
+    inj_sent = 1'b0;
+    inj_req  = 1'b1;
+    t0 = cycle;
+    while (!inj_sent) begin
+      if (cycle - t0 > 100_000) $fatal(1, "no frame with the injected errors (not streaming?)");
+      @(posedge clk);
+    end
+    repeat (500) @(posedge clk);   // the last events reach the CPU domain
+    $display("[%0t] tb   | injected: header bit flip, payload bit flip, bad sync on lane 1", $time);
+  endtask
+
+  // Byte clock gate of the receiver (TX model status): it opens and closes
+  // only while the clock lane is in its static HS-0 (CLK-ZERO, CLK-TRAIL),
+  // never in an LP state or while the clock toggles, with the PHY timing
+  // that the driver computes for this video clock. ce_bad counts from the
+  // end of the reset (the gate starts open in a two-state simulation, see
+  // bow_dphy_lp).
+  int unsigned ce_bad0 = 0;
+
+  function automatic void check_dphy_gate();
+    if (u_csi.ce_bad != ce_bad0 || u_csi.ce_rise_toggle != 0 || u_csi.runts != 0) begin
+      $fatal(1, "D-PHY byte clock gate: open in LP %0d x, opened while toggling %0d x, runts %0d",
+             u_csi.ce_bad - ce_bad0, u_csi.ce_rise_toggle, u_csi.runts);
+    end
+    $display("[%0t] tb   | D-PHY byte clock gate ok (%0d bursts)", $time, u_csi.bursts_done);
+  endfunction
+
+  // The 'stat' answer after inject_errors(): exactly these error counts
+  function automatic void check_error_counters(int unsigned from);
+    string       s;
+    int unsigned ecc0, ecc1, crc, trunc, sot0, sot1, drop, ovf, misc;
+    s = log0_line("  errors: ", from);
+    if ($sscanf(s, "ecc %d/%d crc %d trunc %d sot %d/%d drop %d ovf %d misc %d", ecc0, ecc1, crc,
+                trunc, sot0, sot1, drop, ovf, misc) != 9) begin
+      $fatal(1, "no error counters in the 'stat' answer");
+    end
+    if (ecc0 != 1 || ecc1 != 0 || crc != 1 || trunc != 0 || sot0 != 0 || sot1 != 1 || ovf != 0 ||
+        misc < 1) begin
+      $fatal(1, "error counters '%s', expected ecc 1/0 crc 1 trunc 0 sot 0/1 ovf 0 misc >= 1", s);
+    end
+    $display("[%0t] tb   | error counters ok: %s", $time, s);
+  endfunction
+
   task automatic run_test();
     byte unsigned rsp[$], none[$];
     int unsigned  mark, mark1, step;
@@ -926,12 +1188,13 @@ module tb_bow32;
           step++;
         end
       end
-      // Camera path: I2C sensor control, CSI-2 RX registers over AXI4-Lite,
-      // camera stream -> ISP -> capture -> image over UART, AE/AWB loops.
+      // Camera path: I2C sensor control, AXI4-Lite device, IMX219 -> CSI-2
+      // receiver (eye calibration) -> ISP -> capture -> image over UART,
+      // AE/AWB loops.
       "camera": begin
         cam_setup();
         expect_text(0, "camera: IMX219 found (id 0219)");
-        expect_text(0, "csi2rx: found (2 lanes)");
+        expect_text(0, "csi2rx: Bow32 receiver, 2 lanes, PHY clock 108 MHz");
         expect_text(0, "> ");
         step = 0;
         mark = log0.len();
@@ -947,13 +1210,36 @@ module tb_bow32;
             check_bars();
           end
           expect_text(0, cam_rsp[step], mark);
-          if (step == 6 && (out_w != 64 || out_h != 48)) begin
+          if (cam_rsp2[step] != "") expect_text(0, cam_rsp2[step], mark);
+          if (cam_isp[step] && (out_w != 64 || out_h != 48)) begin
             $fatal(1, "ISP output frame %0dx%0d, expected 64x48", out_w, out_h);
           end
           step++;
         end
-        $display("[%0t] tb   | camera frames %0d, ISP output frames %0d (%0dx%0d)", $time,
-                 cam_frames, out_frames, out_w, out_h);
+        $display("[%0t] tb   | camera frames %0d, ISP output frames %0d (%0dx%0d), D-PHY bursts %0d",
+                 $time, cam_frames, out_frames, out_w, out_h, u_csi.bursts_done);
+        check_dphy_gate();
+      end
+      // MIPI CSI-2 receiver with sw/apps/csi2_test: 'test quick' (every check
+      // on 64x48 frames), then errors injected into line packets of the
+      // running stream must show up exactly in the counters of 'stat'.
+      "csi2": begin
+        expect_text(0, "csi2_test: Bow32 MIPI CSI-2 receiver test");
+        expect_text(0, "camera: IMX219 found (id 0219)");
+        expect_text(0, "csi2rx: Bow32 receiver, 2 lanes, PHY clock 108 MHz");
+        expect_text(0, "type h for help\n> ");
+        mark = log0.len();
+        uart_send_str(0, "test quick\r");
+        expect_text(0, "csi2_test: PASS (11/11)\nok\n> ", mark);
+        check_calibration(mark);
+        inject_errors();
+        mark = log0.len();
+        uart_send_str(0, "stat\r");
+        expect_text(0, "ok\n> ", mark);
+        check_error_counters(mark);
+        $display("[%0t] tb   | camera frames %0d, D-PHY bursts %0d, bit flips outside the eye %0d",
+                 $time, cam_frames, u_csi.bursts_done, u_csi.flips);
+        check_dphy_gate();
       end
       default: $fatal(1, "unknown +TEST=%s", test);
     endcase
@@ -968,6 +1254,13 @@ module tb_bow32;
     if ($test$plusargs("WAVES")) begin
       $dumpfile("waves.fst");
       $dumpvars(0, tb_bow32);
+    end
+
+    // Eye of the data lanes (IDELAY taps): every tap good, except in the
+    // csi2 test (and there the reset tap 0 is bad on both lanes)
+    if (test == "csi2") begin
+      u_csi.eye_lo = '{100, 180};
+      u_csi.eye_hi = '{300, 400};
     end
 
     fork
@@ -990,6 +1283,7 @@ module tb_bow32;
              flash_file == "" ? "<erased>" : flash_file);
     repeat (20) @(posedge clk);
     rst_n = 1'b1;
+    ce_bad0 = u_csi.ce_bad;
 
     run_test();
 

@@ -19,7 +19,9 @@ help:
 	@echo "  make sim         build the Verilator testbench"
 	@echo "  make test        run all system simulation tests"
 	@echo "  make test-tools  unit tests of the host tools (tools/tests)"
-	@echo "  make run TEST=x  run one test (boot|load|break|flash|irq|gpio|camera), WAVES=1 for waves"
+	@echo "  make test-ip     unit tests of the ISP and CSI-2 RX IPs (RTL vs. Python models)"
+	@echo "  make test-fpga-dv  pin level test of the KV260 D-PHY I/O + CSI-2 RX (xsim, needs Vivado)"
+	@echo "  make run TEST=x  run one test (boot|load|break|flash|irq|gpio|camera|csi2), WAVES=1 for waves"
 	@echo "  make fpga        Vivado build for the Kria $(BOARD)     -> build/fpga/$(BOARD)/"
 	@echo "  make fpga-jtag   load the bitstream into a running Kria over JTAG (xsdb)"
 	@echo "  make gen         regenerate memory map files from hw/top/data/bow32_memmap.yaml"
@@ -48,6 +50,13 @@ test: deps
 test-tools:
 	$(PYTHON) -m unittest discover -s tools/tests -v
 
+test-ip:
+	$(MAKE) -C hw/ip/isp/dv test
+	$(MAKE) -C hw/ip/csi2rx/dv test
+
+test-fpga-dv:
+	$(MAKE) -C hw/fpga/common/dv test
+
 run: deps
 	$(MAKE) -C sim run $(if $(TEST),TEST=$(TEST)) $(if $(WAVES),WAVES=$(WAVES))
 
@@ -66,4 +75,4 @@ gen-check:
 clean:
 	rm -rf build
 
-.PHONY: help deps sw lint sim test test-tools run fpga fpga-jtag gen gen-check clean
+.PHONY: help deps sw lint sim test test-tools test-ip test-fpga-dv run fpga fpga-jtag gen gen-check clean

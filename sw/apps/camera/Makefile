@@ -1,3 +1,3 @@
 APP  := camera
-SRCS := main.c imx219.c csi2rx.c
+SRCS := main.c
 include ../../mk/app.mk
