@@ -5,6 +5,13 @@ bộ thu MIPI CSI-2, nạp ứng dụng mẫu `camera`, chụp ảnh về PC th�
 Trước khi đọc, hãy chạy được Bow32 cơ bản theo [fpga_kria.md](fpga_kria.md)
 (UART0 trên PMOD J2, nạp chương trình bằng `bow32_flash.py`).
 
+> **Trạng thái (2026-10-30):** cả hai bitstream build bằng Vivado 2025.2
+> (`kv260_cam`: WNS +0,7 ns ở clock video 200 MHz) và chạy trên KV260, nạp qua
+> JTAG. Với test pattern của ISP (160×120 tới 1080p, RGB và YUV), ảnh capture
+> và thống kê khớp bit-exact với `tools/isp/isp_model.py`. Với camera v2 thật:
+> IMX219 được nhận qua TCA9546A, CSI-2 RX nhận RAW10 không lỗi, 1080p chạy
+> 30,1 fps và 720p 60,1 fps, sọc màu `tp 2` đúng thứ tự, AE/AWB khoá.
+
 ```
  Pi camera v2 ──MIPI CSI-2──► MIPI CSI-2 RX   ──RAW10──► ISP Bow32 ──► capture buffer ──► CPU ──UART0──► PC (PNG)
  (IMX219, J9)   2 lane        Subsystem (AMD)  AXI4-S    (200 MHz)                       (sw/apps/camera)
@@ -19,7 +26,7 @@ Trước khi đọc, hãy chạy được Bow32 cơ bản theo [fpga_kria.md](fp
 |-----|---------|
 | Kria KV260 + nguồn, thẻ SD Kria Ubuntu (hoặc chỉ cần JTAG) | như [fpga_kria.md](fpga_kria.md) |
 | **Raspberry Pi camera module v2** (Sony IMX219, 8 MP) | camera "có sẵn cho KV260": AMD dùng nó trong các ứng dụng mẫu. Camera v1.3 (OV5647), v3 (IMX708), HQ (IMX477) **không** dùng được với driver này |
-| Cáp camera 15 chân | cắm vào **J9** (RPi camera) của KV260, mặt tiếp xúc đúng chiều |
+| Cáp camera 15 chân | cắm vào **J9** (RPi camera) của KV260, mặt tiếp xúc đúng chiều, khi board đã tắt nguồn. J7/J8 là connector IAS 34 chân, không dùng cho camera Pi |
 | Adapter USB-UART 3,3 V trên PMOD J2 | UART0, như bản cơ bản; nên dùng loại chạy được 921600 baud (FT232, CP2102...) |
 
 Chân FPGA dùng thêm (đều có trong `hw/fpga/kv260/constr/kv260.xdc` và
@@ -56,7 +63,8 @@ make fpga BOARD=kv260_cam FLASH_VMEM=$PWD/build/sw/camera/camera.vmem
 Cần Vivado 2022.2 trở lên có IP **MIPI CSI-2 Receiver Subsystem**
 (`mipi_csi2_rx_subsystem`). Nếu Vivado báo thiếu license cho IP này thì cần
 lấy license trên trang AMD. Block design (`tcl/cam_bd.tcl`) gồm PS (chỉ lấy
-`pl_clk0`/`pl_resetn0`), `clk_wiz` (200 MHz + 50 MHz), 2 `proc_sys_reset` và
+`pl_clk0`/`pl_resetn0`), `clk_wiz` (200 MHz + 50 MHz; `pl_clk0` thật là
+99,999 MHz nên ra 199,998 / 49,9995 MHz), 2 `proc_sys_reset` và
 CSI-2 RX: 2 lane, 912 Mbit/s mỗi lane, RAW10, 1 pixel/clock, đầu ra VFB
 (AXI4-Stream video). Sau khi build, kiểm tra:
 
@@ -64,8 +72,12 @@ CSI-2 RX: 2 lane, 912 Mbit/s mỗi lane, RAW10, 1 pixel/clock, đầu ra VFB
 - `build/fpga/kv260_cam/bd_ports.txt`: danh sách port của block design. Nếu
   synthesis báo port không tồn tại (tên port của IP đổi theo phiên bản Vivado),
   so với `rtl/bow32_kv260_cam_top.sv` và sửa tên cho khớp.
-- `vivado.log`: các dòng `WARNING: mipi_csi2_rx: parameter ... not set` là
-  bình thường với Vivado mới (vị trí chân lấy từ XDC).
+- `vivado.log`: với Vivado 2025.2 các cảnh báo `[BD 41-721] ... disabled
+  parameter '..._IO_LOC_NAME'` và `[BD 41-176] The physical port 'dl*_...' ...
+  not found` là bình thường. `WARNING: mipi_csi2_rx: parameter ... not set`
+  chỉ báo tham số không có ở phiên bản Vivado đó (chân D-PHY luôn có trong
+  XDC). Pixel format, số lane, line rate và chân D-PHY được đọc lại sau khi
+  đặt: sai thì build dừng với `ERROR`.
 
 ## 4. Nạp bitstream
 
@@ -154,6 +166,22 @@ mỗi frame, xoay tới khi số lớn nhất.
 | Ảnh quá tối / sáng | `ae on`, hoặc chỉnh tay `exp <dòng>` và `gain <0..232>` |
 | `image CRC mismatch` | giảm baud (`--fast 460800`) hoặc kiểm tra dây GND |
 | Vivado: timing không đạt | xem đường trễ xấu nhất trong `timing_summary.rpt`; có thể hạ clock video xuống 150 MHz (`CLKOUT1_REQUESTED_OUT_FREQ` trong `cam_bd.tcl`) cho 720p |
+
+`error -1` là thiết bị không trả ACK. Để biết switch hay cảm biến không trả
+lời, gửi tay START + địa chỉ qua thanh ghi `CMD` của I2C0 rồi đọc `STATUS`
+(bit 1 = NACK) và kết thúc bằng STOP:
+
+```
+> wr 40007004 5e8          # START + 0x74 (TCA9546A), ghi
+> rd 40007008              # 00000004: có ACK, 00000006: NACK
+> wr 40007004 200          # STOP
+> wr 40007004 520          # START + 0x10 (IMX219), kênh 2 đã được chọn lúc khởi động
+> rd 40007008
+> wr 40007004 200
+```
+
+Switch trả lời mà IMX219 thì không: camera chưa cắm, cắm ngược mặt, lỏng cáp
+hoặc không phải camera v2.
 
 ## 8. Bên trong ứng dụng
 

@@ -1,9 +1,9 @@
 # Chạy Bow32 trên AMD Kria KV260
 
-> **Trạng thái:** flow Vivado và overlay đã được viết theo tài liệu Kria nhưng
-> **chưa được chạy thử trên board/Vivado thật** trong lần tạo dự án này. Chân
-> PMOD đã được đối chiếu với schematic carrier KV260 (xem mục nối dây J2); hãy
-> báo lại lỗi (nếu có) để sửa script.
+> **Trạng thái:** đã build bằng Vivado 2025.2 và chạy trên KV260, nạp bằng
+> `make fpga-jtag` trong lúc Kria Ubuntu đang chạy. Cách nạp bằng `xmutil`
+> (overlay) chưa được thử. Chân PMOD đã được đối chiếu với schematic carrier
+> KV260 (xem mục nối dây J2).
 
 ## Tổng quan
 

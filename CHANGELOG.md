@@ -47,6 +47,19 @@
   `bow32_top` bỏ port `uart1_rx_i/uart1_tx_o`, thêm `gpioa_*` / `gpiob_*`. Trên
   KV260 UART1 vẫn ở J2 chân 5/7.
 
+### Fixed
+- `kv260_cam` build được với Vivado 2025.2 (`tcl/cam_bd.tcl`):
+  `make_bd_pins_external` bỏ qua pin đã nối nên port `sys_clk`/`vid_clk`/
+  `*_resetn` được tạo bằng `create_bd_port`; `C_EN_CSI_V2_0` đưa
+  `CMN_PXL_FORMAT` của CSI-2 RX về RAW8 nên tham số chính được đặt lại sau và
+  kiểm tra lại (cả vị trí chân D-PHY); `clk_wiz` lấy tần số vào từ `pl_clk0`
+  (99,999 MHz) thay vì 100 MHz cố định (lỗi `validate_bd_design`).
+- ISP: frame bị huỷ giữa một dòng (tắt ISP khi đang stream, lỗi hình học) làm
+  đầu ra `isp_*` có SOF giữa dòng; giờ dòng đó được điền nốt bằng pixel 0
+  (test `camera` hỏng khi đổi từ camera sang `tpg`).
+- `bow32_cam.py --fast`: chờ câu trả lời của lệnh `baud` ở tốc độ mới trước khi
+  đồng bộ, prompt thừa không còn làm lệnh kế tiếp báo lỗi.
+
 ## [0.1.0] - 2026-10-20
 
 ### Added

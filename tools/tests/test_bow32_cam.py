@@ -7,6 +7,7 @@ sw/apps/camera. Run: python3 -m unittest discover tools/tests
 import struct
 import sys
 import tempfile
+import time
 import unittest
 import zlib
 from pathlib import Path
@@ -45,21 +46,35 @@ class FakeCameraSerial:
         self.tx = bytearray()
         self.w, self.h, self.fmt, self.corrupt = width, height, fmt, corrupt
         self.pixels = bytes((7 * i) & 0xFF for i in range(3 * width * height))
+        self.busy_until = 0.0     # `baud`: firmware in bow_delay_ms(100)
+
+    def _tick(self):
+        if self.busy_until and time.monotonic() >= self.busy_until:
+            self.busy_until = 0.0
+            self._say("ok\n> ")
+            self._process()        # input received during the delay
 
     @property
     def in_waiting(self):
+        self._tick()
         return len(self.tx)
 
     def reset_input_buffer(self):
+        self._tick()
         self.tx.clear()
 
     def read(self, n):
+        self._tick()
         out, self.tx = bytes(self.tx[:n]), self.tx[n:]
         return out
 
     def write(self, data):
+        self._tick()
         self.rx += data
-        while b"\r" in self.rx:
+        self._process()
+
+    def _process(self):
+        while not self.busy_until and b"\r" in self.rx:
             line, _, rest = bytes(self.rx).partition(b"\r")
             self.rx = bytearray(rest)
             self._line(line.decode())
@@ -83,7 +98,8 @@ class FakeCameraSerial:
             self._say("\nEND\nok\n")
         elif line.startswith("baud "):
             self._say(f"ok, switching to {line[5:]} baud\n")
-            self._say("ok\n")
+            self.busy_until = time.monotonic() + 0.1
+            return                         # "ok" and the prompt come after the delay
         elif line == "boom":
             self._say("unknown command, h for help\nerror\n")
         else:
@@ -142,6 +158,8 @@ class TestShell(unittest.TestCase):
         cam.sync()
         cam.fast(921600)
         self.assertEqual(ser.baudrate, 921600)
+        # the shell is usable afterwards
+        self.assertIn("ae: locked", cam.command("ae on"))
 
 
 if __name__ == "__main__":
