@@ -19,13 +19,13 @@ help:
 	@echo "  make sim         build the Verilator testbench"
 	@echo "  make test        run all system simulation tests"
 	@echo "  make test-tools  unit tests of the host tools (tools/tests)"
-	@echo "  make test-ip     unit tests of the ISP and CSI-2 RX IPs (RTL vs. Python models)"
+	@echo "  make test-ip     unit tests of the ISP, CSI-2 RX and H.264 IPs (RTL vs. Python models)"
 	@echo "  make test-fpga-dv  pin level test of the KV260 D-PHY I/O + CSI-2 RX (xsim, needs Vivado)"
-	@echo "  make run TEST=x  run one test (boot|load|break|flash|irq|gpio|camera|csi2), WAVES=1 for waves"
+	@echo "  make run TEST=x  run one test (boot|load|break|flash|irq|gpio|camera|csi2|h264), WAVES=1 for waves"
 	@echo "  make fpga        Vivado build for the Kria $(BOARD)     -> build/fpga/$(BOARD)/"
 	@echo "  make fpga-jtag   load the bitstream into a running Kria over JTAG (xsdb)"
 	@echo "  make gen         regenerate memory map files from hw/top/data/bow32_memmap.yaml"
-	@echo "  make gen-check   check that generated files are up to date"
+	@echo "  make gen-check   check that generated files are up to date (memory map, H.264 tables)"
 	@echo "  make clean       remove build/"
 
 $(IBEX_DIR)/rtl/ibex_top.sv:
@@ -53,6 +53,7 @@ test-tools:
 test-ip:
 	$(MAKE) -C hw/ip/isp/dv test
 	$(MAKE) -C hw/ip/csi2rx/dv test
+	$(MAKE) -C hw/ip/h264/dv test
 
 test-fpga-dv:
 	$(MAKE) -C hw/fpga/common/dv test
@@ -68,9 +69,11 @@ fpga-jtag:
 
 gen:
 	$(PYTHON) tools/gen_memmap.py
+	$(PYTHON) tools/h264/h264_model.py tables
 
 gen-check:
 	$(PYTHON) tools/gen_memmap.py --check
+	$(PYTHON) tools/h264/h264_model.py tables --check
 
 clean:
 	rm -rf build

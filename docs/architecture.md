@@ -9,13 +9,13 @@
                            │ sys_rst_req                          │
  ┌─────────────────────────┼──────────────────────────────────────┼──┐
  │  bow_cpu_ibex           │                                      │  │
- │  ┌───────────────┐      │       bow_bus_xbar (main)            │  │
+ │  ┌───────────────┐      │       bow_bus_xbar (main, 3 x 7)     │  │
  │  │ ibex_top      │ instr├──────>┌──────────────┐               │  │
  │  │ RV32IMC       │      │       │ decode + RR  │──> bow_rom    │  │
  │  │               │ data ├──────>│ arbiter/dev  │──> bow_flash ─┼──┤ (mem port)
- │  └───────▲───────┘      │       └──────────────┘──> bow_sram   │  │
- │          │irq_fast[7:0] │              │                       │  │
- └──────────┼──────────────┼──────────────┼───────────────────────┘  │
+ │  └───────▲───────┘      │  ┌───>└──────────────┘──> bow_sram   │  │
+ │          │irq_fast[9:0] │  │ DMA       │        └─> bow_vram 1 MiB
+ └──────────┼──────────────┼──┼───────────┼───────────────────────┘  │
             │              │       bow_bus_xbar (periph, 1 host)     │
             │              │       ┌──────────────┐                  │
             │              └───────│ SYSCTRL      │<── uart0_rx (BREAK detect)
@@ -26,18 +26,28 @@
             ├──────────────────────│ GPIOB        │<─┴─> gpiob[7:0]  (PB0/PB1 = UART1 TX/RX)
             ├──────────────────────│ ISP (regs)   │──┐
             ├──────────────────────│ I2C0         │<─┼─> scl/sda (open drain)
-            └──────────────────────│ CSI2RX       │──┼──┐
-                                   └──────────────┘  │  │
+            ├──────────────────────│ CSI2RX       │──┼──┐
+            ├──────────────────────│ H264 (regs)  │──┼──┼──┐
+            └──────────────────────│ DMA (regs)   │──┼──┼──┼──┐
+                                   └──────────────┘  │  │  │  │
    main xbar ──> ISP capture buffer (0x3000_0000) ───┤  │
    main xbar ──> bow_axil_bridge ──> m_axil_* (AXI4-Lite, 0x5000_0000)
                                                      │  │
-   dphy_* (D-PHY I/O) ──> bow_csi2rx ────────────────┼──┘
-                              │ RAW10 (m_axis)       │
+   dphy_* (D-PHY I/O) ──> bow_csi2rx ────────────────┼──┘  │  │
+                              │ RAW10 (m_axis)       │     │  │
                               └──> bow_isp ──────────┴──> isp_* (RGB888 / YUV444, vid_clk_i)
+                                      │ YUV 4:4:4          │  │
+                                      └──> bow_h264 ───────┘  │   H.264 byte stream
+                                              └──> bow_dma ───┘   (kênh 0) ──> main xbar ──> VRAM
 ```
 
 Từ phiên bản có camera, main crossbar có 6 device (thêm buffer capture của ISP
-và cửa sổ AXI4-Lite) và peripheral bus có 9 slot (thêm ISP, I2C0, CSI2RX).
+và cửa sổ AXI4-Lite) và peripheral bus có 9 slot (thêm ISP, I2C0, CSI2RX). Bản
+có video thêm **host thứ ba (DMA)** và **video RAM 1 MiB** trên main crossbar
+(3 host × 7 device), bộ mã hoá **H.264** và **DMA** trên peripheral bus
+(11 slot): camera → CSI-2 → ISP → H.264 → DMA → VRAM là một luồng phần cứng
+liên tục, CPU chỉ cấu hình và gửi stream đi ([ip/h264.md](ip/h264.md),
+[ip/dma.md](ip/dma.md)).
 Bộ thu MIPI CSI-2 (`bow_csi2rx`) nhận các tín hiệu D-PHY `dphy_*` (trên KV260
 từ `bow_dphy_io_xusp` ở board top) và đưa RAW10 vào ISP. Đặc tả:
 [ip/isp.md](ip/isp.md), [ip/csi2rx.md](ip/csi2rx.md), [ip/i2c.md](ip/i2c.md),
@@ -69,9 +79,9 @@ Một giao thức duy nhất cho toàn SoC: chính là bus native của Ibex (t�
 OBI) — `req/gnt` để bắt tay, `rvalid` **đúng 1 chu kỳ** sau `gnt`. Thiết bị chậm
 giữ `gnt = 0`. Chi tiết: [bus.md](bus.md).
 
-* **Main crossbar**: 2 host (instr, data) × 6 device. Mỗi device có arbiter
-  round-robin riêng → instruction fetch từ flash và load/store vào SRAM có thể
-  diễn ra cùng chu kỳ. Grant chưa được nhận thì bị khoá (thiết bị chậm như cầu
+* **Main crossbar**: 3 host (instr, data, DMA) × 7 device. Mỗi device có arbiter
+  round-robin riêng → instruction fetch từ flash, load/store vào SRAM và DMA ghi
+  VRAM có thể diễn ra cùng chu kỳ. Grant chưa được nhận thì bị khoá (thiết bị chậm như cầu
   AXI4-Lite luôn thấy một request ổn định).
 * **Peripheral bus**: cũng là `bow_bus_xbar` với 1 host, chia vùng 64 KiB thành
   các slot 4 KiB.
@@ -80,9 +90,9 @@ giữ `gnt = 0`. Chi tiết: [bus.md](bus.md).
 ## Clock và reset
 
 * Miền clock CPU `clk_i` (50 MHz trên Kria) cho CPU, bus và mọi ngoại vi.
-* Miền clock video `vid_clk_i` dùng trong pipeline pixel của ISP và trong máy
-  trạng thái LP / đầu ra pixel của bộ thu CSI-2 (200 MHz trong bản build
-  camera, bằng `clk_i` trong bản cơ bản).
+* Miền clock video `vid_clk_i` dùng trong pipeline pixel của ISP, toàn bộ bộ mã
+  hoá H.264 và trong máy trạng thái LP / đầu ra pixel của bộ thu CSI-2 (200 MHz
+  trong bản build camera, bằng `clk_i` trong bản cơ bản).
 * Miền **byte clock** của bộ thu CSI-2 = HS clock của camera / 4 (114 MHz ở
   912 Mbit/s), lấy từ lane clock của D-PHY và chỉ chạy khi có HS: tìm sync,
   ghép lane, giải packet, unpack. Bản cơ bản không có D-PHY nên clock này
@@ -109,6 +119,8 @@ giữ `gnt = 0`. Chi tiết: [bus.md](bus.md).
 | ISP (frame / capture xong, lỗi) | `irq_fast_i[5]` | `0x80000015` |
 | I2C0 (lệnh xong) | `irq_fast_i[6]` | `0x80000016` |
 | CSI2RX (FS, FE, lỗi, LOG/RAW xong) | `irq_fast_i[7]` | `0x80000017` |
+| H264 (frame xong, đủ FRAMES, lỗi) | `irq_fast_i[8]` | `0x80000018` |
+| DMA (kênh xong, packet, lỗi bus) | `irq_fast_i[9]` | `0x80000019` |
 
 `irq_timer_i`, `irq_external_i`, `irq_software_i` đang nối 0 — chỗ trống để học
 thêm CLINT/PLIC (xem [roadmap.md](roadmap.md)).
@@ -128,6 +140,8 @@ thêm CLINT/PLIC (xem [roadmap.md](roadmap.md)).
 | ISP có mô hình Python bit-exact | Mọi công thức kiểm chứng được từng bit; sửa RTL thì sửa mô hình |
 | Bộ thu MIPI CSI-2 tự viết thay MIPI CSI-2 RX Subsystem của AMD (bản camera đầu tiên dùng IP này) | Mục tiêu học: D-PHY, SerDes, CDC, protocol đều đọc được trong RTL; không cần IP/license của hãng; mọi thứ quan sát được (bộ đếm lỗi, log packet, word thô, bản đồ eye); phần IP độc lập công nghệ, chỉ `bow_dphy_io_xusp` dùng primitive UltraScale+ |
 | Eye của D-PHY hiệu chỉnh bằng phần mềm lúc chạy | Clock tới ISERDES trễ 0,4–1,4 ns so với data tuỳ PVT: static timing không đạt được; IDELAY + quét tap trong driver là đủ |
+| Bộ mã hoá H.264 tự viết, intra only (`I_16x16`, CAVLC) | Đọc hiểu được từng khối theo chuẩn; không cần frame tham chiếu nên nằm gọn trong FPGA (strip buffer 4 × 16 dòng); stream giải mã được bằng mọi trình phát |
+| Stream H.264 đi qua DMA vào video RAM riêng | Phần cứng nối liền camera → bộ nhớ; CPU (50 MHz) không phải chép dữ liệu; VRAM ở cổng crossbar riêng nên không làm chậm SRAM của CPU |
 
 ## Quy ước mã nguồn
 

@@ -33,6 +33,7 @@ make test-tools    # unit test của công cụ Python (gồm mô hình CSI-2)
 | `irq` | ROM + `uart_irq` | ngắt nhanh UART1, WFI, ISR |
 | `gpio` | ROM + `gpio_demo` | gửi lệnh qua UART0 rồi kiểm tra pad: xuất, set/clear/toggle, đọc `IN`, ngắt cạnh xuống, open-drain, tắt/bật chức năng thay thế PB0/PB1 (UART1) |
 | `camera` | ROM + `camera` | dò IMX219 qua I2C (PA7, TCA9546A, clock stretching); cửa sổ AXI4-Lite (đọc/ghi qua cầu, bus error khi `SLVERR`/timeout); mode 64×48, `cam` hiệu chỉnh eye (mọi tap tốt: `taps 248/248 eye 512/512`), `csi` → `csi2rx: link ok`, 48 dòng, WC 80; sọc màu của cảm biến → bộ thu CSI-2 → ISP → capture → ảnh RGB qua UART (CRC + kiểm tra màu từng sọc), AE và AWB hội tụ, flip (BGGR), TPG của ISP ở YUV |
+| `h264` | ROM + `video` | `dmatest` (DMA kênh 1: SRAM → VRAM → SRAM, lỗi bus ở địa chỉ không ánh xạ); mode 64×48, TPG sọc màu → ISP (YUV) → bộ mã hoá H.264 → DMA kênh 0 → VRAM; `rec 3` rồi `send`: stream qua UART (CRC), lưu `build/sim/h264.hex`; sau mô phỏng `h264_model.py decode --bars` giải mã ra 3 frame 64×48 có đủ 8 sọc màu |
 | `csi2` | ROM + `csi2_test` | `test quick` → `csi2_test: PASS (11/11)` (eye mô hình: lane 0 tap 100…300, lane 1 180…400, tap reset 0 xấu; hiệu chỉnh phải ra ~208/288); rồi cài lỗi vào một frame đang chạy (lật 1 bit header → ECC sửa, lật 1 bit payload → CRC, byte sync sai trên lane 1 → SOT + skew) và `stat` phải in đúng `ecc 1/0 crc 1 trunc 0 sot 0/1 ovf 0`, `misc ≥ 1`; một dòng `[FAIL]` dừng mô phỏng ngay |
 
 Một test PASS khi in `TEST PASSED`; lỗi dùng `$fatal` (mã thoát ≠ 0). Có
@@ -88,6 +89,25 @@ kê, histogram và buffer capture.
 make -C hw/ip/isp/dv test                       # seed 1..6, camera + TPG
 make -C hw/ip/isp/dv run SEED=7 TPG=1 WIDTH=160 HEIGHT=90
 ```
+
+### Bộ mã hoá H.264
+
+`hw/ip/h264/dv/` so bộ mã hoá với mô hình bit-exact `tools/h264/h264_model.py`
+(mô hình đã được đối chiếu với FFmpeg: giải mã stream của nó trùng từng pixel với
+ảnh tái tạo). `h264_model.py gen` sinh case: kích thước (cả chiều cao không chia
+hết 16), nhiều frame với QP từ 10 tới 51, SKIP, deblocking, ảnh cảnh / nhiễu /
+gradient / phẳng (seed chia hết cho 3: frame đầu nhiễu ở QP 10 — nhiều hệ số,
+level lớn, mã escape). `tb_bow_h264.sv` lập trình thanh ghi, phát các frame với
+khoảng trống ngẫu nhiên trong dòng, đọc đầu ra với back-pressure ngẫu nhiên (2
+clock lệch), ghi `out.hex` + `rec.txt` (các hàng tái tạo); `h264_model.py check`
+so từng byte.
+
+```bash
+make -C hw/ip/h264/dv test                               # seed 1..8
+make -C hw/ip/h264/dv run SEED=40 WIDTH=176 HEIGHT=136 FRAMES=2
+```
+
+Testbench in `MB_CYCLES` (số chu kỳ engine cho mỗi macroblock, hiện 392).
 
 ### Bộ thu CSI-2
 

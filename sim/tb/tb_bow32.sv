@@ -14,7 +14,8 @@
 // AXI4-Lite master port.
 //
 // Plusargs:
-//   +TEST=<name>      boot | load | break | flash | irq | gpio | camera | csi2 (see run_test below)
+//   +TEST=<name>      boot | load | break | flash | irq | gpio | camera | csi2 | h264
+//                     (see run_test below)
 //   +ROM=<vmem>       boot ROM image (required)
 //   +FLASH=<vmem>     image preloaded into the flash (backdoor)
 //   +IMAGE=<vmem>     image downloaded over UART by the 'load' test
@@ -1131,6 +1132,50 @@ module tb_bow32;
     $display("[%0t] tb   | error counters ok: %s", $time, s);
   endfunction
 
+  // H.264 test: one command of sw/apps/video and the text expected after it
+  task automatic video_cmd(string cmd, string rsp);
+    int unsigned mark;
+    mark = log0.len();
+    rxq0.delete();
+    uart_send_str(0, {cmd, "\r"});
+    expect_text(0, rsp, mark);
+  endtask
+
+  // Stream transfer of `send`: "H264 <bytes> <crc> <frames> <w> <h> <num> <den>"
+  // line + raw bytes; written to build/sim/h264.hex for the decoder check of
+  // sim/Makefile (tools/h264/h264_model.py decode --bars).
+  task automatic receive_h264(output int unsigned frames);
+    string        line;
+    int unsigned  len, w, h, num, den, fd;
+    logic [31:0]  crc;
+    byte unsigned b, data[$];
+    line = "";
+    forever begin
+      while (rxq0.size() == 0) @(posedge clk);
+      b = rxq0.pop_front();
+      if (b == 8'h0a) begin
+        if (line.len() > 5 && line.substr(0, 4) == "H264 ") break;
+        line = "";
+      end else if (b != 8'h0d) begin
+        line = {line, string'(b)};
+      end
+    end
+    if ($sscanf(line, "H264 %d %h %d %d %d %d %d", len, crc, frames, w, h, num, den) != 7) begin
+      $fatal(1, "bad stream header '%s'", line);
+    end
+    while (data.size() < len) begin
+      while (rxq0.size() == 0) @(posedge clk);
+      data.push_back(rxq0.pop_front());
+    end
+    if (crc32(data) != crc) $fatal(1, "H.264 stream CRC mismatch");
+    if (w != 64 || h != 48) $fatal(1, "H.264 stream of %0dx%0d, expected 64x48", w, h);
+    fd = $fopen("h264.hex", "w");
+    foreach (data[i]) $fdisplay(fd, "%02x", data[i]);
+    $fclose(fd);
+    $display("[%0t] tb   | received H.264 stream: %0d bytes, %0d frames %0dx%0d @ %0d/%0d fps, crc %08x ok",
+             $time, len, frames, w, h, num, den, crc);
+  endtask
+
   task automatic run_test();
     byte unsigned rsp[$], none[$];
     int unsigned  mark, mark1, step;
@@ -1240,6 +1285,28 @@ module tb_bow32;
         $display("[%0t] tb   | camera frames %0d, D-PHY bursts %0d, bit flips outside the eye %0d",
                  $time, cam_frames, u_csi.bursts_done, u_csi.flips);
         check_dphy_gate();
+      end
+      // Video path with sw/apps/video: DMA memory to memory copies, ISP test
+      // pattern -> H.264 encoder -> DMA -> video RAM -> stream over UART0
+      // (decoded and checked by sim/Makefile after the simulation).
+      "h264": begin
+        int unsigned frames;
+        expect_text(0, "h264: Bow32 encoder, max width 2048, 4 strips; DMA 2 channels; video RAM 1024 KiB");
+        expect_text(0, "> ");
+        video_cmd("dmatest", "dma: 2 x 256 bytes copied, bus error detected\nok\n> ");
+        video_cmd("mode 64 48", "ok\n> ");
+        video_cmd("tpg 0", "tpg 0 64x48");
+        video_cmd("qp 26", "ok\n> ");
+        mark = log0.len();
+        video_cmd("rec 3", "rec: 3 frames, ");
+        expect_text(0, "ok\n> ", mark);
+        mark = log0.len();
+        rxq0.delete();
+        uart_send_str(0, "send\r");
+        receive_h264(frames);
+        expect_text(0, "END\nok\n> ", mark);
+        if (frames != 3) $fatal(1, "%0d frames in the stream, expected 3", frames);
+        video_cmd("stat", "record 3 frames");
       end
       default: $fatal(1, "unknown +TEST=%s", test);
     endcase

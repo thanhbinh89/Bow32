@@ -95,13 +95,14 @@ close $fh
 
 # Gray coded buses (set_bus_skew): one "Slack (MET)" per constraint. A
 # constraint whose cells are not found (renamed RTL) is missing from the
-# report, so count them: 7 set_bus_skew lines in constr/kv260_cam.xdc.
+# report, so count them: 9 set_bus_skew lines in constr/kv260_cam.xdc
+# (CSI-2 receiver 7, H.264 output FIFO 2).
 set skew [report_bus_skew -return_string]
 set fh [open [file join $out_dir bus_skew.rpt] w]
 puts $fh $skew
 close $fh
 set skew_met [regexp -all {Slack \(MET\)} $skew]
-if {[regexp {Slack \(VIOLATED\)} $skew] || $skew_met != 7} {
+if {[regexp {Slack \(VIOLATED\)} $skew] || $skew_met != 9} {
   puts "CRITICAL WARNING: bus skew violated or not constrained ($skew_met met), see bus_skew.rpt"
 }
 
