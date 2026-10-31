@@ -87,7 +87,8 @@ Hướng dẫn đầy đủ để thêm một IP vào SoC: [adding_an_ip.md](add
 
 ## Mở rộng sau này
 
-* Nhiều host hơn (DMA, debug module system bus): tăng `NumHosts`.
+* Nhiều host hơn: đã làm cho DMA (`NumHosts = 3`, [ip/dma.md](ip/dma.md)); debug
+  module system bus sẽ là host thứ tư.
 * Device có latency thay đổi / nhiều giao dịch treo: cần thêm FIFO định tuyến
   phản hồi trong crossbar (bài tập hay), hoặc chuyển sang TL-UL / AXI4-Lite qua
   bridge.

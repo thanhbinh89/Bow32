@@ -6,6 +6,67 @@
 ## [Unreleased]
 
 ### Added
+- **Bộ mã hoá H.264** `bow_h264` (`hw/ip/h264`): đầu ra ISP (YUV 4:4:4) →
+  byte stream H.264 Annex B, Constrained Baseline, intra only (mỗi frame một
+  IDR slice `I_16x16`, CAVLC). 4:2:0 (trung bình 2x2), strip buffer 4 × 16 dòng
+  (UltraRAM), dự đoán luma V/H/DC/plane + chroma DC/H/V/plane chọn theo SAD,
+  DCT 4x4, lượng tử, DC Hadamard, tái tạo đúng chuẩn, CAVLC (nC, coeff_token,
+  level, total_zeros, run_before), emulation prevention, NAL đệm tới 4 byte.
+  QP 10…51 mỗi frame, FRAMES / SKIP, cờ deblocking, thống kê (FRAME_BYTES,
+  FRAME_CYCLES, MB_CYCLES); frame lỗi / encoder chậm vẫn cho stream hợp lệ
+  (ERR_INPUT / ERR_OVF). 392 chu kỳ/macroblock ở clock video 200 MHz. Thanh
+  ghi `H264` ở `0x4000_9000`, ngắt `irq_fast[8]` ([docs/ip/h264.md](docs/ip/h264.md)).
+- **DMA** `bow_dma` (`hw/ip/dma`): bus master thứ ba của main crossbar, 2 kênh
+  memory→memory / stream→memory (tuyến tính, vòng, DROP), đếm packet, lỗi bus,
+  ngắt. Kênh 0 nhận stream H.264. Thanh ghi `DMA` ở `0x4000_A000`, ngắt
+  `irq_fast[9]` ([docs/ip/dma.md](docs/ip/dma.md)).
+- **Video RAM** `bow_vram`: 1 MiB ở `0x2400_0000` (UltraRAM, 0 wait-state),
+  vùng `VRAM` trong linker script; `bow_uram_sdp` (RAM 2 port kiểu UltraRAM) trong
+  `hw/ip/common`.
+- Mô hình bit-exact `tools/h264/h264_model.py` (encoder, decoder cho đúng tập con
+  này, SPS/PPS, sinh bảng CAVLC cho RTL `bow_h264_tables_pkg.sv`, lệnh
+  `gen` / `check` / `decode` / `tables`), đối chiếu với FFmpeg: giải mã trùng từng
+  pixel. `tools/h264/mp4.py`: ghi MP4 (fast start) không cần ffmpeg.
+- Testbench IP `hw/ip/h264/dv` (`make test-ip`): stream RTL trùng từng byte với mô
+  hình (kích thước, crop, QP đổi từng frame, SKIP, deblocking, khoảng trống đầu
+  vào, back-pressure đầu ra, 2 clock lệch); CI chạy nó.
+- Driver `bow_h264.h/.c` (SPS/PPS giống từng byte mô hình), `bow_dma.h`.
+- Ứng dụng `video`: camera / TPG → ISP (BT.709 video range) → H.264 → DMA → VRAM,
+  rate control mỗi frame, dừng an toàn khi VRAM gần đầy, `send` qua UART0,
+  `dmatest`. Tool `tools/bow32_video.py`: quay và ghi `.h264` + `.mp4`.
+- Test mô phỏng `h264`: `dmatest`, TPG 64×48 → 3 frame qua UART, stream được
+  giải mã và kiểm tra 8 sọc màu.
+- Unit test `tools/tests/test_h264_model.py` (mô hình, MP4, tool, bảng RTL, SPS/PPS
+  của C; đối chiếu FFmpeg khi có PyAV).
+- **Bộ thu MIPI CSI-2** `bow_csi2rx` (`hw/ip/csi2rx`), thay MIPI CSI-2 RX
+  Subsystem của AMD: phần số của D-PHY (máy trạng thái LP bật bộ thu HS và
+  termination, cổng byte clock, phát hiện mất clock, tìm sync 0xB8 và căn byte
+  mỗi lane), ghép 1–2 lane, lớp packet (ECC header sửa 1 bit, CRC-16, lọc
+  VC/DT, FS/FE), unpack RAW10/RAW8, FIFO 2 clock, đầu ra AXI4-Stream RAW10
+  1 pixel/clock cho ISP. Bộ đếm lỗi, log 64 packet, 64 word thô mỗi lane, đo
+  `FRAME_TIME`/`LINE_TIME`/`BYTECLK`. Thanh ghi `CSI2RX` ở `0x4000_8000`, ngắt
+  `irq_fast[7]` ([docs/ip/csi2rx.md](docs/ip/csi2rx.md)).
+- `bow_fifo_async` (FIFO 2 clock, con trỏ gray) trong `hw/ip/common`.
+- D-PHY I/O cho UltraScale+ `hw/fpga/common/rtl/bow_dphy_io_xusp.sv`
+  (`IBUFDS_DPHY`, `IDELAYE3` COUNT, `ISERDESE3` 1:8, 2 × `BUFGCE_DIV`) và test
+  mức chân với unisim `make -C hw/fpga/common/dv test` (xsim, cần Vivado).
+- Driver `bow_csi2rx.h/.c`: start/stop quanh stream, bộ đếm, link check, hiệu
+  chỉnh eye của tap IDELAY lúc chạy, log packet, word thô, in trạng thái.
+- Ứng dụng `csi2_test`: shell bring-up (`stat`, `cal`, `log`, `raw`, `delay`,
+  `mode`, `tp`, `fmt`, `irq`, `rd`/`wr`) và `test [quick]` (11 check; trên
+  board 16: 1080p30 và 720p60).
+- Ứng dụng `camera`: lệnh `cal [step]`, `csilog [fs|fe]`, `csi` theo bộ thu mới;
+  hiệu chỉnh eye ở `cam` đầu tiên.
+- Mô hình Python `tools/csi2/csi2_model.py` (viết từ đặc tả, không từ RTL) +
+  19 unit test; testbench IP `hw/ip/csi2rx/dv` với mô hình máy phát D-PHY
+  `csi2_tx_model.sv` (30 case mặc định, 210/210 với 40 seed); `make test-ip`;
+  CI chạy test IP của bộ thu.
+- Test mô phỏng `csi2`: `csi2_test test quick` rồi cài lỗi (ECC, CRC, SoT/skew)
+  và kiểm tra đúng số đếm.
+- Kết quả trên KV260 + camera v2: `csi2_test: PASS (16/16)`, 2 lane ×
+  912 Mbit/s, byte clock 114,06 MHz, frame 33326 µs (1080p30) / 16653 µs
+  (720p60), không lỗi ECC/CRC/SoT trong nhiều phút, eye ~260 tap (~0,94 ns) mỗi
+  lane; Vivado 2025.2: WNS +1,023 ns, bus skew 7/7 đạt, 0 lỗi DRC.
 - **ISP** `bow_isp` (`hw/ip/isp`): RAW10 Bayer → RGB888 / YUV444, 1 pixel/clock,
   hai miền clock (CPU / video). Pipeline BLC, DPC (5×5), white balance,
   demosaic bilinear (3×3), CCM, gamma (3 LUT), CSC; thống kê (tổng RGB, luma,
@@ -40,12 +101,38 @@
   gửi được BREAK.
 
 ### Changed
+- `bow32_top`: main crossbar 3 host (thêm DMA) × 7 device (thêm VRAM), peripheral
+  bus 11 slot (thêm H264, DMA); đầu ra ISP đi vào bộ mã hoá H.264; tham số
+  `VramBytes`, `H264MaxWidth`, `H264Strips`.
+- `kv260_cam.xdc`: 2 `set_bus_skew` cho FIFO đầu ra của H.264 (`build.tcl` kiểm tra 9).
+- `make gen` / `gen-check` gồm bảng CAVLC của RTL.
+- `kv260_cam`: chân D-PHY J9 vào `bow_dphy_io_xusp` + `bow_csi2rx`; block design
+  `bow32_cam` chỉ còn PS + `clk_wiz` + 2 `proc_sys_reset` (không cần IP hay
+  license MIPI); XDC mới (HS clock 2,193 ns, nhóm clock bất đồng bộ, false path
+  cho data và CE, `CLOCK_DELAY_GROUP`, 7 `set_bus_skew`); `build.tcl` ghi thêm
+  báo cáo clocks / clock_interaction / check_timing / methodology / drc /
+  bus_skew + `clockInfo.txt` và cảnh báo khi bus skew hoặc clock delay group sai.
+- `bow32_top`: bỏ port `cam_t*`, thêm port `dphy_*` và tham số `CsiLanes`,
+  `CsiPhy`, `VidClkHz`; peripheral bus 9 slot. Bản `kv260` cơ bản có CSI2RX
+  không có D-PHY (`CsiPhy = 0`, mọi lane LP-11).
+- Driver IMX219 chuyển từ `sw/apps/camera` sang `sw/common` (`imx219.h/.c`):
+  probe stream 100 µs để lane vào LP-11, format RAW8/RAW10, màu cho test
+  pattern màu đơn, pattern 0–4.
+- Test `camera`: luồng D-PHY qua `csi2_tx_model.sv` + mô hình IMX219 (LP-00 sau
+  khi bật nguồn; FS, 2 dòng embedded, các dòng, FE; mỗi packet một burst),
+  clock video 107,5 MHz.
+- Cửa sổ AXI4-Lite `0x5000_0000`: không còn thiết bị trong `kv260_cam` (truy cập
+  timeout → bus error).
 - `bow32_top`: thêm port I2C0, miền clock video + luồng camera/ISP, master
   AXI4-Lite; main crossbar 2×6, peripheral bus 8 slot.
 - `bow_rr_arbiter` khoá grant cho tới khi device nhận request.
 - UART1 là chức năng thay thế của PB0 (TX) / PB1 (RX), bật sau reset:
   `bow32_top` bỏ port `uart1_rx_i/uart1_tx_o`, thêm `gpioa_*` / `gpiob_*`. Trên
   KV260 UART1 vẫn ở J2 chân 5/7.
+
+### Removed
+- MIPI CSI-2 RX Subsystem của AMD trong block design `bow32_cam` và driver của
+  nó (`sw/apps/camera/csi2rx.c/.h`).
 
 ### Fixed
 - `kv260_cam` build được với Vivado 2025.2 (`tcl/cam_bd.tcl`):

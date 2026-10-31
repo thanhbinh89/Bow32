@@ -78,14 +78,53 @@ if {[get_property PROGRESS [get_runs impl_1]] ne "100%"} {
 
 # ---------------------------------------------------------------- reports
 open_run impl_1
-report_timing_summary -file [file join $out_dir timing_summary.rpt]
-report_utilization    -file [file join $out_dir utilization.rpt]
+report_timing_summary    -file [file join $out_dir timing_summary.rpt]
+report_utilization       -file [file join $out_dir utilization.rpt]
+# Clock domain crossings of the CSI-2 receiver (constr/kv260_cam.xdc)
+report_clocks            -file [file join $out_dir clocks.rpt]
+report_clock_interaction -file [file join $out_dir clock_interaction.rpt]
+check_timing -verbose    -file [file join $out_dir check_timing.rpt]
+report_methodology       -file [file join $out_dir methodology.rpt]
+report_drc               -file [file join $out_dir drc.rpt]
 set wns [get_property SLACK [get_timing_paths -max_paths 1 -nworst 1 -setup]]
+set whs [get_property SLACK [get_timing_paths -max_paths 1 -nworst 1 -hold]]
+# Setup, hold and pulse width together: the summary has one verdict line
+set fh [open [file join $out_dir timing_summary.rpt] r]
+set timing_met [regexp {All user specified timing constraints are met} [read $fh]]
+close $fh
+
+# Gray coded buses (set_bus_skew): one "Slack (MET)" per constraint. A
+# constraint whose cells are not found (renamed RTL) is missing from the
+# report, so count them: 9 set_bus_skew lines in constr/kv260_cam.xdc
+# (CSI-2 receiver 7, H.264 output FIFO 2).
+set skew [report_bus_skew -return_string]
+set fh [open [file join $out_dir bus_skew.rpt] w]
+puts $fh $skew
+close $fh
+set skew_met [regexp -all {Slack \(MET\)} $skew]
+if {[regexp {Slack \(VIOLATED\)} $skew] || $skew_met != 9} {
+  puts "CRITICAL WARNING: bus skew violated or not constrained ($skew_met met), see bus_skew.rpt"
+}
+
+# The placer lists the members of every CLOCK_DELAY_GROUP: both D-PHY clock
+# nets (HS clock and byte clock) must be in it.
+set clock_info [file join [get_property DIRECTORY [get_runs impl_1]] clockInfo.txt]
+if {[file exists $clock_info]} {
+  file copy -force $clock_info [file join $out_dir clockInfo.txt]
+  set fh [open $clock_info r]
+  set txt [read $fh]
+  close $fh
+  if {![regexp {The following 2 clock nets belong to CLOCK_DELAY_GROUP bow_dphy_rx_clk} $txt]} {
+    puts "CRITICAL WARNING: CLOCK_DELAY_GROUP bow_dphy_rx_clk does not hold the 2 D-PHY clock nets"
+  }
+} else {
+  puts "CRITICAL WARNING: $clock_info not found, CLOCK_DELAY_GROUP bow_dphy_rx_clk not checked"
+}
 
 file copy -force [file join [get_property DIRECTORY [get_runs impl_1]] $top.bit] \
                  [file join $out_dir bow32_kv260_cam.bit]
 
-puts "INFO: bitstream [file join $out_dir bow32_kv260_cam.bit]  (setup WNS = $wns ns)"
-if {$wns < 0} {
-  puts "CRITICAL WARNING: timing constraints are not met, see timing_summary.rpt"
+puts "INFO: bitstream [file join $out_dir bow32_kv260_cam.bit]  (setup WNS = $wns ns, hold WHS = $whs ns)"
+if {!$timing_met} {
+  puts "CRITICAL WARNING: timing constraints are not met (setup, hold or pulse width), see timing_summary.rpt"
 }
