@@ -6,6 +6,38 @@
 ## [Unreleased]
 
 ### Added
+- **Bộ mã hoá H.264** `bow_h264` (`hw/ip/h264`): đầu ra ISP (YUV 4:4:4) →
+  byte stream H.264 Annex B, Constrained Baseline, intra only (mỗi frame một
+  IDR slice `I_16x16`, CAVLC). 4:2:0 (trung bình 2x2), strip buffer 4 × 16 dòng
+  (UltraRAM), dự đoán luma V/H/DC/plane + chroma DC/H/V/plane chọn theo SAD,
+  DCT 4x4, lượng tử, DC Hadamard, tái tạo đúng chuẩn, CAVLC (nC, coeff_token,
+  level, total_zeros, run_before), emulation prevention, NAL đệm tới 4 byte.
+  QP 10…51 mỗi frame, FRAMES / SKIP, cờ deblocking, thống kê (FRAME_BYTES,
+  FRAME_CYCLES, MB_CYCLES); frame lỗi / encoder chậm vẫn cho stream hợp lệ
+  (ERR_INPUT / ERR_OVF). 392 chu kỳ/macroblock ở clock video 200 MHz. Thanh
+  ghi `H264` ở `0x4000_9000`, ngắt `irq_fast[8]` ([docs/ip/h264.md](docs/ip/h264.md)).
+- **DMA** `bow_dma` (`hw/ip/dma`): bus master thứ ba của main crossbar, 2 kênh
+  memory→memory / stream→memory (tuyến tính, vòng, DROP), đếm packet, lỗi bus,
+  ngắt. Kênh 0 nhận stream H.264. Thanh ghi `DMA` ở `0x4000_A000`, ngắt
+  `irq_fast[9]` ([docs/ip/dma.md](docs/ip/dma.md)).
+- **Video RAM** `bow_vram`: 1 MiB ở `0x2400_0000` (UltraRAM, 0 wait-state),
+  vùng `VRAM` trong linker script; `bow_uram_sdp` (RAM 2 port kiểu UltraRAM) trong
+  `hw/ip/common`.
+- Mô hình bit-exact `tools/h264/h264_model.py` (encoder, decoder cho đúng tập con
+  này, SPS/PPS, sinh bảng CAVLC cho RTL `bow_h264_tables_pkg.sv`, lệnh
+  `gen` / `check` / `decode` / `tables`), đối chiếu với FFmpeg: giải mã trùng từng
+  pixel. `tools/h264/mp4.py`: ghi MP4 (fast start) không cần ffmpeg.
+- Testbench IP `hw/ip/h264/dv` (`make test-ip`): stream RTL trùng từng byte với mô
+  hình (kích thước, crop, QP đổi từng frame, SKIP, deblocking, khoảng trống đầu
+  vào, back-pressure đầu ra, 2 clock lệch); CI chạy nó.
+- Driver `bow_h264.h/.c` (SPS/PPS giống từng byte mô hình), `bow_dma.h`.
+- Ứng dụng `video`: camera / TPG → ISP (BT.709 video range) → H.264 → DMA → VRAM,
+  rate control mỗi frame, dừng an toàn khi VRAM gần đầy, `send` qua UART0,
+  `dmatest`. Tool `tools/bow32_video.py`: quay và ghi `.h264` + `.mp4`.
+- Test mô phỏng `h264`: `dmatest`, TPG 64×48 → 3 frame qua UART, stream được
+  giải mã và kiểm tra 8 sọc màu.
+- Unit test `tools/tests/test_h264_model.py` (mô hình, MP4, tool, bảng RTL, SPS/PPS
+  của C; đối chiếu FFmpeg khi có PyAV).
 - **Bộ thu MIPI CSI-2** `bow_csi2rx` (`hw/ip/csi2rx`), thay MIPI CSI-2 RX
   Subsystem của AMD: phần số của D-PHY (máy trạng thái LP bật bộ thu HS và
   termination, cổng byte clock, phát hiện mất clock, tìm sync 0xB8 và căn byte
@@ -69,6 +101,11 @@
   gửi được BREAK.
 
 ### Changed
+- `bow32_top`: main crossbar 3 host (thêm DMA) × 7 device (thêm VRAM), peripheral
+  bus 11 slot (thêm H264, DMA); đầu ra ISP đi vào bộ mã hoá H.264; tham số
+  `VramBytes`, `H264MaxWidth`, `H264Strips`.
+- `kv260_cam.xdc`: 2 `set_bus_skew` cho FIFO đầu ra của H.264 (`build.tcl` kiểm tra 9).
+- `make gen` / `gen-check` gồm bảng CAVLC của RTL.
 - `kv260_cam`: chân D-PHY J9 vào `bow_dphy_io_xusp` + `bow_csi2rx`; block design
   `bow32_cam` chỉ còn PS + `clk_wiz` + 2 `proc_sys_reset` (không cần IP hay
   license MIPI); XDC mới (HS clock 2,193 ns, nhóm clock bất đồng bộ, false path

@@ -17,7 +17,8 @@ theo [adding_an_ip.md](adding_an_ip.md) và kiểm chứng bằng test mô phỏ
 - [ ] **PLIC** đơn giản → `irq_external_i`, nhiều nguồn ngắt có ưu tiên.
 - [ ] **SPI master** (cảm biến / màn hình qua PMOD).
 - [x] **I2C master** ([ip/i2c.md](ip/i2c.md)): điều khiển cảm biến camera.
-- [ ] **DMA** (host thứ 3 trên crossbar: tăng `NumHosts`).
+- [x] **DMA** ([ip/dma.md](ip/dma.md)): host thứ 3 trên crossbar, 2 kênh M2M /
+      stream → bộ nhớ; ghi stream H.264 vào video RAM 1 MiB.
 - [ ] Flash: wait-state đọc + prefetch buffer; bật `ICache` của Ibex để thấy hiệu quả.
 - [ ] Bộ đếm hiệu năng (`MHPMCounterNum`) và đo CoreMark.
 
@@ -50,6 +51,11 @@ theo [adding_an_ip.md](adding_an_ip.md) và kiểm chứng bằng test mô phỏ
       PASS 16/16 trên KV260.
 - [ ] Bộ thu CSI-2 nâng cao: 4 lane (2 pixel/clock), RAW12, nhiều packet trong
       một burst, tự hiệu chỉnh lại eye khi có lỗi, deskew, ULPS.
+- [x] **Bộ mã hoá H.264** ([ip/h264.md](ip/h264.md)): intra only, `I_16x16`,
+      CAVLC; camera → ISP → H.264 → DMA → video RAM → MP4 ([video_kv260.md](video_kv260.md)).
+- [ ] H.264 nâng cao: Intra 4x4, frame P (`P_Skip` + tìm chuyển động, cần frame
+      tham chiếu trong DDR), rate control theo hàng macroblock, streaming liên tục
+      qua UART / Ethernet của PS.
 - [ ] Hiển thị: đưa `isp_*` ra DisplayPort (live video của PS) hoặc HDMI.
 - [ ] ISP nâng cao: demosaic thích nghi theo cạnh, khử nhiễu, sharpen, lens
       shading, thống kê theo lưới, 2 pixel/clock.

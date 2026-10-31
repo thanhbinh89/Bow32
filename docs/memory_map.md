@@ -17,6 +17,7 @@ Tệp này được sinh tự động từ `hw/top/data/bow32_memmap.yaml`. Sử
 | 3 | `periph` | `0x40000000` | `0x4000FFFF` | 64 KiB | Peripheral bus (16 x 4 KiB slots) |
 | 4 | `isp_buf` | `0x30000000` | `0x3001FFFF` | 128 KiB | ISP capture buffer (32K x 24 bit, read only) |
 | 5 | `axil` | `0x50000000` | `0x5000FFFF` | 64 KiB | AXI4-Lite window (devices of the FPGA block design) |
+| 6 | `vram` | `0x24000000` | `0x240FFFFF` | 1024 KiB | Video RAM (1 MiB, UltraRAM): DMA buffers, H.264 stream |
 
 ## Peripheral bus
 
@@ -31,6 +32,8 @@ Tệp này được sinh tự động từ `hw/top/data/bow32_memmap.yaml`. Sử
 | 6 | `isp` | `0x40006000` | `0x40006FFF` | 4 KiB | ISP registers (image signal processor) |
 | 7 | `i2c0` | `0x40007000` | `0x40007FFF` | 4 KiB | I2C master 0 (camera control) |
 | 8 | `csi2rx` | `0x40008000` | `0x40008FFF` | 4 KiB | MIPI CSI-2 receiver (D-PHY RX + CSI-2 RX) |
+| 9 | `h264` | `0x40009000` | `0x40009FFF` | 4 KiB | H.264 encoder (ISP output -> H.264 stream) |
+| 10 | `dma` | `0x4000A000` | `0x4000AFFF` | 4 KiB | DMA controller (2 channels, M2M / stream to memory) |
 
 Truy cập vào địa chỉ không được ánh xạ trả về bus error (Ibex sinh exception *load/store/instruction access fault*).
 
@@ -46,3 +49,5 @@ Truy cập vào địa chỉ không được ánh xạ trả về bus error (Ibe
 | 5 | `0x80000015` | `isp` | ISP frame done / capture done / error |
 | 6 | `0x80000016` | `i2c0` | I2C0 command done |
 | 7 | `0x80000017` | `csi2rx` | CSI-2 RX frame start / frame end / error / log or raw capture done |
+| 8 | `0x80000018` | `h264` | H.264 encoder frame done / sequence done / error |
+| 9 | `0x80000019` | `dma` | DMA channel done / stream packet / bus error |

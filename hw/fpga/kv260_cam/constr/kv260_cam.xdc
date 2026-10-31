@@ -79,3 +79,11 @@ set_bus_skew -from [get_cells {u_soc/u_csi2rx/u_capture/log_ack_o_reg[*]}] \
              -to   [get_cells {u_soc/u_csi2rx/u_sync_log_ack/g_bit[*].u_sync/sync_q_reg[0]}] 5.0
 set_bus_skew -from [get_cells {u_soc/u_csi2rx/u_capture/raw_ack_o_reg[*]}] \
              -to   [get_cells {u_soc/u_csi2rx/u_sync_raw_ack/g_bit[*].u_sync/sync_q_reg[0]}] 5.0
+
+# ---- H.264 encoder output FIFO (u_soc/u_h264/u_out, bow_fifo_async) -----------------
+# write pointer clk_vid -> clk_sys, read pointer clk_sys -> clk_vid. 9 constraints in
+# this file in total (tcl/build.tcl counts them).
+set_bus_skew -from [get_cells {u_soc/u_h264/u_out/wgray_q_reg[*]}] \
+             -to   [get_cells {u_soc/u_h264/u_out/wgray_r1_q_reg[*]}] 5.0
+set_bus_skew -from [get_cells {u_soc/u_h264/u_out/rgray_q_reg[*]}] \
+             -to   [get_cells {u_soc/u_h264/u_out/rgray_w1_q_reg[*]}] 5.0

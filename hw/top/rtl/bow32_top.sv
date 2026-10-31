@@ -4,8 +4,9 @@
 // Bow32 SoC top level (technology independent).
 //
 //   Ibex (instr) --+                          +--> ROM    8 KiB
-//                  +--> main xbar (2 x 6) ----+--> FLASH  128 KiB (memory window)
-//   Ibex (data) ---+                          +--> SRAM   16 KiB
+//   Ibex (data) ---+--> main xbar (3 x 7) ----+--> FLASH  128 KiB (memory window)
+//   DMA ----------+                           +--> SRAM   16 KiB
+//                                             +--> VRAM   1 MiB (DMA buffers)
 //                                             +--> ISP capture buffer -------------+
 //                                             +--> AXI4-Lite bridge --> m_axil_*   |
 //                                             +--> periph xbar (1 x 9)             |
@@ -18,9 +19,12 @@
 //                                                    +--> ISP registers ------+    |
 //                                                    +--> I2C0 --> scl/sda    |    |
 //                                                    +--> CSI2RX registers -+ |    |
+//                                                    +--> H264 registers    | |    |
+//                                                    +--> DMA registers     | |    |
 //                                                                           | |    |
 //   dphy_* (D-PHY I/O) --> CSI-2 RX (bow_csi2rx) --RAW10--> ISP (bow_isp) <-+-+----+
 //                                             +--> isp_* (RGB888/YUV444 AXI4-Stream)
+//                                             +--> H.264 encoder (YUV444) --stream--> DMA channel 0
 //
 // Addresses and port numbers come from bow32_memmap_pkg (generated from
 // hw/top/data/bow32_memmap.yaml). See docs/architecture.md.
@@ -47,7 +51,12 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
   parameter bit                 CsiPhy        = 1'b1,
   parameter int unsigned        VidClkHz      = ClkFreqHz,
   // AXI4-Lite window: address bits passed to the AXI device
-  parameter int unsigned        AxilAddrWidth = 16
+  parameter int unsigned        AxilAddrWidth = 16,
+  // Video RAM (vram window of the memory map: at most 1 MiB)
+  parameter int unsigned        VramBytes     = 1024 * 1024,
+  // H.264 encoder: maximum width (strip buffers), strips of 16 lines
+  parameter int unsigned        H264MaxWidth  = 2048,
+  parameter int unsigned        H264Strips    = 4
 ) (
   input  logic clk_i,
   input  logic rst_ni,        // asynchronous board reset, active low
@@ -142,7 +151,7 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
   // Interrupts
   // ---------------------------------------------------------------------------
   logic        uart0_irq, uart1_irq, flash_irq, gpioa_irq, gpiob_irq, isp_irq, i2c0_irq;
-  logic        csi2rx_irq;
+  logic        csi2rx_irq, h264_irq, dma_irq;
   logic [14:0] irq_fast;
 
   always_comb begin
@@ -155,6 +164,8 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
     irq_fast[IrqFastIsp]    = isp_irq;
     irq_fast[IrqFastI2c0]   = i2c0_irq;
     irq_fast[IrqFastCsi2rx] = csi2rx_irq;
+    irq_fast[IrqFastH264]   = h264_irq;
+    irq_fast[IrqFastDma]    = dma_irq;
   end
 
   // ---------------------------------------------------------------------------
@@ -162,7 +173,8 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
   // ---------------------------------------------------------------------------
   localparam int unsigned HostInstr = 0;
   localparam int unsigned HostData  = 1;
-  localparam int unsigned NumHosts  = 2;
+  localparam int unsigned HostDma   = 2;
+  localparam int unsigned NumHosts  = 3;
 
   bus_req_t [NumHosts-1:0] host_req;
   bus_rsp_t [NumHosts-1:0] host_rsp;
@@ -221,6 +233,16 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
     .rst_ni    (sys_rst_n),
     .bus_req_i (main_req[MainDevSram]),
     .bus_rsp_o (main_rsp[MainDevSram])
+  );
+
+  // Video RAM: accesses above VramBytes wrap around inside the window
+  bow_vram #(
+    .SizeBytes (VramBytes)
+  ) u_vram (
+    .clk_i,
+    .rst_ni    (sys_rst_n),
+    .bus_req_i (main_req[MainDevVram]),
+    .bus_rsp_o (main_rsp[MainDevVram])
   );
 
   // ---------------------------------------------------------------------------
@@ -341,7 +363,7 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
   assign uart1_rx = gpiob_af_in[1];
 
   logic unused_af;
-  assign unused_af = ^{gpiob_af_in[7:2], gpiob_af_in[0]};
+  assign unused_af = ^{gpiob_af_in[7:2], gpiob_af_in[0], dma_tready[1]};
 
   // ---------------------------------------------------------------------------
   // Camera path: MIPI CSI-2 receiver -> ISP (registers on the peripheral bus,
@@ -380,6 +402,14 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
     .dly_tap_i       (dphy_dly_tap_i)
   );
 
+  logic        isp_tvalid, isp_tuser, isp_tlast;
+  logic [23:0] isp_tdata;
+
+  assign isp_tvalid_o = isp_tvalid;
+  assign isp_tdata_o  = isp_tdata;
+  assign isp_tuser_o  = isp_tuser;
+  assign isp_tlast_o  = isp_tlast;
+
   bow_isp #(
     .MaxWidth (IspMaxWidth),
     .BufWords (IspBufWords)
@@ -398,12 +428,60 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
     .s_axis_tdata_i  (cam_tdata),
     .s_axis_tuser_i  (cam_tuser),
     .s_axis_tlast_i  (cam_tlast),
-    .m_axis_tvalid_o (isp_tvalid_o),
+    .m_axis_tvalid_o (isp_tvalid),
     .m_axis_tready_i (isp_tready_i),
-    .m_axis_tdata_o  (isp_tdata_o),
-    .m_axis_tuser_o  (isp_tuser_o),
-    .m_axis_tlast_o  (isp_tlast_o)
+    .m_axis_tdata_o  (isp_tdata),
+    .m_axis_tuser_o  (isp_tuser),
+    .m_axis_tlast_o  (isp_tlast)
   );
+
+  // ---------------------------------------------------------------------------
+  // Video encoding: ISP output (YUV 4:4:4) -> H.264 encoder -> DMA channel 0
+  // -> memory (VRAM). DMA channel 1 has no stream (memory to memory).
+  // ---------------------------------------------------------------------------
+  logic        h264_tvalid, h264_tready, h264_tlast;
+  logic [31:0] h264_tdata;
+
+  bow_h264 #(
+    .MaxWidth  (H264MaxWidth),
+    .NumStrips (H264Strips)
+  ) u_h264 (
+    .clk_i,
+    .rst_ni          (sys_rst_n),
+    .reg_req_i       (periph_req[PeriphDevH264]),
+    .reg_rsp_o       (periph_rsp[PeriphDevH264]),
+    .irq_o           (h264_irq),
+    .m_axis_tvalid_o (h264_tvalid),
+    .m_axis_tready_i (h264_tready),
+    .m_axis_tdata_o  (h264_tdata),
+    .m_axis_tlast_o  (h264_tlast),
+    .vid_clk_i,
+    .vid_rst_ni,
+    .s_axis_tvalid_i (isp_tvalid && isp_tready_i),
+    .s_axis_tdata_i  (isp_tdata),
+    .s_axis_tuser_i  (isp_tuser),
+    .s_axis_tlast_i  (isp_tlast)
+  );
+
+  logic [1:0] dma_tready;
+
+  bow_dma #(
+    .NumCh (2)
+  ) u_dma (
+    .clk_i,
+    .rst_ni     (sys_rst_n),
+    .reg_req_i  (periph_req[PeriphDevDma]),
+    .reg_rsp_o  (periph_rsp[PeriphDevDma]),
+    .host_req_o (host_req[HostDma]),
+    .host_rsp_i (host_rsp[HostDma]),
+    .s_tvalid_i ({1'b0, h264_tvalid}),
+    .s_tready_o (dma_tready),
+    .s_tdata_i  ({32'h0, h264_tdata}),
+    .s_tlast_i  ({1'b0, h264_tlast}),
+    .irq_o      (dma_irq)
+  );
+
+  assign h264_tready = dma_tready[0];
 
   bow_i2c u_i2c0 (
     .clk_i,
