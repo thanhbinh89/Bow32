@@ -17,7 +17,8 @@ theo [adding_an_ip.md](adding_an_ip.md) và kiểm chứng bằng test mô phỏ
 - [ ] **PLIC** đơn giản → `irq_external_i`, nhiều nguồn ngắt có ưu tiên.
 - [ ] **SPI master** (cảm biến / màn hình qua PMOD).
 - [x] **I2C master** ([ip/i2c.md](ip/i2c.md)): điều khiển cảm biến camera.
-- [ ] **DMA** (host thứ 3 trên crossbar: tăng `NumHosts`).
+- [x] **DMA** ([ip/dma.md](ip/dma.md)): host thứ 3 trên crossbar, 2 kênh M2M /
+      stream → bộ nhớ; ghi stream H.264 vào video RAM 1 MiB.
 - [ ] Flash: wait-state đọc + prefetch buffer; bật `ICache` của Ibex để thấy hiệu quả.
 - [ ] Bộ đếm hiệu năng (`MHPMCounterNum`) và đo CoreMark.
 
@@ -32,7 +33,8 @@ theo [adding_an_ip.md](adding_an_ip.md) và kiểm chứng bằng test mô phỏ
 ## Mức 4 — tích hợp với Kria
 
 - [ ] UART của Bow32 ↔ PS qua AXI UART Lite: điều khiển từ Linux, không cần adapter.
-- [x] Cầu **Bow32 bus → AXI4-Lite** ([ip/axil_bridge.md](ip/axil_bridge.md)): Bow32 điều khiển IP AXI của Xilinx (CSI-2 RX).
+- [x] Cầu **Bow32 bus → AXI4-Lite** ([ip/axil_bridge.md](ip/axil_bridge.md)): Bow32 điều khiển IP AXI
+      của Xilinx (đã dùng cho CSI-2 RX của AMD; nay cửa sổ để trống cho IP khác).
 - [ ] AXI4 master (DMA) để Bow32 ghi ảnh / dữ liệu vào DDR của PS.
 - [ ] Flash không bay hơi: backing store trên QSPI/eMMC thông qua PS.
 - [ ] Bus TL-UL (OpenTitan) hoặc AXI làm interconnect chính, so sánh độ phức tạp.
@@ -42,16 +44,25 @@ theo [adding_an_ip.md](adding_an_ip.md) và kiểm chứng bằng test mô phỏ
 - [x] **ISP** RAW10 → RGB/YUV 1 pixel/clock, thống kê AE/AWB/AF, capture
       ([ip/isp.md](ip/isp.md)); camera IMX219 1080p30 / 720p60 trên KV260
       ([camera_kv260.md](camera_kv260.md)).
-- [ ] **Bộ thu MIPI CSI-2 của Bow32** thay IP AMD: D-PHY RX (IOB/ISERDES của
-      UltraScale+, phát hiện SoT, căn byte, căn lane), lớp packet (header,
-      ECC, CRC-16), unpack RAW10, xuất AXI4-Stream giống hiện tại.
+- [x] **Bộ thu MIPI CSI-2 của Bow32** thay IP AMD ([ip/csi2rx.md](ip/csi2rx.md)):
+      D-PHY RX trên `IBUFDS_DPHY`/`IDELAYE3`/`ISERDESE3`/`BUFGCE_DIV`, máy trạng
+      thái LP, phát hiện SoT, căn byte, ghép lane, lớp packet (header, ECC,
+      CRC-16), unpack RAW10/RAW8, eye hiệu chỉnh bằng phần mềm; `csi2_test`
+      PASS 16/16 trên KV260.
+- [ ] Bộ thu CSI-2 nâng cao: 4 lane (2 pixel/clock), RAW12, nhiều packet trong
+      một burst, tự hiệu chỉnh lại eye khi có lỗi, deskew, ULPS.
+- [x] **Bộ mã hoá H.264** ([ip/h264.md](ip/h264.md)): intra only, `I_16x16`,
+      CAVLC; camera → ISP → H.264 → DMA → video RAM → MP4 ([video_kv260.md](video_kv260.md)).
+- [ ] H.264 nâng cao: Intra 4x4, frame P (`P_Skip` + tìm chuyển động, cần frame
+      tham chiếu trong DDR), rate control theo hàng macroblock, streaming liên tục
+      qua UART / Ethernet của PS.
 - [ ] Hiển thị: đưa `isp_*` ra DisplayPort (live video của PS) hoặc HDMI.
 - [ ] ISP nâng cao: demosaic thích nghi theo cạnh, khử nhiễu, sharpen, lens
       shading, thống kê theo lưới, 2 pixel/clock.
 
 ## Chất lượng / quy trình
 
-- [ ] Testbench riêng cho từng IP (`hw/ip/<ip>/dv/`), coverage (đã có cho ISP: so bit-exact với mô hình Python).
+- [ ] Testbench riêng cho từng IP (`hw/ip/<ip>/dv/`), coverage (đã có cho ISP và bộ thu CSI-2: so với mô hình Python).
 - [ ] Mô tả thanh ghi bằng file dữ liệu (hjson/YAML) và sinh RTL + header (giống `reggen` của OpenTitan).
-- [ ] Formal (SymbiYosys) cho crossbar và FIFO.
+- [ ] Formal (SymbiYosys) cho crossbar và FIFO (cả FIFO 2 clock `bow_fifo_async`).
 - [ ] Đồng mô phỏng UART ↔ PTY để chạy `bow32_flash.py` thật với mô hình Verilator.

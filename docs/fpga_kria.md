@@ -32,8 +32,10 @@ Dùng KR260 hoặc carrier khác: copy `hw/fpga/kv260/` thành thư mục board 
 sửa XDC theo user guide của carrier (KR260: UG1092) và gọi `make fpga BOARD=<tên>`.
 
 Bản này cũng nối PA7 vào RPI_ENABLE (F11) và I2C0 vào switch I2C của camera
-(G11/F10); ISP chạy ở clock SoC với test pattern. Camera thật (MIPI CSI-2) cần
-bitstream `kv260_cam`: xem [camera_kv260.md](camera_kv260.md).
+(G11/F10). ISP và bộ thu MIPI CSI-2 (`CSI2RX`) chạy ở clock SoC; bộ thu không
+có D-PHY (`INFO.PHY = 0`: mọi lane nối LP-11, không có byte clock), nên chỉ dùng
+được test pattern của ISP. Camera thật cần bitstream `kv260_cam` (D-PHY trên
+chân J9): xem [camera_kv260.md](camera_kv260.md).
 
 ## 1. Phần cứng cần có
 

@@ -2,20 +2,20 @@
  * Copyright Bow32 contributors.
  * SPDX-License-Identifier: Apache-2.0
  *
- * Camera demo: Raspberry Pi camera v2 (IMX219) -> MIPI CSI-2 RX -> Bow32 ISP,
- * controlled from a small shell on UART0. Type `h` for help.
+ * Camera demo: Raspberry Pi camera v2 (IMX219) -> Bow32 MIPI CSI-2 receiver
+ * -> Bow32 ISP, controlled from a small shell on UART0. Type `h` for help.
  *
  * Works on both KV260 builds:
- *   hw/fpga/kv260      no CSI-2 receiver: ISP test pattern (`tpg`), I2C probe
+ *   hw/fpga/kv260      no D-PHY: ISP test pattern (`tpg`), I2C probe
  *   hw/fpga/kv260_cam  camera: `cam` streams 1080p30 (or `mode 720p` = 60 fps)
  * Images are read from the ISP capture buffer and sent to the PC with `snap`
  * (tools/bow32_cam.py turns them into PNG files). See docs/camera_kv260.md.
  *
- * Shows: sensor bring-up over I2C, ISP configuration (shadow registers +
- * UPDATE), statistics driven auto exposure / auto white balance, capture.
+ * Shows: sensor bring-up over I2C, CSI-2 receiver start/stop around the
+ * stream and eye calibration, ISP configuration (shadow registers + UPDATE),
+ * statistics driven auto exposure / auto white balance, capture.
  */
 #include "bow32.h"
-#include "csi2rx.h"
 #include "imx219.h"
 
 static const char help[] =
@@ -25,7 +25,7 @@ static const char help[] =
     "  stop                stop streaming\n"
     "  mode 1080p|720p|<w> <h> [fps]   frame size (default 1080p, 30 fps)\n"
     "sensor:\n"
-    "  tp <n>              sensor test pattern (0 off, 2 colour bars)\n"
+    "  tp <n>              sensor test pattern (0 off, 1 solid, 2 colour bars)\n"
     "  exp <lines>         exposure (turns AE off)\n"
     "  gain <0..232>       analog gain code, gain = 256 / (256 - code)\n"
     "  flip <h> <v>        mirror / flip (0|1)\n"
@@ -42,8 +42,12 @@ static const char help[] =
     "  cap [x y w h s]     capture w x h pixels, box filter 2^s (default: whole frame)\n"
     "  dump                send the capture to the PC (tools/bow32_cam.py)\n"
     "  snap                cap + dump\n"
+    "CSI-2 receiver:\n"
+    "  csi                 link status, counters, timing, PHY state\n"
+    "  cal [step]          calibrate the data lane delays while streaming (step 16)\n"
+    "  csilog [fs|fe]      log of 64 packets: now, from the next FS or up to an FE\n"
     "misc:\n"
-    "  info  csi  baud <rate>  rd <addr>  wr <addr> <val>\n";
+    "  info  baud <rate>  rd <addr>  wr <addr> <val>\n";
 
 /* Starting point for the IMX219 colour matrix (s3.8, rows sum to 1.0);
  * tune it for your light. */
@@ -55,8 +59,9 @@ static const int16_t ccm_off0[3] = {0, 0, 0};
 static struct {
   /* frame format */
   uint32_t w, h, fll;
-  /* hardware found at start-up */
-  bool sensor, csi;
+  /* hardware found at start-up: sensor, CSI-2 receiver, its D-PHY; the
+   * data lane delays were calibrated */
+  bool sensor, csi, phy, calibrated;
   /* state */
   bool cam, tpg, yuv, hflip, vflip;
   uint32_t tp, exposure, again;
@@ -131,10 +136,15 @@ static void isp_setup(uint32_t bayer) {
   ISP->WB[ISP_WB_B] = cam.wb_b;
 }
 
+/* Frame period of the current mode in ms, rounded up. */
+static uint32_t frame_ms(void) { return imx219_frame_us(cam.fll) / 1000u + 1u; }
+
 static void stop_all(void) {
-  if (cam.cam && cam.sensor) imx219_stream(false);
+  if (cam.cam) {
+    if (cam.sensor) imx219_stream(false);
+    bow_csi2rx_stop(frame_ms() + 10u); /* the sensor finishes its frame first */
+  }
   ISP->CTRL = 0;
-  if (cam.csi) csi2rx_start(false);
   cam.cam = cam.tpg = false;
 }
 
@@ -161,13 +171,28 @@ static int sensor_apply_ctrl(void) {
   return r;
 }
 
+/* Eye calibration of the data lanes while the sensor streams. One tap may
+ * have to wait for a whole frame: allow 1.2 frame periods + 2 ms per tap. */
+static bool calibrate(uint32_t step, bool verbose) {
+  bow_csi2rx_cal_t cal;
+  uint32_t tap_ms = imx219_frame_us(cam.fll) * 12u / 10000u + 3u;
+  if (!bow_csi2rx_calibrate(step, tap_ms, &cal, verbose)) {
+    bow_printf("csi2rx: calibration failed\n");
+    return false;
+  }
+  bow_printf("csi2rx: calibrated taps %u/%u eye %u/%u\n", cal.tap[0], cal.tap[1], cal.width[0],
+             cal.width[1]);
+  cam.calibrated = true;
+  return true;
+}
+
 static bool start_cam(void) {
   if (!cam.sensor) {
     bow_printf("error: no IMX219 (check the ribbon cable, then `info`)\n");
     return false;
   }
-  if (!cam.csi) {
-    bow_printf("error: this bitstream has no CSI-2 receiver, use the kv260_cam build\n");
+  if (!cam.phy) {
+    bow_printf("error: this bitstream has no D-PHY, use the kv260_cam build\n");
     return false;
   }
   stop_all();
@@ -176,26 +201,37 @@ static bool start_cam(void) {
     bow_printf("error: ISP does not take the configuration (no video clock?)\n");
     return false;
   }
-  if (!csi2rx_start(true)) {
-    bow_printf("error: CSI-2 RX soft reset timeout\n");
-    return false;
-  }
+  bow_csi2rx_start(2, CSI2_DT_RAW10, IMX219_LANE_RATE); /* the sensor is still in LP-11 */
   uint32_t max_exp = cam.fll - IMX219_EXP_OFFSET;
   if (cam.exposure > max_exp) cam.exposure = max_exp;
   int r = imx219_configure(cam.w, cam.h, cam.fll);
   if (r == I2C_OK) r = imx219_set_orientation(cam.hflip, cam.vflip);
   if (r == I2C_OK) r = imx219_set_test_pattern(cam.tp);
   if (r == I2C_OK) r = sensor_apply_ctrl();
+  if (r == I2C_OK) {
+    ISP->STATUS = 0xFF;
+    ISP->CTRL = ISP_CTRL_EN;
+    r = imx219_stream(true);
+  }
   if (r != I2C_OK) {
     bow_printf("error: I2C %d while programming the sensor\n", r);
+    ISP->CTRL = 0;
+    CSI2RX->CTRL = 0;
     return false;
   }
-  ISP->STATUS = 0xFF;
-  ISP->CTRL = ISP_CTRL_EN;
-  if (imx219_stream(true) != I2C_OK) return false;
   cam.cam = true;
   cam.frames = 0;
   cam.ae_locked = cam.awb_locked = false;
+  /* The first start calibrates (the reset tap 0 can sit at the edge of the
+   * eye). The receiver keeps the taps: calibrate again only when the link
+   * has errors with them. */
+  if (!cam.calibrated || !bow_csi2rx_link_check(64, 200)) {
+    if (!calibrate(16, false)) return false;
+    /* The ISP drops the frames broken by the tap sweep (input error), the
+     * last one just ended: after one clean frame, clear its error flags. */
+    bow_csi2rx_wait_frame(2u * frame_ms());
+    ISP->STATUS = ISP_ST_ERRORS;
+  }
   static const char *const order[4] = {"RGGB", "GRBG", "GBRG", "BGGR"};
   bow_printf("streaming %ux%u %s\n", cam.w, cam.h, order[imx219_bayer(cam.hflip, cam.vflip)]);
   return true;
@@ -376,7 +412,7 @@ static void info(void) {
   bow_printf("ae %s (target %u)  awb %s (r %u b %u)  source %s\n", cam.ae ? "on" : "off",
              cam.ae_target, cam.awb ? "on" : "off", cam.wb_r, cam.wb_b,
              cam.cam ? "camera" : cam.tpg ? "tpg" : "none");
-  if (cam.csi) csi2rx_print_status();
+  if (cam.csi) bow_csi2rx_print_status();
 }
 
 /* --------------------------------------------------------------- commands */
@@ -551,7 +587,34 @@ static bool execute(const char *line) {
       bow_printf("no CSI-2 receiver in this bitstream\n");
       return true;
     }
-    csi2rx_print_status();
+    bow_csi2rx_print_status();
+    return true;
+  }
+  if ((a = match(line, "cal"))) {
+    if (!cam.cam) {
+      bow_printf("error: the camera is not streaming (cam)\n");
+      return false;
+    }
+    v = 16;
+    parse_num(a, &v, false);
+    if (v == 0 || v > 256) return false;
+    return calibrate(v, true);
+  }
+  if ((a = match(line, "csilog"))) {
+    static uint32_t entries[CSI2RX_LOG_ENTRIES];
+    if (!cam.phy) {
+      bow_printf("error: this bitstream has no D-PHY\n");
+      return false;
+    }
+    uint32_t mode = 0;
+    if (word_is(a, "fs")) mode = CSI2RX_LOG_TRIG_FS;
+    if (word_is(a, "fe")) mode = CSI2RX_LOG_STOP_FE;
+    uint32_t n = bow_csi2rx_log(entries, mode, 3u * frame_ms() + 100u);
+    if (n == 0) {
+      bow_printf("error: no packets (is the camera streaming?)\n");
+      return false;
+    }
+    bow_csi2rx_print_log(entries, n);
     return true;
   }
   if ((a = match(line, "baud"))) {
@@ -587,6 +650,7 @@ static bool execute(const char *line) {
 static void probe_hardware(void) {
   uint16_t id = 0;
   uint32_t lanes;
+  bool phy;
 
   bow_i2c_init(I2C0, 400000);
   int r = imx219_probe(&id);
@@ -599,11 +663,15 @@ static void probe_hardware(void) {
     bow_printf("camera: no IMX219 on I2C (error %d)\n", r);
   }
 
-  cam.csi = csi2rx_probe(&lanes);
-  if (cam.csi) {
-    bow_printf("csi2rx: found (%u lanes)\n", lanes);
+  cam.csi = bow_csi2rx_probe(&lanes, &phy);
+  cam.phy = cam.csi && phy;
+  if (cam.phy) {
+    bow_printf("csi2rx: Bow32 receiver, %u lanes, PHY clock %u MHz\n", lanes,
+               CSI2RX_INFO_MHZ(CSI2RX->INFO));
+  } else if (cam.csi) {
+    bow_printf("csi2rx: Bow32 receiver, no D-PHY in this bitstream - ISP test pattern only\n");
   } else {
-    bow_printf("csi2rx: not present (bus error) - ISP test pattern only\n");
+    bow_printf("csi2rx: not present - ISP test pattern only\n");
   }
 
   if (ISP->ID != ISP_ID_VALUE) bow_printf("ISP: unexpected id %08x\n", ISP->ID);

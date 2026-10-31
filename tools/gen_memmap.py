@@ -124,7 +124,7 @@ def gen_h(mm):
 
 def gen_ld(mm):
     o = [f"/* {BANNER} */", "", "MEMORY", "{"]
-    attrs = {"rom": "rx", "flash": "rx", "sram": "rwx"}
+    attrs = {"rom": "rx", "flash": "rx", "sram": "rwx", "vram": "rw"}
     for r in mm["main_bus"]:
         if r["name"] in attrs:
             o.append(f"  {r['name'].upper():<6} ({attrs[r['name']]}) : ORIGIN = 0x{r['base']:08X}, "
