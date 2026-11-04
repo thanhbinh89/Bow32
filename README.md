@@ -8,7 +8,9 @@ một **bộ thu MIPI CSI-2** tự viết (D-PHY trên primitive I/O của Ultra
 không dùng IP của AMD) và một **bộ mã hoá H.264** tự viết cùng **DMA** và
 **video RAM 1 MiB**: camera → CSI-2 → ISP → H.264 → DMA → RAM là một luồng
 phần cứng liền mạch, ra file **MP4** trên PC. Chạy thử với Raspberry Pi camera
-v2 (IMX219) của KV260 ở **1080p30** hoặc **720p60**.
+v2 (IMX219) của KV260 ở **1080p30** hoặc **720p60**. Bow32 còn có khối tăng tốc
+**mã khối MKV** theo dự thảo TCVN XXXX:2024 (MKV-128 / MKV-256, đủ 6 phiên bản
+khoá), kiểm chứng với mọi giá trị của Phụ lục A trong chuẩn.
 
 ```
                  +-----------------------------------------------------------+
@@ -35,6 +37,7 @@ v2 (IMX219) của KV260 ở **1080p30** hoặc **720p60**.
                  |       +------------------------|  CSI2RX regs   |   |     |  0x4000_8000
                  |       |                  +-----|  H264 regs     |   |     |  0x4000_9000
                  |       |                  |  +--|  DMA regs      |   |     |  0x4000_A000
+                 |       |                  |  |  |  MKV cipher    |   |     |  0x4000_B000
                  |       |                  |  |  +----------------+   |     |
                  |       v                  |  |                       v     |
    D-PHY (J9) ---+--> CSI-2 RX ---> ISP: BLC DPC WB demosaic CCM gamma CSC --+--> isp_* RGB/YUV
@@ -60,10 +63,11 @@ v2 (IMX219) của KV260 ở **1080p30** hoặc **720p60**.
 | **Bộ mã hoá H.264** | Constrained Baseline, intra only (IDR mỗi frame, `I_16x16` đủ 4 mode luma + 4 mode chroma, chọn mode theo SAD), CAVLC, 4:2:0, QP 10…51 mỗi frame, cờ deblocking; 392 chu kỳ/macroblock ở 200 MHz (1080p tới ~62 fps); stream Annex B chuẩn, bit-exact với mô hình Python, giải mã bằng FFmpeg trùng từng pixel ([docs/ip/h264.md](docs/ip/h264.md)) |
 | **DMA** | 2 kênh, bus master thứ ba của main crossbar: memory→memory, stream→memory (tuyến tính / vòng / bỏ), đếm packet (frame), lỗi bus, ngắt ([docs/ip/dma.md](docs/ip/dma.md)) |
 | **Video RAM** | 1 MiB (UltraRAM), 0 wait-state, cổng crossbar riêng cho buffer DMA / stream video |
+| **Mã khối MKV** | dự thảo TCVN XXXX:2024: MKV-128 (khoá 128/192/256) và MKV-256 (khoá 256/384/512), lược đồ khoá trong phần cứng, mã hoá / giải mã 2R + 2 chu kỳ mỗi khối (một nửa vòng / chu kỳ), CLEAR xoá khoá, ngắt; 7 500 LUT; khớp Phụ lục A từng khoá vòng và trạng thái, 360/360 khối ngẫu nhiên trên KV260 trùng mô hình Python ([docs/ip/mkv.md](docs/ip/mkv.md)) |
 | I2C master | 100/400 kHz, START lặp lại, clock stretching; điều khiển cảm biến camera |
 | Cầu AXI4-Lite | cửa sổ `0x5000_0000` tới IP AXI4-Lite của block design (hiện để trống), timeout → bus error |
-| Công cụ | `bow32_flash.py` (nạp qua UART), `bow32_cam.py` (chụp ảnh → PNG, xem trực tiếp), `bow32_video.py` (quay video → `.h264` + `.mp4`), `bow32_image.py` (header/CRC), `gen_memmap.py` (memory map một nguồn), `isp_model.py` (mô hình ISP bit-exact), `csi2_model.py` (mô hình bộ thu CSI-2), `h264/h264_model.py` (mô hình encoder bit-exact + decoder), `h264/mp4.py` (ghi MP4, không cần ffmpeg) |
-| Kiểm chứng | Lint Verilator `-Wall`, 9 test mô phỏng hệ thống (boot, nạp qua UART, BREAK, flash, ngắt, GPIO, camera, CSI-2, H.264) + test riêng của ISP, bộ thu CSI-2 và bộ mã hoá H.264 so với mô hình Python, chạy trong CI; test chân D-PHY bằng xsim (cần Vivado) |
+| Công cụ | `bow32_flash.py` (nạp qua UART), `bow32_cam.py` (chụp ảnh → PNG, xem trực tiếp), `bow32_video.py` (quay video → `.h264` + `.mp4`), `bow32_mkv.py` (kiểm chứng IP MKV trên board), `bow32_image.py` (header/CRC), `gen_memmap.py` (memory map một nguồn), `isp_model.py` (mô hình ISP bit-exact), `csi2_model.py` (mô hình bộ thu CSI-2), `h264/h264_model.py` (mô hình encoder bit-exact + decoder), `h264/mp4.py` (ghi MP4, không cần ffmpeg), `mkv/mkv_model.py` (mô hình MKV + véc tơ trích từ PDF của chuẩn) |
+| Kiểm chứng | Lint Verilator `-Wall`, 10 test mô phỏng hệ thống (boot, nạp qua UART, BREAK, flash, ngắt, GPIO, camera, CSI-2, H.264, MKV) + test riêng của ISP, bộ thu CSI-2, bộ mã hoá H.264 và khối MKV so với mô hình Python, chạy trong CI; test chân D-PHY bằng xsim (cần Vivado) |
 | FPGA | Flow Vivado bằng script cho Kria KV260 (bản cơ bản và bản camera `kv260_cam`, không cần IP/license MIPI), overlay để nạp bằng `xmutil` trên Linux |
 
 ## Bắt đầu nhanh
@@ -78,7 +82,7 @@ pip install -r requirements.txt   # pyserial, PyYAML
 make sw        # boot ROM + ứng dụng mẫu   -> build/sw/
 make lint      # lint RTL
 make test      # chạy toàn bộ test mô phỏng (Verilator)
-make test-ip   # test riêng của ISP, bộ thu CSI-2 và bộ mã hoá H.264 (so với mô hình Python)
+make test-ip   # test riêng của ISP, bộ thu CSI-2, bộ mã hoá H.264 và MKV (so với mô hình Python)
 make test-tools # unit test của công cụ Python
 make test-fpga-dv # test mức chân D-PHY I/O + bộ thu CSI-2 (xsim, cần Vivado)
 make fpga      # bitstream + firmware cho Kria KV260 (cần Vivado)
@@ -108,6 +112,14 @@ Video H.264 → MP4 (camera → ISP → H.264 → DMA → video RAM → UART), x
 ```bash
 python3 tools/bow32_flash.py -p /dev/ttyUSB0 flash build/sw/video/video.bin
 python3 tools/bow32_video.py -p /dev/ttyUSB0 --fast 921600 rec -n 45 --skip 1 -o video.mp4
+```
+
+Mã khối MKV (bitstream nào cũng có), xem [docs/mkv_kv260.md](docs/mkv_kv260.md):
+
+```bash
+python3 tools/bow32_flash.py -p /dev/ttyUSB0 flash build/sw/mkv/mkv.bin
+python3 tools/bow32_mkv.py -p /dev/ttyUSB0 test          # self-test: mkv: PASS (11/11)
+python3 tools/bow32_mkv.py -p /dev/ttyUSB0 verify -n 120 # khoá/khối ngẫu nhiên, so với mô hình
 ```
 
 ### Công cụ cần có
@@ -140,6 +152,7 @@ Bow32/
 │   │   ├── csi2rx/               #   bộ thu MIPI CSI-2: rtl/ + dv/ (mô hình máy phát D-PHY)
 │   │   ├── h264/                 #   bộ mã hoá H.264: rtl/ + dv/ (test bit-exact với mô hình)
 │   │   ├── dma/                  #   DMA 2 kênh (bus master)
+│   │   ├── mkv/                  #   mã khối MKV (TCVN dự thảo 2024): rtl/ + dv/ (so với mô hình)
 │   │   ├── i2c/                  #   I2C master
 │   │   ├── axil/                 #   cầu Bow32 bus -> AXI4-Lite
 │   │   ├── sysctrl/              #   system controller + reset manager
@@ -157,11 +170,11 @@ Bow32/
 ├── sw/
 │   ├── common/                   # HAL, driver (UART, I2C, ISP, CSI-2 RX, IMX219, H.264, DMA...), crt0, linker script
 │   ├── bootrom/                  # romcode: boot + UART loader
-│   ├── apps/                     # hello, uart_irq, flash_demo, gpio_demo, camera, csi2_test, video
+│   ├── apps/                     # hello, uart_irq, flash_demo, gpio_demo, camera, csi2_test, video, mkv
 │   └── mk/                       # Makefile dùng chung
-├── tools/                        # công cụ Python phía host (+ isp/, csi2/, h264/: mô hình, MP4)
-├── docs/                         # tài liệu (tiếng Việt)
-└── .github/workflows/ci.yml      # CI: gen-check, sw, test-tools, lint, test, ISP / CSI-2 RX / H.264 dv
+├── tools/                        # công cụ Python phía host (+ isp/, csi2/, h264/, mkv/: mô hình, MP4)
+├── docs/                         # tài liệu (tiếng Việt); docs/ref/: PDF dự thảo chuẩn MKV
+└── .github/workflows/ci.yml      # CI: gen-check, sw, test-tools, lint, test, ISP / CSI-2 RX / H.264 / MKV dv
 ```
 
 ## Tài liệu
@@ -171,12 +184,14 @@ Bow32/
 | [docs/architecture.md](docs/architecture.md) | Kiến trúc tổng thể, clock/reset, ngắt, quyết định thiết kế |
 | [docs/memory_map.md](docs/memory_map.md) | Bản đồ bộ nhớ (sinh tự động) |
 | [docs/bus.md](docs/bus.md) | Giao thức bus, crossbar, cách gắn thiết bị mới |
-| [docs/ip/](docs/ip/) | Đặc tả từng IP và thanh ghi: CPU, UART, GPIO, flash, sysctrl, bộ nhớ, ISP, bộ thu CSI-2, H.264, DMA, I2C, cầu AXI4-Lite |
+| [docs/ip/](docs/ip/) | Đặc tả từng IP và thanh ghi: CPU, UART, GPIO, flash, sysctrl, bộ nhớ, ISP, bộ thu CSI-2, H.264, DMA, MKV, I2C, cầu AXI4-Lite |
 | [docs/ip/isp.md](docs/ip/isp.md) | ISP: pipeline, công thức từng stage, thống kê, capture, thanh ghi |
 | [docs/ip/csi2rx.md](docs/ip/csi2rx.md) | Bộ thu MIPI CSI-2: D-PHY, I/O UltraScale+, CDC, packet, thanh ghi, hiệu chỉnh eye, ràng buộc |
 | [docs/camera_kv260.md](docs/camera_kv260.md) | Chạy camera trên KV260: bitstream, ứng dụng `camera` và `csi2_test`, chụp ảnh về PC |
 | [docs/ip/h264.md](docs/ip/h264.md) | Bộ mã hoá H.264: kiến trúc, các khối, quyết định của encoder, stream, thanh ghi, kiểm chứng |
 | [docs/ip/dma.md](docs/ip/dma.md) | DMA: chế độ M2M / stream, ring buffer, thanh ghi |
+| [docs/ip/mkv.md](docs/ip/mkv.md) | Mã khối MKV: thuật toán, sai khác của bản dự thảo, kiến trúc, thanh ghi, kiểm chứng |
+| [docs/mkv_kv260.md](docs/mkv_kv260.md) | Chạy và kiểm chứng IP MKV trên KV260: `test`, `kat`, `verify`, `bench` |
 | [docs/video_kv260.md](docs/video_kv260.md) | Quay video H.264 / MP4 trên KV260: ứng dụng `video`, `bow32_video.py`, kết quả |
 | [docs/boot.md](docs/boot.md) | Quy trình boot, định dạng ảnh, giao thức UART loader |
 | [docs/simulation.md](docs/simulation.md) | Chạy mô phỏng, xem waveform, viết test mới |

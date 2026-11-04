@@ -14,7 +14,7 @@
  │  │ RV32IMC       │      │       │ decode + RR  │──> bow_rom    │  │
  │  │               │ data ├──────>│ arbiter/dev  │──> bow_flash ─┼──┤ (mem port)
  │  └───────▲───────┘      │  ┌───>└──────────────┘──> bow_sram   │  │
- │          │irq_fast[9:0] │  │ DMA       │        └─> bow_vram 1 MiB
+ │          │irq_fast[10:0]│  │ DMA       │        └─> bow_vram 1 MiB
  └──────────┼──────────────┼──┼───────────┼───────────────────────┘  │
             │              │       bow_bus_xbar (periph, 1 host)     │
             │              │       ┌──────────────┐                  │
@@ -28,7 +28,8 @@
             ├──────────────────────│ I2C0         │<─┼─> scl/sda (open drain)
             ├──────────────────────│ CSI2RX       │──┼──┐
             ├──────────────────────│ H264 (regs)  │──┼──┼──┐
-            └──────────────────────│ DMA (regs)   │──┼──┼──┼──┐
+            ├──────────────────────│ DMA (regs)   │──┼──┼──┼──┐
+            └──────────────────────│ MKV (mã khối)│  │  │  │  │
                                    └──────────────┘  │  │  │  │
    main xbar ──> ISP capture buffer (0x3000_0000) ───┤  │
    main xbar ──> bow_axil_bridge ──> m_axil_* (AXI4-Lite, 0x5000_0000)
@@ -47,7 +48,8 @@ có video thêm **host thứ ba (DMA)** và **video RAM 1 MiB** trên main cross
 (3 host × 7 device), bộ mã hoá **H.264** và **DMA** trên peripheral bus
 (11 slot): camera → CSI-2 → ISP → H.264 → DMA → VRAM là một luồng phần cứng
 liên tục, CPU chỉ cấu hình và gửi stream đi ([ip/h264.md](ip/h264.md),
-[ip/dma.md](ip/dma.md)).
+[ip/dma.md](ip/dma.md)). Slot thứ 12 của peripheral bus là khối mã khối **MKV**
+(dự thảo TCVN XXXX:2024, [ip/mkv.md](ip/mkv.md)), chỉ có thanh ghi.
 Bộ thu MIPI CSI-2 (`bow_csi2rx`) nhận các tín hiệu D-PHY `dphy_*` (trên KV260
 từ `bow_dphy_io_xusp` ở board top) và đưa RAW10 vào ISP. Đặc tả:
 [ip/isp.md](ip/isp.md), [ip/csi2rx.md](ip/csi2rx.md), [ip/i2c.md](ip/i2c.md),
@@ -121,6 +123,7 @@ giữ `gnt = 0`. Chi tiết: [bus.md](bus.md).
 | CSI2RX (FS, FE, lỗi, LOG/RAW xong) | `irq_fast_i[7]` | `0x80000017` |
 | H264 (frame xong, đủ FRAMES, lỗi) | `irq_fast_i[8]` | `0x80000018` |
 | DMA (kênh xong, packet, lỗi bus) | `irq_fast_i[9]` | `0x80000019` |
+| MKV (lệnh xong, lệnh lỗi) | `irq_fast_i[10]` | `0x8000001A` |
 
 `irq_timer_i`, `irq_external_i`, `irq_software_i` đang nối 0 — chỗ trống để học
 thêm CLINT/PLIC (xem [roadmap.md](roadmap.md)).
@@ -142,6 +145,8 @@ thêm CLINT/PLIC (xem [roadmap.md](roadmap.md)).
 | Eye của D-PHY hiệu chỉnh bằng phần mềm lúc chạy | Clock tới ISERDES trễ 0,4–1,4 ns so với data tuỳ PVT: static timing không đạt được; IDELAY + quét tap trong driver là đủ |
 | Bộ mã hoá H.264 tự viết, intra only (`I_16x16`, CAVLC) | Đọc hiểu được từng khối theo chuẩn; không cần frame tham chiếu nên nằm gọn trong FPGA (strip buffer 4 × 16 dòng); stream giải mã được bằng mọi trình phát |
 | Stream H.264 đi qua DMA vào video RAM riêng | Phần cứng nối liền camera → bộ nhớ; CPU (50 MHz) không phải chép dữ liệu; VRAM ở cổng crossbar riêng nên không làm chậm SRAM của CPU |
+| MKV: một nửa vòng mỗi chu kỳ, lược đồ khoá tính một lần vào LUTRAM | Hai nửa của hàm vòng cùng dạng "cộng khoá → S-box → lớp tuyến tính" nên dùng chung một lớp S-box; giải mã đọc khoá vòng theo thứ tự ngược, không phải tính lại; 18 chu kỳ/khối vẫn nhanh hơn nhiều so với CPU ghi/đọc thanh ghi |
+| MKV theo véc tơ kiểm tra khi văn bản dự thảo mâu thuẫn | Hai chỗ (ma trận M4, hằng số lược đồ khoá) được chứng minh bằng chính dữ liệu của Phụ lục A và giữ thành test ([ip/mkv.md](ip/mkv.md)) |
 
 ## Quy ước mã nguồn
 
