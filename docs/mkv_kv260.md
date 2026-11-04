@@ -8,16 +8,17 @@ TCVN XXXX:2024 (Phụ lục A) và với mô hình Python trên PC:
  PC: tools/bow32_mkv.py ──UART0──► Ibex (sw/apps/mkv) ──bus──► MKV IP 0x4000_B000
      + tools/mkv/mkv_model.py      │  mkv_sw.c: MKV phần mềm        KEY / ENC / DEC
        (so sánh)                   │  mkv_vectors.h: Phụ lục A      irq_fast[10]
-                                   └─► "mkv: PASS (11/11)", "out <hex>"
+                                   └─► "mkv: PASS (13/13)", "out <hex>"
 ```
 
 > **Kết quả trên KV260 (2026-11-04):** bitstream `kv260_cam` (Vivado 2025.2) đạt
-> timing (setup WNS +0,032 ns ở clock video 200 MHz, hold +0,010 ns; mọi đường
-> qua MKV ở 50 MHz còn ≥ +4,7 ns); MKV 7 533 LUT (148 LUTRAM), 1 956 FF; toàn bản
-> 33 300 LUT (28 %). Bản `kv260` cũng đạt: WNS +6,005 ns, 31 300 LUT. Trên board:
-> `test` **PASS (11/11)** (20 khoá ngẫu nhiên mỗi phiên bản), `kat` 6/6 bản mã
-> trùng Phụ lục A, `verify` 120 khoá ngẫu nhiên / **360/360 khối** trùng mô hình
-> Python; IP nhanh hơn MKV phần mềm trên Ibex 110…330 lần mỗi khối.
+> timing (setup WNS +0,102 ns ở clock video 200 MHz, hold +0,010 ns; mọi đường
+> qua MKV ở 50 MHz còn ≥ +2,8 ns); MKV có phát hiện lỗi 9 591 LUT (168 LUTRAM),
+> 2 261 FF; toàn bản 35 200 LUT (30 %). Bản `kv260` cũng đạt: WNS +1,197 ns (đường
+> bus vào MKV), 34 400 LUT. Trên board: `test` **PASS (13/13)** (20 khoá ngẫu
+> nhiên mỗi phiên bản, không `FAULT` nào), `kat` 6/6 bản mã trùng Phụ lục A,
+> `verify` 120 khoá ngẫu nhiên / **360/360 khối** trùng mô hình Python; IP nhanh
+> hơn MKV phần mềm trên Ibex 100…300 lần mỗi khối.
 
 ## 1. Build
 
@@ -67,8 +68,8 @@ python3 tools/bow32_flash.py -p /dev/ttyACM0 --no-break flash build/sw/mkv/mkv.b
 ```
 
 ```
-image: 15284 bytes payload, entry 0x08000020, crc 0x01188d48
-erasing 0x08000000 .. 0x08003bd3
+image: 16152 bytes payload, entry 0x08000020, crc 0xcbb5d405
+erasing 0x08000000 .. 0x08003f37
 writing
 verify OK
 booting
@@ -102,12 +103,14 @@ mkv: self-test (full, seed 1)
   [ 9] CLEAR: key schedule, DIN, DOUT zeroed                      ok
   [10] interrupt DONE / ERR on irq_fast[10]                       ok
   [11] bus stall: CMD during KEY, DOUT during ENC                 ok
-mkv: PASS (11/11)
+  [12] wipe: KEY needs a whole new key, DIN / DOUT zeroed         ok
+  [13] fault detection on (INFO), no fault during the self-test   ok
+mkv: PASS (13/13)
 ```
 
 Mục [2] kiểm tra MKV phần mềm (`sw/apps/mkv/mkv_sw.c`) với **khoá vòng và bản mã
 in trong Phụ lục A**; [3], [4] chạy 6 véc tơ trên IP (cả `STATUS.ROUNDS`,
-`CYCLES` = 2R + 2); [5] so IP với phần mềm trên khoá/khối ngẫu nhiên. Ý nghĩa
+`CYCLES` = 4R + 4); [5] so IP với phần mềm trên khoá/khối ngẫu nhiên. Ý nghĩa
 từng mục: [ip/mkv.md](ip/mkv.md#kiểm-chứng). Đổi seed: `test --seed 7`.
 
 ### 4.2 Véc tơ của chuẩn
@@ -165,17 +168,21 @@ python3 tools/bow32_mkv.py -p /dev/ttyACM0 bench
 ```
 version       key schedule (cycles)    one block (cycles)   ECB, 64 blocks
                    IP         SW         IP         SW     cycles/block    KB/s
-MKV-128/128       234     104922        207      23578              124    6451
-MKV-128/192       311     122271        209      27416              124    6451
-MKV-128/256       378     139666        211      31226              124    6451
-MKV-256/256       350     332910        311      78902              228    7017
-MKV-256/384       485     388307        313      91816              228    7017
-MKV-256/512       610     443370        315     104450              228    7017
+MKV-128/128       278     107352        227      24184              124    6451
+MKV-128/192       359     125113        231      28123              124    6451
+MKV-128/256       436     142891        235      32034              124    6451
+MKV-256/256       390     328536        331      77804              228    7017
+MKV-256/384       527     383049        335      90535              228    7017
+MKV-256/512       660     437675        339     103210              228    7017
 ```
 
-Chu kỳ CPU ở 50 MHz, gồm cả driver. Lõi IP chỉ cần 8R + 1 chu kỳ cho lược đồ
-khoá và 2R + 2 cho một khối (`CYCLES`); phần còn lại là CPU ghi `KEY`/`DIN` và
-đọc `DOUT` qua bus.
+Chu kỳ CPU ở 50 MHz, gồm cả driver. Lõi IP cần 16R + 2 chu kỳ cho lược đồ khoá
+và 4R + 4 cho một khối (`CYCLES`, đã gồm lượt kiểm tra); phần còn lại là CPU ghi
+`KEY`/`DIN` và đọc `DOUT` qua bus. Lượt kiểm tra làm một khối đơn lẻ chậm thêm
+~20 chu kỳ và lược đồ khoá ~50 chu kỳ so với bản không kiểm tra, nhưng ECB
+không đổi (124 / 228 chu kỳ mỗi khối): CPU nạp khối sau và đọc khối trước còn
+lâu hơn lõi. Số đo bằng CPU lệch vài chu kỳ giữa các bản build của ứng dụng (vị
+trí code của driver), `CYCLES` của lõi thì cố định.
 
 ### 4.5 Gõ lệnh trực tiếp
 
@@ -185,13 +192,13 @@ python3 tools/bow32_flash.py -p /dev/ttyACM0 monitor     # hoặc picocom -b 115
 
 ```
 > key 256 0102030405060708090a0b0c0d0e0f1112131415161718191a1b1c1d1e1f2223
-key MKV-256/256 R=6 (49 cycles)
+key MKV-256/256 R=6 (98 cycles)
 ok
 > enc 112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00
 out cf2f2c1008186a578fe5b45dbd154473940c2bec5682cdf83a3564a72db0161b
 ok
 > info
-MKV ID 4d4b5601 INFO 00000203 CTRL 00000001 STATUS 00000616 (busy 0 key 1 done 1 err 0, R 6, MKV-256)
+MKV ID 4d4b5601 INFO 00000407 CTRL 00000001 STATUS 00000616 (busy 0 key 1 done 1 err 0 fault 0, R 6, MKV-256)
 ok
 ```
 
@@ -205,4 +212,5 @@ ok
 | `cannot reach the boot ROM loader` | board đang chạy ứng dụng: `wr 40000010 4c4f4144`, `wr 4000000c 52535421` (mục 3), hoặc nạp lại bitstream |
 | `mkv: IP not found (ID 00000000)` | bitstream cũ (trước MKV): build lại `make fpga` từ nhánh này |
 | `timeout` của `bow32_mkv.py` | sai cổng / baud (ứng dụng khác để UART0 ở 921600: thêm `-b 921600`), hoặc adapter đã đổi tên (`ls /dev/ttyACM*`) |
+| `error: MKV fault`, `info` báo `fault 1` | IP phát hiện lỗi trong lúc tính (mỗi lệnh làm hai lần không khớp): kết quả đã bị huỷ, khoá đã bị xoá. Gõ `clear` rồi `key` lại. Lặp lại thường xuyên: kiểm tra nguồn, clock, bitstream |
 | một mục `FAIL` / `verify: FAIL` | lỗi thật của IP hay driver: chạy `make -C hw/ip/mkv/dv test` và `make run TEST=mkv` để so lại trong mô phỏng |

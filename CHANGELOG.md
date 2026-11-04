@@ -13,7 +13,7 @@
   mỗi chu kỳ, datapath 256 bit chung cho hai cỡ khối), `CLEAR` xoá khoá, `KEY` chỉ
   ghi, lệnh lỗi → `ERR`, ghi `CMD` / đọc `DOUT` tự chờ trên bus khi đang bận, `DIN`
   ghi được khi đang chạy. Thanh ghi `MKV` ở `0x4000_B000`, ngắt `irq_fast[10]`;
-  7 533 LUT, 1 956 FF ([docs/ip/mkv.md](docs/ip/mkv.md)).
+  9 591 LUT, 2 261 FF ([docs/ip/mkv.md](docs/ip/mkv.md)).
 - Hai sai khác giữa văn bản dự thảo và Phụ lục A của nó, chứng minh bằng chính
   véc tơ kiểm tra và giữ thành test: ma trận M4 có `0x0D` (không phải `0x0C`) ở
   (2, 3) và (3, 0); hằng số lần cập nhật khoá `i` là `2i` / `2i − 1` ở nửa khoá
@@ -31,7 +31,7 @@
   `mkv_sw.c` để đối chiếu; tool `tools/bow32_mkv.py` (`test`, `kat`, `verify`,
   `bench`) so kết quả của board với mô hình Python.
 - Test mô phỏng hệ thống `mkv`.
-- Kết quả trên KV260 (bitstream `kv260_cam`, timing đạt): `test` PASS 11/11,
+- Kết quả trên KV260 (bitstream `kv260_cam`, timing đạt): `test` PASS 13/13,
   `kat` 6/6, `verify` 360/360 khối ngẫu nhiên trùng mô hình; ECB 124 / 228 chu kỳ
   mỗi khối (MKV-128 / MKV-256), nhanh hơn MKV phần mềm trên Ibex 110…330 lần
   ([docs/mkv_kv260.md](docs/mkv_kv260.md)).
@@ -175,6 +175,49 @@
   (test `camera` hỏng khi đổi từ camera sang `tpg`).
 - `bow32_cam.py --fast`: chờ câu trả lời của lệnh `baud` ở tốc độ mới trước khi
   đồng bộ, prompt thừa không còn làm lệnh kế tiếp báo lỗi.
+
+### Security
+- MKV (`bow_mkv`): khoá và dữ liệu không còn nằm lại sau khi dùng
+  ([docs/ip/mkv.md](docs/ip/mkv.md), "Bảo mật"):
+  - Lệnh `KEY` xoá thanh ghi `KEY` và chỉ chạy khi đã ghi đủ k/32 từ khoá mới
+    kể từ `KEY`/`CLEAR` trước (không thì `ERR`). Trước đây byte không ghi lại
+    vẫn là byte của khoá cũ: ai ghi được `KEY` và ra lệnh được, dù không đọc
+    được khoá, có thể dò khoá từng byte bằng cách so bản mã; đổi `CTRL` cũng
+    dùng lại được khoá cho phiên bản khác.
+  - Engine giữ `K_R` và trạng thái bằng 0 khi rảnh (một chu kỳ sau lược đồ khoá),
+    xoá khoá vòng của khoá dài hơn trước đó trong các chu kỳ không ghi RAM (`KEY` vẫn 8R + 1 chu
+    kỳ), và sau reset xoá cả RAM khoá vòng (32 chu kỳ `BUSY`, không `DONE`).
+  - `DIN` về 0 khi `ENC`/`DEC` lấy khối, `DOUT` về 0 khi `KEY`.
+  - Diện tích (so với bản dựng lại từ `main`, cùng flow): logic thêm ~17 FF
+    (mặt nạ từ khoá đã ghi, cờ xoá RAM sau reset), LUT không tăng: `kv260_cam`
+    MKV 7 533 → 7 467 LUT, 1 956 → 1 961 FF. Ở `kv260` 8 735 → 9 489 LUT, nhưng
+    đó là Vivado ánh xạ lại mạng S-box: chỉ đổi khối thanh ghi, lõi giữ nguyên RTL,
+    lõi vẫn +825 LUT. FSM giữ mã hoá cũ (`fsm_encoding = "none"`): đổi trạng thái
+    reset sang `Clear` làm Vivado mã lại FSM, tốn thêm ~200 LUT. Timing vẫn đạt;
+    số chu kỳ của mọi lệnh không đổi.
+  - Testbench kiểm tra từng điểm; đưa lại từng điểm yếu thì test hỏng. Ứng dụng
+    `mkv` có thêm kiểm tra (12).
+- MKV phát hiện lỗi tiêm vào phần cứng (glitch, laser), vì bản mã sai là thứ
+  phân tích lỗi cần:
+  - Mỗi lệnh làm hai lần trước khi trả kết quả: `ENC` giải mã lại kết quả trên
+    datapath nghịch, `DEC` mã hoá lại trên datapath thuận, rồi so với đầu vào;
+    `KEY` chạy lược đồ khoá lần hai và so từng khoá nửa vòng với RAM.
+  - RAM khoá vòng có parity mỗi byte (lỗi ở khoá vòng lưu trữ giống nhau ở cả
+    hai lượt). Phiên bản lưu kèm bản bù; bộ đếm chu kỳ thứ hai; trạng thái FSM
+    lạ, FSM về `Idle` giữa chừng, `ENC` khi engine không có khoá đều là lỗi.
+  - Lỗi → `STATUS.FAULT` (W1C, ngắt `IRQ_EN[5]`), không `DONE`, `DOUT` đọc ra 0,
+    RAM khoá vòng, `KEY`, `DIN`, `KEY_VALID` bị xoá. `INFO` = `0x407`.
+  - `CYCLES`: `KEY` 16R + 2, `ENC`/`DEC` 4R + 4. Trên board ECB không đổi (CPU
+    là phần chậm), một khối đơn lẻ +~20 chu kỳ.
+  - Driver: `bow_mkv_encrypt` / `decrypt` / `ecb` trả `bool` (false khi lỗi hay
+    chưa có khoá), `bow_mkv_clear` xoá cả `FAULT`.
+  - Testbench tiêm 10 loại lỗi (`force` thanh ghi trạng thái, bộ đếm bước, bộ
+    đếm chu kỳ, số vòng, FSM, `KEY_VALID`; lật bit trong RAM khoá vòng): tất cả
+    bị phát hiện, không lọt kết quả, xoá sạch, IP dùng lại được. 21 mutation (bỏ
+    từng cơ chế) đều làm test hỏng. Ứng dụng có thêm kiểm tra (13), `test` giờ là
+    `PASS (13/13)`.
+  - Chi phí: MKV 7 467 → 9 591 LUT, 1 961 → 2 261 FF, 148 → 168 LUTRAM
+    (`kv260_cam`); timing vẫn đạt.
 
 ## [0.1.0] - 2026-10-20
 

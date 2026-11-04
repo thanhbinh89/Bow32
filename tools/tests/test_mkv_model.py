@@ -274,7 +274,7 @@ class FakeMkvSerial:
         if words[0] == "key":
             l, key = int(words[1]), bytes.fromhex(words[2])
             self.key = (l, key)
-            return True, f"key MKV-{l}/{len(key) * 8} R={m.rounds_for(l, len(key) * 8)} (49 cycles)\r\n"
+            return True, f"key MKV-{l}/{len(key) * 8} R={m.rounds_for(l, len(key) * 8)} (98 cycles)\r\n"
         if words[0] in ("enc", "dec"):
             l, key = self.key
             blk = bytes.fromhex(words[1])

@@ -63,7 +63,7 @@ khoá), kiểm chứng với mọi giá trị của Phụ lục A trong chuẩn.
 | **Bộ mã hoá H.264** | Constrained Baseline, intra only (IDR mỗi frame, `I_16x16` đủ 4 mode luma + 4 mode chroma, chọn mode theo SAD), CAVLC, 4:2:0, QP 10…51 mỗi frame, cờ deblocking; 392 chu kỳ/macroblock ở 200 MHz (1080p tới ~62 fps); stream Annex B chuẩn, bit-exact với mô hình Python, giải mã bằng FFmpeg trùng từng pixel ([docs/ip/h264.md](docs/ip/h264.md)) |
 | **DMA** | 2 kênh, bus master thứ ba của main crossbar: memory→memory, stream→memory (tuyến tính / vòng / bỏ), đếm packet (frame), lỗi bus, ngắt ([docs/ip/dma.md](docs/ip/dma.md)) |
 | **Video RAM** | 1 MiB (UltraRAM), 0 wait-state, cổng crossbar riêng cho buffer DMA / stream video |
-| **Mã khối MKV** | dự thảo TCVN XXXX:2024: MKV-128 (khoá 128/192/256) và MKV-256 (khoá 256/384/512), lược đồ khoá trong phần cứng, mã hoá / giải mã 2R + 2 chu kỳ mỗi khối (một nửa vòng / chu kỳ), CLEAR xoá khoá, ngắt; 7 500 LUT; khớp Phụ lục A từng khoá vòng và trạng thái, 360/360 khối ngẫu nhiên trên KV260 trùng mô hình Python ([docs/ip/mkv.md](docs/ip/mkv.md)) |
+| **Mã khối MKV** | dự thảo TCVN XXXX:2024: MKV-128 (khoá 128/192/256) và MKV-256 (khoá 256/384/512), lược đồ khoá trong phần cứng, mã hoá / giải mã 4R + 4 chu kỳ mỗi khối (một nửa vòng / chu kỳ, mỗi lệnh làm hai lần và đối chiếu để phát hiện lỗi tiêm vào), xoá khoá sau khi dùng, CLEAR, ngắt; 9 600 LUT; khớp Phụ lục A từng khoá vòng và trạng thái, 360/360 khối ngẫu nhiên trên KV260 trùng mô hình Python ([docs/ip/mkv.md](docs/ip/mkv.md)) |
 | I2C master | 100/400 kHz, START lặp lại, clock stretching; điều khiển cảm biến camera |
 | Cầu AXI4-Lite | cửa sổ `0x5000_0000` tới IP AXI4-Lite của block design (hiện để trống), timeout → bus error |
 | Công cụ | `bow32_flash.py` (nạp qua UART), `bow32_cam.py` (chụp ảnh → PNG, xem trực tiếp), `bow32_video.py` (quay video → `.h264` + `.mp4`), `bow32_mkv.py` (kiểm chứng IP MKV trên board), `bow32_image.py` (header/CRC), `gen_memmap.py` (memory map một nguồn), `isp_model.py` (mô hình ISP bit-exact), `csi2_model.py` (mô hình bộ thu CSI-2), `h264/h264_model.py` (mô hình encoder bit-exact + decoder), `h264/mp4.py` (ghi MP4, không cần ffmpeg), `mkv/mkv_model.py` (mô hình MKV + véc tơ trích từ PDF của chuẩn) |
@@ -118,7 +118,7 @@ Mã khối MKV (bitstream nào cũng có), xem [docs/mkv_kv260.md](docs/mkv_kv26
 
 ```bash
 python3 tools/bow32_flash.py -p /dev/ttyUSB0 flash build/sw/mkv/mkv.bin
-python3 tools/bow32_mkv.py -p /dev/ttyUSB0 test          # self-test: mkv: PASS (11/11)
+python3 tools/bow32_mkv.py -p /dev/ttyUSB0 test          # self-test: mkv: PASS (13/13)
 python3 tools/bow32_mkv.py -p /dev/ttyUSB0 verify -n 120 # khoá/khối ngẫu nhiên, so với mô hình
 ```
 
