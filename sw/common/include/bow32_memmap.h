@@ -45,6 +45,8 @@
 #define BOW32_H264_SIZE 0x00001000u
 #define BOW32_DMA_BASE 0x4000A000u
 #define BOW32_DMA_SIZE 0x00001000u
+#define BOW32_MKV_BASE 0x4000B000u
+#define BOW32_MKV_SIZE 0x00001000u
 
 /* Ibex fast interrupt lines (mcause = 0x80000000 | (16 + line)) */
 #define BOW32_IRQ_FAST_UART0 0
@@ -57,5 +59,6 @@
 #define BOW32_IRQ_FAST_CSI2RX 7
 #define BOW32_IRQ_FAST_H264 8
 #define BOW32_IRQ_FAST_DMA 9
+#define BOW32_IRQ_FAST_MKV 10
 
 #endif /* BOW32_MEMMAP_H_ */

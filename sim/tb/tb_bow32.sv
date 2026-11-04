@@ -14,7 +14,7 @@
 // AXI4-Lite master port.
 //
 // Plusargs:
-//   +TEST=<name>      boot | load | break | flash | irq | gpio | camera | csi2 | h264
+//   +TEST=<name>      boot | load | break | flash | irq | gpio | camera | csi2 | h264 | mkv
 //                     (see run_test below)
 //   +ROM=<vmem>       boot ROM image (required)
 //   +FLASH=<vmem>     image preloaded into the flash (backdoor)
@@ -193,6 +193,10 @@ module tb_bow32;
     if (test == "csi2" && (contains(line, "[FAIL]") || contains(line, "csi2_test: FAIL") ||
                            (line.len() >= 5 && line.substr(0, 4) == "error"))) begin
       $fatal(1, "csi2_test reported a failure: %s", line);
+    end
+    if (test == "mkv" && (contains(line, " FAIL") || contains(line, "mkv: FAIL") ||
+                          (line.len() >= 5 && line.substr(0, 4) == "error"))) begin
+      $fatal(1, "the mkv app reported a failure: %s", line);
     end
   endfunction
 
@@ -1307,6 +1311,18 @@ module tb_bow32;
         expect_text(0, "END\nok\n> ", mark);
         if (frames != 3) $fatal(1, "%0d frames in the stream, expected 3", frames);
         video_cmd("stat", "record 3 frames");
+      end
+      // MKV block cipher with sw/apps/mkv: Annex A of the draft standard on
+      // the IP and in software, IP vs software, ECB, errors, CLEAR, the
+      // interrupt line; then one block through the shell commands of
+      // tools/bow32_mkv.py (expected value: tools/mkv/mkv_model.py enc 128 ...)
+      "mkv": begin
+        expect_text(0, "mkv: Bow32 MKV IP, MKV-128 + MKV-256, 2 cycles per round");
+        expect_text(0, "> ");
+        video_cmd("test quick", "mkv: PASS (11/11)\nok\n> ");
+        video_cmd("key 128 000102030405060708090a0b0c0d0e0f", "key MKV-128/128 R=6 (49 cycles)\nok\n> ");
+        video_cmd("enc 00112233445566778899aabbccddeeff", "out 77ee73e973cbf02fe33809d88d852da6\nok\n> ");
+        video_cmd("dec 77ee73e973cbf02fe33809d88d852da6", "out 00112233445566778899aabbccddeeff\nok\n> ");
       end
       default: $fatal(1, "unknown +TEST=%s", test);
     endcase
