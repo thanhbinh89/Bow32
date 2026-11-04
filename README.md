@@ -173,7 +173,7 @@ Bow32/
 │   ├── apps/                     # hello, uart_irq, flash_demo, gpio_demo, camera, csi2_test, video, mkv
 │   └── mk/                       # Makefile dùng chung
 ├── tools/                        # công cụ Python phía host (+ isp/, csi2/, h264/, mkv/: mô hình, MP4)
-├── docs/                         # tài liệu (tiếng Việt); docs/ref/: PDF của chuẩn MKV (không commit)
+├── docs/                         # tài liệu (tiếng Việt); docs/ref/: PDF dự thảo chuẩn MKV
 └── .github/workflows/ci.yml      # CI: gen-check, sw, test-tools, lint, test, ISP / CSI-2 RX / H.264 / MKV dv
 ```
 
