@@ -1317,10 +1317,10 @@ module tb_bow32;
       // interrupt line; then one block through the shell commands of
       // tools/bow32_mkv.py (expected value: tools/mkv/mkv_model.py enc 128 ...)
       "mkv": begin
-        expect_text(0, "mkv: Bow32 MKV IP, MKV-128 + MKV-256, 2 cycles per round");
+        expect_text(0, "mkv: Bow32 MKV IP, MKV-128 + MKV-256, 4 cycles per round with fault detection");
         expect_text(0, "> ");
-        video_cmd("test quick", "mkv: PASS (11/11)\nok\n> ");
-        video_cmd("key 128 000102030405060708090a0b0c0d0e0f", "key MKV-128/128 R=6 (49 cycles)\nok\n> ");
+        video_cmd("test quick", "mkv: PASS (13/13)\nok\n> ");
+        video_cmd("key 128 000102030405060708090a0b0c0d0e0f", "key MKV-128/128 R=6 (98 cycles)\nok\n> ");
         video_cmd("enc 00112233445566778899aabbccddeeff", "out 77ee73e973cbf02fe33809d88d852da6\nok\n> ");
         video_cmd("dec 77ee73e973cbf02fe33809d88d852da6", "out 00112233445566778899aabbccddeeff\nok\n> ");
       end
