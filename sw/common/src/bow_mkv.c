@@ -35,7 +35,7 @@ bool bow_mkv_set_key(unsigned block_bits, unsigned key_bits, const uint8_t *key)
   uint32_t st;
   while ((st = MKV->STATUS) & MKV_ST_BUSY) {
   }
-  return (st & (MKV_ST_KEY_VALID | MKV_ST_ERR)) == MKV_ST_KEY_VALID;
+  return (st & (MKV_ST_KEY_VALID | MKV_ST_ERR | MKV_ST_FAULT)) == MKV_ST_KEY_VALID;
 }
 
 unsigned bow_mkv_block_bytes(void) {
@@ -71,25 +71,29 @@ static void read_block(uint8_t *out, unsigned words) {
   }
 }
 
-void bow_mkv_ecb(bool decrypt, const uint8_t *in, uint8_t *out, size_t nblocks) {
+bool bow_mkv_ecb(bool decrypt, const uint8_t *in, uint8_t *out, size_t nblocks) {
   unsigned bytes = bow_mkv_block_bytes();
   uint32_t cmd = decrypt ? MKV_CMD_DEC : MKV_CMD_ENC;
-  if (bytes == 0 || nblocks == 0) return;
+  if (bytes == 0) return false;
+  if (nblocks == 0) return true;
   write_block(in, bytes / 4u);
   for (size_t i = 0; i < nblocks; i++) {
     MKV->CMD = cmd;                                  /* copies DIN, starts */
     if (i + 1u < nblocks) write_block(in + (i + 1u) * bytes, bytes / 4u);
     read_block(out + i * bytes, bytes / 4u);
   }
+  /* a fault zeroes the key schedule: every later block reads 0 as well */
+  uint32_t st = MKV->STATUS;
+  return (st & (MKV_ST_KEY_VALID | MKV_ST_FAULT)) == MKV_ST_KEY_VALID;
 }
 
-void bow_mkv_encrypt(const uint8_t *in, uint8_t *out) { bow_mkv_ecb(false, in, out, 1); }
+bool bow_mkv_encrypt(const uint8_t *in, uint8_t *out) { return bow_mkv_ecb(false, in, out, 1); }
 
-void bow_mkv_decrypt(const uint8_t *in, uint8_t *out) { bow_mkv_ecb(true, in, out, 1); }
+bool bow_mkv_decrypt(const uint8_t *in, uint8_t *out) { return bow_mkv_ecb(true, in, out, 1); }
 
 void bow_mkv_clear(void) {
   MKV->CMD = MKV_CMD_CLEAR;
   while (MKV->STATUS & MKV_ST_BUSY) {
   }
-  MKV->STATUS = MKV_ST_DONE | MKV_ST_ERR;
+  MKV->STATUS = MKV_ST_DONE | MKV_ST_ERR | MKV_ST_FAULT;
 }
