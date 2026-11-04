@@ -35,7 +35,7 @@ package bow32_memmap_pkg;
   localparam logic [MainNumDevices-1:0][31:0] MainDevMask = {~(VramSize - 32'd1), ~(AxilSize - 32'd1), ~(IspBufSize - 32'd1), ~(PeriphSize - 32'd1), ~(SramSize - 32'd1), ~(FlashSize - 32'd1), ~(RomSize - 32'd1)};
 
   // periph_bus
-  localparam int unsigned PeriphNumDevices = 11;
+  localparam int unsigned PeriphNumDevices = 12;
   localparam int unsigned PeriphDevSysctrl = 0;
   localparam int unsigned PeriphDevFlashCtrl = 1;
   localparam int unsigned PeriphDevUart0 = 2;
@@ -47,6 +47,7 @@ package bow32_memmap_pkg;
   localparam int unsigned PeriphDevCsi2rx = 8;
   localparam int unsigned PeriphDevH264 = 9;
   localparam int unsigned PeriphDevDma = 10;
+  localparam int unsigned PeriphDevMkv = 11;
   localparam logic [31:0] SysctrlBase = 32'h40000000;
   localparam logic [31:0] SysctrlSize = 32'h00001000;
   localparam logic [31:0] FlashCtrlBase = 32'h40001000;
@@ -69,8 +70,10 @@ package bow32_memmap_pkg;
   localparam logic [31:0] H264Size = 32'h00001000;
   localparam logic [31:0] DmaBase = 32'h4000A000;
   localparam logic [31:0] DmaSize = 32'h00001000;
-  localparam logic [PeriphNumDevices-1:0][31:0] PeriphDevBase = {DmaBase, H264Base, Csi2rxBase, I2c0Base, IspBase, GpiobBase, GpioaBase, Uart1Base, Uart0Base, FlashCtrlBase, SysctrlBase};
-  localparam logic [PeriphNumDevices-1:0][31:0] PeriphDevMask = {~(DmaSize - 32'd1), ~(H264Size - 32'd1), ~(Csi2rxSize - 32'd1), ~(I2c0Size - 32'd1), ~(IspSize - 32'd1), ~(GpiobSize - 32'd1), ~(GpioaSize - 32'd1), ~(Uart1Size - 32'd1), ~(Uart0Size - 32'd1), ~(FlashCtrlSize - 32'd1), ~(SysctrlSize - 32'd1)};
+  localparam logic [31:0] MkvBase = 32'h4000B000;
+  localparam logic [31:0] MkvSize = 32'h00001000;
+  localparam logic [PeriphNumDevices-1:0][31:0] PeriphDevBase = {MkvBase, DmaBase, H264Base, Csi2rxBase, I2c0Base, IspBase, GpiobBase, GpioaBase, Uart1Base, Uart0Base, FlashCtrlBase, SysctrlBase};
+  localparam logic [PeriphNumDevices-1:0][31:0] PeriphDevMask = {~(MkvSize - 32'd1), ~(DmaSize - 32'd1), ~(H264Size - 32'd1), ~(Csi2rxSize - 32'd1), ~(I2c0Size - 32'd1), ~(IspSize - 32'd1), ~(GpiobSize - 32'd1), ~(GpioaSize - 32'd1), ~(Uart1Size - 32'd1), ~(Uart0Size - 32'd1), ~(FlashCtrlSize - 32'd1), ~(SysctrlSize - 32'd1)};
 
   // Ibex fast interrupt lines
   localparam int unsigned IrqFastUart0 = 0;
@@ -83,5 +86,6 @@ package bow32_memmap_pkg;
   localparam int unsigned IrqFastCsi2rx = 7;
   localparam int unsigned IrqFastH264 = 8;
   localparam int unsigned IrqFastDma = 9;
+  localparam int unsigned IrqFastMkv = 10;
 
 endpackage
