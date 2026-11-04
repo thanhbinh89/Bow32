@@ -6,6 +6,35 @@
 ## [Unreleased]
 
 ### Added
+- **Mã khối MKV** `bow_mkv` (`hw/ip/mkv`) theo dự thảo TCVN XXXX:2024 "Mã khối
+  MKV": MKV-128 (khoá 128 / 192 / 256 bit) và MKV-256 (khoá 256 / 384 / 512 bit),
+  R = 6 / 7 / 8. Lược đồ khoá trong phần cứng (8R + 1 chu kỳ, khoá nửa vòng trong
+  RAM 32 × 256 bit LUTRAM), mã hoá / giải mã một khối 2R + 2 chu kỳ (một nửa vòng
+  mỗi chu kỳ, datapath 256 bit chung cho hai cỡ khối), `CLEAR` xoá khoá, `KEY` chỉ
+  ghi, lệnh lỗi → `ERR`, ghi `CMD` / đọc `DOUT` tự chờ trên bus khi đang bận, `DIN`
+  ghi được khi đang chạy. Thanh ghi `MKV` ở `0x4000_B000`, ngắt `irq_fast[10]`;
+  7 533 LUT, 1 956 FF ([docs/ip/mkv.md](docs/ip/mkv.md)).
+- Hai sai khác giữa văn bản dự thảo và Phụ lục A của nó, chứng minh bằng chính
+  véc tơ kiểm tra và giữ thành test: ma trận M4 có `0x0D` (không phải `0x0C`) ở
+  (2, 3) và (3, 0); hằng số lần cập nhật khoá `i` là `2i` / `2i − 1` ở nửa khoá
+  đầu (`⟨v⟩_l ‖ 0`), không phải `⟨2(i−1)⟩_2l` / `⟨2(i−1)+1⟩_2l`.
+- `tools/mkv/extract_vectors.py`: trích S-box, ma trận và 6 véc tơ của Phụ lục A
+  (khoá vòng, 6 bước mỗi vòng, bản mã) từ PDF vào `tools/mkv/tcvn_mkv_vectors.json`.
+  `tools/mkv/mkv_model.py`: mô hình tham chiếu (`selftest` với mọi giá trị của
+  chuẩn, `gen` / `check` cho testbench, `tables`: bảng RTL / C và véc tơ C, trong
+  `make gen` / `gen-check`); 21 unit test `tools/tests/test_mkv_model.py`.
+- Testbench IP `hw/ip/mkv/dv` (`make test-ip`, CI): Phụ lục A + khoá/khối ngẫu
+  nhiên qua bus thanh ghi, so cả trạng thái sau mỗi nửa vòng và RAM khoá vòng với
+  mô hình; test có hướng cho lỗi, `KEY_VALID`, `CLEAR`, ngắt, `CYCLES`, stall.
+- Driver `bow_mkv.h/.c` (`bow_mkv_set_key`, `encrypt`, `decrypt`, `ecb`, `clear`);
+  ứng dụng `mkv` (`test`, `kat`, `key` / `enc` / `dec`, `bench`) với MKV phần mềm
+  `mkv_sw.c` để đối chiếu; tool `tools/bow32_mkv.py` (`test`, `kat`, `verify`,
+  `bench`) so kết quả của board với mô hình Python.
+- Test mô phỏng hệ thống `mkv`.
+- Kết quả trên KV260 (bitstream `kv260_cam`, timing đạt): `test` PASS 11/11,
+  `kat` 6/6, `verify` 360/360 khối ngẫu nhiên trùng mô hình; ECB 124 / 228 chu kỳ
+  mỗi khối (MKV-128 / MKV-256), nhanh hơn MKV phần mềm trên Ibex 110…330 lần
+  ([docs/mkv_kv260.md](docs/mkv_kv260.md)).
 - **Bộ mã hoá H.264** `bow_h264` (`hw/ip/h264`): đầu ra ISP (YUV 4:4:4) →
   byte stream H.264 Annex B, Constrained Baseline, intra only (mỗi frame một
   IDR slice `I_16x16`, CAVLC). 4:2:0 (trung bình 2x2), strip buffer 4 × 16 dòng

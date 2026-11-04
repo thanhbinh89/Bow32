@@ -9,7 +9,7 @@
 //                                             +--> VRAM   1 MiB (DMA buffers)
 //                                             +--> ISP capture buffer -------------+
 //                                             +--> AXI4-Lite bridge --> m_axil_*   |
-//                                             +--> periph xbar (1 x 9)             |
+//                                             +--> periph xbar (1 x 12)            |
 //                                                    +--> SYSCTRL (+ reset manager)|
 //                                                    +--> FLASH_CTRL               |
 //                                                    +--> UART0                    |
@@ -21,6 +21,7 @@
 //                                                    +--> CSI2RX registers -+ |    |
 //                                                    +--> H264 registers    | |    |
 //                                                    +--> DMA registers     | |    |
+//                                                    +--> MKV block cipher  | |    |
 //                                                                           | |    |
 //   dphy_* (D-PHY I/O) --> CSI-2 RX (bow_csi2rx) --RAW10--> ISP (bow_isp) <-+-+----+
 //                                             +--> isp_* (RGB888/YUV444 AXI4-Stream)
@@ -151,7 +152,7 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
   // Interrupts
   // ---------------------------------------------------------------------------
   logic        uart0_irq, uart1_irq, flash_irq, gpioa_irq, gpiob_irq, isp_irq, i2c0_irq;
-  logic        csi2rx_irq, h264_irq, dma_irq;
+  logic        csi2rx_irq, h264_irq, dma_irq, mkv_irq;
   logic [14:0] irq_fast;
 
   always_comb begin
@@ -166,6 +167,7 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
     irq_fast[IrqFastCsi2rx] = csi2rx_irq;
     irq_fast[IrqFastH264]   = h264_irq;
     irq_fast[IrqFastDma]    = dma_irq;
+    irq_fast[IrqFastMkv]    = mkv_irq;
   end
 
   // ---------------------------------------------------------------------------
@@ -482,6 +484,17 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
   );
 
   assign h264_tready = dma_tready[0];
+
+  // ---------------------------------------------------------------------------
+  // MKV block cipher (draft TCVN XXXX:2024), registers only
+  // ---------------------------------------------------------------------------
+  bow_mkv u_mkv (
+    .clk_i,
+    .rst_ni    (sys_rst_n),
+    .bus_req_i (periph_req[PeriphDevMkv]),
+    .bus_rsp_o (periph_rsp[PeriphDevMkv]),
+    .irq_o     (mkv_irq)
+  );
 
   bow_i2c u_i2c0 (
     .clk_i,

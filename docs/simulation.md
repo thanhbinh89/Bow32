@@ -14,8 +14,8 @@ make sw            # firmware: build/sw/
 make test          # build mô hình + chạy mọi test
 make run TEST=load # chạy một test, log ở build/sim/load.log
 make run TEST=load WAVES=1   # + build/sim/waves.fst  (gtkwave build/sim/waves.fst)
-make test-ip       # test riêng của ISP và bộ thu CSI-2 (bên dưới)
-make test-tools    # unit test của công cụ Python (gồm mô hình CSI-2)
+make test-ip       # test riêng của ISP, bộ thu CSI-2, H.264, MKV (bên dưới)
+make test-tools    # unit test của công cụ Python (gồm mô hình CSI-2, MKV)
 ```
 
 Để mô phỏng nhanh, testbench đặt `BootBaud = 1 Mbaud`, `BootWaitMs = 1` và
@@ -34,6 +34,7 @@ make test-tools    # unit test của công cụ Python (gồm mô hình CSI-2)
 | `gpio` | ROM + `gpio_demo` | gửi lệnh qua UART0 rồi kiểm tra pad: xuất, set/clear/toggle, đọc `IN`, ngắt cạnh xuống, open-drain, tắt/bật chức năng thay thế PB0/PB1 (UART1) |
 | `camera` | ROM + `camera` | dò IMX219 qua I2C (PA7, TCA9546A, clock stretching); cửa sổ AXI4-Lite (đọc/ghi qua cầu, bus error khi `SLVERR`/timeout); mode 64×48, `cam` hiệu chỉnh eye (mọi tap tốt: `taps 248/248 eye 512/512`), `csi` → `csi2rx: link ok`, 48 dòng, WC 80; sọc màu của cảm biến → bộ thu CSI-2 → ISP → capture → ảnh RGB qua UART (CRC + kiểm tra màu từng sọc), AE và AWB hội tụ, flip (BGGR), TPG của ISP ở YUV |
 | `h264` | ROM + `video` | `dmatest` (DMA kênh 1: SRAM → VRAM → SRAM, lỗi bus ở địa chỉ không ánh xạ); mode 64×48, TPG sọc màu → ISP (YUV) → bộ mã hoá H.264 → DMA kênh 0 → VRAM; `rec 3` rồi `send`: stream qua UART (CRC), lưu `build/sim/h264.hex`; sau mô phỏng `h264_model.py decode --bars` giải mã ra 3 frame 64×48 có đủ 8 sọc màu |
+| `mkv` | ROM + `mkv` | `test quick` → `mkv: PASS (11/11)`: MKV phần mềm và IP khớp 6 véc tơ của Phụ lục A (cả khoá vòng), IP ↔ phần mềm trên khoá/khối ngẫu nhiên, ECB (ghi `DIN` khi IP đang chạy), lệnh lỗi, `KEY_VALID`, `CLEAR`, ngắt `irq_fast[10]` (`mip`), stall bus; rồi `key`/`enc`/`dec` qua shell phải ra đúng giá trị của `mkv_model.py`; một dòng `FAIL`/`error` dừng mô phỏng ngay (~9,3 M chu kỳ) |
 | `csi2` | ROM + `csi2_test` | `test quick` → `csi2_test: PASS (11/11)` (eye mô hình: lane 0 tap 100…300, lane 1 180…400, tap reset 0 xấu; hiệu chỉnh phải ra ~208/288); rồi cài lỗi vào một frame đang chạy (lật 1 bit header → ECC sửa, lật 1 bit payload → CRC, byte sync sai trên lane 1 → SOT + skew) và `stat` phải in đúng `ecc 1/0 crc 1 trunc 0 sot 0/1 ovf 0`, `misc ≥ 1`; một dòng `[FAIL]` dừng mô phỏng ngay |
 
 Một test PASS khi in `TEST PASSED`; lỗi dùng `$fatal` (mã thoát ≠ 0). Có
@@ -76,7 +77,7 @@ Clock video 9,3 ns (`VidClkHz = 107_526_882`): `INFO` báo 108 MHz, nên driver
 
 ## Test riêng của IP
 
-`make test-ip` chạy cả hai test dưới đây (CI cũng vậy).
+`make test-ip` chạy các test dưới đây (CI cũng vậy).
 
 ### ISP
 
@@ -108,6 +109,23 @@ make -C hw/ip/h264/dv run SEED=40 WIDTH=176 HEIGHT=136 FRAMES=2
 ```
 
 Testbench in `MB_CYCLES` (số chu kỳ engine cho mỗi macroblock, hiện 392).
+
+### Mã khối MKV
+
+`hw/ip/mkv/dv/` so khối MKV với mô hình `tools/mkv/mkv_model.py`; bản thân mô
+hình được kiểm tra với mọi giá trị in trong Phụ lục A của dự thảo
+(`mkv_model.py selftest`, trích từ PDF bằng `tools/mkv/extract_vectors.py`).
+`mkv_model.py gen` sinh 6 véc tơ của chuẩn (mã hoá + giải mã) rồi khoá/khối ngẫu
+nhiên cho cả 6 phiên bản. `tb_bow_mkv.sv` chạy chúng qua bus thanh ghi (ghi byte
+enable, ghi `DIN` khi IP đang chạy, đọc `DOUT` bị giữ hay sau hỏi vòng) và ghi
+`out.txt`, **trạng thái sau mỗi nửa vòng** (`trace.txt`) và **RAM khoá vòng**
+sau mỗi lược đồ khoá (`rk.txt`); `mkv_model.py check` so tất cả. Cuối test là các
+kiểm tra có hướng: `ERR`, `KEY_VALID`, `CLEAR`, ngắt, `CYCLES`, stall bus.
+
+```bash
+make -C hw/ip/mkv/dv test                    # seed 1..4 (~510 phép toán, ~7 700 trạng thái)
+make -C hw/ip/mkv/dv run SEED=99 COUNT=600   # 1 231 phép toán
+```
 
 ### Bộ thu CSI-2
 

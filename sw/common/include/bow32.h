@@ -26,6 +26,7 @@
 #include "bow_probe.h"
 #include "bow_h264.h"
 #include "bow_dma.h"
+#include "bow_mkv.h"
 
 #define BOW_REG32(addr) (*(volatile uint32_t *)(uintptr_t)(addr))
 

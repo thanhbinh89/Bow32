@@ -60,6 +60,14 @@ theo [adding_an_ip.md](adding_an_ip.md) và kiểm chứng bằng test mô phỏ
 - [ ] ISP nâng cao: demosaic thích nghi theo cạnh, khử nhiễu, sharpen, lens
       shading, thống kê theo lưới, 2 pixel/clock.
 
+## Mức 6 — mật mã
+
+- [x] **Mã khối MKV** (dự thảo TCVN XXXX:2024, [ip/mkv.md](ip/mkv.md)):
+      MKV-128 / MKV-256, 6 phiên bản khoá, lược đồ khoá trong phần cứng, một nửa
+      vòng mỗi chu kỳ; kiểm chứng với Phụ lục A và trên KV260 ([mkv_kv260.md](mkv_kv260.md)).
+- [ ] Chế độ hoạt động trong phần cứng (CTR / CBC / GCM) và nạp dữ liệu bằng DMA.
+- [ ] Hàm băm (SHA-2 / SHA-3) và TRNG (ring oscillator) để có khoá sinh ngay trên chip.
+
 ## Chất lượng / quy trình
 
 - [ ] Testbench riêng cho từng IP (`hw/ip/<ip>/dv/`), coverage (đã có cho ISP và bộ thu CSI-2: so với mô hình Python).

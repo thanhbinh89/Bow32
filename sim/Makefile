@@ -4,7 +4,7 @@
 # System simulation with Verilator (>= 5.0, uses --binary --timing).
 #
 #   make build                 compile the testbench
-#   make run TEST=boot         run one test (boot | load | break | flash | irq | gpio | camera | csi2 | h264)
+#   make run TEST=boot         run one test (boot | load | break | flash | irq | gpio | camera | csi2 | h264 | mkv)
 #   make test                  run all tests
 #   make run TEST=load WAVES=1 also dump build/sim/waves.fst (open with GTKWave)
 
@@ -16,7 +16,7 @@ PYTHON    ?= python3
 WAVES     ?= 0
 
 TEST  ?= boot
-TESTS := boot load break flash irq gpio camera csi2 h264
+TESTS := boot load break flash irq gpio camera csi2 h264 mkv
 
 ROM_VMEM := $(SW_BUILD)/bootrom/bootrom.vmem
 
@@ -29,6 +29,7 @@ FLASH_gpio  := $(SW_BUILD)/gpio_demo/gpio_demo.vmem
 FLASH_camera := $(SW_BUILD)/camera/camera.vmem
 FLASH_csi2  := $(SW_BUILD)/csi2_test/csi2_test.vmem
 FLASH_h264  := $(SW_BUILD)/video/video.vmem
+FLASH_mkv   := $(SW_BUILD)/mkv/mkv.vmem
 IMAGE_load  := $(SW_BUILD)/hello/hello.vmem
 
 # Separate model directories with and without waveform tracing.
