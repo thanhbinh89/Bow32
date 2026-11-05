@@ -4,12 +4,13 @@
 // Bow32 SoC top level (technology independent).
 //
 //   Ibex (instr) --+                          +--> ROM    8 KiB
-//   Ibex (data) ---+--> main xbar (3 x 7) ----+--> FLASH  128 KiB (memory window)
+//   Ibex (data) ---+--> main xbar (3 x 8) ----+--> FLASH  128 KiB (memory window)
 //   DMA ----------+                           +--> SRAM   16 KiB
 //                                             +--> VRAM   1 MiB (DMA buffers)
 //                                             +--> ISP capture buffer -------------+
 //                                             +--> AXI4-Lite bridge --> m_axil_*   |
-//                                             +--> periph xbar (1 x 12)            |
+//                                             +--> DDR2/DDR3 window 512 MiB (bow_ddr) --> ddr_io_* (PHY bundle)
+//                                             +--> periph xbar (1 x 14)            |
 //                                                    +--> SYSCTRL (+ reset manager)|
 //                                                    +--> FLASH_CTRL               |
 //                                                    +--> UART0                    |
@@ -22,6 +23,8 @@
 //                                                    +--> H264 registers    | |    |
 //                                                    +--> DMA registers     | |    |
 //                                                    +--> MKV block cipher  | |    |
+//                                                    +--> DDR controller CSRs (LiteDRAM)
+//                                                    +--> DDR PHY registers         |
 //                                                                           | |    |
 //   dphy_* (D-PHY I/O) --> CSI-2 RX (bow_csi2rx) --RAW10--> ISP (bow_isp) <-+-+----+
 //                                             +--> isp_* (RGB888/YUV444 AXI4-Stream)
@@ -57,7 +60,21 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
   parameter int unsigned        VramBytes     = 1024 * 1024,
   // H.264 encoder: maximum width (strip buffers), strips of 16 lines
   parameter int unsigned        H264MaxWidth  = 2048,
-  parameter int unsigned        H264Strips    = 4
+  parameter int unsigned        H264Strips    = 4,
+  // DDR2/DDR3 SDRAM (docs/ip/ddr.md): LiteDRAM controller core DdrMem (2: DDR2
+  // x8 64 MiB, the FMC card; 3: DDR3 x16 128 MiB, DLL-off), Bow32 PHY. The pad
+  // widths follow DdrMem (DDR2: 8 DQ, 14 address, 2 bank pins, no DM / RESET#;
+  // DDR3: 16 DQ, 13 address, 3 bank pins, DM, RESET#). DdrClkHz = CK,
+  // DdrPsSteps = MMCM fine phase steps per CK, DdrPhyKind 1 pins / 2 loopback
+  // emulator, DdrEmuBytes = emulator storage (INFO, EMU). DdrEn = 0: stub
+  // (window and CSRs answer bus errors, INFO[24] = 0), the ddr_* ports are
+  // unused.
+  parameter bit                 DdrEn         = 1'b0,
+  parameter int unsigned        DdrMem        = 2,
+  parameter int unsigned        DdrClkHz      = 133_333_333,
+  parameter int unsigned        DdrPsSteps    = 504,
+  parameter int unsigned        DdrPhyKind    = 1,
+  parameter int unsigned        DdrEmuBytes   = 0
 ) (
   input  logic clk_i,
   input  logic rst_ni,        // asynchronous board reset, active low
@@ -128,6 +145,24 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
   input  logic                     m_axil_rvalid_i,
   output logic                     m_axil_rready_o,
 
+  // DDR2/DDR3 clocks and PHY bundle (docs/ip/ddr.md). ddr_sys_clk_i = LiteDRAM
+  // controller clock CK / 4 from the same MMCM as ddr_clk_i, every rising edge
+  // on a ddr_clk_i rising edge. Without DDR: DdrEn = 0, clocks and ddr_rst_ni
+  // 0, ddr_ps_done_i / ddr_wps_done_i 0, ddr_io_i '0, ddr_dbg_i '0.
+  input  logic                     ddr_sys_clk_i,  // controller clock (CK / 4, edge aligned)
+  input  logic                     ddr_clk_i,      // CK-rate clock, 0 deg
+  input  logic                     ddr_rst_ni,     // async active low (MMCM locked)
+  input  logic                     ddr_rd_clk_i,   // read capture clock (same frequency, fine PS)
+  output logic                     ddr_ps_en_o,    // read-phase MMCM PSEN (PSCLK = ddr_clk_i)
+  output logic                     ddr_ps_inc_o,
+  input  logic                     ddr_ps_done_i,
+  output logic                     ddr_wps_en_o,   // write-phase MMCM PSEN (PSCLK = ddr_clk_i)
+  output logic                     ddr_wps_inc_o,
+  input  logic                     ddr_wps_done_i,
+  output bow_ddr_pkg::ddr_io_out_t ddr_io_o,       // ddr_clk_i domain
+  input  bow_ddr_pkg::ddr_io_in_t  ddr_io_i,       // ddr_rd_clk_i domain
+  input  logic [31:0]              ddr_dbg_i,      // board debug word (loopback emulator)
+
   // Status (for LEDs / debug)
   output logic       sys_rst_no,
   output logic       core_sleep_o
@@ -152,7 +187,7 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
   // Interrupts
   // ---------------------------------------------------------------------------
   logic        uart0_irq, uart1_irq, flash_irq, gpioa_irq, gpiob_irq, isp_irq, i2c0_irq;
-  logic        csi2rx_irq, h264_irq, dma_irq, mkv_irq;
+  logic        csi2rx_irq, h264_irq, dma_irq, mkv_irq, ddr_irq;
   logic [14:0] irq_fast;
 
   always_comb begin
@@ -168,6 +203,7 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
     irq_fast[IrqFastH264]   = h264_irq;
     irq_fast[IrqFastDma]    = dma_irq;
     irq_fast[IrqFastMkv]    = mkv_irq;
+    irq_fast[IrqFastDdr]    = ddr_irq;
   end
 
   // ---------------------------------------------------------------------------
@@ -507,6 +543,69 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
     .sda_oe_o  (i2c0_sda_oe_o),
     .irq_o     (i2c0_irq)
   );
+
+  // ---------------------------------------------------------------------------
+  // DDR2/DDR3 SDRAM: memory window on the main crossbar, LiteDRAM CSRs and the
+  // PHY / bridge registers on the peripheral bus, PHY bundle to the board pad
+  // wrapper
+  // ---------------------------------------------------------------------------
+  if (DdrEn) begin : g_ddr
+    bow_ddr #(
+      .DdrMem   (DdrMem),
+      .ClkHz    (DdrClkHz),
+      .PsSteps  (DdrPsSteps),
+      .PhyKind  (DdrPhyKind),
+      .EmuBytes (DdrEmuBytes)
+    ) u_ddr (
+      .clk_i,
+      .rst_ni         (sys_rst_n),
+      .mem_req_i      (main_req[MainDevDdr]),
+      .mem_rsp_o      (main_rsp[MainDevDdr]),
+      .csr_req_i      (periph_req[PeriphDevDdrCtrl]),
+      .csr_rsp_o      (periph_rsp[PeriphDevDdrCtrl]),
+      .reg_req_i      (periph_req[PeriphDevDdrPhy]),
+      .reg_rsp_o      (periph_rsp[PeriphDevDdrPhy]),
+      .irq_o          (ddr_irq),
+      .ddr_sys_clk_i,
+      .ddr_clk_i,
+      .ddr_rst_ni,
+      .ddr_rd_clk_i,
+      .ddr_ps_en_o,
+      .ddr_ps_inc_o,
+      .ddr_ps_done_i,
+      .ddr_wps_en_o,
+      .ddr_wps_inc_o,
+      .ddr_wps_done_i,
+      .ddr_io_o,
+      .ddr_io_i,
+      .ddr_dbg_i
+    );
+  end else begin : g_ddr_stub
+    bow_ddr_stub u_ddr (
+      .clk_i,
+      .rst_ni         (sys_rst_n),
+      .mem_req_i      (main_req[MainDevDdr]),
+      .mem_rsp_o      (main_rsp[MainDevDdr]),
+      .csr_req_i      (periph_req[PeriphDevDdrCtrl]),
+      .csr_rsp_o      (periph_rsp[PeriphDevDdrCtrl]),
+      .reg_req_i      (periph_req[PeriphDevDdrPhy]),
+      .reg_rsp_o      (periph_rsp[PeriphDevDdrPhy]),
+      .irq_o          (ddr_irq),
+      .ddr_sys_clk_i,
+      .ddr_clk_i,
+      .ddr_rst_ni,
+      .ddr_rd_clk_i,
+      .ddr_ps_en_o,
+      .ddr_ps_inc_o,
+      .ddr_ps_done_i,
+      .ddr_wps_en_o,
+      .ddr_wps_inc_o,
+      .ddr_wps_done_i,
+      .ddr_io_o,
+      .ddr_io_i,
+      .ddr_dbg_i
+    );
+  end
 
   // ---------------------------------------------------------------------------
   // AXI4-Lite window (devices of the FPGA block design)

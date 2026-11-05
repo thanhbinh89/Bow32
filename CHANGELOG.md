@@ -6,6 +6,89 @@
 ## [Unreleased]
 
 ### Added
+- **SDRAM DDR2/DDR3** `bow_ddr` (`hw/ip/ddr`): controller **LiteDRAM** trên PHY riêng
+  của Bow32. Cửa sổ bộ nhớ 512 MiB ở `0x8000_0000` trên main crossbar (3 × 8), CSR của
+  LiteDRAM ở `0x4000_C000` (8 KiB), thanh ghi PHY/cầu ở `0x4000_E000`, ngắt
+  `irq_fast[11]` ([docs/ip/ddr.md](docs/ip/ddr.md)).
+  - Lõi LiteDRAM sinh bằng `hw/ip/ddr/litedram/bow_ddr_litedram_gen.py` từ `ddr2.yml`
+    (bo RAM: IS43DR86400E x8, CK 133,33 MHz) và `ddr3.yml` (MT41K64M16 x16, DLL-off,
+    125 MHz, mô phỏng): controller ở CK/4, DFI 1:4, BL8 (DDR2 được đặt BL8 thay cho BL4
+    của LiteDRAM), BIST generator/checker, CSR qua Wishbone, cổng native; LiteX/LiteDRAM
+    ghim phiên bản, sinh lại giống từng byte (`make litedram`, `make litedram-check`).
+  - Cầu bus: `bow_ddr_win` (cửa sổ → cổng native, bắt tay 4 pha qua miền clock,
+    đọc-sửa-ghi khi không có DM, `NOT_READY`/`RANGE`, timeout → trạng thái `BROKEN` tới
+    `CORE_RST`), `bow_ddr_csr` (→ `wb_ctrl`).
+  - `bow_ddr_dfi`: DFI 1:4 → một lệnh mỗi CK cho PHY (trễ cố định 8 CK), trả dữ liệu đọc
+    đúng `read_latency` 12, phát hiện `RD_LATE`/`RD_EXTRA`, thực thi APPLY/bước pha/chụp
+    thô; CKE/ODT/RESET# theo DFI.
+  - PHY giữ từ bản trước: `ODDRE1`/`IDDRE1` + MMCM dịch pha đọc và ghi (1/504 CK), FIFO
+    đọc 2 clock, chụp thô 32 chu kỳ, cửa sổ DIR/OE cho level shifter TXV0108 của bo RAM.
+  - `DdrEn = 0` (KV260): bản stub.
+- Sau review (lõi, cầu bus, firmware, CDC) và hai vòng kiểm chứng độc lập:
+  - Bộ sinh LiteDRAM: tắt auto-precharge (emulator và mô hình DRAM không mô phỏng
+    RDA/WRA), tREFI làm tròn xuống (7,77 µs ở DDR2, trước đó 7,83 µs), cổng native không còn bị
+    chặn trong lõi theo `init_done` (truy cập đang chạy luôn xong), revision LiteX dạng
+    bất kỳ được bỏ khỏi file sinh; thêm `litedram_<lõi>_pkg.sv`. `bow_ddr` dừng elaboration
+    (lint, mô phỏng, tổng hợp) khi lõi không khớp PHY, khi CK làm khoảng REF vượt 7,8 µs
+    hoặc CK cao hơn CK của lõi quá 1 %; `make lint` elaborate cả lõi DDR2 và DDR3 và kiểm
+    hai cấu hình sai phải bị từ chối.
+  - `bow_ddr_regs`: `READY` và cầu CSR chờ lõi reset xong sau `CORE_RST` (xung ngắn không
+    còn làm treo truy cập tới timeout; có đường dự phòng khi clock DDR ngừng trong lúc xung);
+    hai cầu từ chối khi đang trong reset cầu; mất clock DDR giữa truy cập báo
+    `BUS_TIMEOUT` như tài liệu.
+  - Firmware: `eye` giữ dữ liệu dưới mẫu huấn luyện và chặn cửa sổ khi không kiểm lại được
+    đường đọc; mọi đường lỗi của `calw` sau khi bắt đầu quét trả lại pha ghi cũ, kiểm nó
+    bằng BIST (PRBS và đếm) và chặn cửa sổ nếu pha cũ cũng hỏng; `bow_ld_handover` chặn cổng
+    native trước đoạn DFII; self-test: chu kỳ REF lấy theo lõi, mục 18 thấy cả cờ lỗi của
+    các mục trước; `bow32_ddr.py` chỉ nhận dấu nhắc ở đầu dòng.
+  - CDC/RDC: `CORE_RST` đúng lúc lõi phát một lệnh ghi đã nhận không còn ghi 0 vào DRAM
+    (flop lệnh native của cầu cửa sổ không reset); bộ bước pha đọc/ghi chỉ reset theo
+    lock của MMCM, nên sau reset SoC (BREAK, reset mềm, `CB_nRST`) `PS_NOW`/`WPS_NOW` vẫn
+    là pha thật và quét pha ghi không vượt ±T/4 đã kiểm timing; sau reset liên kết FIFO
+    đọc được khởi động lại ở pha đọc đã tới; `bow_ddr_clk_xusp` reset cả ba MMCM khi một
+    MMCM mất lock (pha về 0 cùng bộ đếm; trên MPS4 việc này reset cả SoC, vì `MMCM_A` cũng
+    tạo clock SoC); `DBG` của `bow_ddr_lb` được chốt bằng flop trước khi qua miền clock của
+    SoC; tầng bắt dữ liệu của FIFO đọc là flop (không SRL); `tcl/timing_checks.tcl` báo lỗi
+    khi `report_cdc` thấy logic tổ hợp trước một bộ đồng bộ dữ liệu (CDC-10 ngoài chân CLR
+    của bộ đồng bộ reset) hoặc CDC-11 / 12 / 13 / 14.
+  - Test thêm: lượt BIST địa chỉ ngẫu nhiên và bộ giám sát A10 trong `tb_bow_ddr`, các phần
+    A2 / D / E của `tb_bow_ddr_rst`, mất lock (cả mất lock riêng `MMCM_W`) trong xsim của
+    `bow_ddr_clk_xusp`, `strip_dates` của bộ sinh, dấu nhắc của `bow32_ddr.py`; mỗi test
+    mới được kiểm bằng cách đưa lại lỗi cũ vào và thấy nó báo lỗi.
+- `bow_ddr_dev` / `bow_ddr_lb`: DRAM DDR2/DDR3 tổng hợp được, kiểm tra trình tự khởi tạo
+  và mọi luật JEDEC (thanh ghi `DBG`), dùng làm DRAM giả lập 4 MiB (UltraRAM) cho bản
+  loopback trên bo khi chưa có chip.
+- Board **Arm MPS4** (`hw/fpga/mps4`, `make fpga BOARD=mps4`, XCVU13P): `bow_ddr_clk_xusp`
+  (3 MMCME4: SoC 50 MHz, CK 133,33 MHz, clock controller CK/4, clock ghi và clock đọc
+  dịch pha), `bow_ddr_io_xilinx`, bản loopback (mặc định) và bản bo RAM
+  (`DDR_LOOPBACK=0`), file cho thẻ microSD của MCC; console ở UART0 của FPGA (cổng USB 1
+  với `UARTMODE: 0`), reset theo `CB_nPOR` và `CB_nRST`; ràng buộc CDC
+  (`set_max_delay -datapath_only`) và `tcl/timing_checks.tcl` kiểm tra loại ràng buộc của
+  từng cặp clock ([docs/ddr_mps4.md](docs/ddr_mps4.md)).
+- Firmware: driver PHY `bow_ddr.h/.c`; `sw/common/litedram/` (DFII, khởi tạo JEDEC bằng
+  chuỗi sinh từ LiteDRAM cho DDR2 và DDR3 trong cùng một firmware, hiệu chỉnh đọc bằng
+  chụp thô, hiệu chỉnh pha ghi bằng BIST, bàn giao cho controller, BIST); ứng dụng `ddr`
+  (`test` 18 mục, `init`, `cal`, `calw`, `eye`, `verify`, `bist`, `memtest`, `bench`,
+  `cap`, `rd`/`wr`/`dump`); tool `tools/bow32_ddr.py` (`test`, `cal`, `eye`, `bench`,
+  `verify` so với bản Python của bộ sinh dữ liệu BIST); unit test
+  `tools/tests/test_bow32_ddr.py`.
+- `tools/bow32_mps4.py`: nạp Bow32 lên Arm MPS4 qua thẻ microSD của MCC (`install`,
+  `deploy`, `reboot`, `reset`, `restore`, `show`). Chỉ ghi `MB/HBI0376B/BOW32/` và dòng
+  `APPFILE` của `board.txt`, không bao giờ ghi `config.txt`. Mỗi `install` trên thẻ đang
+  chọn thiết kế khác giữ bản sao `board.txt` mới nhất của nhóm kia (trên thẻ và trên PC);
+  `restore` chỉ trả dòng `APPFILE` (cả file chỉ khi `board.txt` hỏng, từ bản giữ trên thẻ,
+  file hỏng được lưu lại); mọi lần ghi qua file tạm + `os.replace`, không thay file chỉ-đọc,
+  bitstream mới chỉ thay bản cũ khi đã chép và đọc lại đủ; giá trị `APPFILE` dừng ở `;`.
+  `REBOOT`/`RESET` qua console MCC rồi chờ console Bow32. Unit test
+  `tools/tests/test_bow32_mps4.py` (thẻ giả, MCC giả). `restore` không bao giờ chọn một file
+  không có trên thẻ, `--appfile` không chọn được BOW32 (đó là việc của `install`); file tạm
+  của `board.txt` nằm trong `BOW32/`; REBOOT mà MCC không báo nạp FPGA xong là lỗi.
+- Testbench IP `hw/ip/ddr/dv` (lõi LiteDRAM thật + mô hình clock, chân, level shifter,
+  DRAM DDR2/DDR3; cấu hình `lb`, `card`, `ddr3`, `stub`; `tb_bow_ddr_rst.sv` cho các góc
+  reset và miền clock) và test mô phỏng hệ thống `ddr` (`test quick` PASS 18/18).
+- Đánh giá khả năng làm DDR trên Bow32 và bo RAM mở rộng `FMC_DDR2_HyperRam`: chỉ hợp
+  với Arm MPS4 (VEK280 chỉ nối chân LA của FMC+, KV260 không có FMC), góp ý schematic và
+  đề xuất sơ đồ chân chỉ dùng LA ([docs/ddr_board_review.md](docs/ddr_board_review.md)).
 - **Mã khối MKV** `bow_mkv` (`hw/ip/mkv`) theo dự thảo TCVN XXXX:2024 "Mã khối
   MKV": MKV-128 (khoá 128 / 192 / 256 bit) và MKV-256 (khoá 256 / 384 / 512 bit),
   R = 6 / 7 / 8. Lược đồ khoá trong phần cứng (8R + 1 chu kỳ, khoá nửa vòng trong

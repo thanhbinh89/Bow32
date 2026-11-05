@@ -68,6 +68,19 @@ theo [adding_an_ip.md](adding_an_ip.md) và kiểm chứng bằng test mô phỏ
 - [ ] Chế độ hoạt động trong phần cứng (CTR / CBC / GCM) và nạp dữ liệu bằng DMA.
 - [ ] Hàm băm (SHA-2 / SHA-3) và TRNG (ring oscillator) để có khoá sinh ngay trên chip.
 
+## Mức 7 — bộ nhớ ngoài
+
+- [x] **DDR2/DDR3** ([ip/ddr.md](ip/ddr.md)): controller LiteDRAM (sinh từ cấu hình, phiên
+      bản ghim) trên PHY riêng (`ODDRE1`/`IDDRE1` + MMCM dịch pha, level shifter), hiệu
+      chỉnh bằng phần mềm qua DFII; chạy trên Arm MPS4 với DRAM giả lập
+      ([ddr_mps4.md](ddr_mps4.md)).
+- [ ] Chạy với bo RAM mở rộng thật (DDR2 IS43DR86400E qua level shifter) khi đã sản xuất
+      ([ddr_board_review.md](ddr_board_review.md)); điều khiển HyperRAM trên cùng bo.
+- [ ] Cache trước cửa sổ DDR để CPU chạy mã từ DDR; DMA ghi frame H.264 vào DDR.
+- [ ] Bo RAM rev-B DDR3 1,5 V nối thẳng FMC (không level shifter): dùng PHY `USPDDRPHY`
+      của LiteDRAM ở DDR3-800 trở lên; deskew từng bit bằng `IDELAYE3`.
+- [ ] DDR4 SODIMM 8 GB có sẵn trên MPS4 (bank 60–62) với `USPDDRPHY` của LiteDRAM.
+
 ## Chất lượng / quy trình
 
 - [ ] Testbench riêng cho từng IP (`hw/ip/<ip>/dv/`), coverage (đã có cho ISP và bộ thu CSI-2: so với mô hình Python).

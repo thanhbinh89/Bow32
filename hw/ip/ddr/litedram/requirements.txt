@@ -1,0 +1,9 @@
+# Python packages of the LiteDRAM generator (Makefile in this directory).
+# Pinned, so that generated/ can be reproduced exactly.
+pyyaml
+packaging
+pyserial
+requests
+migen==0.10.0
+litex @ git+https://github.com/enjoy-digital/litex@c12fae344a2fe935806058eeb30a85ee92dc8965
+litedram @ git+https://github.com/enjoy-digital/litedram@f2d22975d67229676e10308ae6e71b819b6afe42
