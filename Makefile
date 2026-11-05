@@ -19,13 +19,15 @@ help:
 	@echo "  make sim         build the Verilator testbench"
 	@echo "  make test        run all system simulation tests"
 	@echo "  make test-tools  unit tests of the host tools (tools/tests)"
-	@echo "  make test-ip     unit tests of the ISP, CSI-2 RX, H.264 and MKV IPs (RTL vs. Python models)"
-	@echo "  make test-fpga-dv  pin level test of the KV260 D-PHY I/O + CSI-2 RX (xsim, needs Vivado)"
-	@echo "  make run TEST=x  run one test (boot|load|break|flash|irq|gpio|camera|csi2|h264|mkv), WAVES=1 for waves"
-	@echo "  make fpga        Vivado build for the Kria $(BOARD)     -> build/fpga/$(BOARD)/"
+	@echo "  make test-ip     unit tests of the ISP, CSI-2 RX, H.264, MKV and DDR IPs (RTL vs. Python models)"
+	@echo "  make test-fpga-dv  pin level tests in xsim (needs Vivado): KV260 D-PHY I/O + CSI-2 RX, DDR pads + clocks"
+	@echo "  make run TEST=x  run one test (boot|load|break|flash|irq|gpio|camera|csi2|h264|mkv|ddr), WAVES=1 for waves"
+	@echo "  make fpga        Vivado build, BOARD=kv260|kv260_cam|mps4 -> build/fpga/$(BOARD)/"
 	@echo "  make fpga-jtag   load the bitstream into a running Kria over JTAG (xsdb)"
 	@echo "  make gen         regenerate memory map files from hw/top/data/bow32_memmap.yaml"
 	@echo "  make gen-check   check that generated files are up to date (memory map, H.264 / MKV tables)"
+	@echo "  make litedram    regenerate the LiteDRAM controller cores (Python venv in build/litex-venv)"
+	@echo "  make litedram-check  check that hw/ip/ddr/litedram/generated is up to date (needs the venv)"
 	@echo "  make clean       remove build/"
 
 $(IBEX_DIR)/rtl/ibex_top.sv:
@@ -36,9 +38,21 @@ deps: $(IBEX_DIR)/rtl/ibex_top.sv
 sw:
 	$(MAKE) -C sw all
 
-lint: deps
-	$(VERILATOR) --lint-only -Wall hw/lint/verilator_waivers.vlt \
+# The SoC as built for simulation (DdrEn = 0) and with each LiteDRAM core
+# (DDR2 at 133 MHz, DDR3 at 125 MHz CK), then two CKs that bow_ddr's
+# elaboration checks must refuse (refresh interval, CK above the core's).
+LINT_CMD = $(VERILATOR) --lint-only -Wall hw/lint/verilator_waivers.vlt \
 	  -F hw/top/bow32_top.f -F hw/vendor/lowrisc_ibex_prim_generic.f --top-module bow32_top
+
+lint: deps
+	$(LINT_CMD)
+	$(LINT_CMD) -GDdrEn=1\'b1 -GDdrMem=2 -GDdrClkHz=133333333
+	$(LINT_CMD) -GDdrEn=1\'b1 -GDdrMem=3 -GDdrClkHz=125000000
+	@# the elaboration checks of bow_ddr must refuse a CK the core was not made for
+	@! $(LINT_CMD) -GDdrEn=1\'b1 -GDdrMem=2 -GDdrClkHz=132000000 > /dev/null 2>&1 || \
+	  { echo "lint: bow_ddr accepted the DDR2 core at 132 MHz (tREFI > 7.8 us)"; exit 1; }
+	@! $(LINT_CMD) -GDdrEn=1\'b1 -GDdrMem=3 -GDdrClkHz=133333333 > /dev/null 2>&1 || \
+	  { echo "lint: bow_ddr accepted the DDR3 core (125 MHz) at 133 MHz"; exit 1; }
 	@echo "lint OK"
 
 sim: deps
@@ -55,6 +69,7 @@ test-ip:
 	$(MAKE) -C hw/ip/csi2rx/dv test
 	$(MAKE) -C hw/ip/h264/dv test
 	$(MAKE) -C hw/ip/mkv/dv test
+	$(MAKE) -C hw/ip/ddr/dv test
 
 test-fpga-dv:
 	$(MAKE) -C hw/fpga/common/dv test
@@ -78,7 +93,13 @@ gen-check:
 	$(PYTHON) tools/h264/h264_model.py tables --check
 	$(PYTHON) tools/mkv/mkv_model.py tables --check
 
+litedram:
+	$(MAKE) -C hw/ip/ddr/litedram all
+
+litedram-check:
+	$(MAKE) -C hw/ip/ddr/litedram check
+
 clean:
 	rm -rf build
 
-.PHONY: help deps sw lint sim test test-tools test-ip test-fpga-dv run fpga fpga-jtag gen gen-check clean
+.PHONY: help deps sw lint sim test test-tools test-ip test-fpga-dv run fpga fpga-jtag gen gen-check litedram litedram-check clean

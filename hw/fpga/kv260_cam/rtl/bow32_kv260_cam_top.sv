@@ -156,6 +156,20 @@ module bow32_kv260_cam_top #(
     .m_axil_rresp_i   (2'b00),
     .m_axil_rvalid_i  (1'b0),
     .m_axil_rready_o  (),
+    // no DDR on this board (DdrEn = 0: stub)
+    .ddr_sys_clk_i  (1'b0),
+    .ddr_clk_i      (1'b0),
+    .ddr_rst_ni     (1'b0),
+    .ddr_rd_clk_i   (1'b0),
+    .ddr_ps_en_o    (),
+    .ddr_ps_inc_o   (),
+    .ddr_ps_done_i  (1'b0),
+    .ddr_wps_en_o   (),
+    .ddr_wps_inc_o  (),
+    .ddr_wps_done_i (1'b0),
+    .ddr_io_o       (),
+    .ddr_io_i       ('0),
+    .ddr_dbg_i      ('0),
     .sys_rst_no   (),
     .core_sleep_o ()
   );

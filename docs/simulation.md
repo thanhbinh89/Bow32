@@ -7,15 +7,18 @@ với `--binary --timing`). Testbench đóng vai máy tính host: theo dõi cả
 thanh ghi IMX219 trên bus I2C, luồng MIPI CSI-2 của IMX219 trên các cổng D-PHY
 của bộ thu (`hw/ip/csi2rx/dv/csi2_tx_model.sv` thay cho cảm biến và I/O của
 board; clock video riêng ~107,5 MHz, không đồng bộ với CPU) và một thiết bị trên
-cổng AXI4-Lite.
+cổng AXI4-Lite. DDR được bật (`DdrEn = 1`, lõi LiteDRAM DDR2) và nối như bản loopback
+của Arm MPS4: mô hình clock (`hw/ip/ddr/dv/ddr_clk_model.sv`: CK, CK/4 cho LiteDRAM, clock
+đọc và hai clock ghi, hai cổng dịch pha như 3 MMCM của board), mô hình chân (`bow_ddr_io_sim.sv`, loopback) và DRAM giả lập `bow_ddr_lb`
+4 MiB; clock DDR chỉ chạy trong test `ddr`, từ lúc boot ROM khởi động ứng dụng.
 
 ```bash
 make sw            # firmware: build/sw/
 make test          # build mô hình + chạy mọi test
 make run TEST=load # chạy một test, log ở build/sim/load.log
 make run TEST=load WAVES=1   # + build/sim/waves.fst  (gtkwave build/sim/waves.fst)
-make test-ip       # test riêng của ISP, bộ thu CSI-2, H.264, MKV (bên dưới)
-make test-tools    # unit test của công cụ Python (gồm mô hình CSI-2, MKV)
+make test-ip       # test riêng của ISP, bộ thu CSI-2, H.264, MKV, DDR (bên dưới)
+make test-tools    # unit test của công cụ Python (gồm mô hình CSI-2, MKV, tool DDR)
 ```
 
 Để mô phỏng nhanh, testbench đặt `BootBaud = 1 Mbaud`, `BootWaitMs = 1` và
@@ -35,6 +38,7 @@ make test-tools    # unit test của công cụ Python (gồm mô hình CSI-2, M
 | `camera` | ROM + `camera` | dò IMX219 qua I2C (PA7, TCA9546A, clock stretching); cửa sổ AXI4-Lite (đọc/ghi qua cầu, bus error khi `SLVERR`/timeout); mode 64×48, `cam` hiệu chỉnh eye (mọi tap tốt: `taps 248/248 eye 512/512`), `csi` → `csi2rx: link ok`, 48 dòng, WC 80; sọc màu của cảm biến → bộ thu CSI-2 → ISP → capture → ảnh RGB qua UART (CRC + kiểm tra màu từng sọc), AE và AWB hội tụ, flip (BGGR), TPG của ISP ở YUV |
 | `h264` | ROM + `video` | `dmatest` (DMA kênh 1: SRAM → VRAM → SRAM, lỗi bus ở địa chỉ không ánh xạ); mode 64×48, TPG sọc màu → ISP (YUV) → bộ mã hoá H.264 → DMA kênh 0 → VRAM; `rec 3` rồi `send`: stream qua UART (CRC), lưu `build/sim/h264.hex`; sau mô phỏng `h264_model.py decode --bars` giải mã ra 3 frame 64×48 có đủ 8 sọc màu |
 | `mkv` | ROM + `mkv` | `test quick` → `mkv: PASS (13/13)`: MKV phần mềm và IP (mỗi lệnh làm hai lần và đối chiếu) khớp 6 véc tơ của Phụ lục A (cả khoá vòng), IP ↔ phần mềm trên khoá/khối ngẫu nhiên, ECB (ghi `DIN` khi IP đang chạy), lệnh lỗi, `KEY_VALID`, `CLEAR`, ngắt `irq_fast[10]` (`mip`), stall bus, xoá khoá / `DIN` / `DOUT`, không `FAULT` nào; rồi `key`/`enc`/`dec` qua shell phải ra đúng giá trị của `mkv_model.py`; một dòng `FAIL`/`error` dừng mô phỏng ngay (~9,3 M chu kỳ) |
+| `ddr` | ROM + `ddr` | `test quick` → `ddr: PASS (18/18)`: khởi tạo JEDEC DDR2 bằng chuỗi sinh từ LiteDRAM (qua DFII), hiệu chỉnh đọc (quét pha của mô hình MMCM, chụp thô, mắt, `RD_DLY`/`RD_SLIP`), bàn giao cho controller, cửa sổ CPU (walking 1/0, đường địa chỉ, đọc-sửa-ghi byte/halfword, xorshift), BIST của LiteDRAM và dữ liệu đọc qua cửa sổ = bản C của bộ sinh dữ liệu, refresh, giới hạn pha, ngắt `irq_fast[11]`; rồi `wr`/`rd` qua shell ở đầu và cuối 4 MiB; cuối cùng DRAM giả lập không được thấy vi phạm JEDEC nào (`DBG`). Một dòng `FAIL`/`error`/`[trap]` dừng mô phỏng ngay (~4,9 M chu kỳ, ~1 phút) |
 | `csi2` | ROM + `csi2_test` | `test quick` → `csi2_test: PASS (11/11)` (eye mô hình: lane 0 tap 100…300, lane 1 180…400, tap reset 0 xấu; hiệu chỉnh phải ra ~208/288); rồi cài lỗi vào một frame đang chạy (lật 1 bit header → ECC sửa, lật 1 bit payload → CRC, byte sync sai trên lane 1 → SOT + skew) và `stat` phải in đúng `ecc 1/0 crc 1 trunc 0 sot 0/1 ovf 0`, `misc ≥ 1`; một dòng `[FAIL]` dừng mô phỏng ngay |
 
 Một test PASS khi in `TEST PASSED`; lỗi dùng `$fatal` (mã thoát ≠ 0). Có
@@ -126,6 +130,44 @@ kiểm tra có hướng: `ERR`, `KEY_VALID`, `CLEAR`, ngắt, `CYCLES`, stall bu
 make -C hw/ip/mkv/dv test                    # seed 1..4 (~510 phép toán, ~7 700 trạng thái)
 make -C hw/ip/mkv/dv run SEED=99 COUNT=600   # 1 231 phép toán
 ```
+
+### DDR2/DDR3
+
+`hw/ip/ddr/dv/` mô phỏng toàn bộ `bow_ddr` (lõi LiteDRAM đã sinh, bộ chuyển DFI, PHY, hai
+cầu bus, thanh ghi) với mô hình clock (CK, CK/4, 3 MMCM dịch pha), chân, level shifter và
+DRAM. `tb_bow_ddr.sv` tự kiểm tra và chạy đúng luồng của firmware qua ba cổng bus: lên
+link, truy cập cửa sổ khi chưa sẵn sàng (lỗi bus, ngắt), khởi tạo JEDEC từ
+`hw/ip/ddr/litedram/generated/<lõi>/init.csv` qua cổng CSR, hiệu chỉnh đọc bằng chụp thô,
+bàn giao, truy cập cửa sổ (kể cả đọc-sửa-ghi byte/halfword, ghi có mặt nạ với DDR3) so với
+mô hình byte, BIST của LiteDRAM (0 lỗi, và phải báo lỗi khi so sai), ngân sách đọc (32 kịp,
+33 → `RD_LATE`), `RANGE`, `CORE_RST` và bàn giao lại, timeout của hai cầu; cuối cùng DRAM
+không được thấy vi phạm JEDEC nào.
+
+BIST có bốn lượt: dữ liệu đếm, dữ liệu ngẫu nhiên, checker với dữ liệu khác (phải báo lỗi),
+và dữ liệu cùng địa chỉ ngẫu nhiên (xung đột hàng trong bank machine); một bộ giám sát DFI báo
+lỗi mọi RD/WR có A10 = 1 (lõi được sinh không có auto-precharge).
+
+`tb_bow_ddr_rst.sv` (`make -C hw/ip/ddr/dv rst`, nằm trong `test`) kiểm các góc reset và
+miền clock: xung `CORE_RST` ngắn rồi truy cập ngay, kể cả đọc CSR ngay trong chu kỳ nhả (phải
+bị từ chối tức thì, không chờ timeout); `CORE_RST` giữa lúc ghi byte qua cửa sổ (mọi burst
+ghi tới PHY phải là word đã ghép, không bao giờ là 0); reset SoC giữa lúc bước pha ghi
+(`PS_NOW`/`WPS_NOW` phải bằng pha thật của mô hình MMCM, giới hạn ±T/4 vẫn tính từ pha 0
+thật); xoá `init_done` khi đang có truy cập cửa sổ (truy cập phải xong hoặc bị từ chối);
+clock DDR ngừng khi MMCM vẫn lock (biến `freeze` của `ddr_clk_model`) → lỗi bus,
+`BUS_TIMEOUT`, `BROKEN`.
+
+```bash
+make -C hw/ip/ddr/dv test                    # 4 cấu hình + rst, ~4 phút
+make -C hw/ip/ddr/dv seeds CFG=card SEEDS="1 2 3"
+make -C hw/ip/ddr/dv run CFG=lb SEED=3 WAVES=1
+```
+
+| Cấu hình | Nội dung |
+|----------|----------|
+| `lb` | bản loopback của MPS4: `bow_ddr_lb` 4 MiB sau loopback của wrapper chân, DDR2 x8, 133,33 MHz |
+| `card` | bo RAM: DDR2 x8 sau level shifter TXV0108 (`ddr_board_model` + `ddr_mem_model`, kiểm tra JEDEC và thời gian ở chân); trễ của bo rút theo seed |
+| `ddr3` | DDR3 x16 DLL-off nối thẳng (lõi `litedram_ddr3`, DM, RESET#), 125 MHz |
+| `stub` | `bow_ddr_stub` (`DdrEn = 0`) |
 
 ### Bộ thu CSI-2
 

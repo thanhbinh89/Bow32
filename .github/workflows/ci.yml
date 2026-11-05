@@ -52,6 +52,9 @@ jobs:
       - name: MKV block cipher unit test (RTL vs. model vs. Annex A of the draft standard)
         run: make -C hw/ip/mkv/dv test
 
+      - name: DDR2/DDR3 unit test (LiteDRAM core + Bow32 PHY, pin models, JEDEC checks)
+        run: make -C hw/ip/ddr/dv test-ci JOBS=4
+
       - name: Upload logs and firmware
         if: always()
         uses: actions/upload-artifact@v4
@@ -63,6 +66,7 @@ jobs:
             build/csi2rx_dv/*/sim.log
             build/h264_dv/*/sim.log
             build/mkv_dv/*/sim.log
+            build/ddr_dv/*/sim.log
             build/sim/h264.hex
             build/sw/*/*.bin
             build/sw/*/*.vmem

@@ -1,0 +1,17 @@
+# LiteDRAM controller for the FMC DDR2 card (docs/fpga/ram_extension): one
+# ISSI IS43DR86400E (512 Mb DDR2, x8) behind TXV0108 level shifters, DM tied to
+# GND. Also used by the MPS4 loopback build (DRAM emulator) and the Verilator
+# tests. Regenerate with `make litedram`.
+
+memtype: DDR2
+module: IS43DR86400E           # bow_ddr_litedram_gen.py
+databits: 8
+ck_freq: 133.333333e6          # DRAM clock; controller clock = CK / 4 (DFI 1:4, BL8)
+cl: 3                          # MR CAS latency
+cwl: 2                         # DDR2 write latency = CL - 1 (AL = 0)
+rdphase: 2                     # DFI phase of READ / WRITE commands
+wrphase: 2
+read_latency: 12               # controller cycles DFI rddata_en -> rddata (bow_ddr_dfi)
+write_latency: 0               # write data on DFI with the WRITE command
+with_dm: false                 # card rev A has no DM: bow_ddr writes whole bursts
+cmd_buffer_depth: 8
