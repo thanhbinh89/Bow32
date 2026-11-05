@@ -1,0 +1,18 @@
+# LiteDRAM controller for a DDR3 x16 device (Micron MT41K64M16, 1 Gb) in
+# DLL-off mode at CK = 125 MHz (JESD79-3: tCK <= 8 ns, CL = CWL = 6). No DDR3
+# hardware exists yet: Verilator tests only (hw/ip/ddr/dv). Regenerate with
+# `make litedram`.
+
+memtype: DDR3
+module: MT41K64M16
+databits: 16
+ck_freq: 125e6                 # DRAM clock; controller clock = CK / 4 (DFI 1:4, BL8)
+cl: 6                          # DLL-off: CL = 6
+cwl: 6                         # DLL-off: CWL = 6
+dll_off: true
+rdphase: 2
+wrphase: 2
+read_latency: 12
+write_latency: 0
+with_dm: true
+cmd_buffer_depth: 8

@@ -1,16 +1,34 @@
 # Copyright Bow32 contributors.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Pin level test of the UltraScale+ D-PHY receive I/O (bow_dphy_io_xusp) with
-# the Bow32 CSI-2 receiver, in the Vivado simulator with the unisim models
-# (tb_bow_dphy_io_xusp.sv describes the stimulus and the checks).
+# Pin level tests of the UltraScale+ I/O and clock wrappers in the Vivado
+# simulator with the unisim models (each testbench describes its stimulus and
+# its checks):
+#   tb_bow_dphy_io_xusp   KV260 D-PHY receive I/O (bow_dphy_io_xusp) + bow_csi2rx
+#   tb_bow_ddr_io_xilinx  DDR2/DDR3 pads (bow_ddr_io_xilinx) on bow_ddr_clk_xusp,
+#                         configurations DDR_IO_CFGS (below)
+#   tb_bow_ddr_clk_xusp   DDR clocks (bow_ddr_clk_xusp: three MMCME4_ADV, fine
+#                         phase shift, LiteDRAM controller clock CK / 4),
+#                         configurations DDR_CLK_CFGS
 #
-#   make test                 compile, elaborate, run SEEDS
+#   make test                 all of them: D-PHY and DDR pads with every seed of
+#                             SEEDS, DDR clocks once per configuration
 #   make test SEEDS="1 2 3 4"
-#   make run SEED=5 WAVES=1   one seed, waveform database in build/fpga_dv/seed5
+#   make run SEED=5 WAVES=1   D-PHY, one seed, waveform database in build/fpga_dv/seed5
+#   make test-dphy | test-ddr-io | test-ddr-clk     one testbench
+#   make run-ddr-io IO_CFG=lb SEED=2 WAVES=1        one pad configuration and seed,
+#                                                   files in build/fpga_dv/ddr_io/lb/seed2
+#   make run-ddr-clk CLK_CFG=125 WAVES=1            one clock configuration,
+#                                                   files in build/fpga_dv/ddr_clk/125/run
+#   make mutants              not part of test: broken copies of bow_ddr_io_xilinx /
+#                             bow_ddr_clk_xusp (mutants.py), each one must FAIL
 #
-# Needs xvlog/xelab/xsim in PATH: source <Vivado>/settings64.sh first.
-# Outputs: build/fpga_dv/
+# Needs xvlog/xelab/xsim in PATH: source <Vivado>/settings64.sh first. The
+# exit code of xsim does not reflect the result: pass/fail comes from the
+# "<testbench>: PASS" line of sim.log.
+# Outputs: build/fpga_dv/ (D-PHY), build/fpga_dv/ddr_io/<cfg>/,
+# build/fpga_dv/ddr_clk/<cfg>/, build/fpga_dv/mutants/<name>/: one xsim
+# library and snapshot directory (xsim.dir) each.
 
 REPO   := $(abspath ../../../..)
 BUILD  := $(REPO)/build/fpga_dv
@@ -23,18 +41,71 @@ SEEDS ?= 1 2 3
 SEED  ?= 1
 WAVES ?= 0
 
+DEBUG  := $(if $(filter 1,$(WAVES)),typical,off)
+XELAB_OPTS = -L unisims_ver -L secureip -debug $(DEBUG) --timescale 1ns/1ps
+GLBL   = $$XILINX_VIVADO/data/verilog/src/glbl.v
+
+# ------------------------------------------------------------- D-PHY I/O
 TOP    := tb_bow_dphy_io_xusp
 SNAP   := $(BUILD)/xsim.dir/$(TOP)_sim/xsimk
 FLISTS := $(REPO)/hw/ip/common/common.f $(REPO)/hw/ip/bus/bus.f $(REPO)/hw/ip/csi2rx/csi2rx.f
 SRCS    = $(filter %.sv %.v,$(shell cat $(BUILD)/files.txt 2>/dev/null)) $(CURDIR)/$(TOP).sv
-DEBUG  := $(if $(filter 1,$(WAVES)),typical,off)
 
-build: check-tools $(SNAP)
+# --------------------------------------------------------------- DDR pads
+# Configurations of bow_ddr_io_xilinx (xelab -generic_top of the testbench):
+#   card  x8, level shifter pins, CK as two single ended outputs, DIR read
+#         level 1: the MPS4 FMC+ DDR2 card
+#   x16   x16 with DM and RESET#, 16 address / 3 bank pins, CK on OBUFDS, DIR
+#         read level 0
+#   lb    x8 loopback (the MPS4 loopback build: bow_ddr_lb behind the pads)
+#   lb16  x16 loopback with DM, no level shifter pins
+DDR_IO_TOP   := tb_bow_ddr_io_xilinx
+DDR_IO_DIR   ?= $(BUILD)/ddr_io
+DDR_IO_RTL   ?= $(REPO)/hw/fpga/common/rtl/bow_ddr_io_xilinx.sv
+DDR_CLK_RTL  ?= $(REPO)/hw/fpga/common/rtl/bow_ddr_clk_xusp.sv
+DDR_IO_SRCS   = $(REPO)/hw/ip/ddr/rtl/bow_ddr_pkg.sv $(DDR_CLK_RTL) $(DDR_IO_RTL) \
+                $(CURDIR)/$(DDR_IO_TOP).sv
+DDR_IO_CFGS  ?= card x16 lb lb16
+DDR_IO_GEN_card :=
+DDR_IO_GEN_x16  := DqBits=16 AddrPins=16 BankPins=3 HasDm=1 HasResetN=1 CkSingleEnded=0 \
+                   LsDirReadLevel=0
+DDR_IO_GEN_lb   := Loopback=1
+DDR_IO_GEN_lb16 := DqBits=16 HasDm=1 HasLs=0 Loopback=1
+IO_CFG ?= card
+ddr_io_snap = $(DDR_IO_DIR)/$(1)/xsim.dir/$(DDR_IO_TOP)_sim/xsimk
+
+# ------------------------------------------------------------- DDR clocks
+# Configurations of bow_ddr_clk_xusp: 133 = MPS4 (VCO 1200 MHz, DDR /9, 504
+# phase steps), 125 = the DDR3 simulation clock (VCO 1000 MHz, /8, 448 steps).
+DDR_CLK_TOP  := tb_bow_ddr_clk_xusp
+DDR_CLK_DIR  ?= $(BUILD)/ddr_clk
+DDR_CLK_SRCS  = $(DDR_CLK_RTL) $(CURDIR)/$(DDR_CLK_TOP).sv
+DDR_CLK_CFGS ?= 133 125
+DDR_CLK_GEN_133 :=
+DDR_CLK_GEN_125 := T=8.0 STEPS=448 VcoMult=10.0 DdrDivide=8 SysDivide=20
+CLK_CFG ?= 133
+ddr_clk_snap = $(DDR_CLK_DIR)/$(1)/xsim.dir/$(DDR_CLK_TOP)_sim/xsimk
+
+# a configuration name has to be one of the lists above
+ifneq ($(filter run-ddr-io,$(MAKECMDGOALS)),)
+  ifeq ($(origin DDR_IO_GEN_$(IO_CFG)),undefined)
+    $(error unknown IO_CFG $(IO_CFG): card, x16, lb or lb16)
+  endif
+endif
+ifneq ($(filter run-ddr-clk,$(MAKECMDGOALS)),)
+  ifeq ($(origin DDR_CLK_GEN_$(CLK_CFG)),undefined)
+    $(error unknown CLK_CFG $(CLK_CFG): 133 or 125)
+  endif
+endif
+
+build: check-tools $(SNAP) $(foreach c,$(DDR_IO_CFGS),$(call ddr_io_snap,$(c))) \
+       $(foreach c,$(DDR_CLK_CFGS),$(call ddr_clk_snap,$(c)))
 
 check-tools:
 	@command -v $(XVLOG) >/dev/null 2>&1 && test -n "$$XILINX_VIVADO" || \
 	  { echo "xvlog not found: source <Vivado>/settings64.sh"; exit 1; }
 
+# ------------------------------------------------------------- D-PHY I/O
 $(BUILD)/files.txt: $(FLISTS) flist.py
 	@mkdir -p $(BUILD)
 	$(PYTHON) flist.py $(FLISTS) > $@
@@ -66,10 +137,79 @@ run: check-tools $(SNAP)
 	    echo "$(TOP) seed $(SEED): FAIL, see $(RUN_DIR)/sim.log"; exit 1; }
 	@echo "$(TOP) seed $(SEED): PASS"
 
-test: check-tools $(SNAP)
+test-dphy: check-tools $(SNAP)
 	@set -e; for s in $(SEEDS); do $(MAKE) --no-print-directory run SEED=$$s; done
+
+# ------------------------------------------------------- DDR pads, clocks
+# One library + snapshot directory per configuration (xelab -generic_top);
+# rebuilt when a source or WAVES changes.
+$(DDR_IO_DIR)/%/xsim.dir/$(DDR_IO_TOP)_sim/xsimk: $(DDR_IO_SRCS) $(DDR_IO_DIR)/%/debug_$(DEBUG)
+	cd $(DDR_IO_DIR)/$* && $(XVLOG) -sv $(DDR_IO_SRCS) > xvlog.log 2>&1 || \
+	  { tail -20 xvlog.log; exit 1; }
+	cd $(DDR_IO_DIR)/$* && $(XVLOG) $(GLBL) > xvlog_glbl.log 2>&1 || \
+	  { tail -20 xvlog_glbl.log; exit 1; }
+	cd $(DDR_IO_DIR)/$* && $(XELAB) $(XELAB_OPTS) $(addprefix -generic_top ,$(DDR_IO_GEN_$*)) \
+	  -s $(DDR_IO_TOP)_sim work.$(DDR_IO_TOP) work.glbl > xelab.log 2>&1 || { tail -20 xelab.log; exit 1; }
+
+$(DDR_CLK_DIR)/%/xsim.dir/$(DDR_CLK_TOP)_sim/xsimk: $(DDR_CLK_SRCS) $(DDR_CLK_DIR)/%/debug_$(DEBUG)
+	cd $(DDR_CLK_DIR)/$* && $(XVLOG) -sv $(DDR_CLK_SRCS) > xvlog.log 2>&1 || \
+	  { tail -20 xvlog.log; exit 1; }
+	cd $(DDR_CLK_DIR)/$* && $(XVLOG) $(GLBL) > xvlog_glbl.log 2>&1 || \
+	  { tail -20 xvlog_glbl.log; exit 1; }
+	cd $(DDR_CLK_DIR)/$* && $(XELAB) $(XELAB_OPTS) $(addprefix -generic_top ,$(DDR_CLK_GEN_$*)) \
+	  -s $(DDR_CLK_TOP)_sim work.$(DDR_CLK_TOP) work.glbl > xelab.log 2>&1 || { tail -20 xelab.log; exit 1; }
+
+# WAVES stamps, explicit targets (a missing intermediate file would not
+# trigger a rebuild)
+$(foreach c,$(sort $(DDR_IO_CFGS) $(IO_CFG)),$(DDR_IO_DIR)/$(c)/debug_$(DEBUG)) \
+$(foreach c,$(sort $(DDR_CLK_CFGS) $(CLK_CFG)),$(DDR_CLK_DIR)/$(c)/debug_$(DEBUG)):
+	@mkdir -p $(@D)
+	rm -f $(@D)/debug_*
+	touch $@
+
+# xsim_run <snapshot dir> <run dir> <testbench> <seed>
+xsim_mode = $(if $(filter 1,$(WAVES)),-wdb $(1).wdb -tclbatch waves.tcl,-R)
+define xsim_run
+@mkdir -p $(2)
+@rm -f $(2)/sim.log
+@printf 'log_wave -recursive *\nrun -all\nquit\n' > $(2)/waves.tcl
+cd $(2) && $(XSIM) $(3)_sim --xsimdir $(1)/xsim.dir -sv_seed $(4) -log sim.log \
+  $(call xsim_mode,$(3)) > /dev/null 2>&1 || true
+endef
+
+IO_RUN = $(DDR_IO_DIR)/$(IO_CFG)/seed$(SEED)
+run-ddr-io: check-tools $(call ddr_io_snap,$(IO_CFG))
+	$(call xsim_run,$(DDR_IO_DIR)/$(IO_CFG),$(IO_RUN),$(DDR_IO_TOP),$(SEED))
+	@grep -q "^$(DDR_IO_TOP): PASS" $(IO_RUN)/sim.log || \
+	  { grep -E "ERROR|FAIL|Error" $(IO_RUN)/sim.log | head -20; \
+	    echo "$(DDR_IO_TOP) $(IO_CFG) seed $(SEED): FAIL, see $(IO_RUN)/sim.log"; exit 1; }
+	@echo "$(DDR_IO_TOP) $(IO_CFG) seed $(SEED): PASS"
+
+CLK_RUN = $(DDR_CLK_DIR)/$(CLK_CFG)/run
+run-ddr-clk: check-tools $(call ddr_clk_snap,$(CLK_CFG))
+	$(call xsim_run,$(DDR_CLK_DIR)/$(CLK_CFG),$(CLK_RUN),$(DDR_CLK_TOP),$(SEED))
+	@grep -q "^$(DDR_CLK_TOP): PASS" $(CLK_RUN)/sim.log || \
+	  { grep -E "ERROR|FAIL|Error" $(CLK_RUN)/sim.log | head -20; \
+	    echo "$(DDR_CLK_TOP) $(CLK_CFG): FAIL, see $(CLK_RUN)/sim.log"; exit 1; }
+	@echo "$(DDR_CLK_TOP) $(CLK_CFG): PASS"
+
+test-ddr-io: check-tools $(foreach c,$(DDR_IO_CFGS),$(call ddr_io_snap,$(c)))
+	@set -e; for c in $(DDR_IO_CFGS); do for s in $(SEEDS); do \
+	  $(MAKE) --no-print-directory run-ddr-io IO_CFG=$$c SEED=$$s; done; done
+
+test-ddr-clk: check-tools $(foreach c,$(DDR_CLK_CFGS),$(call ddr_clk_snap,$(c)))
+	@set -e; for c in $(DDR_CLK_CFGS); do $(MAKE) --no-print-directory run-ddr-clk CLK_CFG=$$c; done
+
+test: test-dphy test-ddr-io test-ddr-clk
+
+# Each mutant gets its own DDR_IO_DIR / DDR_CLK_DIR and RTL copy, then runs
+# run-ddr-io / run-ddr-clk of this Makefile (MUTANT_JOBS in parallel).
+MUTANT_JOBS ?= 4
+mutants: check-tools
+	$(PYTHON) mutants.py --build $(BUILD)/mutants --jobs $(MUTANT_JOBS) $(MUTANTS)
 
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: build check-tools run test clean
+.PHONY: build check-tools run test test-dphy test-ddr-io test-ddr-clk run-ddr-io run-ddr-clk \
+        mutants clean

@@ -1,0 +1,15 @@
+BOARD: HBI0376B
+TITLE: Motherboard configuration file
+
+; Copyright Bow32 contributors.
+; SPDX-License-Identifier: Apache-2.0
+; Goes to MB\HBI0376B\board.txt on the configuration microSD card (keep a copy
+; of the card's own file: it selects the Arm image with APPFILE: CA5DS\ca5ds.txt).
+; MBBIOS and CPLD must name the files that are on the card.
+
+[MCCS]
+MBBIOS: mbb_v211.ebf               ;MB BIOS IMAGE
+CPLD: pld_v100.dat                 ;CPLD slim vme data file
+
+[APPLICATION NOTE]
+APPFILE: BOW32\bow32.txt           ;Bow32 (hw/fpga/mps4)

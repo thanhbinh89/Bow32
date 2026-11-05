@@ -1,0 +1,46 @@
+BOARD: HBI0376
+TITLE: Bow32 RISC-V learning MCU (hw/fpga/mps4)
+
+; Copyright Bow32 contributors.
+; SPDX-License-Identifier: Apache-2.0
+; Goes to MB\HBI0376B\BOW32\bow32.txt on the configuration microSD card
+; (hw/fpga/mps4/Makefile `make sdcard` adds the DOS line endings the MCC needs).
+; MB\HBI0376B\board.txt selects it: APPFILE: BOW32\bow32.txt
+
+[FPGAS]
+TOTALFPGAS: 1                      ;Total Number of FPGAs
+F0FILE: bow32.bit                  ;FPGA0 Filename (build/fpga/mps4/bow32_mps4.bit)
+F0MODE: FPGA                       ;FPGA0 Programming Mode
+
+[OSCCLKS]
+TOTALOSCCLKS: 7
+; Bow32 uses OSCCLKA[2] only (100 MHz -> MMCMs: SoC 50 MHz, DDR 133.333 MHz).
+; The other oscillators keep the values of the Arm images.
+OSC0: 20.0                         ;OSCCLK[0]   - unused
+OSC1: 30.0                         ;OSCCLK[1]   - unused
+OSC2: 100.0                        ;OSCCLK[2]   - Bow32 clock input (osc_clk_i, ball AW23)
+OSC3: 30.0                         ;OSCCLK[3]   - unused
+OSC4: 40.0                         ;OSCCLK[4]   - unused
+OSC5: 25.175                       ;OSCCLK[5]   - unused
+OSC6: 100.0                        ;DDR4 reference clock - unused
+
+[HARDWARE CONTROL]
+ASSERTNPOR: TRUE                   ;External resets assert nPOR (CB_nPOR = Bow32 reset)
+LEGACYRST: FALSE                   ;Legacy CB_nPOR/CB_nRST reset mode
+CPUWAIT: 0xFFFFFFFF                ;CPUWAIT value (not implemented by Bow32)
+
+[PERIPHERAL SUPPORT]
+; Bow32 implements none of the MCC interfaces (no SCC, no SMB, no DDR4).
+FPGA_SMB: FALSE                    ;SMB interface is supported (MCC_SMC<>FPGA_SMB)
+SMB_LAR: FALSE                     ;SMB LAR interface is supported
+FPGA_SCC: FALSE                    ;SCC interface is supported
+FPGA_DDR: FALSE                    ;DDR interface is supported
+FPGA_SYSREG: FALSE                 ;System register interface is supported
+FPGA_REMAP: FALSE                  ;REMAP interface is supported
+FPGA_HDMI: FALSE                   ;HDMI interface is supported
+FPGA_RTC: FALSE                    ;RTC PL031 interface is supported
+FPGA_PCIE: FALSE                   ;PCIe interface is supported
+FPGA_QSPI: FALSE                   ;QSPI interface is supported
+
+[SCC REGISTERS]
+TOTALSYSCONS: 0                    ;Total Number of SYSCON registers defined

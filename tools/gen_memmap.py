@@ -39,6 +39,8 @@ def camel(name):
 
 
 def human_size(size):
+    if size >= 1024 * 1024 and size % (1024 * 1024) == 0:
+        return f"{size // (1024 * 1024)} MiB"
     if size >= 1024 and size % 1024 == 0:
         return f"{size // 1024} KiB"
     return f"{size} B"

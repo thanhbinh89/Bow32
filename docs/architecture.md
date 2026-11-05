@@ -9,12 +9,12 @@
                            │ sys_rst_req                          │
  ┌─────────────────────────┼──────────────────────────────────────┼──┐
  │  bow_cpu_ibex           │                                      │  │
- │  ┌───────────────┐      │       bow_bus_xbar (main, 3 x 7)     │  │
+ │  ┌───────────────┐      │       bow_bus_xbar (main, 3 x 8)     │  │
  │  │ ibex_top      │ instr├──────>┌──────────────┐               │  │
  │  │ RV32IMC       │      │       │ decode + RR  │──> bow_rom    │  │
  │  │               │ data ├──────>│ arbiter/dev  │──> bow_flash ─┼──┤ (mem port)
  │  └───────▲───────┘      │  ┌───>└──────────────┘──> bow_sram   │  │
- │          │irq_fast[10:0]│  │ DMA       │        └─> bow_vram 1 MiB
+ │          │irq_fast[11:0]│  │ DMA       │        └─> bow_vram 1 MiB
  └──────────┼──────────────┼──┼───────────┼───────────────────────┘  │
             │              │       bow_bus_xbar (periph, 1 host)     │
             │              │       ┌──────────────┐                  │
@@ -29,10 +29,12 @@
             ├──────────────────────│ CSI2RX       │──┼──┐
             ├──────────────────────│ H264 (regs)  │──┼──┼──┐
             ├──────────────────────│ DMA (regs)   │──┼──┼──┼──┐
-            └──────────────────────│ MKV (mã khối)│  │  │  │  │
-                                   └──────────────┘  │  │  │  │
+            ├──────────────────────│ MKV (mã khối)│  │  │  │  │
+            └──────────────────────│ DDR CSR, PHY │──┼──┼──┼──┼──┐
+                                   └──────────────┘  │  │  │  │  │
    main xbar ──> ISP capture buffer (0x3000_0000) ───┤  │
    main xbar ──> bow_axil_bridge ──> m_axil_* (AXI4-Lite, 0x5000_0000)
+   main xbar ──> bow_ddr (cửa sổ 0x8000_0000) ──> LiteDRAM ──DFI──> PHY ──> ddr_io_* ──> pad wrapper
                                                      │  │
    dphy_* (D-PHY I/O) ──> bow_csi2rx ────────────────┼──┘  │  │
                               │ RAW10 (m_axis)       │     │  │
@@ -49,7 +51,12 @@ có video thêm **host thứ ba (DMA)** và **video RAM 1 MiB** trên main cross
 (11 slot): camera → CSI-2 → ISP → H.264 → DMA → VRAM là một luồng phần cứng
 liên tục, CPU chỉ cấu hình và gửi stream đi ([ip/h264.md](ip/h264.md),
 [ip/dma.md](ip/dma.md)). Slot thứ 12 của peripheral bus là khối mã khối **MKV**
-(dự thảo TCVN XXXX:2024, [ip/mkv.md](ip/mkv.md)), chỉ có thanh ghi.
+(dự thảo TCVN XXXX:2024, [ip/mkv.md](ip/mkv.md)), chỉ có thanh ghi. **DDR2/DDR3**
+(`bow_ddr`, [ip/ddr.md](ip/ddr.md)) là controller LiteDRAM (sinh từ Python) trên PHY
+riêng của Bow32, có ba cổng: cửa sổ bộ nhớ 512 MiB ở `0x8000_0000` (device thứ 8 của main
+crossbar), CSR của LiteDRAM ở `0x4000_C000` (8 KiB) và thanh ghi PHY/cầu ở `0x4000_E000`;
+tham số `DdrEn` của `bow32_top` chọn IP thật (Arm MPS4) hay bản stub (KV260: trả lỗi
+bus), `DdrMem` chọn lõi DDR2 (bo RAM) hay DDR3.
 Bộ thu MIPI CSI-2 (`bow_csi2rx`) nhận các tín hiệu D-PHY `dphy_*` (trên KV260
 từ `bow_dphy_io_xusp` ở board top) và đưa RAW10 vào ISP. Đặc tả:
 [ip/isp.md](ip/isp.md), [ip/csi2rx.md](ip/csi2rx.md), [ip/i2c.md](ip/i2c.md),
@@ -81,7 +88,7 @@ Một giao thức duy nhất cho toàn SoC: chính là bus native của Ibex (t�
 OBI) — `req/gnt` để bắt tay, `rvalid` **đúng 1 chu kỳ** sau `gnt`. Thiết bị chậm
 giữ `gnt = 0`. Chi tiết: [bus.md](bus.md).
 
-* **Main crossbar**: 3 host (instr, data, DMA) × 7 device. Mỗi device có arbiter
+* **Main crossbar**: 3 host (instr, data, DMA) × 8 device. Mỗi device có arbiter
   round-robin riêng → instruction fetch từ flash, load/store vào SRAM và DMA ghi
   VRAM có thể diễn ra cùng chu kỳ. Grant chưa được nhận thì bị khoá (thiết bị chậm như cầu
   AXI4-Lite luôn thấy một request ổn định).
@@ -99,8 +106,13 @@ giữ `gnt = 0`. Chi tiết: [bus.md](bus.md).
   912 Mbit/s), lấy từ lane clock của D-PHY và chỉ chạy khi có HS: tìm sync,
   ghép lane, giải packet, unpack. Bản cơ bản không có D-PHY nên clock này
   nối 0.
+* Miền **DDR** của `bow_ddr` (khi `DdrEn = 1`): `ddr_sys_clk_i` = CK/4 cho controller
+  LiteDRAM, `ddr_clk_i` = CK của DRAM (133,33 MHz trên MPS4) cho bộ chuyển DFI và PHY
+  (cùng MMCM, đồng bộ với nhau), `ddr_rd_clk_i` cùng tần số CK nhưng pha dịch được (bắt
+  dữ liệu đọc), cộng hai clock ghi chỉ dùng trong wrapper chân của board. Reset liên kết
+  `ddr_rst_ni & sys_rst_n` (MMCM lock) đồng bộ vào từng miền ([ip/ddr.md](ip/ddr.md)).
 * Mọi tín hiệu qua lại giữa các miền đều qua bộ đồng bộ, bus gray hoặc RAM
-  2 clock (xem [ip/isp.md](ip/isp.md), [ip/csi2rx.md](ip/csi2rx.md)).
+  2 clock (xem [ip/isp.md](ip/isp.md), [ip/csi2rx.md](ip/csi2rx.md), [ip/ddr.md](ip/ddr.md)).
 * `bow_rstmgr` tạo hai miền reset (assert bất đồng bộ, nhả đồng bộ):
   * **POR** (`por_rst_n`): chỉ reset SYSCTRL — giữ *reset cause*, `BOOT_FLAG`,
     bộ phát hiện BREAK qua các lần reset hệ thống.
@@ -124,6 +136,7 @@ giữ `gnt = 0`. Chi tiết: [bus.md](bus.md).
 | H264 (frame xong, đủ FRAMES, lỗi) | `irq_fast_i[8]` | `0x80000018` |
 | DMA (kênh xong, packet, lỗi bus) | `irq_fast_i[9]` | `0x80000019` |
 | MKV (lệnh xong, lệnh lỗi) | `irq_fast_i[10]` | `0x8000001A` |
+| DDR (APPLY, chụp thô / bước pha xong, lỗi) | `irq_fast_i[11]` | `0x8000001B` |
 
 `irq_timer_i`, `irq_external_i`, `irq_software_i` đang nối 0 — chỗ trống để học
 thêm CLINT/PLIC (xem [roadmap.md](roadmap.md)).
@@ -147,6 +160,9 @@ thêm CLINT/PLIC (xem [roadmap.md](roadmap.md)).
 | Stream H.264 đi qua DMA vào video RAM riêng | Phần cứng nối liền camera → bộ nhớ; CPU (50 MHz) không phải chép dữ liệu; VRAM ở cổng crossbar riêng nên không làm chậm SRAM của CPU |
 | MKV: một nửa vòng mỗi chu kỳ, lược đồ khoá tính một lần vào LUTRAM | Hai nửa của hàm vòng cùng dạng "cộng khoá → S-box → lớp tuyến tính" nên dùng chung một lớp S-box; giải mã đọc khoá vòng theo thứ tự ngược, không phải tính lại; 18 chu kỳ/khối vẫn nhanh hơn nhiều so với CPU ghi/đọc thanh ghi |
 | MKV theo véc tơ kiểm tra khi văn bản dự thảo mâu thuẫn | Hai chỗ (ma trận M4, hằng số lược đồ khoá) được chứng minh bằng chính dữ liệu của Phụ lục A và giữ thành test ([ip/mkv.md](ip/mkv.md)) |
+| DDR: controller LiteDRAM, PHY riêng nối qua DFI | Controller đã chạy trên rất nhiều board, sinh lại được từ cấu hình; PHY của LiteDRAM không làm được DDR2 trên UltraScale+, không điều khiển level shifter và không chỉnh được pha đọc trên cả chu kỳ, nên Bow32 giữ PHY riêng |
+| PHY DDR chỉ dùng `ODDRE1`/`IDDRE1` + MMCM dịch pha, hiệu chỉnh bằng phần mềm | Đọc hiểu được từng chu kỳ ở chân; không cần IP MIG/license; cùng cách dùng được trên mọi FPGA có DDR register ở I/O. Giá phải trả: CK thấp (DDR2-266, DDR3 chỉ chế độ DLL-off) |
+| Bản loopback với DRAM giả lập tổng hợp được (`bow_ddr_lb`) | Chạy được trên bo trước khi có chip DRAM: PHY vẫn lái chân thật, dữ liệu đọc đi qua IOB/IDDR/FIFO; DRAM giả lập kiểm tra mọi luật JEDEC nên lỗi của controller lộ ra ngay ở thanh ghi `DBG` |
 
 ## Quy ước mã nguồn
 
