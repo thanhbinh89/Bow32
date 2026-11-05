@@ -17,7 +17,8 @@ Tệp này được sinh tự động từ `hw/top/data/bow32_memmap.yaml`. Sử
 | 3 | `periph` | `0x40000000` | `0x4000FFFF` | 64 KiB | Peripheral bus (16 x 4 KiB slots) |
 | 4 | `isp_buf` | `0x30000000` | `0x3001FFFF` | 128 KiB | ISP capture buffer (32K x 24 bit, read only) |
 | 5 | `axil` | `0x50000000` | `0x5000FFFF` | 64 KiB | AXI4-Lite window (devices of the FPGA block design) |
-| 6 | `vram` | `0x24000000` | `0x240FFFFF` | 1024 KiB | Video RAM (1 MiB, UltraRAM): DMA buffers, H.264 stream |
+| 6 | `vram` | `0x24000000` | `0x240FFFFF` | 1 MiB | Video RAM (1 MiB, UltraRAM): DMA buffers, H.264 stream |
+| 7 | `ddr` | `0x80000000` | `0x9FFFFFFF` | 512 MiB | DDR2/DDR3 SDRAM window (bow_ddr, 512 MiB decode, real size = DRAM size) |
 
 ## Peripheral bus
 
@@ -35,6 +36,8 @@ Tệp này được sinh tự động từ `hw/top/data/bow32_memmap.yaml`. Sử
 | 9 | `h264` | `0x40009000` | `0x40009FFF` | 4 KiB | H.264 encoder (ISP output -> H.264 stream) |
 | 10 | `dma` | `0x4000A000` | `0x4000AFFF` | 4 KiB | DMA controller (2 channels, M2M / stream to memory) |
 | 11 | `mkv` | `0x4000B000` | `0x4000BFFF` | 4 KiB | MKV block cipher (TCVN draft 2024): MKV-128 / MKV-256 |
+| 12 | `ddr_ctrl` | `0x4000C000` | `0x4000DFFF` | 8 KiB | DDR controller CSRs (LiteDRAM: DFII, BIST, init status) |
+| 13 | `ddr_phy` | `0x4000E000` | `0x4000EFFF` | 4 KiB | DDR PHY and bus bridge registers (bow_ddr) |
 
 Truy cập vào địa chỉ không được ánh xạ trả về bus error (Ibex sinh exception *load/store/instruction access fault*).
 
@@ -53,3 +56,4 @@ Truy cập vào địa chỉ không được ánh xạ trả về bus error (Ibe
 | 8 | `0x80000018` | `h264` | H.264 encoder frame done / sequence done / error |
 | 9 | `0x80000019` | `dma` | DMA channel done / stream packet / bus error |
 | 10 | `0x8000001A` | `mkv` | MKV command done / command error |
+| 11 | `0x8000001B` | `ddr` | DDR PHY / bridge: capture / phase done, errors |

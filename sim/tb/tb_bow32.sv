@@ -13,8 +13,19 @@
 // replaces the sensor and the receive I/O of the board) and a device on the
 // AXI4-Lite master port.
 //
+// The SoC has its DDR2 memory system (DdrEn = 1, DdrMem = 2: LiteDRAM DDR2
+// controller + Bow32 PHY) wired like the MPS4 loopback build: DDR clock model
+// (hw/ip/ddr/dv/ddr_clk_model.sv: CK, the controller clock CK / 4 with its
+// rising edges on CK rising edges, write and read clocks with MMCM fine phase
+// shift), pad model (hw/ip/ddr/dv/bow_ddr_io_sim.sv, Loopback) and the DRAM
+// emulator bow_ddr_lb (4 MiB of the 64 MiB DDR2 address space). The DDR
+// clocks run only in the ddr test, from the moment the boot ROM starts the
+// application (the clock and pad models slow the simulation down); elsewhere
+// the DDR side sees no clock (CLK_OK = 0, the window and the LiteDRAM CSRs
+// answer bus errors).
+//
 // Plusargs:
-//   +TEST=<name>      boot | load | break | flash | irq | gpio | camera | csi2 | h264 | mkv
+//   +TEST=<name>      boot | load | break | flash | irq | gpio | camera | csi2 | h264 | mkv | ddr
 //                     (see run_test below)
 //   +ROM=<vmem>       boot ROM image (required)
 //   +FLASH=<vmem>     image preloaded into the flash (backdoor)
@@ -55,6 +66,15 @@ module tb_bow32;
   longint unsigned cycle = 0;
   always @(posedge clk) cycle <= cycle + 1;
 
+  // DDR2 (LiteDRAM core litedram_ddr2) at 133.33 MHz, controller clock CK / 4,
+  // 504 fine phase steps per CK (MPS4 loopback build)
+  localparam int unsigned DdrMem      = 2;
+  localparam int unsigned DdrTckPs    = 7500;
+  localparam int unsigned DdrClkHz    = 133_333_333;
+  localparam int unsigned DdrPsSteps  = 504;
+  localparam int unsigned DdrEmuBytes = 4 << 20;
+  logic ddr_en = 1'b0;   // DDR clocks on (ddr test, from the application start)
+
   // ------------------------------------------------------------------- DUT
   logic       uart0_rx = 1'b1, uart0_tx;
   logic       uart1_rx = 1'b1;  // UART1 is the alternate function of PB0 (TX) / PB1 (RX)
@@ -88,6 +108,13 @@ module tb_bow32;
   logic [1:0]  axil_bresp = 2'b00, axil_rresp = 2'b00;
   logic [31:0] axil_rdata = '0;
 
+  // DDR memory system <-> clock model, pad model and DRAM emulator
+  logic ddr_sys_clk, ddr_clk, ddr_wclk, ddr_wclk90, ddr_rd_clk, ddr_locked;
+  logic ddr_ps_en, ddr_ps_inc, ddr_ps_done, ddr_wps_en, ddr_wps_inc, ddr_wps_done;
+  bow_ddr_pkg::ddr_io_out_t ddr_io_o;
+  bow_ddr_pkg::ddr_io_in_t  ddr_io_i;
+  logic [31:0] ddr_dbg;
+
   bow32_top #(
     .ClkFreqHz   (ClkFreqHz),
     .BootBaud    (Baud),
@@ -95,7 +122,13 @@ module tb_bow32;
     .BreakCycles (BreakCycles),
     .CsiLanes    (2),
     .CsiPhy      (1'b1),
-    .VidClkHz    (VidClkHz)
+    .VidClkHz    (VidClkHz),
+    .DdrEn       (1'b1),
+    .DdrMem      (DdrMem),
+    .DdrClkHz    (DdrClkHz),
+    .DdrPsSteps  (DdrPsSteps),
+    .DdrPhyKind  (2),
+    .DdrEmuBytes (DdrEmuBytes)
   ) dut (
     .clk_i        (clk),
     .rst_ni       (rst_n),
@@ -148,8 +181,118 @@ module tb_bow32;
     .m_axil_rresp_i   (axil_rresp),
     .m_axil_rvalid_i  (axil_rvalid),
     .m_axil_rready_o  (axil_rready),
+    .ddr_sys_clk_i  (ddr_sys_clk),
+    .ddr_clk_i      (ddr_clk),
+    .ddr_rst_ni     (ddr_locked),
+    .ddr_rd_clk_i   (ddr_rd_clk),
+    .ddr_ps_en_o    (ddr_ps_en),
+    .ddr_ps_inc_o   (ddr_ps_inc),
+    .ddr_ps_done_i  (ddr_ps_done),
+    .ddr_wps_en_o   (ddr_wps_en),
+    .ddr_wps_inc_o  (ddr_wps_inc),
+    .ddr_wps_done_i (ddr_wps_done),
+    .ddr_io_o       (ddr_io_o),
+    .ddr_io_i       (ddr_io_i),
+    .ddr_dbg_i      (ddr_dbg),
     .sys_rst_no   (sys_rst_n),
     .core_sleep_o (core_sleep)
+  );
+
+  // ------------------------------------------------------------------ DDR
+  // MPS4 loopback build: MMCMs (ddr_clk, the LiteDRAM controller clock
+  // sys_clk = CK / 4, write clocks, read capture clock with fine phase
+  // shift), pads driven by the PHY and read back through the IDDRs, the DRAM
+  // emulator answering on the pad wrapper's loopback inputs.
+  ddr_clk_model #(
+    .TckPs   (DdrTckPs),
+    .PsSteps (DdrPsSteps)
+  ) u_ddr_clk (
+    .en_i       (ddr_en),
+    .ddr_clk_o  (ddr_clk),
+    .sys_clk_o  (ddr_sys_clk),
+    .wclk_o     (ddr_wclk),
+    .wclk90_o   (ddr_wclk90),
+    .rd_clk_o   (ddr_rd_clk),
+    .locked_o   (ddr_locked),
+    .ps_en_i    (ddr_ps_en),
+    .ps_inc_i   (ddr_ps_inc),
+    .ps_done_o  (ddr_ps_done),
+    .wps_en_i   (ddr_wps_en),
+    .wps_inc_i  (ddr_wps_inc),
+    .wps_done_o (ddr_wps_done)
+  );
+
+  logic                                         ddr_lb_en, ddr_lb_rst_n;
+  logic [1:0][bow_ddr_pkg::MaxDq-1:0]           ddr_lb_dq;
+  logic [bow_ddr_pkg::MaxLanes-1:0][1:0]        ddr_lb_dqs;
+
+  bow_ddr_io_sim #(
+    .DqBits   (8),
+    .Lanes    (1),
+    .AddrPins (14),
+    .BankPins (2),
+    .Loopback (1'b1)
+  ) u_ddr_io (
+    .clk_i        (ddr_clk),
+    .wclk_i       (ddr_wclk),
+    .wclk90_i     (ddr_wclk90),
+    .rd_clk_i     (ddr_rd_clk),
+    .io_o_i       (ddr_io_o),
+    .io_i_o       (ddr_io_i),
+    .lb_en_i      (ddr_lb_en),
+    .lb_dq_i      (ddr_lb_dq),
+    .lb_dqs_i     (ddr_lb_dqs),
+    .ck_p_o       (),
+    .ck_n_o       (),
+    .cke_o        (),
+    .rst_n_o      (),
+    .odt_o        (),
+    .cs_n_o       (),
+    .ras_n_o      (),
+    .cas_n_o      (),
+    .we_n_o       (),
+    .ba_o         (),
+    .a_o          (),
+    .dq_o         (),
+    .dq_oe_o      (),
+    .dq_i         ('0),
+    .dqs_p_o      (),
+    .dqs_n_o      (),
+    .dqs_oe_o     (),
+    .dqs_p_i      ('0),
+    .dqs_n_i      ('1),
+    .dm_o         (),
+    .ls_oe_n_o    (),
+    .ls_dir_dq_o  (),
+    .ls_dir_dqs_o ()
+  );
+
+  bow_rst_sync u_ddr_lb_rst (
+    .clk_i  (ddr_clk),
+    .rst_ni (ddr_locked),
+    .rst_no (ddr_lb_rst_n)
+  );
+
+  // 4 MiB x8: RowBits = 22 - 10 - 2 = 10, i.e. the first 4 MiB of the 64 MiB
+  // DDR2 window (LiteDRAM row/bank/column mapping, byte address [25:12] =
+  // row); the app limits its tests to EMU bytes, an ACT to a higher row is a
+  // DBG error of the emulator
+  bow_ddr_lb #(
+    .Ddr3     (1'b0),
+    .DqBits   (8),
+    .BankBits (2),
+    .RowBits  (10),
+    .ColBits  (10),
+    .MemBytes (DdrEmuBytes),
+    .UseUram  (1'b0)
+  ) u_ddr_lb (
+    .clk_i    (ddr_clk),
+    .rst_ni   (ddr_lb_rst_n),
+    .io_i     (ddr_io_o),
+    .lb_en_o  (ddr_lb_en),
+    .lb_dq_o  (ddr_lb_dq),
+    .lb_dqs_o (ddr_lb_dqs),
+    .dbg_o    (ddr_dbg)
   );
 
   // ------------------------------------------------------------- GPIO pads
@@ -197,6 +340,11 @@ module tb_bow32;
     if (test == "mkv" && (contains(line, " FAIL") || contains(line, "mkv: FAIL") ||
                           (line.len() >= 5 && line.substr(0, 4) == "error"))) begin
       $fatal(1, "the mkv app reported a failure: %s", line);
+    end
+    if (test == "ddr" && (contains(line, " FAIL") || contains(line, "ddr: FAIL") ||
+                          contains(line, "[trap]") ||
+                          (line.len() >= 5 && line.substr(0, 4) == "error"))) begin
+      $fatal(1, "the ddr app reported a failure: %s", line);
     end
   endfunction
 
@@ -1323,6 +1471,37 @@ module tb_bow32;
         video_cmd("key 128 000102030405060708090a0b0c0d0e0f", "key MKV-128/128 R=6 (98 cycles)\nok\n> ");
         video_cmd("enc 00112233445566778899aabbccddeeff", "out 77ee73e973cbf02fe33809d88d852da6\nok\n> ");
         video_cmd("dec 77ee73e973cbf02fe33809d88d852da6", "out 00112233445566778899aabbccddeeff\nok\n> ");
+      end
+      // DDR2 (LiteDRAM controller + Bow32 PHY) with sw/apps/ddr on the
+      // loopback emulator: probe, JEDEC init through LiteDRAM's DFII, read
+      // calibration (phase sweep over the MMCM model), hand over to the
+      // controller, window loads / stores with read-modify-write, LiteDRAM
+      // BIST, the error paths and the interrupt line ("test quick", every
+      // item must pass); then the window from the shell, at both ends of the
+      // emulator's 4 MiB. The emulator checks every command against the JEDEC
+      // rules (DBG): no error may be left, and it must have seen the init.
+      "ddr": begin
+        string ddr_pass;
+        int    ddr_ok, ddr_all;
+        expect_text(0, "boot: starting image");
+        ddr_en = 1'b1;
+        expect_text(0, {"ddr: Bow32 DDR2 x8 (LiteDRAM controller), PHY loopback, 133 MHz (133333333 Hz), ",
+                        "504 phase steps, emulator 4096 KiB"});
+        expect_text(0, "> ");
+        mark = log0.len();
+        video_cmd("test quick", "ddr: PASS (");
+        expect_text(0, "\nok\n> ", mark);
+        ddr_pass = log0_line("ddr: PASS (", mark);
+        if ($sscanf(ddr_pass, "%d/%d)", ddr_ok, ddr_all) != 2 || ddr_ok != ddr_all || ddr_all == 0) begin
+          $fatal(1, "ddr self-test result 'ddr: PASS (%s', expected (n/n)", ddr_pass);
+        end
+        video_cmd("wr 80001234 cafef00d", "ok\n> ");
+        video_cmd("wr 803ffffc 12345678", "ok\n> ");
+        video_cmd("rd 80001234", "80001234: cafef00d\nok\n> ");
+        video_cmd("rd 803ffffc", "803ffffc: 12345678\nok\n> ");
+        if (ddr_dbg[31] || !ddr_dbg[30]) begin
+          $fatal(1, "DRAM emulator: DBG %08x (JEDEC rule errors or init not done)", ddr_dbg);
+        end
       end
       default: $fatal(1, "unknown +TEST=%s", test);
     endcase

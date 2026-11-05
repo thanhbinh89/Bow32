@@ -4,7 +4,7 @@
 # System simulation with Verilator (>= 5.0, uses --binary --timing).
 #
 #   make build                 compile the testbench
-#   make run TEST=boot         run one test (boot | load | break | flash | irq | gpio | camera | csi2 | h264 | mkv)
+#   make run TEST=boot         run one test (boot | load | break | flash | irq | gpio | camera | csi2 | h264 | mkv | ddr)
 #   make test                  run all tests
 #   make run TEST=load WAVES=1 also dump build/sim/waves.fst (open with GTKWave)
 
@@ -16,7 +16,7 @@ PYTHON    ?= python3
 WAVES     ?= 0
 
 TEST  ?= boot
-TESTS := boot load break flash irq gpio camera csi2 h264 mkv
+TESTS := boot load break flash irq gpio camera csi2 h264 mkv ddr
 
 ROM_VMEM := $(SW_BUILD)/bootrom/bootrom.vmem
 
@@ -30,6 +30,7 @@ FLASH_camera := $(SW_BUILD)/camera/camera.vmem
 FLASH_csi2  := $(SW_BUILD)/csi2_test/csi2_test.vmem
 FLASH_h264  := $(SW_BUILD)/video/video.vmem
 FLASH_mkv   := $(SW_BUILD)/mkv/mkv.vmem
+FLASH_ddr   := $(SW_BUILD)/ddr/ddr.vmem
 IMAGE_load  := $(SW_BUILD)/hello/hello.vmem
 
 # Separate model directories with and without waveform tracing.
@@ -45,9 +46,12 @@ endif
 
 SIM_BIN := $(OBJ_DIR)/Vtb_bow32
 # The D-PHY transmitter model of the CSI-2 receiver tests (package
-# csi2_tx_pkg + module csi2_tx_model) is compiled before the testbench.
-TB_SRCS := $(REPO)/hw/ip/csi2rx/dv/csi2_tx_model.sv tb/tb_bow32.sv
-RTL_DEPS := $(shell find $(REPO)/hw/ip $(REPO)/hw/top -name '*.sv' -o -name '*.f')
+# csi2_tx_pkg + module csi2_tx_model) and the DDR clock and pad models are
+# compiled before the testbench.
+TB_SRCS := $(REPO)/hw/ip/csi2rx/dv/csi2_tx_model.sv $(REPO)/hw/ip/ddr/dv/ddr_clk_model.sv \
+           $(REPO)/hw/ip/ddr/dv/bow_ddr_io_sim.sv tb/tb_bow32.sv
+# (*.v: the generated LiteDRAM cores of hw/ip/ddr/litedram/generated)
+RTL_DEPS := $(shell find $(REPO)/hw/ip $(REPO)/hw/top -name '*.sv' -o -name '*.v' -o -name '*.f')
 
 build: $(SIM_BIN)
 

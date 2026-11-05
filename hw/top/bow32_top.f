@@ -19,6 +19,7 @@
 -F ../ip/h264/h264.f
 -F ../ip/dma/dma.f
 -F ../ip/mkv/mkv.f
+-F ../ip/ddr/ddr.f
 -F ../ip/i2c/i2c.f
 -F ../ip/axil/axil.f
 -F ../ip/cpu/cpu.f
