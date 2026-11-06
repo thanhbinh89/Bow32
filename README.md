@@ -9,8 +9,8 @@ không dùng IP của AMD) và một **bộ mã hoá H.264** tự viết cùng *
 **video RAM 1 MiB**: camera → CSI-2 → ISP → H.264 → DMA → RAM là một luồng
 phần cứng liền mạch, ra file **MP4** trên PC. Chạy thử với Raspberry Pi camera
 v2 (IMX219) của KV260 ở **1080p30** hoặc **720p60**. Bow32 còn có khối tăng tốc
-**mã khối MKV** theo dự thảo TCVN XXXX:2024 (MKV-128 / MKV-256, đủ 6 phiên bản
-khoá), kiểm chứng với mọi giá trị của Phụ lục A trong chuẩn, và **SDRAM DDR2/DDR3**:
+**mã khối MKV** theo TCVN 14263:2024 (MKV-128 / MKV-256, đủ 6 phiên bản khoá),
+kiểm chứng với Phụ lục A của chuẩn, và **SDRAM DDR2/DDR3**:
 controller **LiteDRAM** (sinh từ Python) trên PHY riêng của Bow32 (`ODDRE1`/`IDDRE1` +
 MMCM dịch pha, điều khiển level shifter, hiệu chỉnh bằng phần mềm), chạy trên bo **Arm
 MPS4** (Virtex UltraScale+).
@@ -68,7 +68,7 @@ MPS4** (Virtex UltraScale+).
 | **Bộ mã hoá H.264** | Constrained Baseline, intra only (IDR mỗi frame, `I_16x16` đủ 4 mode luma + 4 mode chroma, chọn mode theo SAD), CAVLC, 4:2:0, QP 10…51 mỗi frame, cờ deblocking; 392 chu kỳ/macroblock ở 200 MHz (1080p tới ~62 fps); stream Annex B chuẩn, bit-exact với mô hình Python, giải mã bằng FFmpeg trùng từng pixel ([docs/ip/h264.md](docs/ip/h264.md)) |
 | **DMA** | 2 kênh, bus master thứ ba của main crossbar: memory→memory, stream→memory (tuyến tính / vòng / bỏ), đếm packet (frame), lỗi bus, ngắt ([docs/ip/dma.md](docs/ip/dma.md)) |
 | **Video RAM** | 1 MiB (UltraRAM), 0 wait-state, cổng crossbar riêng cho buffer DMA / stream video |
-| **Mã khối MKV** | dự thảo TCVN XXXX:2024: MKV-128 (khoá 128/192/256) và MKV-256 (khoá 256/384/512), lược đồ khoá trong phần cứng, mã hoá / giải mã 4R + 4 chu kỳ mỗi khối (một nửa vòng / chu kỳ, mỗi lệnh làm hai lần và đối chiếu để phát hiện lỗi tiêm vào), xoá khoá sau khi dùng, CLEAR, ngắt; 9 600 LUT; khớp Phụ lục A từng khoá vòng và trạng thái, 360/360 khối ngẫu nhiên trên KV260 trùng mô hình Python ([docs/ip/mkv.md](docs/ip/mkv.md)) |
+| **Mã khối MKV** | TCVN 14263:2024: MKV-128 (khoá 128/192/256) và MKV-256 (khoá 256/384/512), lược đồ khoá trong phần cứng, mã hoá / giải mã 4R + 4 chu kỳ mỗi khối (một nửa vòng / chu kỳ, mỗi lệnh làm hai lần và đối chiếu để phát hiện lỗi tiêm vào), xoá khoá sau khi dùng, CLEAR, ngắt; 9 500 LUT; khớp Phụ lục A của chuẩn từng khoá vòng, 360/360 khối ngẫu nhiên trên KV260 trùng mô hình Python ([docs/ip/mkv.md](docs/ip/mkv.md)) |
 | **DDR2/DDR3 (LiteDRAM + PHY Bow32)** | cửa sổ 512 MiB ở `0x8000_0000` cho CPU/DMA; controller LiteDRAM sinh từ cấu hình (`make litedram`, phiên bản ghim): bank machine, refresh, DFII, BIST; DDR2 x8 (bo RAM, CK 133,33 MHz) và DDR3 x16 chế độ DLL-off (≤ 125 MHz, mô phỏng), BL8; bộ chuyển DFI 1:4 sang PHY riêng chỉ dùng `ODDRE1`/`IDDRE1` + 3 MMCM (pha đọc và pha ghi dịch được 1/504 CK); hiệu chỉnh mắt đọc bằng phần mềm qua DFII + chụp thô; đọc-sửa-ghi khi không có chân DM; điều khiển DIR/OE của level shifter cho bo RAM mở rộng; DRAM giả lập tổng hợp được (kiểm tra luật JEDEC) để chạy trên bo khi chưa có chip ([docs/ip/ddr.md](docs/ip/ddr.md)) |
 | I2C master | 100/400 kHz, START lặp lại, clock stretching; điều khiển cảm biến camera |
 | Cầu AXI4-Lite | cửa sổ `0x5000_0000` tới IP AXI4-Lite của block design (hiện để trống), timeout → bus error |
@@ -170,7 +170,7 @@ Bow32/
 │   │   ├── csi2rx/               #   bộ thu MIPI CSI-2: rtl/ + dv/ (mô hình máy phát D-PHY)
 │   │   ├── h264/                 #   bộ mã hoá H.264: rtl/ + dv/ (test bit-exact với mô hình)
 │   │   ├── dma/                  #   DMA 2 kênh (bus master)
-│   │   ├── mkv/                  #   mã khối MKV (TCVN dự thảo 2024): rtl/ + dv/ (so với mô hình)
+│   │   ├── mkv/                  #   mã khối MKV (TCVN 14263:2024): rtl/ + dv/ (so với mô hình)
 │   │   ├── ddr/                  #   DDR2/DDR3: litedram/ (bộ sinh + lõi LiteDRAM đã sinh), rtl/ (cầu, DFI, PHY,
 │   │   │                         #   DRAM giả lập), dv/ (mô hình clock, chân, bo, DRAM)
 │   │   ├── i2c/                  #   I2C master
@@ -212,7 +212,7 @@ Bow32/
 | [docs/camera_kv260.md](docs/camera_kv260.md) | Chạy camera trên KV260: bitstream, ứng dụng `camera` và `csi2_test`, chụp ảnh về PC |
 | [docs/ip/h264.md](docs/ip/h264.md) | Bộ mã hoá H.264: kiến trúc, các khối, quyết định của encoder, stream, thanh ghi, kiểm chứng |
 | [docs/ip/dma.md](docs/ip/dma.md) | DMA: chế độ M2M / stream, ring buffer, thanh ghi |
-| [docs/ip/mkv.md](docs/ip/mkv.md) | Mã khối MKV: thuật toán, sai khác của bản dự thảo, kiến trúc, thanh ghi, kiểm chứng |
+| [docs/ip/mkv.md](docs/ip/mkv.md) | Mã khối MKV: thuật toán (TCVN 14263:2024), so với bản dự thảo, kiến trúc, thanh ghi, kiểm chứng |
 | [docs/mkv_kv260.md](docs/mkv_kv260.md) | Chạy và kiểm chứng IP MKV trên KV260: `test`, `kat`, `verify`, `bench` |
 | [docs/ip/ddr.md](docs/ip/ddr.md) | DDR2/DDR3: lõi LiteDRAM (sinh, CSR), cầu bus, bộ chuyển DFI, PHY, level shifter, khởi tạo, hiệu chỉnh, thanh ghi, kiểm chứng |
 | [docs/ddr_mps4.md](docs/ddr_mps4.md) | Chạy bộ điều khiển DDR trên Arm MPS4: build, thẻ microSD, `test`, `cal`, `verify`, `bench` |

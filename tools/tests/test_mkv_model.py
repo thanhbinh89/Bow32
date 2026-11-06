@@ -1,14 +1,19 @@
 # Copyright Bow32 contributors.
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for tools/mkv (the MKV block cipher reference model of the
-draft TCVN XXXX:2024) and tools/bow32_mkv.py. Run:
+"""Unit tests for tools/mkv (the reference model of the MKV block cipher of
+TCVN 14263:2024) and tools/bow32_mkv.py. Run:
 python3 -m unittest discover -s tools/tests
 
-The model is checked against every value printed in the draft
-(tools/mkv/tcvn_mkv_vectors.json, extracted from the PDF): the S-boxes, the
-MixWords matrices, and for the six versions of Annex A the round keys, the
-six steps of every round and the ciphertext. The two places where the text
-of the draft and its test vectors disagree are tested explicitly.
+The model is checked against Annex A of the standard
+(tools/mkv/tcvn14263_vectors.json, transcribed from the scanned standard):
+for the six versions every round key, both branches of the first key
+schedule update, the first and the last round, the ciphertext. With its
+DRAFT edition it is checked against every value printed in the draft
+(tools/mkv/draft_vectors.json, extracted from the PDF): the S-boxes, the
+MixWords matrices and the six vectors of its Annex A, which differ from the
+standard in three points (R, the rotation of MixWords, the key schedule
+constants), each tested here; the two errata of the text of the draft are
+tested too.
 """
 
 import random
@@ -23,8 +28,9 @@ sys.path.insert(0, str(ROOT / "mkv"))
 import mkv_model as m  # noqa: E402
 import bow32_mkv  # noqa: E402
 
-SPEC = m.load_spec()
-CASES = SPEC["cases"]
+SPEC = m.load_spec()                # the draft: tables and its Annex A
+DRAFT_CASES = SPEC["cases"]
+CASES = m.load_vectors()            # Annex A of TCVN 14263:2024
 IDENT4 = tuple(tuple(int(i == j) for j in range(4)) for i in range(4))
 
 
@@ -34,7 +40,7 @@ class TablesTest(unittest.TestCase):
         self.assertEqual(m.SBOX_INV.hex(), SPEC["sbox_inv"])
         self.assertEqual(sorted(m.SBOX), list(range(256)))
         self.assertTrue(all(m.SBOX_INV[m.SBOX[x]] == x for x in range(256)))
-        # examples of clause 4.2.2.1
+        # examples of clause 5.4.1 (4.2.2.1 of the draft)
         self.assertEqual(m.SBOX[0x24], 0x1C)
         self.assertEqual(m.SBOX_INV[0x82], 0xB4)
 
@@ -66,18 +72,29 @@ class TablesTest(unittest.TestCase):
         self.assertEqual(m.matmul(m.M4_INV, m.M4), IDENT4)
 
     def test_erratum_1_vectors_need_0x0d(self):
-        """With the printed M4 the MixWords step of round 1 of A.1.1 is wrong."""
-        case = CASES[0]
+        """With the M4 printed in the draft the MixWords step of round 1 of
+        its A.1.1 is wrong (the standard prints 0x0D)."""
+        case = DRAFT_CASES[0]
         x = bytes.fromhex(case["trace"][0][1])          # SubCells output of round 1
         want = bytes.fromhex(case["trace"][0][2])       # MixWords output
-        self.assertEqual(m.mix_words(x), want)
+        with m.edition(m.DRAFT):
+            self.assertEqual(m.mix_words(x), want)
         self.assertNotEqual(m._mix(x, m.M4_PRINTED), want)
+
+    def test_constants_in_generated_tables(self):
+        sv, c = m.sv_tables(), m.c_tables()
+        self.assertIn("Const0L128 = 128'hb2b3d88a94e713ad8cd92a1a91ee0293;", sv)   # byte 0 = 0x93
+        self.assertIn("0x43, 0xc8, 0x53, 0xa3", c)                                # Const^1_256
+        self.assertEqual(m.CONST[256][0], m.CONST[128][0] + m.CONST[128][1])
 
 
 class AnnexATest(unittest.TestCase):
+    """Annex A of TCVN 14263:2024."""
+
     def test_six_versions(self):
         self.assertEqual([(c["block_bits"], c["key_bits"], c["rounds"]) for c in CASES],
                          [(l, k, r) for (l, k), r in sorted(m.VERSIONS.items())])
+        self.assertEqual(sorted(m.VERSIONS.values()), [7, 7, 8, 8, 9, 9])
 
     def test_round_keys(self):
         for case in CASES:
@@ -86,12 +103,23 @@ class AnnexATest(unittest.TestCase):
                 self.assertEqual([x.hex() for x in h[:-1]], case["round_keys"])
                 self.assertEqual(h[-1].hex(), case["k_post"])
 
-    def test_every_round_step(self):
+    def test_first_key_schedule_update(self):
+        """Both branches, nine steps each: constants, MixWords with rotation."""
+        for case in CASES:
+            with self.subTest(case["section"]):
+                l, n = case["block_bits"], case["block_bits"] // 8
+                k = m.initial_key_state(bytes.fromhex(case["key"]), l)
+                upd = m.update_trace(k[:n], k[n:], 1, l)
+                self.assertEqual({s: [x.hex() for x in upd[s]] for s in upd}, case["first_update"])
+
+    def test_first_and_last_round(self):
         for case in CASES:
             with self.subTest(case["section"]):
                 trace = []
                 ct = m.encrypt(bytes.fromhex(case["key"]), bytes.fromhex(case["plaintext"]), trace)
-                self.assertEqual([[s.hex() for s in r] for r in trace], case["trace"])
+                self.assertEqual(len(trace), case["rounds"])
+                self.assertEqual([s.hex() for s in trace[0]], case["trace_first"])
+                self.assertEqual([s.hex() for s in trace[-1]], case["trace_last"])
                 self.assertEqual(ct.hex(), case["ciphertext"])
 
     def test_decryption(self):
@@ -102,6 +130,50 @@ class AnnexATest(unittest.TestCase):
 
     def test_selftest(self):
         self.assertEqual(m.selftest(verbose=False), [])
+
+
+class DraftTest(unittest.TestCase):
+    """The DRAFT edition gives every value of the Annex A of the draft; the
+    standard differs in exactly three points, each one needed."""
+
+    def test_draft_round_keys_and_every_round_step(self):
+        with m.edition(m.DRAFT):
+            for case in DRAFT_CASES:
+                with self.subTest(case["section"]):
+                    key, pt = bytes.fromhex(case["key"]), bytes.fromhex(case["plaintext"])
+                    h = m.key_schedule(key, case["block_bits"])
+                    self.assertEqual([x.hex() for x in h[:-1]], case["round_keys"])
+                    self.assertEqual(h[-1].hex(), case["k_post"])
+                    trace = []
+                    ct = m.encrypt(key, pt, trace)
+                    self.assertEqual([[s.hex() for s in r] for r in trace], case["trace"])
+                    self.assertEqual(ct.hex(), case["ciphertext"])
+                    self.assertEqual(m.decrypt(key, ct), pt)
+
+    def test_draft_is_another_cipher(self):
+        for case in DRAFT_CASES:
+            with self.subTest(case["section"]):
+                ct = m.encrypt(bytes.fromhex(case["key"]), bytes.fromhex(case["plaintext"]))
+                self.assertNotEqual(ct.hex(), case["ciphertext"])
+
+    def test_each_difference_is_needed(self):
+        """The standard with any one of the three points as in the draft
+        misses the vectors of the standard."""
+        std = m.TCVN_14263
+        variants = {"rounds": std._replace(rounds=m.DRAFT.rounds),
+                    "rotation": std._replace(rotate=False),
+                    "constants": std._replace(const={})}
+        for name, ed in variants.items():
+            with self.subTest(name), m.edition(ed):
+                for case in CASES:
+                    ct = m.encrypt(bytes.fromhex(case["key"]), bytes.fromhex(case["plaintext"]))
+                    self.assertNotEqual(ct.hex(), case["ciphertext"])
+
+    def test_rotation(self):
+        x = bytes(range(32))
+        self.assertEqual(m.rotate_words(x[:16]).hex(), "00010203" "05060704" "0a0b0809" "0f0c0d0e")
+        self.assertEqual(m.rotate_words(x)[8:16], bytes([10, 11, 12, 13, 14, 15, 8, 9]))   # 16 bits
+        self.assertEqual(m.rotate_words(m.rotate_words(x), -1), x)
 
 
 class KeyScheduleTest(unittest.TestCase):
@@ -117,8 +189,9 @@ class KeyScheduleTest(unittest.TestCase):
         self.assertEqual(m.initial_key_state(key, 256), key + bytes(b ^ 0xFF for b in key[16:32]))
 
     def _schedule_as_written(self, key, l):
-        """Clause 4.6 read literally: update i uses Const_{i-1}, Const^Left =
-        <2(i-1)>_2l, Const^Right = <2(i-1)+1>_2l (2l-bit big-endian)."""
+        """Clause 4.6 of the draft read literally: update i uses Const_{i-1},
+        Const^Left = <2(i-1)>_2l, Const^Right = <2(i-1)+1>_2l (2l-bit
+        big-endian). Call with the DRAFT edition."""
         n = l // 8
         k0 = m.initial_key_state(key, l)
         kl, kr = k0[:n], k0[n:]
@@ -134,15 +207,24 @@ class KeyScheduleTest(unittest.TestCase):
         return out
 
     def test_erratum_2_constants(self):
-        """The literal reading of the text misses K01 of every vector; the
-        model (constants 2i and 2i - 1 in the first key half) gets them all."""
-        for case in CASES:
-            with self.subTest(case["section"]):
-                key = bytes.fromhex(case["key"])
-                literal = self._schedule_as_written(key, case["block_bits"])
-                self.assertEqual(literal[0].hex(), case["round_keys"][0])
-                self.assertNotEqual(literal[1].hex(), case["round_keys"][1])
-        self.assertEqual(m.schedule_constant(5, 128), bytes(15) + b"\x05" + bytes(16))
+        """The literal reading of the text of the draft misses K01 of every
+        vector of the draft; its DRAFT edition (constants 2i and 2i - 1 in the
+        first key half) gets them all."""
+        with m.edition(m.DRAFT):
+            for case in DRAFT_CASES:
+                with self.subTest(case["section"]):
+                    key = bytes.fromhex(case["key"])
+                    literal = self._schedule_as_written(key, case["block_bits"])
+                    self.assertEqual(literal[0].hex(), case["round_keys"][0])
+                    self.assertNotEqual(literal[1].hex(), case["round_keys"][1])
+            self.assertEqual(m.schedule_constant(5, 128, 0), bytes(15) + b"\x05" + bytes(16))
+
+    def test_constants(self):
+        """Clause 5.5: Const^h_l ^ <v>_l, v in the last byte."""
+        c = m.schedule_constant(5, 128, 0)
+        self.assertEqual(c[:16], m.xor(m.CONST[128][0], bytes(15) + b"\x05"))
+        self.assertEqual(c[16:], bytes(16))
+        self.assertEqual(m.schedule_constant(2, 256, 1)[:32].hex()[-4:], "f1e7")   # ..f1e5 ^ 2
 
     def test_bad_versions(self):
         with self.assertRaises(ValueError):
@@ -174,12 +256,14 @@ class PropertiesTest(unittest.TestCase):
         key, pt = bytes.fromhex(case["key"]), bytes.fromhex(case["plaintext"])
         ct = bytes.fromhex(case["ciphertext"])
         enc = m.half_round_states(key, pt)
+        trace = []
+        m.encrypt(key, pt, trace)
         self.assertEqual(len(enc), 2 * case["rounds"] + 1)
-        self.assertEqual([s.hex() for s in enc[:-1]],
-                         [v for r in case["trace"] for v in (r[2], r[5])])
+        self.assertEqual(enc[:-1], [v for r in trace for v in (r[2], r[5])])
+        self.assertEqual([enc[0].hex(), enc[1].hex()], [case["trace_first"][2], case["trace_first"][5]])
         self.assertEqual(enc[-1], ct)
         dec = m.half_round_states(key, ct, decrypt_op=True)
-        self.assertEqual(dec[0].hex(), case["trace"][-1][5])     # ct ^ K_post
+        self.assertEqual(dec[0].hex(), case["trace_last"][5])    # ct ^ K_post
         self.assertEqual(dec[1:-1], list(reversed(enc[:-2])))
         self.assertEqual(dec[-1], pt)
 
@@ -274,7 +358,8 @@ class FakeMkvSerial:
         if words[0] == "key":
             l, key = int(words[1]), bytes.fromhex(words[2])
             self.key = (l, key)
-            return True, f"key MKV-{l}/{len(key) * 8} R={m.rounds_for(l, len(key) * 8)} (98 cycles)\r\n"
+            r = m.rounds_for(l, len(key) * 8)
+            return True, f"key MKV-{l}/{len(key) * 8} R={r} ({16 * r + 2} cycles)\r\n"
         if words[0] in ("enc", "dec"):
             l, key = self.key
             blk = bytes.fromhex(words[1])

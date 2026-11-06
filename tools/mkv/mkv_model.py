@@ -3,47 +3,61 @@
 # SPDX-License-Identifier: Apache-2.0
 """Reference model of the MKV block cipher for the Bow32 MKV IP (hw/ip/mkv).
 
-MKV is the block cipher of the draft Vietnamese national standard
-"TCVN XXXX:2024 Cong nghe thong tin - Cac ky thuat an toan - Thuat toan mat
-ma - Ma khoi MKV" (docs/ref/Du-thao-TCVN-XXXX2024.pdf). Six versions:
+MKV is the block cipher of the Vietnamese national standard TCVN 14263:2024
+"Cong nghe thong tin - Ky thuat an toan - Thuat toan ma khoi MKV"
+(Information technology - Security techniques - Block cipher algorithm MKV).
+Six versions (Table 1):
 
-    MKV-128  block 128 bit, key 128 / 192 / 256 bit, R = 6 / 7 / 8 rounds
-    MKV-256  block 256 bit, key 256 / 384 / 512 bit, R = 6 / 7 / 8 rounds
+    MKV-128  block 128 bit, key 128 / 192 / 256 bit, R = 7 / 8 / 9 rounds
+    MKV-256  block 256 bit, key 256 / 384 / 512 bit, R = 7 / 8 / 9 rounds
 
-Round function (FLC-SDS structure, state X = x0 || x1 || x2 || x3, every
-sub-state x_i is a column of t = l / 32 bytes):
+Round function (clause 5.2, state X = x^0 || x^1 || x^2 || x^3, every
+sub-state x^j is a column of t = l / 32 bytes, w = 8t bits):
 
-    F(K0 || K1, X) = XWords(SubCells(MixWords(SubCells(X ^ K0)) ^ K1))
+    F(K_i^0 || K_i^1, X) = XWords(SubCells(MixWords(SubCells(X ^ K_i^0)) ^ K_i^1))
     C = F(K_{R-1}, ... F(K_0, P)) ^ K_post
 
-This model follows the text of the draft and its test vectors (Annex A,
-tools/mkv/tcvn_mkv_vectors.json, extracted from the PDF by
-extract_vectors.py). Where the two disagree, the test vectors win (they are
-what any other implementation of the standard produces):
+MixWords (clause 5.4.3) rotates sub-state j left by j * w / 4 bits, then
+multiplies it by M4 (MKV-128) or M8 (MKV-256): y^j = M_t (x^j <<<_w j*w/4).
 
-  * Erratum 1 - matrix M4 of MixWords (MKV-128), clause 4.2.2.2: the text
-    prints 0x0C at (row 2, col 3) and (row 3, col 0). Every MKV-128 vector
-    needs 0x0D there, and the printed inverse M4^-1 is the inverse of the
-    matrix with 0x0D (with 0x0C, M4 * M4^-1 != I).
-  * Erratum 2 - key schedule constants, clause 4.6: the text writes
-    Const^Left_i = <2i>_2l, Const^Right_i = <2i+1>_2l and uses Const_{i-1}
-    in update i. The vectors need, for update i = 1..R:
-        K_i^Left  = F(0, F(c(2i),     K_{i-1}^Right))
-        K_i^Right = K_i^Left ^ F(0, F(c(2i - 1), K_{i-1}^Left))
-    where c(v) = <v>_l || 0^l: the l-bit big-endian value v as K0 (the
-    first key addition), K1 = 0.
+Key schedule (clause 5.5): K = K^0 || K^1 = K_int from the master key,
+RK_0 = K^0, then for i = 0 .. R - 1, with G(X) = XWords(SubCells(MixWords(
+SubCells(X)))):
+    K^1 <- G(G(K^1 ^ Const^1_l ^ <2i + 2>_l))
+    K^0 <- G(G(K^0 ^ Const^0_l ^ <2i + 1>_l)) ^ K^1
+    SWAP(K^0, K^1);  RK_{2i+1} = K^0, RK_{2i+2} = K^1
+Round key K_i = RK_2i || RK_2i+1, K_post = RK_2R. <v>_l is v as an l-bit
+big-endian number (v in the last byte).
+
+The model is checked against Annex A of the standard
+(tools/mkv/tcvn14263_vectors.json, transcribed from the scanned standard:
+for each of the six versions the inputs, every round key, both branches of
+the first key schedule update, the first and the last round and the
+ciphertext).
+
+The draft of the standard (docs/ref/Du-thao-TCVN-XXXX2024.pdf) is a
+different cipher in three points, all three fixed by TCVN 14263:2024:
+R = 6 / 7 / 8, MixWords without the rotation, and a key schedule without
+Const^0 / Const^1. The DRAFT edition of this model (with edition(DRAFT):
+...) reproduces every value of the Annex A of the draft
+(tools/mkv/draft_vectors.json, extracted from its PDF by extract_vectors.py),
+which shows that these three are the only differences. The text of the
+draft also had two errata against its own vectors, both corrected in the
+standard: M4 printed with 0x0C at (2, 3) and (3, 0) instead of 0x0D, and
+key schedule constants that did not give its vectors.
 
 Byte order: a block / key is a byte string in the order of the standard
-(the hex strings of Annex A). Sub-state x_i = bytes [i*t, (i+1)*t), byte j
-of it is the j-th entry of the column vector of MixWords.
+(the hex strings of Annex A). Sub-state x^j = bytes [j*t, (j+1)*t), byte b
+of it is x^j_b, the b-th entry of the column vector of MixWords and the b-th
+byte of the w-bit string x^j (x^j_0 first: x^j <<<_w 8 = x^j_1 .. x^j_0).
 
 Library use:
     ct = encrypt(key, pt)                # key 16..64 bytes, pt 16 or 32 bytes
     pt = decrypt(key, ct)
-    h = key_schedule(key, len(pt) * 8)   # half-round keys, see below
+    h = key_schedule(key, len(pt) * 8)   # h[j] = RK_j, see below
 
 Command line:
-    mkv_model.py selftest                       model vs Annex A (all states)
+    mkv_model.py selftest                       model vs Annex A (standard, draft)
     mkv_model.py kat                            print the Annex A vectors
     mkv_model.py enc|dec <l> <key> <block>      one block (hex)
     mkv_model.py gen DIR [--seed N --count N]   test case for hw/ip/mkv/dv
@@ -52,21 +66,25 @@ Command line:
 """
 
 import argparse
+import contextlib
 import json
 import random
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-VECTORS_JSON = Path(__file__).resolve().parent / "tcvn_mkv_vectors.json"
+VECTORS_JSON = Path(__file__).resolve().parent / "tcvn14263_vectors.json"
+DRAFT_JSON = Path(__file__).resolve().parent / "draft_vectors.json"
 
 # ============================================================== constants
 # GF(2^8) of the standard: x^8 + x^5 + x^3 + x + 1
 POLY = 0x12B
 
-# Table 1 of the standard: S-box s, one row per high nibble of the input.
-# The inverse (Table 2) is computed; both are checked against the tables
-# extracted from the PDF (tcvn_mkv_vectors.json).
+# Table 2 of the standard: S-box s, one row per high nibble of the input.
+# The inverse (Table 3) is computed; both are checked against the tables
+# extracted from the PDF of the draft (draft_vectors.json), which are the
+# same as in the standard.
 SBOX = bytes.fromhex("".join((
     "011191e1d1b17161f121c151a1413181",
     "0010e392b5d477668938ab4acd5c2ffe",
@@ -86,12 +104,12 @@ SBOX = bytes.fromhex("".join((
     "09ce4c63d83725eaa07f1d52f996b48b")))
 SBOX_INV = bytes(SBOX.index(x) for x in range(256))
 
-# MixWords matrices (rows), clause 4.2.2.2. M4 with erratum 1 corrected.
+# MixWords matrices (rows), clauses 5.4.3 / 5.4.4.
 M4 = ((0x01, 0x02, 0x01, 0x03),
       (0x03, 0x07, 0x01, 0x04),
       (0x04, 0x0B, 0x03, 0x0D),
       (0x0D, 0x1E, 0x06, 0x14))
-M4_PRINTED = ((0x01, 0x02, 0x01, 0x03),      # as printed in the draft
+M4_PRINTED = ((0x01, 0x02, 0x01, 0x03),      # as printed in the draft (erratum)
               (0x03, 0x07, 0x01, 0x04),
               (0x04, 0x0B, 0x03, 0x0C),
               (0x0C, 0x1E, 0x06, 0x14))
@@ -116,9 +134,40 @@ M8_INV = ((0xB3, 0xCA, 0xB8, 0xDA, 0x72, 0x5C, 0xCD, 0x1F),
           (0xCB, 0x1D, 0x24, 0x5C, 0xEB, 0x15, 0x11, 0x04),
           (0x04, 0xDB, 0x0C, 0x14, 0x0C, 0xDB, 0x04, 0x01))
 
-# (block bits, key bits) -> rounds R, Table 1 of the standard
-VERSIONS = {(128, 128): 6, (128, 192): 7, (128, 256): 8,
-            (256, 256): 6, (256, 384): 7, (256, 512): 8}
+# Constants Const^0_l, Const^1_l of the key schedule, clause 5.5
+CONST = {128: (bytes.fromhex("9302ee911a2ad98cad13e7948ad8b3b2"),
+               bytes.fromhex("d4da00f33f11fd8822166bb9cd187c55")),
+         256: (bytes.fromhex("9302ee911a2ad98cad13e7948ad8b3b2d4da00f33f11fd8822166bb9cd187c55"),
+               bytes.fromhex("43c853a3f90f70ae8d72ad0e7aac0c71afad739c17a14bd656c9436300def1e5"))}
+
+
+class Edition(NamedTuple):
+    name: str
+    rounds: dict      # (block bits, key bits) -> rounds R, Table 1
+    rotate: bool      # MixWords rotates sub-state j by j * w / 4 bits
+    const: dict       # block bits -> (Const^0_l, Const^1_l); empty: no constants
+
+
+TCVN_14263 = Edition("TCVN 14263:2024",
+                     {(128, 128): 7, (128, 192): 8, (128, 256): 9,
+                      (256, 256): 7, (256, 384): 8, (256, 512): 9}, True, CONST)
+DRAFT = Edition("draft TCVN XXXX:2024",
+                {(128, 128): 6, (128, 192): 7, (128, 256): 8,
+                 (256, 256): 6, (256, 384): 7, (256, 512): 8}, False, {})
+
+EDITION = TCVN_14263            # the one the functions below compute
+VERSIONS = TCVN_14263.rounds
+
+
+@contextlib.contextmanager
+def edition(ed):
+    """with edition(DRAFT): ... computes the cipher of the draft."""
+    global EDITION
+    saved, EDITION = EDITION, ed
+    try:
+        yield ed
+    finally:
+        EDITION = saved
 
 
 # ============================================================ primitives
@@ -160,6 +209,7 @@ def inv_sub_cells(x):
 
 
 def _mix(x, matrix):
+    """Every sub-state times the matrix (no rotation)."""
     t = len(matrix)
     out = bytearray()
     for c in range(4):
@@ -168,12 +218,29 @@ def _mix(x, matrix):
     return bytes(out)
 
 
+def rotate_words(x, sign=1):
+    """x^j <<<_w j * w / 4 for every sub-state j (sign -1: >>>_w). Byte b of
+    the result is byte (b + j * t / 4) mod t of x^j."""
+    t = len(x) // 4
+    out = bytearray()
+    for j in range(4):
+        col = x[j * t:(j + 1) * t]
+        n = (sign * j * t // 4) % t
+        out += col[n:] + col[:n]
+    return bytes(out)
+
+
 def mix_words(x):
+    """y^j = M_t (x^j <<<_w j * w / 4), clause 5.4.3."""
+    if EDITION.rotate:
+        x = rotate_words(x)
     return _mix(x, M8 if len(x) == 32 else M4)
 
 
 def inv_mix_words(x):
-    return _mix(x, M8_INV if len(x) == 32 else M4_INV)
+    """y^j = (M_t^-1 x^j) >>>_w j * w / 4, clause 5.4.4."""
+    y = _mix(x, M8_INV if len(x) == 32 else M4_INV)
+    return rotate_words(y, -1) if EDITION.rotate else y
 
 
 def x_words(x):
@@ -206,13 +273,13 @@ def inv_round_f(k, x):
 # ========================================================== key schedule
 def rounds_for(block_bits, key_bits):
     try:
-        return VERSIONS[(block_bits, key_bits)]
+        return EDITION.rounds[(block_bits, key_bits)]
     except KeyError:
         raise ValueError(f"no MKV-{block_bits} version with a {key_bits} bit key") from None
 
 
 def initial_key_state(key, block_bits):
-    """K_0 (2l bits) from the master key, clause 4.6 step 1."""
+    """K_int (2l bits) from the master key, clause 5.5 step 1."""
     n = block_bits // 8
     w = n // 4
     rounds_for(block_bits, len(key) * 8)
@@ -225,34 +292,53 @@ def initial_key_state(key, block_bits):
     return bytes(key) + inv[2] + inv[3]             # k0..k5 || ~k2 || ~k3
 
 
-def schedule_constant(v, block_bits):
-    """Round key of F for the key schedule constant v (erratum 2)."""
+def schedule_constant(v, block_bits, half):
+    """Round key K0 || K1 of the first F of a key schedule branch, clause 5.5:
+    K0 = Const^half_l ^ <v>_l, K1 = 0. half 0: K^0 (left branch, v = 2i + 1),
+    1: K^1 (right branch, v = 2i + 2). The draft has no Const."""
     n = block_bits // 8
-    return v.to_bytes(n, "big") + bytes(n)
+    c = v.to_bytes(n, "big")
+    if EDITION.const:
+        c = xor(c, EDITION.const[block_bits][half])
+    return c + bytes(n)
 
 
-def update_ks(kl, kr, i, block_bits):
-    """UpdateKS for update i = 1..R: (K_{i-1}^L, K_{i-1}^R) -> (K_i^L, K_i^R)."""
+def update_ks(k0, k1, i, block_bits):
+    """Update i = 1..R of the key schedule (the loop index of clause 5.5 step 3
+    is i - 1): (K^0, K^1) -> (K^0, K^1) after SWAP = (RK_{2i-1}, RK_{2i})."""
     zero = bytes(block_bits // 4)
-    new_l = round_f(zero, round_f(schedule_constant(2 * i, block_bits), kr))
-    new_r = xor(new_l, round_f(zero, round_f(schedule_constant(2 * i - 1, block_bits), kl)))
-    return new_l, new_r
+    right = round_f(zero, round_f(schedule_constant(2 * i, block_bits, 1), k1))           # 3.1, 3.2
+    left = xor(round_f(zero, round_f(schedule_constant(2 * i - 1, block_bits, 0), k0)), right)  # 3.3, 3.4
+    return right, left                                                                      # 3.5
+
+
+def update_trace(k0, k1, i, block_bits):
+    """The nine steps of each branch of update i as printed in Annex A: add
+    constant, SubCells, MixWords, SubCells, XWords, SubCells, MixWords,
+    SubCells, XWords (the left one before the XOR with the right one)."""
+    zero = bytes(block_bits // 4)
+    out = {}
+    for name, k, half, v in (("left", k0, 0, 2 * i - 1), ("right", k1, 1, 2 * i)):
+        first, second = [], []
+        round_f(zero, round_f(schedule_constant(v, block_bits, half), k, first), second)
+        a, b = first[0], second[0]
+        out[name] = [a[0], a[1], a[2], a[4], a[5], b[1], b[2], b[4], b[5]]
+    return out
 
 
 def key_schedule(key, block_bits):
-    """Half-round keys h[0..2R]: K_0^L, K_1^L, K_1^R, ..., K_R^L, K_R^R.
+    """Half-round keys h[0..2R] = RK_0 .. RK_2R of clause 5.5.
 
-    Round key i is h[2i] || h[2i+1] (K_0 = K_0^L || K_1^L,
-    K_i = K_i^R || K_{i+1}^L), K_post = h[2R]. This is also the order of the
-    round key memory of the RTL."""
+    Round key i is K_i = K_i^0 || K_i^1 = h[2i] || h[2i+1], K_post = h[2R].
+    This is also the order of the round key memory of the RTL."""
     rounds = rounds_for(block_bits, len(key) * 8)
     n = block_bits // 8
-    k0 = initial_key_state(key, block_bits)
-    kl, kr = k0[:n], k0[n:]
-    out = [kl]
+    k = initial_key_state(key, block_bits)
+    k0, k1 = k[:n], k[n:]
+    out = [k0]
     for i in range(1, rounds + 1):
-        kl, kr = update_ks(kl, kr, i, block_bits)
-        out += [kl, kr]
+        k0, k1 = update_ks(k0, k1, i, block_bits)
+        out += [k0, k1]
     return out
 
 
@@ -304,13 +390,17 @@ def half_round_states(key, block, decrypt_op=False, h=None):
 
 
 # ======================================================= Annex A vectors
-def load_spec(path=VECTORS_JSON):
+def load_vectors(path=VECTORS_JSON):
+    """Annex A of TCVN 14263:2024, per version: key, plaintext, ciphertext,
+    round_keys RK_0 .. RK_2R-1 and k_post, first_update (both branches of
+    update 1, nine steps each), trace_first / trace_last (the six steps of
+    the first / last round)."""
+    return json.loads(Path(path).read_text())["cases"]
+
+
+def load_spec(path=DRAFT_JSON):
     """Tables, matrices and test vectors as printed in the draft."""
     return json.loads(Path(path).read_text())
-
-
-def load_vectors(path=VECTORS_JSON):
-    return load_spec(path)["cases"]
 
 
 def tuples(rows):
@@ -318,8 +408,9 @@ def tuples(rows):
 
 
 def selftest(verbose=True):
-    """Model vs every value of the draft (tables, matrices, Annex A).
-    Returns a list of errors."""
+    """Model vs every value of Annex A of the standard, and (DRAFT edition)
+    vs every value of the draft: tables, matrices, Annex A. Returns a list
+    of errors."""
     errors = []
 
     def check(cond, what):
@@ -327,36 +418,63 @@ def selftest(verbose=True):
             errors.append(what)
 
     spec = load_spec()
-    check(SBOX.hex() == spec["sbox"], "S-box differs from Table 1")
-    check(SBOX_INV.hex() == spec["sbox_inv"], "inverse S-box differs from Table 2")
-    check(SBOX[0x24] == 0x1C and SBOX_INV[0x82] == 0xB4, "S-box examples of 4.2.2.1")
+    check(SBOX.hex() == spec["sbox"], "S-box differs from Table 2")
+    check(SBOX_INV.hex() == spec["sbox_inv"], "inverse S-box differs from Table 3")
+    check(SBOX[0x24] == 0x1C and SBOX_INV[0x82] == 0xB4, "S-box examples of 5.4.1")
     check(tuples(spec["m4_inv"]) == M4_INV and tuples(spec["m8"]) == M8
-          and tuples(spec["m8_inv"]) == M8_INV, "matrices differ from 4.2.2.2")
-    check(tuples(spec["m4"]) == M4_PRINTED, "printed M4 is not the one of erratum 1")
+          and tuples(spec["m8_inv"]) == M8_INV, "matrices differ from 5.4.3 / 5.4.4")
+    check(tuples(spec["m4"]) == M4_PRINTED, "M4 of the draft is not the one of its erratum")
     ident4 = tuple(tuple(int(i == j) for j in range(4)) for i in range(4))
     ident8 = tuple(tuple(int(i == j) for j in range(8)) for i in range(8))
     check(matmul(M4, M4_INV) == ident4 and matmul(M4_INV, M4) == ident4, "M4 * M4^-1 != I")
     check(matmul(M8, M8_INV) == ident8 and matmul(M8_INV, M8) == ident8, "M8 * M8^-1 != I")
-    for case in spec["cases"]:
+    for case in load_vectors():
         name = f"{case['section']} MKV-{case['block_bits']}/{case['key_bits']}"
+        l, n = case["block_bits"], case["block_bits"] // 8
         key = bytes.fromhex(case["key"])
         pt = bytes.fromhex(case["plaintext"])
         ct = bytes.fromhex(case["ciphertext"])
-        h = key_schedule(key, case["block_bits"])
+        h = key_schedule(key, l)
         check(len(h) == 2 * case["rounds"] + 1, f"{name}: number of rounds")
         want = [bytes.fromhex(k) for k in case["round_keys"]] + [bytes.fromhex(case["k_post"])]
         for i, (a, b) in enumerate(zip(h, want)):
-            check(a == b, f"{name}: round key K{i:02d}" if i < len(h) - 1 else f"{name}: K_post")
+            check(a == b, f"{name}: RK_{i}")
+        k = initial_key_state(key, l)
+        upd = update_trace(k[:n], k[n:], 1, l)
+        for side in ("left", "right"):
+            for s, (a, b) in enumerate(zip(upd[side], case["first_update"][side])):
+                check(a == bytes.fromhex(b), f"{name}: update 1, {side} branch, step {s + 1}")
         trace = []
         out = encrypt(key, pt, trace)
-        for r, (got, exp) in enumerate(zip(trace, case["trace"])):
+        for r, exp in ((1, case["trace_first"]), (case["rounds"], case["trace_last"])):
             for s in range(6):
-                check(got[s] == bytes.fromhex(exp[s]), f"{name}: round {r + 1} step {s + 1}")
+                check(trace[r - 1][s] == bytes.fromhex(exp[s]), f"{name}: round {r} step {s + 1}")
         check(out == ct, f"{name}: ciphertext")
         check(decrypt(key, ct) == pt, f"{name}: decryption")
         if verbose:
-            print(f"{name:24s} R={case['rounds']}  {len(want)} keys, {6 * len(trace)} states, "
+            print(f"{name:24s} R={case['rounds']}  {len(want)} round keys, 18 + 12 states, "
                   f"ct {ct.hex()} {'ok' if out == ct else 'MISMATCH'}")
+    with edition(DRAFT):
+        for case in spec["cases"]:
+            name = f"draft {case['section']} MKV-{case['block_bits']}/{case['key_bits']}"
+            key = bytes.fromhex(case["key"])
+            pt = bytes.fromhex(case["plaintext"])
+            ct = bytes.fromhex(case["ciphertext"])
+            h = key_schedule(key, case["block_bits"])
+            check(len(h) == 2 * case["rounds"] + 1, f"{name}: number of rounds")
+            want = [bytes.fromhex(k) for k in case["round_keys"]] + [bytes.fromhex(case["k_post"])]
+            for i, (a, b) in enumerate(zip(h, want)):
+                check(a == b, f"{name}: RK_{i}")
+            trace = []
+            out = encrypt(key, pt, trace)
+            for r, (got, exp) in enumerate(zip(trace, case["trace"])):
+                for s in range(6):
+                    check(got[s] == bytes.fromhex(exp[s]), f"{name}: round {r + 1} step {s + 1}")
+            check(out == ct, f"{name}: ciphertext")
+            check(decrypt(key, ct) == pt, f"{name}: decryption")
+            if verbose:
+                print(f"{name:24s} R={case['rounds']}  {len(want)} round keys, {6 * len(trace)} states, "
+                      f"ct {ct.hex()} {'ok' if out == ct else 'MISMATCH'}")
     return errors
 
 
@@ -478,7 +596,7 @@ def cmd_check(args):
 
 
 # ================================================================ tables
-# Generated from this model (which `selftest` checks against the PDF):
+# Generated from this model (which `selftest` checks against Annex A):
 SV_TABLES = "hw/ip/mkv/rtl/bow_mkv_tables_pkg.sv"   # S-boxes, matrices (RTL)
 C_TABLES = "sw/apps/mkv/mkv_tables.h"               # S-boxes, matrices (C reference)
 C_VECTORS = "sw/apps/mkv/mkv_vectors.h"             # Annex A (self-test of the app)
@@ -497,9 +615,9 @@ def _sv_matrix(name, m):
 def sv_tables():
     lines = ["// AUTO-GENERATED by `tools/mkv/mkv_model.py tables` - DO NOT EDIT",
              "//",
-             "// Constants of the MKV block cipher (draft TCVN XXXX:2024), the same values",
-             "// as tools/mkv/mkv_model.py: S-box s and its inverse (Tables 1 / 2), MixWords",
-             "// matrices (clause 4.2.2.2; M4 with 0x0D at (2, 3) and (3, 0), see the model).",
+             "// Constants of the MKV block cipher (TCVN 14263:2024), the same values as",
+             "// tools/mkv/mkv_model.py: S-box s and its inverse (Tables 2 / 3), MixWords",
+             "// matrices (clauses 5.4.3 / 5.4.4), key schedule constants (clause 5.5).",
              "",
              "package bow_mkv_tables_pkg;",
              "",
@@ -508,7 +626,15 @@ def sv_tables():
              _sv_matrix("M4Inv", M4_INV),
              _sv_matrix("M8", M8),
              _sv_matrix("M8Inv", M8_INV),
-             ""]
+             "",
+             "  // Const^h_l in the byte order of the state: byte b of the constant (the",
+             "  // first byte of the hex string of the standard is byte 0) = [8*b +: 8]"]
+    for l in (128, 256):
+        for half in (0, 1):
+            value = CONST[l][half][::-1].hex()
+            lines.append(f"  localparam logic [{l - 1}:0] Const{half}L{l} = {l}'h"
+                         + "_".join(value[i:i + 32] for i in range(0, len(value), 32)) + ";")
+    lines.append("")
     for name, table in (("sbox", SBOX), ("sbox_inv", SBOX_INV)):
         lines.append(f"  function automatic logic [7:0] {name}(logic [7:0] x);")
         lines.append("    logic [7:0] r;")
@@ -531,9 +657,9 @@ def _c_bytes(data, indent="    ", per_line=16):
 
 def c_tables():
     lines = ["/* AUTO-GENERATED by `tools/mkv/mkv_model.py tables` - DO NOT EDIT */",
-             "/* Constants of the MKV block cipher (draft TCVN XXXX:2024), the same values as",
-             " * tools/mkv/mkv_model.py: S-box and inverse, MixWords matrices (M4 with 0x0D",
-             " * at (2, 3) and (3, 0), see the model). */",
+             "/* Constants of the MKV block cipher (TCVN 14263:2024), the same values as",
+             " * tools/mkv/mkv_model.py: S-box and inverse, MixWords matrices, key schedule",
+             " * constants Const^0_l, Const^1_l. */",
              "#ifndef MKV_TABLES_H_",
              "#define MKV_TABLES_H_",
              "",
@@ -546,6 +672,11 @@ def c_tables():
         lines.append(f"static const uint8_t {name}[{n}][{n}] = {{")
         lines += ["    {" + ", ".join(f"0x{v:02x}" for v in row) + "}," for row in m]
         lines += ["};", ""]
+    for l in (128, 256):
+        lines.append(f"static const uint8_t mkv_const{l}[2][{l // 8}] = {{")
+        for half in (0, 1):
+            lines += ["    {"] + _c_bytes(CONST[l][half], indent="        ") + ["    },"]
+        lines += ["};", ""]
     lines += ["#endif /* MKV_TABLES_H_ */"]
     return "\n".join(lines) + "\n"
 
@@ -553,9 +684,9 @@ def c_tables():
 def c_vectors():
     cases = load_vectors()
     lines = ["/* AUTO-GENERATED by `tools/mkv/mkv_model.py tables` - DO NOT EDIT */",
-             "/* Test vectors of Annex A of the draft TCVN XXXX:2024 (tools/mkv/tcvn_mkv_vectors.json,",
-             " * extracted from the PDF): key, plaintext, ciphertext and the half-round keys",
-             " * h[0..2R] = K00 .. K(2R-1), K_post as printed. */",
+             "/* Test vectors of Annex A of TCVN 14263:2024 (tools/mkv/tcvn14263_vectors.json,",
+             " * transcribed from the standard): key, plaintext, ciphertext and the half-round",
+             " * keys h[0..2R] = RK_0 .. RK_2R (K_post = RK_2R) as printed. */",
              "#ifndef MKV_VECTORS_H_",
              "#define MKV_VECTORS_H_",
              "",
@@ -608,7 +739,8 @@ def cmd_selftest(args):
     errors = selftest(verbose=True)
     for e in errors:
         print("ERROR", e)
-    print("selftest:", "FAIL" if errors else "PASS (Annex A: 6 versions, every round key and state)")
+    print("selftest:", "FAIL" if errors else
+          "PASS (Annex A of TCVN 14263:2024 and of the draft, 6 versions each)")
     return 1 if errors else 0
 
 

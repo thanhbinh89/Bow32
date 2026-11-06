@@ -1460,7 +1460,7 @@ module tb_bow32;
         if (frames != 3) $fatal(1, "%0d frames in the stream, expected 3", frames);
         video_cmd("stat", "record 3 frames");
       end
-      // MKV block cipher with sw/apps/mkv: Annex A of the draft standard on
+      // MKV block cipher with sw/apps/mkv: Annex A of TCVN 14263:2024 on
       // the IP and in software, IP vs software, ECB, errors, CLEAR, the
       // interrupt line; then one block through the shell commands of
       // tools/bow32_mkv.py (expected value: tools/mkv/mkv_model.py enc 128 ...)
@@ -1468,9 +1468,9 @@ module tb_bow32;
         expect_text(0, "mkv: Bow32 MKV IP, MKV-128 + MKV-256, 4 cycles per round with fault detection");
         expect_text(0, "> ");
         video_cmd("test quick", "mkv: PASS (13/13)\nok\n> ");
-        video_cmd("key 128 000102030405060708090a0b0c0d0e0f", "key MKV-128/128 R=6 (98 cycles)\nok\n> ");
-        video_cmd("enc 00112233445566778899aabbccddeeff", "out 77ee73e973cbf02fe33809d88d852da6\nok\n> ");
-        video_cmd("dec 77ee73e973cbf02fe33809d88d852da6", "out 00112233445566778899aabbccddeeff\nok\n> ");
+        video_cmd("key 128 000102030405060708090a0b0c0d0e0f", "key MKV-128/128 R=7 (114 cycles)\nok\n> ");
+        video_cmd("enc 00112233445566778899aabbccddeeff", "out c098d0b88df6c0f81a906eef34e0c43a\nok\n> ");
+        video_cmd("dec c098d0b88df6c0f81a906eef34e0c43a", "out 00112233445566778899aabbccddeeff\nok\n> ");
       end
       // DDR2 (LiteDRAM controller + Bow32 PHY) with sw/apps/ddr on the
       // loopback emulator: probe, JEDEC init through LiteDRAM's DFII, read

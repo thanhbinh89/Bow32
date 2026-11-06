@@ -1,8 +1,8 @@
 // Copyright Bow32 contributors.
 // SPDX-License-Identifier: Apache-2.0
 //
-// MKV block cipher engine (draft TCVN XXXX:2024): MKV-128 / MKV-256, keys of
-// l, 3l/2 and 2l bits (R = 6, 7, 8 rounds), key schedule, encryption and
+// MKV block cipher engine (TCVN 14263:2024): MKV-128 / MKV-256, keys of l,
+// 3l/2 and 2l bits (R = 7, 8, 9 rounds), key schedule, encryption and
 // decryption. One half-round per clock (docs/ip/mkv.md):
 //
 //   encryption  2R half-rounds  x <- L(S(x ^ h[s])), L = MixWords (s even) or
@@ -32,12 +32,13 @@
 // 16R + 1, CLEAR 32 (the CYCLES register of bow_mkv also counts that cycle:
 // 4R + 4, 16R + 2, 33).
 //
-// The half-round keys h[0..2R] = K_0^L, K_1^L, K_1^R, ..., K_R^R (round key
-// i = h[2i] || h[2i+1], K_post = h[2R]) are kept in a 32 x (256 + 32 parity)
-// bit distributed RAM, written once by the key schedule.
+// The half-round keys h[0..2R] = RK_0 .. RK_2R of the key schedule (round
+// key i = K_i^0 || K_i^1 = h[2i] || h[2i+1], K_post = h[2R]) are kept in a
+// 32 x (256 + 32 parity) bit distributed RAM, written once by the key
+// schedule.
 //
 // No key material is left where it is not needed (UpdateKS can be inverted:
-// any K_i^L, K_i^R gives back the master key):
+// any pair RK_2i-1, RK_2i gives back the master key):
 //   * the key schedule zeroes h[2R+1..31] (round keys of a previous, longer
 //     key) in the cycles in which it does not write the RAM,
 //   * the engine keeps its own copies (K_R, the state, the input) at zero
@@ -95,14 +96,14 @@ module bow_mkv_core import bow_mkv_pkg::*; (
                            // (key schedule: next stale round key 2R+1..31, 0 = done)
   logic [3:0] upd_q;       // key schedule update i = 1..R
   logic [1:0] half_q;      // key schedule: half-round of F(0, F(c, x))
-  logic       left_q;      // key schedule: 0 right branch (-> K_i^L), 1 left
-  state_t     st_q, kl_q, kr_q, in_q, dout_q;
+  logic       left_q;      // key schedule: 0 right branch (-> new K^0), 1 left
+  state_t     st_q, kl_q, kr_q, in_q, dout_q;   // kl_q, kr_q: K^0, K^1
 
   logic [4:0] last_step;   // 2R
   assign last_step = {rounds_q, 1'b0};
 
-  logic [3:0] rounds_d;    // R of the version of a KEY command
-  assign rounds_d = 4'd6 + ((klen_i == 2'd3) ? 4'd2 : {2'b00, klen_i});
+  logic [3:0] rounds_d;    // R of the version of a KEY command (Table 1)
+  assign rounds_d = 4'd7 + ((klen_i == 2'd3) ? 4'd2 : {2'b00, klen_i});
 
   // ------------------------------------------------------- round key memory
   // half-round key and one even parity bit per byte
@@ -123,7 +124,7 @@ module bow_mkv_core import bow_mkv_pkg::*; (
   end
   assign {rk_rpar, rk_rdata} = rk_mem[rk_raddr];
 
-  // ----------------------------------------------- initial key state K_0
+  // ------------------------------- initial key state K_int = K^0 || K^1
   //   k = 2l    k0 .. k7          k = 3l/2   k0 .. k5 ~k2 ~k3
   //   k = l     k0 .. k3 ~k0 .. ~k3            (words k_i of l/4 bits)
   state_t k0l, k0r;
@@ -146,15 +147,17 @@ module bow_mkv_core import bow_mkv_pkg::*; (
   end
 
   // ------------------------------------------------- forward half-round
-  // L(S(x ^ k)): encryption (key h[s]) and key schedule. Key schedule
-  // constant of update i: c(v) = <v>_l || 0^l, v = 2i (right branch) or
-  // 2i - 1 (left branch), i.e. v in the last byte of the first key.
+  // L(S(x ^ k)): encryption (key h[s]) and key schedule. Key schedule, update
+  // i = 1..R (clause 5.5, loop index i - 1): the first key addition of each
+  // branch adds Const^1_l ^ <2i>_l (right branch, K^1) or Const^0_l ^
+  // <2i - 1>_l (left branch, K^0); <v>_l has v in the last byte.
   state_t     fwd_in, fwd_key, fwd_out, sched_const;
   logic       fwd_mix;
   logic [7:0] sched_v;
 
   assign sched_v     = {3'b000, upd_q, 1'b0} - {7'h00, left_q};
-  assign sched_const = wide_q ? {sched_v, 248'h0} : {128'h0, sched_v, 120'h0};
+  assign sched_const = ks_const(wide_q, left_q) ^
+                       (wide_q ? {sched_v, 248'h0} : {128'h0, sched_v, 120'h0});
 
   always_comb begin
     if (fsm_q == KeySched) begin
@@ -189,8 +192,8 @@ module bow_mkv_core import bow_mkv_pkg::*; (
     endcase
   end
 
-  // key schedule: half-round key of this update, h[2i-1] = K_i^L (right
-  // branch) or h[2i] = K_i^R (left branch)
+  // key schedule: half-round key of update i, h[2i-1] = RK_2i-1 = the new
+  // K^0 (right branch) or h[2i] = RK_2i = the new K^1 (left branch)
   logic [4:0] ks_addr;
   assign ks_addr = left_q ? {upd_q, 1'b0} : {upd_q, 1'b0} - 5'd1;
 
@@ -265,8 +268,8 @@ module bow_mkv_core import bow_mkv_pkg::*; (
       fault_q    <= 1'b0;
       wide_q     <= 1'b0;
       wide_n_q   <= 1'b1;
-      rounds_q   <= 4'd6;
-      rounds_n_q <= ~4'd6;
+      rounds_q   <= 4'd7;
+      rounds_n_q <= ~4'd7;
       cnt_q      <= '0;
       step_q     <= '0;
       upd_q      <= 4'd1;
@@ -328,10 +331,10 @@ module bow_mkv_core import bow_mkv_pkg::*; (
           if (half_q == 2'd3) begin
             left_q <= ~left_q;
             if (!left_q) begin
-              kr_q <= fwd_out;               // K_i^L, until the left branch is done
-            end else begin
-              kl_q  <= kr_q;                 // K_i^L
-              kr_q  <= kr_q ^ fwd_out;       // K_i^R = K_i^L ^ F(0, F(c(2i-1), K_{i-1}^L))
+              kr_q <= fwd_out;               // the new K^0, until the left branch is done
+            end else begin                   // SWAP: K^0 <- G(G(K^1 ^ c)),
+              kl_q  <= kr_q;                 // K^1 <- G(G(K^0 ^ c')) ^ G(G(K^1 ^ c))
+              kr_q  <= kr_q ^ fwd_out;
               upd_q <= upd_q + 4'd1;
               if (last) begin
                 if (!chk_q) begin            // second pass, from the master key again
@@ -396,8 +399,8 @@ module bow_mkv_core import bow_mkv_pkg::*; (
           dout_ok_q  <= 1'b0;
           wide_q     <= 1'b0;                // a consistent version until the next KEY
           wide_n_q   <= 1'b1;
-          rounds_q   <= 4'd6;
-          rounds_n_q <= ~4'd6;
+          rounds_q   <= 4'd7;
+          rounds_n_q <= ~4'd7;
           if (last) begin
             fsm_q  <= Idle;
             run_q  <= 1'b0;

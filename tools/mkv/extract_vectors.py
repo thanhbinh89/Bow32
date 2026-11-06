@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # Copyright Bow32 contributors.
 # SPDX-License-Identifier: Apache-2.0
-"""Extract the tables and the test vectors of the MKV draft standard.
+"""Extract the tables and the test vectors of the draft of the MKV standard.
 
-    extract_vectors.py docs/ref/Du-thao-TCVN-XXXX2024.pdf [-o tcvn_mkv_vectors.json]
+    extract_vectors.py docs/ref/Du-thao-TCVN-XXXX2024.pdf [-o draft_vectors.json]
 
 Needs `pdftotext` (poppler-utils). Reads the text layer of the PDF
 (`pdftotext -layout`) and writes, exactly as printed:
@@ -11,8 +11,12 @@ Needs `pdftotext` (poppler-utils). Reads the text layer of the PDF
   * the MixWords matrices M4, M4^-1, M8, M8^-1 (clause 4.2.2.2),
   * the six test vectors of Annex A: plaintext, master key, the round keys
     K00..K(2R-1) and K_post, the six steps of every round, the ciphertext.
-tools/mkv/mkv_model.py (selftest) and tools/tests/test_mkv_model.py check
-the model against this file.
+The S-boxes and matrices are those of TCVN 14263:2024 too (the draft prints
+M4 with an erratum); the test vectors are those of the draft cipher, which
+tools/mkv/mkv_model.py computes with its DRAFT edition. mkv_model.py
+(selftest) and tools/tests/test_mkv_model.py check the model against this
+file. The standard itself is a scanned PDF: its Annex A is transcribed in
+tools/mkv/tcvn14263_vectors.json.
 """
 
 import argparse
@@ -117,7 +121,7 @@ def annex_a(lines):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     ap.add_argument("pdf")
-    ap.add_argument("-o", "--output", default=str(Path(__file__).resolve().parent / "tcvn_mkv_vectors.json"))
+    ap.add_argument("-o", "--output", default=str(Path(__file__).resolve().parent / "draft_vectors.json"))
     args = ap.parse_args()
     text = subprocess.run(["pdftotext", "-layout", args.pdf, "-"], check=True,
                           capture_output=True).stdout.decode("utf-8")

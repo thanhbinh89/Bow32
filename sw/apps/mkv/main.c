@@ -2,9 +2,9 @@
  * Copyright Bow32 contributors.
  * SPDX-License-Identifier: Apache-2.0
  *
- * MKV demo and self-test: the Bow32 MKV block cipher IP (draft TCVN
- * XXXX:2024, docs/ip/mkv.md) against Annex A of the standard and against a
- * software MKV (mkv_sw.c). Shell on UART0, `h` for help.
+ * MKV demo and self-test: the Bow32 MKV block cipher IP (TCVN 14263:2024,
+ * docs/ip/mkv.md) against Annex A of the standard and against a software
+ * MKV (mkv_sw.c). Shell on UART0, `h` for help.
  *
  *   test [quick] [seed]   self-test, ends with "mkv: PASS (n/n)" / "mkv: FAIL (k/n)"
  *   kat                   Annex A on the IP
@@ -574,7 +574,7 @@ int main(void) {
   int prev = 0;
 
   bow_uart_init(UART0, SYSCTRL->BOOT_BAUD);
-  bow_printf("\nBow32 MKV block cipher demo (draft TCVN XXXX:2024), type h for help\n");
+  bow_printf("\nBow32 MKV block cipher demo (TCVN 14263:2024), type h for help\n");
   if (bow_mkv_present()) {
     bow_printf("mkv: Bow32 MKV IP, MKV-128 + MKV-256, %u cycles per round%s, %u MHz\n",
                (MKV->INFO >> 8) & 0xFFu,
