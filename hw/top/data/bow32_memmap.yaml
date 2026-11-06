@@ -41,7 +41,7 @@ periph_bus:
   - {name: csi2rx,     base: 0x40008000, size: 0x1000, desc: "MIPI CSI-2 receiver (D-PHY RX + CSI-2 RX)"}
   - {name: h264,       base: 0x40009000, size: 0x1000, desc: "H.264 encoder (ISP output -> H.264 stream)"}
   - {name: dma,        base: 0x4000A000, size: 0x1000, desc: "DMA controller (2 channels, M2M / stream to memory)"}
-  - {name: mkv,        base: 0x4000B000, size: 0x1000, desc: "MKV block cipher (TCVN draft 2024): MKV-128 / MKV-256"}
+  - {name: mkv,        base: 0x4000B000, size: 0x1000, desc: "MKV block cipher (TCVN 14263:2024): MKV-128 / MKV-256"}
   - {name: ddr_ctrl,   base: 0x4000C000, size: 0x2000, desc: "DDR controller CSRs (LiteDRAM: DFII, BIST, init status)"}
   - {name: ddr_phy,    base: 0x4000E000, size: 0x1000, desc: "DDR PHY and bus bridge registers (bow_ddr)"}
 

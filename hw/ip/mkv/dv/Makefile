@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # MKV block cipher unit test: RTL vs the reference model
-# (tools/mkv/mkv_model.py), which is itself checked against every value of
-# Annex A of the draft standard (`mkv_model.py selftest`).
+# (tools/mkv/mkv_model.py), which is itself checked against Annex A of
+# TCVN 14263:2024 (`mkv_model.py selftest`).
 #
 #   make test                    Annex A + random keys / blocks, several seeds
 #   make run SEED=7 COUNT=200    one case, files in build/mkv_dv/seed7
