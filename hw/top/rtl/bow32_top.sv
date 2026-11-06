@@ -522,7 +522,7 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
   assign h264_tready = dma_tready[0];
 
   // ---------------------------------------------------------------------------
-  // MKV block cipher (draft TCVN XXXX:2024), registers only
+  // MKV block cipher (TCVN 14263:2024), registers only
   // ---------------------------------------------------------------------------
   bow_mkv u_mkv (
     .clk_i,

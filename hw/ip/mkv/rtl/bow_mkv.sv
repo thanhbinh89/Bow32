@@ -1,12 +1,13 @@
 // Copyright Bow32 contributors.
 // SPDX-License-Identifier: Apache-2.0
 //
-// Bow32 MKV block cipher accelerator: MKV-128 / MKV-256 of the draft
-// TCVN XXXX:2024 with the six key sizes, key schedule in hardware,
-// encryption and decryption of one block per command (bow_mkv_core).
+// Bow32 MKV block cipher accelerator: MKV-128 / MKV-256 of TCVN 14263:2024
+// with the six key sizes, key schedule in hardware, encryption and
+// decryption of one block per command (bow_mkv_core).
 // Register map (docs/ip/mkv.md):
 //
-//   0x000 ID        R     0x4D4B5601 ("MKV", version 1)
+//   0x000 ID        R     0x4D4B5602 ("MKV", version 2: TCVN 14263:2024;
+//                         version 1 was the cipher of the draft)
 //   0x004 INFO      R     [0] MKV-128  [1] MKV-256  [2] fault detection
 //                         [15:8] cycles per round of ENC / DEC (4: 2 + check)
 //   0x008 CTRL      RW    [0] BLOCK (0 MKV-128, 1 MKV-256)
@@ -54,7 +55,7 @@ module bow_mkv import bow_bus_pkg::*; (
   output logic     irq_o
 );
 
-  localparam logic [31:0] IdValue   = 32'h4d4b_5601;
+  localparam logic [31:0] IdValue   = 32'h4d4b_5602;
   localparam logic [31:0] InfoValue = 32'h0000_0407;   // 4 cycles per round, fault detection,
                                                         // both block sizes
 

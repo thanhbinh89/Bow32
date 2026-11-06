@@ -6,7 +6,7 @@ on UART0) against the reference model tools/mkv/mkv_model.py.
 
 Examples:
   bow32_mkv.py -p /dev/ttyACM0 test              self-test of the app (`test`)
-  bow32_mkv.py -p /dev/ttyACM0 kat               Annex A on the IP vs the PDF values
+  bow32_mkv.py -p /dev/ttyACM0 kat               Annex A on the IP vs the values of the standard
   bow32_mkv.py -p /dev/ttyACM0 verify -n 120     random keys / blocks: IP vs model
   bow32_mkv.py -p /dev/ttyACM0 enc 256 <key> <block>
   bow32_mkv.py -p /dev/ttyACM0 bench
@@ -96,7 +96,7 @@ def verify(board, count, seed, progress=True):
 
 
 def check_kat(text):
-    """`kat` output vs the vectors of the PDF. Returns a list of errors."""
+    """`kat` output vs Annex A of TCVN 14263:2024. Returns a list of errors."""
     errors = []
     found = {m.group(1): m for m in KAT_RE.finditer(text)}
     for case in mkv_model.load_vectors():

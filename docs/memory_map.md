@@ -35,7 +35,7 @@ Tệp này được sinh tự động từ `hw/top/data/bow32_memmap.yaml`. Sử
 | 8 | `csi2rx` | `0x40008000` | `0x40008FFF` | 4 KiB | MIPI CSI-2 receiver (D-PHY RX + CSI-2 RX) |
 | 9 | `h264` | `0x40009000` | `0x40009FFF` | 4 KiB | H.264 encoder (ISP output -> H.264 stream) |
 | 10 | `dma` | `0x4000A000` | `0x4000AFFF` | 4 KiB | DMA controller (2 channels, M2M / stream to memory) |
-| 11 | `mkv` | `0x4000B000` | `0x4000BFFF` | 4 KiB | MKV block cipher (TCVN draft 2024): MKV-128 / MKV-256 |
+| 11 | `mkv` | `0x4000B000` | `0x4000BFFF` | 4 KiB | MKV block cipher (TCVN 14263:2024): MKV-128 / MKV-256 |
 | 12 | `ddr_ctrl` | `0x4000C000` | `0x4000DFFF` | 8 KiB | DDR controller CSRs (LiteDRAM: DFII, BIST, init status) |
 | 13 | `ddr_phy` | `0x4000E000` | `0x4000EFFF` | 4 KiB | DDR PHY and bus bridge registers (bow_ddr) |
 
