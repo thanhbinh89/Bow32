@@ -117,8 +117,10 @@ Testbench in `MB_CYCLES` (số chu kỳ engine cho mỗi macroblock, hiện 392)
 ### Mã khối MKV
 
 `hw/ip/mkv/dv/` so khối MKV với mô hình `tools/mkv/mkv_model.py`; bản thân mô
-hình được kiểm tra với mọi giá trị in trong Phụ lục A của dự thảo
-(`mkv_model.py selftest`, trích từ PDF bằng `tools/mkv/extract_vectors.py`).
+hình được kiểm tra với Phụ lục A của TCVN 14263:2024 (`mkv_model.py selftest`,
+véc tơ chép từ bản chuẩn vào `tools/mkv/tcvn14263_vectors.json`) và, ở phiên bản
+`DRAFT`, với mọi giá trị của Phụ lục A bản dự thảo (trích từ PDF bằng
+`tools/mkv/extract_vectors.py`).
 `mkv_model.py gen` sinh 6 véc tơ của chuẩn (mã hoá + giải mã) rồi khoá/khối ngẫu
 nhiên cho cả 6 phiên bản. `tb_bow_mkv.sv` chạy chúng qua bus thanh ghi (ghi byte
 enable, ghi `DIN` khi IP đang chạy, đọc `DOUT` bị giữ hay sau hỏi vòng) và ghi
@@ -127,7 +129,7 @@ sau mỗi lược đồ khoá (`rk.txt`); `mkv_model.py check` so tất cả. Cu
 kiểm tra có hướng: `ERR`, `KEY_VALID`, `CLEAR`, ngắt, `CYCLES`, stall bus.
 
 ```bash
-make -C hw/ip/mkv/dv test                    # seed 1..4 (~510 phép toán, ~7 700 trạng thái)
+make -C hw/ip/mkv/dv test                    # seed 1..4 (514 phép toán, ~8 700 trạng thái)
 make -C hw/ip/mkv/dv run SEED=99 COUNT=600   # 1 231 phép toán
 ```
 

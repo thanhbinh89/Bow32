@@ -190,7 +190,7 @@ module tb_bow_mkv;
     if ($urandom_range(1) == 0) begin
       do rd(RegStatus, st); while (st[StBusy]);
       if (!st[StKeyValid] || st[StErr] || st[StFault]) $fatal(1, "key schedule: STATUS %08x", st);
-      if (st[11:8] != 4'(6 + klen) || st[StWide] != (l == 256)) $fatal(1, "STATUS %08x for MKV-%0d/%0d", st, l, k);
+      if (st[11:8] != 4'(7 + klen) || st[StWide] != (l == 256)) $fatal(1, "STATUS %08x for MKV-%0d/%0d", st, l, k);
     end
   endtask
 
@@ -283,7 +283,7 @@ module tb_bow_mkv;
         $fatal(1, "mismatch");
       end
       rd(RegCycles, w);
-      expect_eq(w, 32'(4 * (6 + ((2 * k == 3 * l) ? 1 : (k == 2 * l) ? 2 : 0)) + 4),
+      expect_eq(w, 32'(4 * (7 + ((2 * k == 3 * l) ? 1 : (k == 2 * l) ? 2 : 0)) + 4),
                 $sformatf("op %0d: CYCLES (4R + 4)", i));
       wr(RegStatus, 32'h0C);
       n_ops++;
@@ -324,7 +324,7 @@ module tb_bow_mkv;
     for (int i = 0; i < 16; i++) key[32*i +: 32] = $urandom();
     set_key(128, 128, key);
     do rd(RegStatus, st); while (st[StBusy]);
-    if (!st[StKeyValid] || st[11:8] != 4'd6) $fatal(1, "KEY: STATUS %08x", st);
+    if (!st[StKeyValid] || st[11:8] != 4'd7) $fatal(1, "KEY: STATUS %08x", st);
     wr(RegCtrl, 32'h0);                       // same version: still valid
     rd(RegStatus, st);
     if (!st[StKeyValid]) $fatal(1, "CTRL write of the same value cleared KEY_VALID");
@@ -359,11 +359,11 @@ module tb_bow_mkv;
     wr(RegCmd, CmdEnc);
     if (last_stall < 60) $fatal(1, "CMD during the key schedule stalled %0d cycles", last_stall);
     rd(RegCycles, w);
-    expect_eq(w, 32'd130, "CYCLES of KEY (R = 8): 16R + 2");
+    expect_eq(w, 32'd146, "CYCLES of KEY (R = 9): 16R + 2");
     rd(RegDout, w);                           // waits for the encryption
     if (last_stall == 0) $fatal(1, "DOUT read during the encryption did not stall");
     rd(RegCycles, w);
-    expect_eq(w, 32'd36, "CYCLES of ENC (R = 8): 4R + 4");
+    expect_eq(w, 32'd40, "CYCLES of ENC (R = 9): 4R + 4");
 
     // interrupt on DONE, W1C
     wr(RegStatus, 32'h0C);
@@ -707,7 +707,7 @@ module tb_bow_mkv;
     repeat (5) @(posedge clk);
 
     rd(RegId, w);
-    expect_eq(w, 32'h4d4b_5601, "ID");
+    expect_eq(w, 32'h4d4b_5602, "ID");
     rd(RegInfo, w);
     expect_eq(w, 32'h0000_0407, "INFO");
     do rd(RegStatus, w); while (w[StBusy]);     // round key RAM wipe after reset

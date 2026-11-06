@@ -1,8 +1,8 @@
 # Mã khối MKV trên Kria KV260: kiểm chứng IP `bow_mkv`
 
 Hướng dẫn nạp bitstream có khối mật mã MKV ([ip/mkv.md](ip/mkv.md)), chạy ứng
-dụng kiểm thử `sw/apps/mkv` và đối chiếu kết quả của phần cứng với dự thảo
-TCVN XXXX:2024 (Phụ lục A) và với mô hình Python trên PC:
+dụng kiểm thử `sw/apps/mkv` và đối chiếu kết quả của phần cứng với TCVN
+14263:2024 (Phụ lục A) và với mô hình Python trên PC:
 
 ```
  PC: tools/bow32_mkv.py ──UART0──► Ibex (sw/apps/mkv) ──bus──► MKV IP 0x4000_B000
@@ -11,14 +11,15 @@ TCVN XXXX:2024 (Phụ lục A) và với mô hình Python trên PC:
                                    └─► "mkv: PASS (13/13)", "out <hex>"
 ```
 
-> **Kết quả trên KV260 (2026-11-04):** bitstream `kv260_cam` (Vivado 2025.2) đạt
-> timing (setup WNS +0,102 ns ở clock video 200 MHz, hold +0,010 ns; mọi đường
-> qua MKV ở 50 MHz còn ≥ +2,8 ns); MKV có phát hiện lỗi 9 591 LUT (168 LUTRAM),
-> 2 261 FF; toàn bản 35 200 LUT (30 %). Bản `kv260` cũng đạt: WNS +1,197 ns (đường
-> bus vào MKV), 34 400 LUT. Trên board: `test` **PASS (13/13)** (20 khoá ngẫu
-> nhiên mỗi phiên bản, không `FAULT` nào), `kat` 6/6 bản mã trùng Phụ lục A,
-> `verify` 120 khoá ngẫu nhiên / **360/360 khối** trùng mô hình Python; IP nhanh
-> hơn MKV phần mềm trên Ibex 100…300 lần mỗi khối.
+> **Kết quả trên KV260 (2026-11-05), MKV theo TCVN 14263:2024:** bitstream
+> `kv260_cam` (Vivado 2025.2) đạt timing (setup WNS +0,151 ns ở clock video 200 MHz,
+> hold +0,010 ns; mọi đường qua MKV ở 50 MHz còn ≥ +1,27 ns); MKV có phát hiện lỗi
+> 9 524 LUT (168 LUTRAM), 2 282 FF, bằng bản theo dự thảo (`main` build lại cùng
+> flow: 9 526 LUT, 2 278 FF); toàn bản 35 321 LUT (30 %). Bản `kv260` cũng đạt: WNS
+> +3,842 ns (đường bus vào MKV), 34 548 LUT. Trên board: `test` **PASS (13/13)**
+> (20 khoá ngẫu nhiên mỗi phiên bản, không `FAULT` nào), `kat` 6/6 bản mã trùng
+> Phụ lục A của chuẩn, `verify` 120 khoá ngẫu nhiên / **360/360 khối** trùng mô hình
+> Python; IP nhanh hơn MKV phần mềm trên Ibex 140…360 lần mỗi khối.
 
 ## 1. Build
 
@@ -68,8 +69,8 @@ python3 tools/bow32_flash.py -p /dev/ttyACM0 --no-break flash build/sw/mkv/mkv.b
 ```
 
 ```
-image: 16152 bytes payload, entry 0x08000020, crc 0xcbb5d405
-erasing 0x08000000 .. 0x08003f37
+image: 16788 bytes payload, entry 0x08000020, crc 0x30403ffe
+erasing 0x08000000 .. 0x080041b3
 writing
 verify OK
 booting
@@ -108,8 +109,8 @@ mkv: self-test (full, seed 1)
 mkv: PASS (13/13)
 ```
 
-Mục [2] kiểm tra MKV phần mềm (`sw/apps/mkv/mkv_sw.c`) với **khoá vòng và bản mã
-in trong Phụ lục A**; [3], [4] chạy 6 véc tơ trên IP (cả `STATUS.ROUNDS`,
+Mục [1] cần `ID` = `0x4D4B5602` (MKV theo TCVN 14263:2024). Mục [2] kiểm tra MKV
+phần mềm (`sw/apps/mkv/mkv_sw.c`) với **khoá vòng và bản mã in trong Phụ lục A**; [3], [4] chạy 6 véc tơ trên IP (cả `STATUS.ROUNDS`,
 `CYCLES` = 4R + 4); [5] so IP với phần mềm trên khoá/khối ngẫu nhiên. Ý nghĩa
 từng mục: [ip/mkv.md](ip/mkv.md#kiểm-chứng). Đổi seed: `test --seed 7`.
 
@@ -120,19 +121,19 @@ python3 tools/bow32_mkv.py -p /dev/ttyACM0 kat
 ```
 
 ```
-A.1.1 MKV-128/128 R=6
-  key 0102030405060708090a0b0c0d0e0f11
-  pt  112233445566778899aabbccddeeff00
-  ct  b331228334c3f81a37206591498756a1  ok
+A.1.1 MKV-128/128 R=7
+  key 000102030405060708090a0b0c0d0e0f
+  pt  ffeeddccbbaa99887766554433221100
+  ct  f2795ecba8f4d887f539ee8d8df1141d  ok
 ...
-A.2.3 MKV-256/512 R=8
-  key 0102030405060708090a0b0c0d0e0f1112131415161718191a1b1c1d1e1f2223...
-  pt  112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00
-  ct  93b442fb88d257fbe71256be511aab9b1f71a4dd524635a61019a12acb262c85  ok
+A.2.3 MKV-256/512 R=9
+  key 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021...
+  pt  ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100
+  ct  3dad4f9b1330c6111ced631dddf6e3eea0678d10dd7b75a06b5ba602fcca28ab  ok
 kat: PASS (6 versions, ciphertexts equal Annex A)
 ```
 
-Tool so bản mã của board với giá trị trích từ PDF (`tools/mkv/tcvn_mkv_vectors.json`).
+Tool so bản mã của board với giá trị của chuẩn (`tools/mkv/tcvn14263_vectors.json`).
 
 ### 4.3 Ngẫu nhiên, so với mô hình trên PC
 
@@ -155,8 +156,8 @@ chạy trên board**. Một khối tuỳ ý:
 
 ```bash
 python3 tools/bow32_mkv.py -p /dev/ttyACM0 enc 128 000102030405060708090a0b0c0d0e0f 00112233445566778899aabbccddeeff
-board 77ee73e973cbf02fe33809d88d852da6
-model 77ee73e973cbf02fe33809d88d852da6  ok
+board c098d0b88df6c0f81a906eef34e0c43a
+model c098d0b88df6c0f81a906eef34e0c43a  ok
 ```
 
 ### 4.4 Tốc độ
@@ -168,21 +169,24 @@ python3 tools/bow32_mkv.py -p /dev/ttyACM0 bench
 ```
 version       key schedule (cycles)    one block (cycles)   ECB, 64 blocks
                    IP         SW         IP         SW     cycles/block    KB/s
-MKV-128/128       278     107352        227      24184              124    6451
-MKV-128/192       359     125113        231      28123              124    6451
-MKV-128/256       436     142891        235      32034              124    6451
-MKV-256/256       390     328536        331      77804              228    7017
-MKV-256/384       527     383049        335      90535              228    7017
-MKV-256/512       660     437675        339     103210              228    7017
+MKV-128/128       296     147454        237      33793              127    6299
+MKV-128/192       377     168363        241      38518              127    6299
+MKV-128/256       449     189373        245      43271              127    6299
+MKV-256/256       408     428118        349     101105              239    6694
+MKV-256/384       545     488967        353     115354              239    6694
+MKV-256/512       673     549929        357     129659              239    6694
 ```
 
 Chu kỳ CPU ở 50 MHz, gồm cả driver. Lõi IP cần 16R + 2 chu kỳ cho lược đồ khoá
 và 4R + 4 cho một khối (`CYCLES`, đã gồm lượt kiểm tra); phần còn lại là CPU ghi
 `KEY`/`DIN` và đọc `DOUT` qua bus. Lượt kiểm tra làm một khối đơn lẻ chậm thêm
-~20 chu kỳ và lược đồ khoá ~50 chu kỳ so với bản không kiểm tra, nhưng ECB
-không đổi (124 / 228 chu kỳ mỗi khối): CPU nạp khối sau và đọc khối trước còn
-lâu hơn lõi. Số đo bằng CPU lệch vài chu kỳ giữa các bản build của ứng dụng (vị
-trí code của driver), `CYCLES` của lõi thì cố định.
+~20 chu kỳ và lược đồ khoá ~50 chu kỳ so với bản không kiểm tra. ECB không phụ
+thuộc R (cùng 127 / 239 chu kỳ mỗi khối cho ba độ dài khoá): CPU nạp khối sau và
+đọc khối trước còn lâu hơn lõi (32…40 chu kỳ). Số đo bằng CPU lệch vài chu kỳ
+giữa các bản build của ứng dụng (vị trí code của driver trong flash: bản theo
+dự thảo đo 124 / 228 với cùng vòng lặp đặt ở địa chỉ khác), `CYCLES` của lõi
+thì cố định. MKV phần mềm chậm hơn khi còn theo bản dự thảo 26…40 % mỗi khối
+(thêm một vòng, phép xoay cột tính chỉ số từng byte).
 
 ### 4.5 Gõ lệnh trực tiếp
 
@@ -192,13 +196,13 @@ python3 tools/bow32_flash.py -p /dev/ttyACM0 monitor     # hoặc picocom -b 115
 
 ```
 > key 256 0102030405060708090a0b0c0d0e0f1112131415161718191a1b1c1d1e1f2223
-key MKV-256/256 R=6 (98 cycles)
+key MKV-256/256 R=7 (114 cycles)
 ok
 > enc 112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00
-out cf2f2c1008186a578fe5b45dbd154473940c2bec5682cdf83a3564a72db0161b
+out 772c1fe62ff01af708c935f974d84889f053f2c3d7e09d9dfdbefdabc94bf9a1
 ok
 > info
-MKV ID 4d4b5601 INFO 00000407 CTRL 00000001 STATUS 00000616 (busy 0 key 1 done 1 err 0 fault 0, R 6, MKV-256)
+MKV ID 4d4b5602 INFO 00000407 CTRL 00000001 STATUS 00000716 (busy 0 key 1 done 1 err 0 fault 0, R 7, MKV-256)
 ok
 ```
 
@@ -211,6 +215,7 @@ ok
 |------------|--------------------------|
 | `cannot reach the boot ROM loader` | board đang chạy ứng dụng: `wr 40000010 4c4f4144`, `wr 4000000c 52535421` (mục 3), hoặc nạp lại bitstream |
 | `mkv: IP not found (ID 00000000)` | bitstream cũ (trước MKV): build lại `make fpga` từ nhánh này |
+| `mkv: IP not found (ID 4d4b5601)` | bitstream có MKV phiên bản 1 (mã của bản dự thảo, R = 6 / 7 / 8): build và nạp lại bitstream |
 | `timeout` của `bow32_mkv.py` | sai cổng / baud (ứng dụng khác để UART0 ở 921600: thêm `-b 921600`), hoặc adapter đã đổi tên (`ls /dev/ttyACM*`) |
 | `error: MKV fault`, `info` báo `fault 1` | IP phát hiện lỗi trong lúc tính (mỗi lệnh làm hai lần không khớp): kết quả đã bị huỷ, khoá đã bị xoá. Gõ `clear` rồi `key` lại. Lặp lại thường xuyên: kiểm tra nguồn, clock, bitstream |
 | một mục `FAIL` / `verify: FAIL` | lỗi thật của IP hay driver: chạy `make -C hw/ip/mkv/dv test` và `make run TEST=mkv` để so lại trong mô phỏng |

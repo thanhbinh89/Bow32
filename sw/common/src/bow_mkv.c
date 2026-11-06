@@ -19,16 +19,16 @@ static void store_le32(uint8_t *p, uint32_t v) {
 
 unsigned bow_mkv_rounds(unsigned block_bits, unsigned key_bits) {
   if (block_bits != 128 && block_bits != 256) return 0;
-  if (key_bits == block_bits) return 6;
-  if (2u * key_bits == 3u * block_bits) return 7;
-  if (key_bits == 2u * block_bits) return 8;
+  if (key_bits == block_bits) return 7;
+  if (2u * key_bits == 3u * block_bits) return 8;
+  if (key_bits == 2u * block_bits) return 9;
   return 0;
 }
 
 bool bow_mkv_set_key(unsigned block_bits, unsigned key_bits, const uint8_t *key) {
   unsigned rounds = bow_mkv_rounds(block_bits, key_bits);
   if (rounds == 0) return false;
-  MKV->CTRL = (block_bits == 256 ? MKV_CTRL_BLOCK256 : 0u) | MKV_CTRL_KLEN(rounds - 6u);
+  MKV->CTRL = (block_bits == 256 ? MKV_CTRL_BLOCK256 : 0u) | MKV_CTRL_KLEN(rounds - 7u);
   for (unsigned i = 0; i < key_bits / 32u; i++) MKV->KEY[i] = load_le32(key + 4u * i);
   MKV->STATUS = MKV_ST_DONE | MKV_ST_ERR;
   MKV->CMD = MKV_CMD_KEY;

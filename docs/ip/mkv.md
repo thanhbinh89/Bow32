@@ -1,13 +1,19 @@
 # Khối mật mã MKV (`bow_mkv`)
 
-IP tăng tốc **mã khối MKV** của dự thảo tiêu chuẩn quốc gia *TCVN XXXX:2024
-Công nghệ thông tin – Các kỹ thuật an toàn – Thuật toán mật mã – Mã khối MKV*
-(Ban Cơ yếu Chính phủ, bản PDF trong `docs/ref/Du-thao-TCVN-XXXX2024.pdf`). Đủ
-**6 phiên bản** của chuẩn, lược đồ khóa chạy trong phần cứng, mã hoá và giải mã
-mỗi lệnh một khối. Mỗi lệnh được làm hai lần và đối chiếu trước khi trả kết quả
-(phát hiện lỗi tiêm vào phần cứng). Mã RTL: `hw/ip/mkv/rtl/`. Mô hình tham chiếu:
-`tools/mkv/mkv_model.py`. Driver: `sw/common/include/bow_mkv.h`. Ứng dụng kiểm
-thử: `sw/apps/mkv`, chạy trên KV260: [../mkv_kv260.md](../mkv_kv260.md).
+IP tăng tốc **mã khối MKV** theo tiêu chuẩn quốc gia **TCVN 14263:2024** *Công
+nghệ thông tin – Kỹ thuật an toàn – Thuật toán mã khối MKV* (Ban Cơ yếu Chính
+phủ xây dựng, Bộ Khoa học và Công nghệ công bố). Đủ **6 phiên bản** của chuẩn,
+lược đồ khóa chạy trong phần cứng, mã hoá và giải mã mỗi lệnh một khối. Mỗi lệnh
+được làm hai lần và đối chiếu trước khi trả kết quả (phát hiện lỗi tiêm vào phần
+cứng). Mã RTL: `hw/ip/mkv/rtl/`. Mô hình tham chiếu: `tools/mkv/mkv_model.py`.
+Driver: `sw/common/include/bow_mkv.h`. Ứng dụng kiểm thử: `sw/apps/mkv`, chạy
+trên KV260: [../mkv_kv260.md](../mkv_kv260.md).
+
+Văn bản tiêu chuẩn thuộc bản quyền của Viện Tiêu chuẩn Chất lượng Việt Nam và chỉ
+được dùng nội bộ, nên không có trong repo. Repo giữ bản **dự thảo**
+(`docs/ref/Du-thao-TCVN-XXXX2024.pdf`): đó là một mã khác, khác bản chuẩn ở ba
+điểm của thuật toán (xem [So với bản dự thảo](#so-với-bản-dự-thảo)). Các véc tơ
+kiểm tra của chuẩn được chép vào `tools/mkv/tcvn14263_vectors.json`.
 
 ```
                +--------------------------------------------------------------------+
@@ -17,8 +23,8 @@ thử: `sw/apps/mkv`, chạy trên KV260: [../mkv_kv260.md](../mkv_kv260.md).
                   ▼                                                          │
                +--------------------------------------------------------------------+
                | bow_mkv_core                                                       |
-               |   K_0 từ khoá chính ─► KL / KR (2 × 256 bit)                       |
-               |                           │ UpdateKS: F(0, F(c, x)) × 2 / lần       |
+               |   K_int từ khoá chính ─► K⁰ / K¹ (2 × 256 bit)                     |
+               |                    │ cập nhật: G(G(x ⊕ Const ⊕ ⟨v⟩)), 2 nhánh / lần |
                |   nửa vòng thuận:  x ^ k ─► SubCells ─► MixWords | XWords ─► x     |
                |   nửa vòng nghịch: x ─► XWords | invMixWords ─► invSubCells ─► ^ k |
                |                           ▲ k                                       |
@@ -29,33 +35,37 @@ thử: `sw/apps/mkv`, chạy trên KV260: [../mkv_kv260.md](../mkv_kv260.md).
 
 | Thông số | Giá trị |
 |----------|---------|
-| Phiên bản | MKV-128 (khối 128 bit) khoá 128 / 192 / 256 bit, MKV-256 (khối 256 bit) khoá 256 / 384 / 512 bit; R = 6 / 7 / 8 vòng (Bảng 1 của chuẩn) |
+| Phiên bản | MKV-128 (khối 128 bit) khoá 128 / 192 / 256 bit, MKV-256 (khối 256 bit) khoá 256 / 384 / 512 bit; R = 7 / 8 / 9 vòng (Bảng 1 của chuẩn) |
 | Lệnh | `KEY` (lược đồ khoá), `ENC`, `DEC` (một khối), `CLEAR` (xoá khoá và dữ liệu) |
 | Phát hiện lỗi | mỗi lệnh làm hai lần: `ENC` giải mã lại kết quả, `DEC` mã hoá lại, `KEY` chạy lược đồ khoá lần hai; parity mỗi byte khoá vòng; phiên bản lưu kèm bản bù; bộ đếm chu kỳ thứ hai; trạng thái FSM lạ. Lỗi → `FAULT`, không trả kết quả, xoá khoá |
 | Kiến trúc | **một nửa vòng mỗi chu kỳ** trên datapath 256 bit dùng chung cho hai cỡ khối |
-| Số chu kỳ (`CYCLES`) | `KEY` 16R + 2 (98 / 114 / 130), `ENC` / `DEC` 4R + 4 (28 / 32 / 36), `CLEAR` 33, đã gồm lượt kiểm tra; sau reset engine tự xoá RAM khoá vòng (32 chu kỳ `BUSY`) |
-| Thông lượng lõi (50 MHz) | MKV-128/128: 128 bit / 28 chu kỳ ≈ 229 Mbit/s; MKV-256/256: ≈ 457 Mbit/s |
-| Trên board (CPU + driver) | ECB 124 chu kỳ/khối (MKV-128, ~6,4 MB/s), 228 chu kỳ/khối (MKV-256, ~7,0 MB/s), như khi chưa có lượt kiểm tra; phần mềm trên Ibex: 23 600…104 000 chu kỳ/khối |
-| Tài nguyên (KV260) | 9 591 LUT (168 LUTRAM), 2 261 FF trong `kv260_cam`, không BRAM / DSP; phần phát hiện lỗi chiếm ~2 100 LUT, 300 FF, 20 LUTRAM. Timing đạt ở 50 MHz: slack ≥ 2,8 ns trên mọi đường qua MKV (≥ 1,2 ns ở bản `kv260`). Cùng RTL, bản `kv260` ra 11 510 LUT: Vivado ánh xạ mạng 64 S-box khác nhau tuỳ thiết kế xung quanh |
+| Số chu kỳ (`CYCLES`) | `KEY` 16R + 2 (114 / 130 / 146), `ENC` / `DEC` 4R + 4 (32 / 36 / 40), `CLEAR` 33, đã gồm lượt kiểm tra; sau reset engine tự xoá RAM khoá vòng (32 chu kỳ `BUSY`) |
+| Thông lượng lõi (50 MHz) | MKV-128/128: 128 bit / 32 chu kỳ = 200 Mbit/s; MKV-256/256: 400 Mbit/s |
+| Trên board (CPU + driver) | ECB 127 chu kỳ/khối (MKV-128, ~6,3 MB/s), 239 chu kỳ/khối (MKV-256, ~6,7 MB/s), như nhau với cả ba độ dài khoá (CPU chậm hơn lõi); phần mềm trên Ibex: 33 800…130 000 chu kỳ/khối |
+| Tài nguyên (KV260) | 9 524 LUT (168 LUTRAM), 2 282 FF trong `kv260_cam`, không BRAM / DSP: bằng bản theo dự thảo build lại cùng flow (9 526 LUT, 2 278 FF), vì phép xoay chỉ là nối dây và hằng số chỉ thêm vài mux (tổng hợp riêng IP: +14 LUT). Phần phát hiện lỗi chiếm ~2 100 LUT, 300 FF, 20 LUTRAM. Timing đạt ở 50 MHz: slack ≥ 1,27 ns trên mọi đường qua MKV (≥ 3,8 ns ở bản `kv260`). Cùng RTL, bản `kv260` ra 11 581 LUT: Vivado ánh xạ mạng 64 S-box khác nhau tuỳ thiết kế xung quanh |
 | Thanh ghi | peripheral bus `0x4000_B000`, ngắt `irq_fast[10]` |
 
 ## Thuật toán
 
-Tóm tắt điều 4 của chuẩn, với ký hiệu dùng trong RTL và mô hình.
+Tóm tắt điều 5 của chuẩn, với ký hiệu dùng trong RTL và mô hình.
 
-**Trạng thái.** Khối `l` bit `X = x⁰‖x¹‖x²‖x³`, mỗi trạng thái con `xⁱ` là một
-cột `t` byte (`t = 4` với MKV-128, `t = 8` với MKV-256). Byte được đánh số theo
-thứ tự của chuẩn (thứ tự của các chuỗi hex ở Phụ lục A): cột `c` gồm các byte
-`c·t … c·t + t − 1`.
+**Trạng thái.** Khối `l` bit `X = x⁰‖x¹‖x²‖x³`, mỗi trạng thái con `xᶜ` là một
+cột `t` byte, `w = 8t` bit (`t = 4` với MKV-128, `t = 8` với MKV-256). Byte được
+đánh số theo thứ tự của chuẩn (thứ tự của các chuỗi hex ở Phụ lục A): cột `c`
+gồm các byte `c·t … c·t + t − 1`, byte `j` của cột là `xᶜⱼ`, cũng là byte thứ `j`
+(tính từ trái) của xâu `w` bit `xᶜ`.
 
 **Các biến đổi.**
 
-* `SubCells`: hộp thế 8 bit `s` cho từng byte (Bảng 1; nghịch đảo: Bảng 2).
-* `MixWords`: mỗi cột nhân với ma trận `M4` (4 × 4) hoặc `M8` (8 × 8) trên
-  GF(2⁸) với đa thức `x⁸ + x⁵ + x³ + x + 1` (`0x12B`).
-* `XWords`: `yⁱ = XOR của ba cột còn lại` (tự nghịch đảo).
+* `SubCells`: hộp thế 8 bit `s` cho từng byte (Bảng 2; nghịch đảo: Bảng 3).
+* `MixWords` (điều 5.4.3): cột `c` **xoay trái `c·w/4` bit** rồi nhân với ma trận
+  `M4` (4 × 4) hoặc `M8` (8 × 8) trên GF(2⁸) với đa thức `x⁸ + x⁵ + x³ + x + 1`
+  (`0x12B`): `yᶜ = M_t (xᶜ ⋘_w c·w/4)`. Với MKV-128 cột `c` xoay `c` byte, với
+  MKV-256 xoay `2c` byte: byte `j` của kết quả xoay là byte `(j + c·t/4) mod t`.
+  `invMixWords` nhân `M_t⁻¹` rồi xoay phải cùng số bit.
+* `XWords`: `yᶜ = XOR của ba cột còn lại` (tự nghịch đảo).
 
-**Hàm vòng** với khoá vòng `K = K⁰‖K¹` (2l bit):
+**Hàm vòng** với khoá vòng `K_i = K_i⁰‖K_i¹` (2l bit), điều 5.2 / 5.3:
 
 ```
 F(K, X)    = XWords(SubCells(MixWords(SubCells(X ⊕ K⁰)) ⊕ K¹))
@@ -63,66 +73,78 @@ invF(K, X) = invSubCells(invMixWords(invSubCells(XWords(X)) ⊕ K¹)) ⊕ K⁰
 C = F(K_{R-1}, … F(K_0, P)) ⊕ K_post        P = invF(K_0, … invF(K_{R-1}, C ⊕ K_post))
 ```
 
-**Lược đồ khoá.** Trạng thái khoá 2l bit `K_i = K_i^L‖K_i^R`, các từ `kⱼ` dài
-`l/4` bit:
+**Lược đồ khoá** (điều 5.5). Trạng thái khoá 2l bit `K = K⁰‖K¹`, các từ `kⱼ`
+dài `l/4` bit, `G(X) = XWords(SubCells(MixWords(SubCells(X))))`:
 
 ```
-K_0 = k0 … k7                  (khoá 2l bit)
-      k0 … k5 ‖ ~k2 ‖ ~k3      (khoá 3l/2 bit)
-      k0 … k3 ‖ ~k0 … ~k3      (khoá l bit)
-lần cập nhật i = 1 … R:
-  K_i^L = F(0, F(c(2i),     K_{i-1}^R))
-  K_i^R = K_i^L ⊕ F(0, F(c(2i − 1), K_{i-1}^L))       c(v) = ⟨v⟩_l ‖ 0^l
-K_0 = K_0^L‖K_1^L,  K_i = K_i^R‖K_{i+1}^L,  K_post = K_R^R
+K_int = k0 … k7                  (khoá 2l bit)
+        k0 … k5 ‖ ~k2 ‖ ~k3      (khoá 3l/2 bit)
+        k0 … k3 ‖ ~k0 … ~k3      (khoá l bit)
+K⁰‖K¹ = K_int,  RK_0 = K⁰
+với i = 0 … R − 1:
+  K¹ ← G(G(K¹ ⊕ Const¹_l ⊕ ⟨2i + 2⟩_l))
+  K⁰ ← G(G(K⁰ ⊕ Const⁰_l ⊕ ⟨2i + 1⟩_l)) ⊕ K¹
+  SWAP(K⁰, K¹);  RK_{2i+1} = K⁰;  RK_{2i+2} = K¹
+K_i = RK_{2i} ‖ RK_{2i+1},  K_post = RK_{2R}
 ```
 
-Nói cách khác, dãy **khoá nửa vòng** `h[0..2R] = K_0^L, K_1^L, K_1^R, …,
-K_R^L, K_R^R`: nửa vòng `s` của phép mã hoá dùng `h[s]`, `K_post = h[2R]`. Đây
-cũng là thứ tự của RAM khoá vòng trong RTL và của dòng `K00 … K_post` ở Phụ lục A.
+`⟨v⟩_l` là số `v` viết thành `l` bit (big-endian: `v` ở byte cuối). Hằng số:
 
-## Sai khác giữa văn bản dự thảo và véc tơ kiểm tra
+```
+Const⁰_128 = 9302ee911a2ad98cad13e7948ad8b3b2      Const⁰_256 = Const⁰_128 ‖ Const¹_128
+Const¹_128 = d4da00f33f11fd8822166bb9cd187c55      Const¹_256 = 43c853a3f90f70ae8d72ad0e7aac0c71
+                                                                afad739c17a14bd656c9436300def1e5
+```
 
-Khi đối chiếu từng giá trị, văn bản dự thảo có **hai chỗ** mâu thuẫn với chính
-các véc tơ kiểm tra ở Phụ lục A. Bow32 theo **véc tơ kiểm tra**, vì đó là kết quả
-mà mọi cài đặt khác của chuẩn (cài đặt tham chiếu sinh ra các véc tơ) tạo ra:
+Dãy **khoá nửa vòng** `h[0..2R] = RK_0 … RK_2R`: nửa vòng `s` của phép mã hoá
+dùng `h[s]`, `K_post = h[2R]`. Đây cũng là thứ tự của RAM khoá vòng trong RTL và
+của các dòng khoá vòng in đậm ở Phụ lục A.
 
-1. **Ma trận M4 (điều 4.2.2.2).** Văn bản in `0x0C` ở hàng 2 cột 3 và hàng 3
-   cột 0 (đánh số từ 0). Mọi véc tơ MKV-128 cần `0x0D`; giải hệ phương trình trên
-   GF(2⁸) từ 84 cột (đầu vào, đầu ra) của bước MixWords ở Phụ lục A ra đúng
-   một ma trận:
+## So với bản dự thảo
 
-   ```
-        01 02 01 03
-   M4 = 03 07 01 04        (in trong dự thảo: 04 0B 03 0C / 0C 1E 06 14)
-        04 0B 03 0D
-        0D 1E 06 14
-   ```
+Bản dự thảo (`docs/ref/Du-thao-TCVN-XXXX2024.pdf`, Bow32 cài theo bản này tới
+phiên bản 1 của IP, `ID = 0x4D4B5601`) và TCVN 14263:2024 giống nhau ở S-box,
+`M8`, `M4⁻¹`, `M8⁻¹`, `XWords`, cấu trúc vòng, `K_int` và thứ tự byte, nhưng khác
+nhau ở **ba điểm của thuật toán**, nên là hai mã khác nhau: dữ liệu mã bằng IP
+cũ không giải mã được bằng IP mới (`ID = 0x4D4B5602`) và ngược lại.
 
-   Ma trận `M4⁻¹` in trong dự thảo đúng là nghịch đảo của ma trận này
-   (`M4 · M4⁻¹ = I`), còn với `0x0C` thì không. M8 và M8⁻¹ đúng như in.
-2. **Hằng số của lược đồ khoá (điều 4.6).** Văn bản viết `Const^Left_i =
-   ⟨2i⟩_{2l}`, `Const^Right_i = ⟨2i+1⟩_{2l}` và dùng `Const_{i−1}` ở lần cập nhật
-   `i`. Các véc tơ cần, ở lần cập nhật `i = 1…R`, hằng số `2i` cho nhánh tạo
-   `K_i^L` (từ `K^R`) và `2i − 1` cho nhánh kia, đặt ở **nửa khoá đầu** của `F`:
-   `c(v) = ⟨v⟩_l ‖ 0^l` (byte cuối của `K⁰` là `v`, `K¹ = 0`).
+| | Dự thảo | TCVN 14263:2024 |
+|---|---|---|
+| Số vòng R (khoá l / 3l/2 / 2l) | 6 / 7 / 8 | **7 / 8 / 9** |
+| MixWords | nhân ma trận | **xoay cột `c` đi `c·w/4` bit**, rồi nhân ma trận |
+| Khoá của `F` đầu ở mỗi nhánh lược đồ khoá | `⟨2i + 1⟩_l`, `⟨2i + 2⟩_l` | **`Const⁰_l` ⊕** `⟨2i + 1⟩_l`, **`Const¹_l` ⊕** `⟨2i + 2⟩_l` |
+| Ma trận `M4` in trong văn bản | sai: `0x0C` ở (2, 3) và (3, 0) | đúng: `0x0D` |
+| Phụ lục A | bản rõ `1122…ff00`, khoá `0102…0f11…`; khoá vòng, 6 bước mỗi vòng | bản rõ `ffee…1100`, khoá `0001…`; thêm 9 bước của cả hai nhánh ở mỗi lần cập nhật khoá |
 
-`tools/tests/test_mkv_model.py` giữ hai sai khác này thành test: `M4` in sai
-không cho ra bước MixWords của A.1.1 và không là nghịch đảo của `M4⁻¹`; đọc
-nguyên văn điều 4.6 thì sai ngay `K01` của cả 6 véc tơ.
+Ngoài ra văn bản chuẩn đổi số điều (điều 4 → 5; MixWords 4.2.2.2 → 5.4.3, lược
+đồ khoá 4.6 → 5.5) và ký hiệu (`K^L`, `K^R` → `K⁰`, `K¹`; khoá vòng `RK_j`).
+
+Văn bản dự thảo còn **mâu thuẫn với chính véc tơ của nó** ở hai chỗ, đều đã được
+sửa trong bản chuẩn: ma trận `M4` in `0x0C` (chỉ `0x0D` mới cho ra các véc tơ và là
+nghịch đảo của `M4⁻¹` in cùng trang), và hằng số lược đồ khoá viết là
+`Const^Left_i = ⟨2i⟩_{2l}`, `Const^Right_i = ⟨2i+1⟩_{2l}`, dùng `Const_{i−1}` ở lần
+cập nhật `i`, trong khi các véc tơ cần `⟨2i⟩_l`, `⟨2i − 1⟩_l` ở nửa khoá đầu của
+`F` (đúng như điều 5.5 của bản chuẩn, chỉ thiếu `Const`).
+
+Mô hình giữ cả hai bản: `mkv_model.py` mặc định theo chuẩn; trong
+`with edition(DRAFT):` nó tính mã của bản dự thảo và cho ra **mọi giá trị** ở Phụ
+lục A của bản dự thảo (`tools/mkv/draft_vectors.json`). `tools/tests/test_mkv_model.py`
+kiểm rằng bỏ bất kỳ điểm nào trong ba điểm trên thì sai véc tơ của chuẩn, và giữ
+hai lỗi của văn bản dự thảo thành test.
 
 ## Kiến trúc RTL
 
 | File | Nội dung |
 |------|----------|
-| `bow_mkv_tables_pkg.sv` | **sinh tự động** (`mkv_model.py tables`): S-box, S-box nghịch đảo (hàm `case`), M4, M4⁻¹, M8, M8⁻¹ |
-| `bow_mkv_pkg.sv` | các lớp trên trạng thái 256 bit: `sub_cells`, `mix_words`, `inv_mix_words` (nhân GF(2⁸) với hằng → mạng XOR), `x_words`, `block_mask` |
+| `bow_mkv_tables_pkg.sv` | **sinh tự động** (`mkv_model.py tables`): S-box, S-box nghịch đảo (hàm `case`), M4, M4⁻¹, M8, M8⁻¹, hằng số `Const⁰_l`, `Const¹_l` |
+| `bow_mkv_pkg.sv` | các lớp trên trạng thái 256 bit: `sub_cells`, `mix_words`, `inv_mix_words` (xoay cột: chỉ là nối dây; nhân GF(2⁸) với hằng → mạng XOR), `x_words`, `block_mask`, `ks_const` |
 | `bow_mkv_core.sv` | engine: FSM, datapath nửa vòng thuận / nghịch, lược đồ khoá, RAM khoá vòng |
 | `bow_mkv.sv` | khối thanh ghi trên bus Bow32, giải mã lệnh, cờ trạng thái, ngắt |
 
 **Hai cỡ khối trên một datapath.** Byte `b` của khối nằm ở `state[8b +: 8]`.
 MKV-256 dùng 4 cột 64 bit, MKV-128 dùng 4 cột 32 bit ở 128 bit thấp (128 bit
-cao luôn bằng 0). S-box dùng chung, chỉ MixWords (M8 hay M4) và XWords (cột 64
-hay 32 bit) chọn theo cỡ khối.
+cao luôn bằng 0). S-box dùng chung, chỉ MixWords (xoay `2c` hay `c` byte, M8 hay
+M4), XWords (cột 64 hay 32 bit) và hằng số lược đồ khoá chọn theo cỡ khối.
 
 **Một nửa vòng mỗi chu kỳ.** Hàm vòng tách thành hai nửa cùng dạng "cộng khoá →
 SubCells → lớp tuyến tính": `M(S(x ⊕ K⁰))` rồi `XW(S(x ⊕ K¹))`. Phép giải mã là
@@ -138,11 +160,11 @@ SubCells → lớp tuyến tính": `M(S(x ⊕ K⁰))` rồi `XW(S(x ⊕ K¹))`. 
 | `DEC` | `s = 0` | `x ← DIN ⊕ h[2R]` (`in ← DIN`) |
 | | `s = 1 … 2R` | `x ← S⁻¹(L⁻¹(x)) ⊕ h[2R − s]`, `L⁻¹` = XWords (s lẻ) / invMixWords (s chẵn); bước cuối giữ vào `DOUT` |
 | | lượt 2, `Check` | mã hoá lại `x` trên datapath thuận, so với `in` như trên |
-| `KEY` | lúc nhận lệnh | `KL, KR ← K_0`, `h[0] ← K_0^L`, `DOUT ← 0` |
-| | mỗi lần cập nhật (8 chu kỳ) | 4 nửa vòng thuận trên `KR` với khoá `c(2i), 0, 0, 0` → `K_i^L` (ghi tạm vào `KR`, `h[2i−1]`); 4 nửa vòng trên `KL` với `c(2i−1)` → `B`; `KL ← K_i^L`, `KR ← K_i^L ⊕ B` (`h[2i]`). 6 chu kỳ không ghi RAM: `h[2R+1…31] ← 0` (khoá vòng của khoá dài hơn trước đó) |
-| | lượt 2 (8R chu kỳ) | chạy lại từ `K_0` (đọc lại `KEY`), không ghi RAM mà so từng khoá nửa vòng với RAM |
+| `KEY` | lúc nhận lệnh | `K⁰, K¹ ← K_int`, `h[0] ← K⁰` (`RK_0`), `DOUT ← 0` |
+| | lần cập nhật `i` (8 chu kỳ) | 4 nửa vòng thuận trên `K¹` với khoá `Const¹ ⊕ ⟨2i⟩, 0, 0, 0` → `A` (ghi tạm vào `K¹`, `h[2i−1]`); 4 nửa vòng trên `K⁰` với `Const⁰ ⊕ ⟨2i−1⟩` → `B`; `K⁰ ← A`, `K¹ ← A ⊕ B` (`h[2i]`), tức SWAP của điều 5.5. 6 chu kỳ không ghi RAM: `h[2R+1…31] ← 0` (khoá vòng của khoá dài hơn trước đó) |
+| | lượt 2 (8R chu kỳ) | chạy lại từ `K_int` (đọc lại `KEY`), không ghi RAM mà so từng khoá nửa vòng với RAM |
 | | `Check` | so `h[0]`, bộ đếm chu kỳ; đúng: `KEY_VALID`, `KEY ← 0`; sai: `FAULT` |
-| | sau đó | engine rảnh luôn giữ `KL, KR, x, in` = 0: một chu kỳ sau lệnh chúng đã về 0 |
+| | sau đó | engine rảnh luôn giữ `K⁰, K¹, x, in` = 0: một chu kỳ sau lệnh chúng đã về 0 |
 
 **Phát hiện lỗi.** Lỗi tiêm vào phần cứng (glitch xung clock / điện áp, laser)
 làm sai một bước tính, và bản mã sai là thứ phân tích lỗi cần. Vì vậy không kết
@@ -173,14 +195,15 @@ lược đồ khoá theo chiều ngược. LUTRAM không có reset, nên sau m�
 đầu ở `Clear`: 32 chu kỳ ghi 0 (`BUSY` = 1, không đặt `DONE`, `CYCLES` giữ 0).
 
 **Đường dài nhất** (50 MHz, 20 ns): đọc RAM → XOR → S-box → M8 → mux → thanh
-ghi, ngắn hơn đường qua bus (Ibex → crossbar → ghi thanh ghi MKV: slack +2,8 ns
-ở `kv260_cam`, +1,2 ns ở `kv260`, chủ yếu là trễ dây). Muốn nhanh hơn có thể làm cả vòng mỗi chu kỳ (gấp đôi S-box).
+ghi, ngắn hơn đường qua bus (Ibex → crossbar → ghi thanh ghi MKV: slack +1,27 ns
+ở `kv260_cam`, +3,8 ns ở `kv260`, chủ yếu là trễ dây, thay đổi theo mỗi lần place
+& route; các đường bắt đầu từ thanh ghi MKV còn ≥ +3,4 ns). Muốn nhanh hơn có thể làm cả vòng mỗi chu kỳ (gấp đôi S-box).
 
 ## Bản đồ thanh ghi (`0x4000_B000`)
 
 | Offset | Tên | Truy cập | Mô tả |
 |-------:|-----|:--:|-------|
-| 0x000 | `ID` | R | `0x4D4B5601` ("MKV", phiên bản 1) |
+| 0x000 | `ID` | R | `0x4D4B5602` ("MKV", phiên bản 2: TCVN 14263:2024; phiên bản 1 là mã của bản dự thảo) |
 | 0x004 | `INFO` | R | [0] có MKV-128, [1] có MKV-256, [2] có phát hiện lỗi, [15:8] số chu kỳ mỗi vòng của `ENC`/`DEC` (4: 2 + lượt kiểm tra) |
 | 0x008 | `CTRL` | RW | [0] `BLOCK` (0 MKV-128, 1 MKV-256), [2:1] `KLEN` (0: k = l, 1: k = 3l/2, 2: k = 2l, 3: không hợp lệ) — phiên bản cho lệnh `KEY` kế tiếp |
 | 0x00C | `CMD` | W | mỗi lần ghi **một** bit: [0] `KEY`, [1] `ENC`, [2] `DEC`, [3] `CLEAR`; ghi 0 không làm gì |
@@ -226,7 +249,7 @@ static const uint8_t key[32] = {...}, pt[16] = {...};
 uint8_t ct[16], back[16];
 
 if (!bow_mkv_set_key(128, 256, key)) { /* phiên bản không có trong chuẩn, hay FAULT */ }
-if (!bow_mkv_encrypt(pt, ct)) {          /* CYCLES = 4R + 4 = 36 */
+if (!bow_mkv_encrypt(pt, ct)) {          /* CYCLES = 4R + 4 = 40 */
   /* FAULT: kết quả đã bị huỷ (ct = 0), khoá đã bị xoá */
   bow_mkv_clear();                       /* xoá cả FAULT */
   bow_mkv_set_key(128, 256, key);
@@ -243,12 +266,19 @@ Không dùng driver: `CTRL`, `KEY[i]`, `CMD = KEY`; rồi mỗi khối `DIN[i]`,
 
 Bốn tầng, mỗi tầng dựa trên tầng trước:
 
-1. **Mô hình ↔ PDF.** `tools/mkv/extract_vectors.py` trích từ PDF (`pdftotext`)
-   hai bảng S-box, bốn ma trận và 6 véc tơ của Phụ lục A **với mọi giá trị
-   trung gian** (khoá `K00…K_post`, 6 bước của mỗi vòng, bản mã) vào
-   `tools/mkv/tcvn_mkv_vectors.json`. `mkv_model.py selftest` và 21 unit test
-   (`make test-tools`) kiểm tra mô hình khớp từng giá trị (6 phiên bản, 252 trạng
-   thái, 90 khoá nửa vòng), giải mã, hai sai khác ở trên, file sinh ra còn mới.
+1. **Mô hình ↔ chuẩn.** Văn bản chuẩn là ảnh scan, không trích tự động được:
+   Phụ lục A của TCVN 14263:2024 được chép vào `tools/mkv/tcvn14263_vectors.json`,
+   mỗi phiên bản gồm khoá, bản rõ, **mọi khoá vòng** `RK_0 … RK_2R`, 9 bước của
+   cả hai nhánh ở lần cập nhật khoá đầu, 6 bước của vòng đầu và vòng cuối, bản mã
+   (288 giá trị, mỗi giá trị đọc lại ở 300 dpi). S-box, ma
+   trận và hằng số đối chiếu với điều 5.4, 5.5. Bản dự thảo có lớp chữ:
+   `tools/mkv/extract_vectors.py` trích từ PDF (`pdftotext`) hai bảng S-box, bốn
+   ma trận và 6 véc tơ của Phụ lục A dự thảo **với mọi giá trị trung gian** vào
+   `tools/mkv/draft_vectors.json`. `mkv_model.py selftest` và 28 unit test
+   (`make test-tools`) kiểm tra mô hình khớp từng giá trị của cả hai phụ lục
+   (bản dự thảo với phiên bản `DRAFT` của mô hình), giải mã, ba điểm khác nhau
+   (bỏ một điểm là sai véc tơ của chuẩn), hai lỗi của văn bản dự thảo, file sinh
+   ra còn mới.
 2. **RTL ↔ mô hình** (`make -C hw/ip/mkv/dv test`, cũng trong `make test-ip` và
    CI). `mkv_model.py gen` sinh Phụ lục A + khoá/khối ngẫu nhiên cho cả 6 phiên
    bản (cả khoá toàn 0, toàn 1); `tb_bow_mkv.sv` chạy qua bus thanh ghi (ghi
@@ -270,10 +300,13 @@ Bốn tầng, mỗi tầng dựa trên tầng trước:
    - trạng thái trong lượt một của `KEY`;
    - `KEY_VALID` của khối thanh ghi bị bật khi engine không có khoá.
    Thêm: ngắt `FAULT`, `DOUT` đọc ra 0 khi không có kết quả đã kiểm tra.
-   4 seed: ~510 phép toán, ~7 700 trạng thái, 264 lược đồ khoá, 40 lỗi phát
-   hiện; thử thêm `make run SEED=99 COUNT=600` (1 231 phép toán). Đổi `M4` về
-   `0x0C` hay lệch hằng số lược đồ khoá thì test hỏng ngay ở véc tơ đầu.
-   Mutation (21 bản RTL, mỗi bản bỏ một cơ chế) đều làm test hỏng: giữ khoá
+   4 seed: 514 phép toán, ~8 700 trạng thái, 264 lược đồ khoá, 40 lỗi phát
+   hiện; thử thêm `make run SEED=99 COUNT=600` (1 231 phép toán, ~21 000 trạng
+   thái). Mutation (25 bản RTL, mỗi bản bỏ một cơ chế hay một điểm của chuẩn)
+   đều làm test hỏng. Bốn bản quay về bản dự thảo: `MixWords` hay `invMixWords`
+   không xoay (chính IP báo `FAULT` ở lệnh đầu, vì chiều thuận và chiều nghịch
+   không còn khớp), lược đồ khoá không có `Const` (sai véc tơ đầu), R của bản
+   dự thảo (sai `ROUNDS` ngay ở `KEY` đầu). Các bản còn lại: giữ khoá
    trong `KEY`, nhận `KEY` thiếu từ, giữ `DIN`/`DOUT`, giữ khoá vòng của khoá dài
    trước, giữ `K_R`, không xoá RAM sau reset, và tắt từng phép kiểm tra (parity,
    so kết quả, so lược đồ khoá, bộ đếm chu kỳ, bỏ qua `Check`, phiên bản, trạng
@@ -283,7 +316,7 @@ Bốn tầng, mỗi tầng dựa trên tầng trước:
    qua shell, so với giá trị của mô hình.
 4. **Trên board** ([../mkv_kv260.md](../mkv_kv260.md)): `test` (đủ, 20 khoá
    ngẫu nhiên mỗi phiên bản), `tools/bow32_mkv.py kat` (bản mã so với giá trị in
-   trong PDF) và `verify` (khoá/khối ngẫu nhiên từ PC, so với mô hình Python —
+   trong chuẩn) và `verify` (khoá/khối ngẫu nhiên từ PC, so với mô hình Python —
    độc lập với phần mềm chạy trên board).
 
 `test` của ứng dụng: (1) ID/INFO, (2) MKV phần mềm (`mkv_sw.c`, viết theo chuẩn)

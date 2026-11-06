@@ -4,9 +4,9 @@
  *
  * MKV block cipher accelerator driver (docs/ip/mkv.md).
  *
- * MKV (draft TCVN XXXX:2024): MKV-128 with 128 / 192 / 256 bit keys, MKV-256
- * with 256 / 384 / 512 bit keys. Blocks and keys are byte strings in the
- * order of the standard.
+ * MKV (TCVN 14263:2024): MKV-128 with 128 / 192 / 256 bit keys, MKV-256
+ * with 256 / 384 / 512 bit keys (R = 7 / 8 / 9 rounds). Blocks and keys are
+ * byte strings in the order of the standard.
  *
  *   if (!bow_mkv_set_key(128, 256, key)) { ... unknown version / fault ... }
  *   if (!bow_mkv_encrypt(pt, ct)) { ... }     // one block
@@ -27,7 +27,7 @@
 #include "bow32_memmap.h"
 
 typedef struct {
-  volatile uint32_t ID;       /* 0x000 R   0x4D4B5601 */
+  volatile uint32_t ID;       /* 0x000 R   0x4D4B5602 (version 2: TCVN 14263:2024) */
   volatile uint32_t INFO;     /* 0x004 R   [0] MKV-128 [1] MKV-256 [2] fault detection
                                               [15:8] cycles per round of ENC / DEC */
   volatile uint32_t CTRL;     /* 0x008 RW  MKV_CTRL_* (version of the next KEY command) */
@@ -48,7 +48,7 @@ _Static_assert(__builtin_offsetof(bow_mkv_regs_t, DOUT) == 0x0C0, "MKV DOUT offs
 
 #define MKV ((bow_mkv_regs_t *)BOW32_MKV_BASE)
 
-#define MKV_ID_VALUE 0x4D4B5601u
+#define MKV_ID_VALUE 0x4D4B5602u  /* version 1 (0x...01): cipher of the draft */
 #define MKV_INFO_FAULT_DETECTION (1u << 2)
 
 #define MKV_CTRL_BLOCK256 (1u << 0)                   /* else MKV-128 */
