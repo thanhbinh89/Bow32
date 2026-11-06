@@ -38,6 +38,13 @@
 //     sys_clk_o stop low before the next sys_clk_o rising edge while locked_o
 //     stays 1 (a DDR clock lost without a loss of lock); the other clocks run
 //     on. Clear it after an MMCM restart (en_i low) for aligned clocks again.
+//   * Not inlined (no_inline_module): Verilator before 5.022 (Ubuntu 24.04
+//     and the CI have 5.020) gives the delays of an inlined module the time
+//     unit of the module it is inlined into (verilator/verilator#4806), while
+//     $realtime keeps this module's 1 ps. Under tb_bow32 (1 ns) the edges then
+//     came in bursts 1 ns apart with pauses of up to ~2.7 us (CLK_OK dropped,
+//     APPLY refused). Every CK rising edge checks its time against the
+//     computed one (fatal error when a delay is scaled wrongly).
 
 `timescale 1ps / 1ps
 
@@ -64,6 +71,9 @@ module ddr_clk_model #(
   output logic wps_done_o
 );
 
+  // delays in this module's 1 ps whatever the parent's unit (see the header)
+  /* verilator no_inline_module */
+
   localparam real T    = real'(TckPs);
   localparam real Step = real'(TckPs) / real'(PsSteps);
 
@@ -82,7 +92,7 @@ module ddr_clk_model #(
   bit freeze = 1'b0;
 
   initial begin : g_ddr_clk
-    real         t, d;
+    real         t, d, now;
     int unsigned n;                        // CK rising edges since the start
     ddr_clk_o = 1'b0;
     sys_clk_o = 1'b0;
@@ -99,6 +109,11 @@ module ddr_clk_model #(
         d = t - $realtime;
         if (d < 1.0) d = 1.0;
         #(d);
+        now = $realtime;                   // the wait ends within 1 ps of t
+        if (now > t + 1.0 || now < t - 1.0) begin
+          $fatal(1, "%m: CK edge at %0.1f ps instead of %0.1f ps: delays scaled wrongly (header)",
+                 now, t);
+        end
         ddr_clk_o = 1'b1;                  // same time step, same process
         if (n % 4 == 0) sys_clk_o = 1'b1;
         if (n % 4 == 2) sys_clk_o = 1'b0;
