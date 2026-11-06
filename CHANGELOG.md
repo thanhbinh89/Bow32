@@ -269,6 +269,11 @@
   nó (`sw/apps/camera/csi2rx.c/.h`).
 
 ### Fixed
+- CI: test hệ thống `ddr` hỏng với Verilator 5.020 (`init: APPLY refused`).
+  Verilator trước 5.022 inline `ddr_clk_model` (1 ps) vào `tb_bow32` (1 ns) và tính
+  delay theo đơn vị 1 ns của module cha (verilator/verilator#4806). Kết quả là clock
+  DDR chạy giật cục và `CLK_OK` rớt. Giờ mô hình không bị inline nữa
+  (`no_inline_module`) và tự kiểm tra thời điểm của mỗi cạnh CK.
 - `kv260_cam` build được với Vivado 2025.2 (`tcl/cam_bd.tcl`):
   `make_bd_pins_external` bỏ qua pin đã nối nên port `sys_clk`/`vid_clk`/
   `*_resetn` được tạo bằng `create_bd_port`; `C_EN_CSI_V2_0` đưa

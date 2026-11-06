@@ -257,6 +257,12 @@ clock/data.
   làm lặp hoặc mất bit; `$rtoi(ns * 1000)` tràn 32 bit sau 2,1 ms).
 * CI dùng Verilator 5.020 của Ubuntu 24.04; các test bộ thu CSI-2 được phát
   triển với 5.022.
+* Verilator trước 5.022 (lỗi verilator/verilator#4806): delay `#` của một module
+  bị inline tính theo đơn vị thời gian của module cha, còn `$realtime` vẫn theo
+  đơn vị của chính nó. Mô hình có delay mà `timescale` khác testbench chứa nó cần
+  `/* verilator no_inline_module */`. Ví dụ `ddr_clk_model` (1 ps) nằm dưới
+  `tb_bow32` (1 ns): khi bị inline, clock DDR chạy giật cục, `CLK_OK` rớt và test
+  `ddr` hỏng trong CI. Mô hình này còn tự kiểm tra thời điểm của mỗi cạnh CK.
 
 ## Lint
 
