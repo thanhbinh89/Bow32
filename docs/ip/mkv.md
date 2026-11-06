@@ -10,10 +10,11 @@ Driver: `sw/common/include/bow_mkv.h`. Ứng dụng kiểm thử: `sw/apps/mkv`,
 trên KV260: [../mkv_kv260.md](../mkv_kv260.md).
 
 Văn bản tiêu chuẩn thuộc bản quyền của Viện Tiêu chuẩn Chất lượng Việt Nam và chỉ
-được dùng nội bộ, nên không có trong repo. Repo giữ bản **dự thảo**
-(`docs/ref/Du-thao-TCVN-XXXX2024.pdf`): đó là một mã khác, khác bản chuẩn ở ba
-điểm của thuật toán (xem [So với bản dự thảo](#so-với-bản-dự-thảo)). Các véc tơ
-kiểm tra của chuẩn được chép vào `tools/mkv/tcvn14263_vectors.json`.
+được dùng nội bộ, nên không có trong repo. Bản **dự thảo**
+(`docs/ref/Du-thao-TCVN-XXXX2024.pdf`, cũng chỉ để bản cục bộ) là một mã khác, khác
+bản chuẩn ở ba điểm của thuật toán (xem [So với bản dự thảo](#so-với-bản-dự-thảo)).
+Các véc tơ kiểm tra của chuẩn được chép vào `tools/mkv/tcvn14263_vectors.json`, bảng
+và véc tơ của bản dự thảo vào `tools/mkv/draft_vectors.json`.
 
 ```
                +--------------------------------------------------------------------+

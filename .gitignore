@@ -20,3 +20,12 @@ venv/
 .idea/
 *.swp
 .DS_Store
+
+# Third-party documents: local copies only, never committed (public repo).
+# Arm MPS4 board: TRM 102577, HBI0376B pin lists, FMC pin table
+docs/fpga/MPS4/
+# AMD VEK280 (UG1612, XTP760 schematic, RDF0675 master XDC), KV260 carrier (XTP682)
+docs/fpga/vek280/
+docs/fpga/xtp682-kria-k26-carrier-card-schematic/
+# TCVN 14263:2024 PDFs: draft and licensed official edition
+docs/ref/

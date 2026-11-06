@@ -265,6 +265,13 @@
   KV260 UART1 vẫn ở J2 chân 5/7.
 
 ### Removed
+- Tài liệu của hãng và bản dự thảo TCVN khỏi repo và khỏi toàn bộ lịch sử git (repo
+  public): TRM bo MPS4 của Arm, schematic carrier KV260 của AMD và
+  `docs/ref/Du-thao-TCVN-XXXX2024.pdf`. Lịch sử được viết lại ngày 2026-11-06: mọi commit
+  đều có hash mới, clone cũ cần clone lại. Tài liệu của Arm/AMD
+  (`docs/fpga/MPS4/`, `docs/fpga/vek280/`,
+  `docs/fpga/xtp682-kria-k26-carrier-card-schematic/`) và hai PDF TCVN chỉ để bản cục bộ
+  (`.gitignore`). Bảng và véc tơ của bản dự thảo vẫn ở `tools/mkv/draft_vectors.json`.
 - MIPI CSI-2 RX Subsystem của AMD trong block design `bow32_cam` và driver của
   nó (`sw/apps/camera/csi2rx.c/.h`).
 
