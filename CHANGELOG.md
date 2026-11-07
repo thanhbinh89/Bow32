@@ -89,6 +89,10 @@
 - Đánh giá khả năng làm DDR trên Bow32 và bo RAM mở rộng `FMC_DDR2_HyperRam`: chỉ hợp
   với Arm MPS4 (VEK280 chỉ nối chân LA của FMC+, KV260 không có FMC), góp ý schematic và
   đề xuất sơ đồ chân chỉ dùng LA ([docs/ddr_board_review.md](docs/ddr_board_review.md)).
+- Review IP DDR theo mục tiêu công nghiệp và SoC camera AI: băng thông (cửa sổ 32 bit
+  5 / 3,6 MB/s, DRAM 267 MB/s, cần ≈ 1–2 GB/s), refresh 3,9 µs khi Tc > 85 °C, ECC, bám pha
+  theo nhiệt, QoS, DFI chuẩn cho PHY ASIC; lộ trình P0–P3
+  ([docs/ddr_review_industrial_ai.md](docs/ddr_review_industrial_ai.md)).
 - **Mã khối MKV** `bow_mkv` (`hw/ip/mkv`) theo TCVN 14263:2024 "Thuật toán mã khối
   MKV" (lúc đầu theo bản dự thảo, xem Changed): MKV-128 (khoá 128 / 192 / 256 bit)
   và MKV-256 (khoá 256 / 384 / 512 bit), R = 7 / 8 / 9. Lược đồ khoá trong phần cứng (8R + 1 chu kỳ, khoá nửa vòng trong
