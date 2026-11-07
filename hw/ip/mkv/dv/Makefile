@@ -41,7 +41,20 @@ run: $(SIM_BIN)
 test: $(SIM_BIN)
 	@set -e; for s in $(SEEDS); do $(MAKE) --no-print-directory run SEED=$$s; done
 
+# Review experiments (docs/ip/mkv_review.md): not a pass / fail test, prints
+# what the IP does under fault models outside tb_bow_mkv. Not part of `test`.
+REVIEW_BIN := $(BUILD)/review/Vtb_mkv_review
+
+$(REVIEW_BIN): $(SRCS) tb_mkv_review.sv
+	@mkdir -p $(BUILD)/review
+	$(VERILATOR) --binary --timing -j 0 -O2 -Wno-fatal -Wno-lint -Wno-style -Wno-TIMESCALEMOD \
+	  --top-module tb_mkv_review -Mdir $(BUILD)/review -o Vtb_mkv_review \
+	  $(FLISTS) tb_mkv_review.sv
+
+review: $(REVIEW_BIN)
+	@$(REVIEW_BIN) | grep -v '^- '
+
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: build run test clean
+.PHONY: build run test review clean

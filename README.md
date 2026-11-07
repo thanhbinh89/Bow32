@@ -215,6 +215,7 @@ Bow32/
 | [docs/ip/dma.md](docs/ip/dma.md) | DMA: chế độ M2M / stream, ring buffer, thanh ghi |
 | [docs/ip/mkv.md](docs/ip/mkv.md) | Mã khối MKV: thuật toán (TCVN 14263:2024), so với bản dự thảo, kiến trúc, thanh ghi, kiểm chứng |
 | [docs/mkv_kv260.md](docs/mkv_kv260.md) | Chạy và kiểm chứng IP MKV trên KV260: `test`, `kat`, `verify`, `bench` |
+| [docs/mkv_security_review.md](docs/mkv_security_review.md) | Đánh giá IP MKV cho SoC camera AI: mô hình đe doạ, chuẩn tham chiếu, phát hiện (tiêm lỗi, kênh kề, khoá, tích hợp), lộ trình sửa |
 | [docs/ip/ddr.md](docs/ip/ddr.md) | DDR2/DDR3: lõi LiteDRAM (sinh, CSR), cầu bus, bộ chuyển DFI, PHY, level shifter, khởi tạo, hiệu chỉnh, thanh ghi, kiểm chứng |
 | [docs/ddr_mps4.md](docs/ddr_mps4.md) | Chạy bộ điều khiển DDR trên Arm MPS4: build, thẻ microSD, `test`, `cal`, `verify`, `bench` |
 | [docs/ddr_board_review.md](docs/ddr_board_review.md) | Khả năng làm DDR trên Bow32, bo RAM mở rộng hợp với bo FPGA nào, góp ý schematic |

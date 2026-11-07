@@ -380,6 +380,10 @@ Những gì IP **chưa** có (xem xét theo mô hình đe doạ của sản ph�
 Chế độ hoạt động (CBC, CTR, GCM…) do phần mềm làm trên lệnh `ENC`/`DEC`;
 `bow_mkv_ecb` chỉ là ECB (khối rõ trùng → khối mã trùng), không toàn vẹn.
 
+Đánh giá IP theo thông lệ công nghiệp và chuẩn bảo mật cho SoC camera AI (mô hình đe doạ,
+các phát hiện, thí nghiệm tiêm lỗi `make -C hw/ip/mkv/dv review`, lộ trình sửa):
+[../mkv_security_review.md](../mkv_security_review.md).
+
 ## Bài tập mở rộng
 
 - Cả vòng mỗi chu kỳ (2 lớp S-box): 4R + 4 → 2R + 4 chu kỳ.
