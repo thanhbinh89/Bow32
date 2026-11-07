@@ -14,9 +14,10 @@
 //           the last word of a NAL unit is padded with zero bytes
 //           (trailing_zero_8bits of the byte stream) and has last = 1
 // frame_done_o pulses when the last word of the NAL unit is in the FIFO,
-// with its size in bytes (multiple of 4).
+// with its size in bytes (multiple of 4) and its frame_t; both are held
+// until the next frame_done_o (the CPU domain reads them with the pulse).
 
-module bow_h264_bitpack (
+module bow_h264_bitpack import bow_h264_pkg::*; (
   input  logic        clk_i,
   input  logic        rst_ni,
 
@@ -25,7 +26,7 @@ module bow_h264_bitpack (
   input  logic [1:0]  tk_kind_i,
   input  logic [5:0]  tk_len_i,
   input  logic [31:0] tk_bits_i,
-  input  logic        tk_seq_last_i,
+  input  frame_t      tk_frame_i,       // with kind 2: the frame of the NAL unit
 
   output logic        out_push_o,
   input  logic        out_full_i,
@@ -34,7 +35,7 @@ module bow_h264_bitpack (
 
   output logic        frame_done_o,
   output logic [23:0] frame_bytes_o,
-  output logic        seq_last_o,
+  output frame_t      frame_o,          // stable from frame_done_o to the next one
   output logic        busy_o
 );
 
@@ -45,7 +46,7 @@ module bow_h264_bitpack (
   logic [2:0]  raw_cnt_q;
   logic [7:0]  hdr_q;
   logic        end_q;              // trailing bits in, waiting for the last byte
-  logic        seq_last_q;
+  frame_t      frame_q;
 
   // byte offered to the emulation prevention / packer
   logic        b_valid, b_raw, b_take;
@@ -101,7 +102,7 @@ module bow_h264_bitpack (
       raw_cnt_q  <= '0;
       hdr_q      <= '0;
       end_q      <= 1'b0;
-      seq_last_q <= 1'b0;
+      frame_q    <= '0;
     end else begin
       logic [63:0] a;
       logic [6:0]  c;
@@ -127,7 +128,7 @@ module bow_h264_bitpack (
             a = a | (64'd1 << (7'd63 - c));
             c = c + 7'(trail_len);
             end_q      <= 1'b1;
-            seq_last_q <= tk_seq_last_i;
+            frame_q    <= tk_frame_i;
           end
           default: begin
             a = a | ((64'(tk_bits_i) & ((64'd1 << tk_len_i) - 64'd1)) << (7'd64 - c - 7'(tk_len_i)));
@@ -186,7 +187,7 @@ module bow_h264_bitpack (
       nwords_q      <= '0;
       frame_done_o  <= 1'b0;
       frame_bytes_o <= '0;
-      seq_last_o    <= 1'b0;
+      frame_o       <= '0;
     end else begin
       frame_done_o <= 1'b0;
       if (out_push_o) nwords_q <= nwords_q + 22'd1;
@@ -223,7 +224,7 @@ module bow_h264_bitpack (
         KDone: begin
           frame_done_o  <= 1'b1;
           frame_bytes_o <= {nwords_q, 2'b00};
-          seq_last_o    <= seq_last_q;
+          frame_o       <= frame_q;
           nwords_q      <= '0;
           kst_q         <= KRun;
         end

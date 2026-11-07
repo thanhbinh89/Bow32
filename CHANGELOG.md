@@ -6,6 +6,20 @@
 ## [Unreleased]
 
 ### Added
+- **Review bộ mã hoá H.264 cho camera công nghiệp và SoC camera AI**
+  ([docs/ip/h264_review.md](docs/ip/h264_review.md)): lỗi đã sửa (dưới đây), thông lượng
+  thực đo của CAVLC, rủi ro còn lại và lộ trình (ECC, watchdog, slice theo hàng MB,
+  AXI master / DDR, ROI QP, frame P).
+- H.264: thanh ghi `FRAME_INFO` (`0x03C`): QP, DEBLOCK, `idr_pic_id`, LAST và
+  `ERR_OVF` / `ERR_INPUT` **của frame vừa xong** (frame nào có strip mang mẫu cũ); `ID`
+  = `0x48323602`. Ứng dụng `video` in QP thật của từng frame và số frame có strip cũ.
+- `bow_cdc_hs` (`hw/ip/common`): sự kiện + dữ liệu qua miền clock bằng bắt tay
+  req/ack, đúng với mọi tỉ lệ clock, không mất / gộp lượt truyền.
+- `tb_bow_h264`: 3 tỉ lệ clock (CPU 50 / video 143 MHz, 400 / 143, 25 / 200), case
+  có `FRAMES` và START lần hai, kiểm tra kẹp `SIZE`, START khi EN = 0, EN + START và
+  hai lần ghi QP liền nhau, STATUS bị đọc / ghi W1C liên tục (không mất FRAME_DONE),
+  `FRAME_INFO` từng frame, `DONE` cùng `FRAME_CNT`; mỗi kiểm tra đã được chạy trên RTL
+  cũ và báo lỗi ở đó.
 - **SDRAM DDR2/DDR3** `bow_ddr` (`hw/ip/ddr`): controller **LiteDRAM** trên PHY riêng
   của Bow32. Cửa sổ bộ nhớ 512 MiB ở `0x8000_0000` trên main crossbar (3 × 8), CSR của
   LiteDRAM ở `0x4000_C000` (8 KiB), thanh ghi PHY/cầu ở `0x4000_E000`, ngắt
@@ -276,6 +290,27 @@
   nó (`sw/apps/camera/csi2rx.c/.h`).
 
 ### Fixed
+- H.264 (`bow_h264`, [docs/ip/h264_review.md](docs/ip/h264_review.md)):
+  - `STATUS`: ghi W1C (kể cả chỉ xoá bit khác, hay ghi 0) cùng chu kỳ với một sự kiện
+    làm mất `FRAME_DONE` / `DONE` / lỗi; giờ sự kiện thắng.
+  - EN, DEBLOCK, QP, START, STOP đi thành **một bản ghi** qua `bow_cdc_hs` thay cho
+    `bow_sync` + 3 `bow_cdc_pulse`: trước đây chỉ đúng khi clock video nhanh hơn CPU
+    vài lần (CPU nhanh hơn: QP ghi liền nhau bị mất hoặc lẫn bit, START ngay sau EN có
+    thể bị bỏ). START khi `EN = 0` bị bỏ ngay ở thanh ghi.
+  - Lỗi (`ERR_OVF`, `ERR_INPUT`) qua cờ dính + `bow_cdc_hs` thay cho bộ giới hạn 1 xung
+    / 16 chu kỳ video (mất lỗi khi CPU chậm hơn 3/16 clock video); `BUSY` gồm cả lỗi
+    đang trên đường qua.
+  - `DONE` đi cùng xung `FRAME_DONE` (từ `FRAME_INFO.LAST`): không còn thấy trước
+    `FRAME_CNT` mới.
+  - `idr_pic_id` không còn về 0 ở START: hai IDR liền nhau luôn khác `idr_pic_id`
+    (7.4.3), cả khi stream đi tiếp qua STOP / START.
+  - `SIZE` được kẹp về 16…min(`MaxWidth`, 4080) × 16…4080: rộng quá `MaxWidth` làm
+    chồng địa chỉ strip / line buffer (stream không giải mã được), cao 4082–4094 làm
+    tràn số hàng MB (không frame nào ra, `DONE` không tới).
+  - Reset chỉ miền video (`vid_rst_ni`) giờ reset cả phía CPU của FIFO ra và các đường
+    qua miền clock (`xrst_n`), thanh ghi tự gửi lại cấu hình.
+  - `tb_bow_h264`: pixel đặt 0,1 ns sau cạnh clock (trước đây mất SOF khi `send_frame`
+    được gọi lệch cạnh `vclk`).
 - CI: test hệ thống `ddr` hỏng với Verilator 5.020 (`init: APPLY refused`).
   Verilator trước 5.022 inline `ddr_clk_model` (1 ps) vào `tb_bow32` (1 ns) và tính
   delay theo đơn vị 1 ns của module cha (verilator/verilator#4806). Kết quả là clock

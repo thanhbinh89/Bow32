@@ -1186,8 +1186,10 @@ def test_frame(rnd, width, height, kind):
 
 # ============================================================ unit test I/O
 # Test case of hw/ip/h264/dv (read by tb_bow_h264.sv):
-#   case.txt   "<w> <h> <frames> <skip> <count> <deblock> <hblank> <vblank> <gap> <bp> <seed>"
-#              then one QP per input frame
+#   case.txt   "<w> <h> <frames> <skip> <count> <deblock> <hblank> <vblank> <gap> <bp> <seed>
+#              <restart>" then one QP per input frame. count = FRAMES (0: until STOP);
+#              restart 1: after the sequence a second START with FRAMES = 1 codes
+#              input frame 0 again (QP of frame 0, idr_pic_id goes on)
 #   input.hex  frames x h x w pixels, {V, U, Y} (ISP output order), 6 hex digits
 #   expect.hex expected output words, "<8 hex digits> <last>"
 # The testbench writes out.hex (same format) and status.txt.
@@ -1215,7 +1217,9 @@ def cmd_gen(args):
     h = args.height or rnd.choice([16, 18, 32, 34, 40, 48])
     nf = args.frames
     skip = rnd.choice([0, 0, 1]) if args.skip is None else args.skip
-    count = 0
+    # from the seed, not from rnd: the other parameters of a seed stay the same
+    count = (2 if args.seed % 4 == 1 else 0) if args.count is None else args.count
+    restart = (1 if args.seed % 2 == 0 else 0) if args.restart is None else args.restart
     deblock = rnd.randrange(2)
     kinds = ["scene", "noise", "flat", "ramp"]
     qps = [rnd.randrange(QP_MIN, 52) if i % 4 == 3 else rnd.randrange(18, 40) for i in range(nf)]
@@ -1229,7 +1233,8 @@ def cmd_gen(args):
     gap = rnd.choice([0, 10, 30])
     bp = rnd.choice([0, 20, 60])
     with open(d / "case.txt", "w") as f:
-        f.write(f"{w} {h} {nf} {skip} {count} {deblock} {hblank} {vblank} {gap} {bp} {args.seed}\n")
+        f.write(f"{w} {h} {nf} {skip} {count} {deblock} {hblank} {vblank} {gap} {bp} {args.seed} "
+                f"{restart}\n")
         f.write(" ".join(str(q) for q in qps) + "\n")
     with open(d / "input.hex", "w") as f:
         for fr in frames:
@@ -1238,14 +1243,19 @@ def cmd_gen(args):
                     f.write(f"{v:02x}{u:02x}{y:02x}\n")
     enc = Encoder(w, h)
     outs = []
-    for k, i in enumerate(selected_frames(nf, skip, count)):
+    sel = selected_frames(nf, skip, count)
+    for k, i in enumerate(sel):
         n, _, _ = enc.encode(yuv444_to_420(frames[i], w, h), qps[i], k & 1, bool(deblock))
+        outs.append(n)
+    if restart:
+        # START does not restart idr_pic_id (two IDR pictures in a row differ)
+        n, _, _ = enc.encode(yuv444_to_420(frames[0], w, h), qps[0], len(sel) & 1, bool(deblock))
         outs.append(n)
     with open(d / "expect.hex", "w") as f:
         for wd, last in expected_words(outs):
             f.write(f"{wd:08x} {last}\n")
-    print(f"{d}: {w}x{h}, {nf} input frames, skip {skip}, deblock {deblock}, "
-          f"QP {qps}, {sum(len(o) for o in outs)} bytes expected")
+    print(f"{d}: {w}x{h}, {nf} input frames, skip {skip}, frames {count}, restart {restart}, "
+          f"deblock {deblock}, QP {qps}, {sum(len(o) for o in outs)} bytes expected")
 
 
 def read_words(path):
@@ -1456,6 +1466,8 @@ def main():
     p.add_argument("--height", type=int, default=0)
     p.add_argument("--frames", type=int, default=3)
     p.add_argument("--skip", type=int, default=None)
+    p.add_argument("--count", type=int, default=None, help="FRAMES (default: from the seed)")
+    p.add_argument("--restart", type=int, default=None, help="second START (default: from the seed)")
     p = sub.add_parser("check", help="compare the testbench output with the model")
     p.add_argument("dir")
     p = sub.add_parser("decode", help="decode an Annex B stream of this encoder")

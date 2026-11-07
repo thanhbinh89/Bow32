@@ -337,7 +337,7 @@ static bool record(uint32_t n, uint32_t skip, uint32_t kbytes) {
   uint32_t hdr = bow_h264_write_headers(VRAM, 256, &p);
   uint32_t space = BOW32_VRAM_SIZE - hdr;
   uint32_t target = kbytes ? kbytes * 1024u : space / (n ? n : 1u);
-  uint32_t qp = st.qp, qmin = 99, qmax = 0, ovf = 0, big = 0, coded = 0;
+  uint32_t qp = st.qp, qmin = 99, qmax = 0, ovf = 0, big = 0, coded = 0, stale = 0;
 
   bow_dma_stream(0, VRAM + hdr, space, false);
   bow_h264_init(st.w, st.h, qp, st.deblock);
@@ -354,18 +354,21 @@ static bool record(uint32_t n, uint32_t skip, uint32_t kbytes) {
     uint32_t s = H264->STATUS, cnt = H264->FRAME_CNT;
     done = (s & H264_ST_DONE) != 0;
     if (cnt != coded) {
-      /* FRAME_BYTES is the size of the newest frame; the QP of a frame is
-       * the one written before its start (one frame of delay) */
-      uint32_t bytes = H264->FRAME_BYTES, used = qp;
+      /* FRAME_BYTES / FRAME_INFO describe the newest frame (its QP is the
+       * one written before its start of frame, one frame of delay) */
+      uint32_t bytes = H264->FRAME_BYTES, info = H264->FRAME_INFO, used = H264_FI_QP(info);
+      bool bad = (info & (H264_FI_ERR_OVF | H264_FI_ERR_INPUT)) != 0;
       coded = cnt;
       if (bytes > big) big = bytes;
       if (used < qmin) qmin = used;
       if (used > qmax) qmax = used;
+      if (bad) stale++;
       /* rate control: one QP step per frame toward the target */
       if (bytes > target + target / 8u && qp < H264_QP_MAX) qp++;
       else if (bytes < target - target / 4u && qp > H264_QP_MIN) qp--;
       bow_h264_set_qp(qp);
-      bow_printf("frame %u: %u bytes, %u us\n", coded, bytes, H264->FRAME_CYCLES / vid_mhz);
+      bow_printf("frame %u: %u bytes, QP %u, %u us%s\n", coded, bytes, used,
+                 H264->FRAME_CYCLES / vid_mhz, bad ? ", stale strips" : "");
       last = bow_cycles();
     }
     if (s & H264_ST_ERR_OVF) {
@@ -409,8 +412,9 @@ static bool record(uint32_t n, uint32_t skip, uint32_t kbytes) {
   st.qp = qp;
   bow_printf("rec: %u frames, %u bytes (QP %u..%u, largest %u)%s\n", frames, st.rec_bytes,
              qmin == 99 ? 0 : qmin, qmax, big, full ? ", video RAM full" : "");
-  if (ovf || (H264->STATUS & H264_ST_ERR_OVF)) {
-    bow_printf("warning: the encoder dropped pixels (lower the frame rate or the size)\n");
+  if (ovf || stale || (H264->STATUS & H264_ST_ERR_OVF)) {
+    bow_printf("warning: the encoder dropped pixels in %u frames (lower the frame rate or the size)\n",
+               stale);
   }
   return ok && frames != 0;
 }

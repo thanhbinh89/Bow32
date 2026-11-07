@@ -46,7 +46,7 @@ module bow_h264_cavlc import bow_h264_pkg::*; import bow_h264_tables_pkg::*; #(
   output logic [1:0]    tk_kind_o,
   output logic [5:0]    tk_len_o,
   output logic [31:0]   tk_bits_o,
-  output logic          tk_seq_last_o,    // with kind 2: last frame of the sequence
+  output frame_t        tk_frame_o,       // with kind 2: the frame (FRAME_INFO, STATUS.DONE)
 
   output logic          busy_o
 );
@@ -468,7 +468,7 @@ module bow_h264_cavlc import bow_h264_pkg::*; import bow_h264_tables_pkg::*; #(
   logic [3:0]        rq_tz_q;
   logic [2:0]        rq_zl_q;       // run_before
   logic [3:0]        rq_run_q;
-  logic              rq_seq_last_q;
+  frame_t            rq_frame_q;
 
   assign adv    = !tk_valid_o || tk_ready_i;
   assign e_take = adv && bb_valid_q &&
@@ -558,7 +558,7 @@ module bow_h264_cavlc import bow_h264_pkg::*; import bow_h264_tables_pkg::*; #(
       rq_tz_q       <= '0;
       rq_zl_q       <= '0;
       rq_run_q      <= '0;
-      rq_seq_last_q <= 1'b0;
+      rq_frame_q    <= '0;
     end else if (adv) begin
       rq_valid_q <= 1'b0;
       unique case (est_q)
@@ -674,7 +674,7 @@ module bow_h264_cavlc import bow_h264_pkg::*; import bow_h264_tables_pkg::*; #(
         ETrail: begin
           rq_valid_q    <= 1'b1;
           rq_kind_q     <= RTrail;
-          rq_seq_last_q <= einfo_q.frame.seq_last;
+          rq_frame_q    <= einfo_q.frame;
           est_q         <= EIdle;
         end
         default: est_q <= EIdle;
@@ -689,11 +689,11 @@ module bow_h264_cavlc import bow_h264_pkg::*; import bow_h264_tables_pkg::*; #(
       tk_kind_o     <= '0;
       tk_len_o      <= '0;
       tk_bits_o     <= '0;
-      tk_seq_last_o <= 1'b0;
+      tk_frame_o    <= '0;
     end else if (adv) begin
       tk_valid_o    <= rq_valid_q;
       tk_kind_o     <= 2'd0;
-      tk_seq_last_o <= rq_seq_last_q;
+      tk_frame_o    <= rq_frame_q;
       unique case (rq_kind_q)
         RNal: begin
           tk_kind_o <= 2'd1;

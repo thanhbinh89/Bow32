@@ -26,12 +26,12 @@
 #include "bow32_memmap.h"
 
 typedef struct {
-  volatile uint32_t ID;           /* 0x000 R   0x48323601 */
+  volatile uint32_t ID;           /* 0x000 R   0x48323602 (version 2: FRAME_INFO) */
   volatile uint32_t CTRL;         /* 0x004 RW  H264_CTRL_* */
   volatile uint32_t CMD;          /* 0x008 W   H264_CMD_* */
   volatile uint32_t STATUS;       /* 0x00C R/W1C H264_ST_* */
   volatile uint32_t IRQ_EN;       /* 0x010 RW  STATUS bits 1..4 */
-  volatile uint32_t SIZE;         /* 0x014 RW  [27:16] height (even) [11:0] width (multiple of 16) */
+  volatile uint32_t SIZE;         /* 0x014 RW  [27:16] height (even, 16..4080) [11:0] width (multiple of 16, 16..max) */
   volatile uint32_t QP;           /* 0x018 RW  10..51, from the next coded frame */
   volatile uint32_t FRAMES;       /* 0x01C RW  frames to code after START, 0 = until STOP */
   volatile uint32_t SKIP;         /* 0x020 RW  input frames dropped after each coded frame */
@@ -41,16 +41,17 @@ typedef struct {
   volatile uint32_t MB_CYCLES;    /* 0x030 R   cycles the macroblock engine worked since START */
   volatile uint32_t INFO;         /* 0x034 R   [19:16] strips [15:0] max width */
   volatile uint32_t TOTAL_BYTES;  /* 0x038 R   bytes since START */
+  volatile uint32_t FRAME_INFO;   /* 0x03C R   the last coded frame: H264_FI_* */
 } bow_h264_regs_t;
 
 #define H264 ((bow_h264_regs_t *)BOW32_H264_BASE)
 
-#define H264_ID_VALUE 0x48323601u
+#define H264_ID_VALUE 0x48323602u
 
 #define H264_CTRL_EN      (1u << 0)
 #define H264_CTRL_DEBLOCK (1u << 1) /* slice headers enable the deblocking filter */
 
-#define H264_CMD_START (1u << 0)
+#define H264_CMD_START (1u << 0)    /* ignored while CTRL.EN = 0 */
 #define H264_CMD_STOP  (1u << 1)    /* no new frame after the current one */
 
 #define H264_ST_BUSY       (1u << 0)
@@ -60,8 +61,18 @@ typedef struct {
 #define H264_ST_ERR_INPUT  (1u << 4) /* input frame or line shorter than SIZE */
 #define H264_ST_ARMED      (1u << 5)
 
+/* FRAME_INFO: read it with FRAME_DONE (it describes the newest coded frame) */
+#define H264_FI_QP(v)      ((v) & 0x3Fu)
+#define H264_FI_DEBLOCK    (1u << 8)
+#define H264_FI_IDR_ID     (1u << 9)
+#define H264_FI_ERR_OVF    (1u << 12) /* this frame lost pixels: strips with stale samples */
+#define H264_FI_ERR_INPUT  (1u << 13) /* this frame was short (completed with stale samples) */
+#define H264_FI_LAST       (1u << 14) /* the last frame of FRAMES */
+
 #define H264_QP_MIN 10u
 #define H264_QP_MAX 51u
+#define H264_SIZE_MIN 16u
+#define H264_SIZE_MAX 4080u
 
 /* Stream parameters of the SPS. */
 typedef struct {

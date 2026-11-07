@@ -56,6 +56,10 @@ theo [adding_an_ip.md](adding_an_ip.md) và kiểm chứng bằng test mô phỏ
 - [ ] H.264 nâng cao: Intra 4x4, frame P (`P_Skip` + tìm chuyển động, cần frame
       tham chiếu trong DDR), rate control theo hàng macroblock, streaming liên tục
       qua UART / Ethernet của PS.
+- [ ] H.264 cho camera công nghiệp / SoC camera AI (lộ trình trong
+      [ip/h264_review.md](ip/h264_review.md)): ECC + watchdog, FIFO trạng thái theo
+      frame, slice theo hàng MB, CAVLC 2 phần tử / chu kỳ, AXI master + DDR, đầu vào
+      NV12, ROI QP, SEI metadata.
 - [ ] Hiển thị: đưa `isp_*` ra DisplayPort (live video của PS) hoặc HDMI.
 - [ ] ISP nâng cao: demosaic thích nghi theo cạnh, khử nhiễu, sharpen, lens
       shading, thống kê theo lưới, 2 pixel/clock.
