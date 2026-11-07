@@ -18,7 +18,7 @@ Command line (used by hw/ip/csi2rx/dv):
                           [--raw8] [--contclk] [--test NAME]
         -> DIR/cfg.txt (testbench and TX model settings), DIR/stim.txt (commands,
            see tb_bow_csi2rx.sv). NAME: random (default), lp, watchdog, clk, cmd,
-           ovf, stop, byteclk, eye (directed tests, see gen_<name>).
+           ovf, stop, byteclk, eye, deskew, extra (directed tests, see gen_<name>).
     csi2_model.py check DIR
         compares DIR/out.txt (m_axis transfers) and DIR/regs.txt (register reads,
         frame end records, invariants, burst end times) with the prediction.
@@ -35,8 +35,12 @@ Determinism (the generator only creates what the checker can predict):
   * register accesses follow a clock-only burst + wait, so that work the
     stopped byte clock deferred is done; FRAME_TIME/LINE_TIME are only exact
     when CLK-POST meets the D-PHY minimum (60 ns + 52 UI);
-  * no FIFO overflow except in the 'ovf' test (tready duty >= 1.2 x the input
-    pixel rate averaged over a line period).
+  * no FIFO overflow except in 'nocheck ovf' segments, where tready is held
+    low from before the first burst: the FIFO only fills then, and which
+    groups are written is exact (tready duty >= 1.2 x the input pixel rate
+    averaged over a line period everywhere else);
+  * bytes after a complete packet in its burst (CTRL.EXTRA): the burst sends
+    either none, or more than CTRL.EXTRA beyond what any trail gives.
 """
 
 import argparse
@@ -51,7 +55,8 @@ REG = {
     "IRQ_STATUS": 0x014, "IRQ_EN": 0x018, "ERR_STATUS": 0x01C, "CNT_CLR": 0x020,
     "CNT_FRAME": 0x024, "CNT_PKT": 0x028, "CNT_LINE": 0x02C, "CNT_ECC": 0x030,
     "CNT_CRC": 0x034, "CNT_SOT": 0x038, "CNT_DROP": 0x03C, "CNT_BURST": 0x040,
-    "CNT_MISC": 0x044, "FRAME_INFO": 0x050, "LINE_INFO": 0x054, "FRAME_SUM": 0x058,
+    "CNT_MISC": 0x044, "CNT_EXT": 0x048, "FRAME_INFO": 0x050, "LINE_INFO": 0x054,
+    "FRAME_SUM": 0x058,
     "FRAME_TIME": 0x05C, "LINE_TIME": 0x060, "BYTECLK": 0x064, "DLY0": 0x070,
     "DLY1": 0x074, "LOG_CTRL": 0x080, "RAW_CTRL": 0x084, "LOG": 0x400, "RAW": 0x800,
 }
@@ -59,11 +64,20 @@ REG_NAME = {v: k for k, v in REG.items()}
 ID_VALUE = 0x43533201
 
 CTRL_PHY_EN, CTRL_RX_EN, CTRL_LANES, CTRL_CLK_FORCE, CTRL_VC_ANY = 1, 2, 4, 8, 16
+CTRL_MASK = 0xFF3F7F
+EXTRA_RESET = 64                 # CTRL.EXTRA [23:16]
+
+
+def ctrl_extra(n):
+    return (n & 0xFF) << 16
+
+
 PHY_CFG_RESET = 14 | 2 << 8 | 30 << 16 | 8 << 24
 
 # ERR_STATUS bits
 ERR = {"sot": 0, "ecc_corr": 1, "ecc_err": 2, "crc": 3, "trunc": 4, "ovf": 5,
-       "skew": 6, "format": 7, "frame": 8, "lp": 9}
+       "skew": 6, "format": 7, "frame": 8, "lp": 9, "extra": 10}
+ERR_ALL = 0x7FF
 IRQ_FS, IRQ_FE, IRQ_ERR, IRQ_LOG, IRQ_RAW = 1, 2, 4, 8, 16
 
 # Data types
@@ -186,15 +200,22 @@ def from_bits(bits):
 
 
 SYNC_PATTERN = [0] * 8 + to_bits([SYNC])
+DESKEW_SYNC = 0xFF
+DESKEW_PATTERN = [0] * 8 + to_bits([DESKEW_SYNC])
 
 
-def align_search(bits, start=0):
+def align_search(bits, start=0, deskew=False):
     """Aligner sync search (spec 5.2): first window start B >= start with 8 zero
-    bits followed by the sync byte 0xB8. The bytes then start at B + 16."""
+    bits followed by the sync byte 0xB8. The bytes then start at B + 16.
+    deskew: also stop at 8 zero bits followed by 8 one bits (D-PHY skew
+    calibration burst) and return (B, is_deskew)."""
     for b in range(start, len(bits) - 15):
-        if bits[b:b + 16] == SYNC_PATTERN:
-            return b
-    return None
+        w = bits[b:b + 16]
+        if w == SYNC_PATTERN:
+            return (b, False) if deskew else b
+        if deskew and w == DESKEW_PATTERN:
+            return b, True
+    return (None, False) if deskew else None
 
 
 def words_to_bits(words):
@@ -229,7 +250,8 @@ class Burst:
     hflip: header bits to flip (bit 8 * i + j = bit j of header byte i);
     pflip: payload/CRC bit to flip; trunc: packet bytes sent (-1 = all);
     sync, zeros, phase: per lane sync byte, extra HS-zero bytes, bit phase;
-    zero_ns: extra HS-zero time of the TX (no effect on the result).
+    zero_ns: extra HS-zero time of the TX (no effect on the result);
+    extra: bytes sent after the packet in the same burst.
     """
     vc: int
     dt: int
@@ -242,6 +264,7 @@ class Burst:
     zeros: tuple = (0, 0)
     phase: tuple = (0, 0)
     zero_ns: int = 0
+    extra: list = None
 
     @property
     def is_long(self):
@@ -254,7 +277,7 @@ class Burst:
 
     def sent(self):
         """Bytes the TX sends after the error knobs (bit flips, truncation)."""
-        b = self.packet()
+        b = self.packet() + list(self.extra or [])
         for f in self.hflip:
             if f >= 0:
                 b[f >> 3] ^= 1 << (f & 7)
@@ -267,7 +290,7 @@ class Burst:
         return (f"pkt {self.vc} {self.dt:02x} {self.wc:04x} {self.hflip[0]} {self.hflip[1]} "
                 f"{self.pflip} {self.trunc} {self.sync[0]:02x} {self.sync[1]:02x} "
                 f"{self.zeros[0]} {self.zeros[1]} {self.phase[0]} {self.phase[1]} "
-                f"{self.zero_ns} {pay}")
+                f"{self.zero_ns} {pay}" + (f" {bytes(self.extra).hex()}" if self.extra else ""))
 
     @classmethod
     def parse(cls, f):
@@ -277,13 +300,15 @@ class Burst:
         return cls(vc=int(f[0]), dt=dt, wc=int(f[2], 16), payload=pay,
                    hflip=(int(f[3]), int(f[4])), pflip=int(f[5]), trunc=int(f[6]),
                    sync=(int(f[7], 16), int(f[8], 16)), zeros=(int(f[9]), int(f[10])),
-                   phase=(int(f[11]), int(f[12])), zero_ns=int(f[13]))
+                   phase=(int(f[11]), int(f[12])), zero_ns=int(f[13]),
+                   extra=list(bytes.fromhex(f[15])) if len(f) > 15 and f[15] != "-" else None)
 
 
 @dataclass
 class LaneRx:
     """What the aligner of one lane does with a burst."""
     locked: bool
+    deskew: bool = False  # deskew burst: no lock, no sync error
     sot: int = 0          # relative cycle of the first byte (common offset removed)
     data: list = None     # bytes from the lock on (incl. trail bytes, long enough)
     real: int = 0         # leading bytes made of transmitted bits only
@@ -295,9 +320,9 @@ def lane_receive(lane_bytes, sync, zeros, phase):
     data_bits = to_bits([sync] + list(lane_bytes))
     trail = 1 - data_bits[-1]
     bits = [0] * 16 + data_bits + [trail] * TRAIL_SCAN
-    b = align_search(bits)
-    if b is None:
-        return LaneRx(False)
+    b, dsk = align_search(bits, deskew=True)
+    if b is None or dsk:
+        return LaneRx(False, deskew=dsk)
     tail = bits[b + 16:] + [trail] * 64 * 8
     real = max(0, (16 + len(data_bits) - (b + 16)) // 8)
     return LaneRx(True, sot=zeros + (phase + b - 16) // 8, data=from_bits(tail), real=real)
@@ -306,7 +331,8 @@ def lane_receive(lane_bytes, sync, zeros, phase):
 @dataclass
 class BurstRx:
     """Lane level result of a burst: sync errors, skew, merged byte stream."""
-    sot_err: list         # active lanes without lock
+    sot_err: list         # active lanes without lock (and not deskew)
+    deskew: list = None   # lanes that saw a deskew burst (no lock, no sync error)
     skew: bool = False    # ev_skew (burst dropped)
     merged: list = None   # merged bytes (None: no sop)
     real: int = 0         # merged bytes that are certainly received and transmitted
@@ -318,7 +344,8 @@ def burst_receive(burst, lanes):
     sent = burst.sent()
     per = lane_split(sent, lanes)
     rx = [lane_receive(per[l], burst.sync[l], burst.zeros[l], burst.phase[l]) for l in range(lanes)]
-    res = BurstRx(sot_err=[l for l in range(lanes) if not rx[l].locked])
+    res = BurstRx(sot_err=[l for l in range(lanes) if not rx[l].locked and not rx[l].deskew],
+                  deskew=[l for l in range(lanes) if rx[l].deskew])
     locked = [r for r in rx if r.locked]
     if not locked:
         return res
@@ -351,7 +378,14 @@ def burst_problem(rx, b, res=None):
         return "packet header not complete in the transmitted bytes"
     st, di, wc = ecc_decode(m[:4])
     vc, dt = di >> 6, di & 0x3F
-    if st == ECC_ERR or dt < 0x10:
+    if st == ECC_ERR:
+        return ""
+    need = 4 if dt < 0x10 else 4 + wc + 2
+    thr = (rx.ctrl >> 16) & 0xFF
+    if thr and real >= need and real - need <= thr < real - need + rx.garbage_max:
+        return (f"{real - need} bytes after the packet, the trail may add {rx.garbage_max} "
+                f"(CTRL.EXTRA {thr})")
+    if dt < 0x10:
         return ""
     acc = rx.vc_match(vc) and dt == (rx.ctrl >> 8) & 0x3F and dt in (DT_RAW8, DT_RAW10)
     fmt = acc and ((dt == DT_RAW10 and wc % 5 != 0) or (dt == DT_RAW8 and wc == 0))
@@ -376,11 +410,13 @@ class NotDeterministic(Exception):
 class LineOut:
     """Predicted m_axis pixels of one accepted packet. fuzzy: '' exact line
     (tlast on the last pixel); 'trunc' prefix, then any number of extra
-    pixels, the last one with tlast; 'stop' any prefix, no tlast."""
+    pixels, the last one with tlast; 'stop' any prefix, no tlast. err:
+    tuser[1] expected with tlast (bad line, or lines of the frame lost before)."""
     px: list
     sof: bool
     fuzzy: str = ""
     frame: int = -1
+    err: bool = False
 
 
 @dataclass
@@ -390,7 +426,7 @@ class Mark:
 
 @dataclass
 class Unchecked:
-    """The output until the next Mark is not predicted (ovf, eye tests)."""
+    """The output until the next Mark is not predicted (eye test)."""
     reason: str
 
 
@@ -437,6 +473,7 @@ EVENTS = {
     "drop": ("drop", None), "ovf": ("ovf", "ovf"), "hs0": ("hs0", None), "hs1": ("hs1", None),
     "hsclk": ("hsclk", None), "lp": ("lp", "lp"), "skew": ("misc", "skew"),
     "format": ("misc", "format"), "frame_err": ("misc", "frame"),
+    "extra": ("extra", "extra"), "deskew": ("deskew", None),
 }
 CNT_MAX = {"frame": 0xFFFFFFFF, "pkt": 0xFFFFFFFF, "line": 0xFFFFFFFF, "lp": 255, "misc": 255}
 
@@ -448,12 +485,12 @@ class Receiver:
     def __init__(self, cfg):
         self.cfg = cfg
         self.dut_lanes = cfg["dut_lanes"]
-        self.ctrl = 0x2B00 | (CTRL_LANES if self.dut_lanes == 2 else 0)
+        self.ctrl = 0x2B00 | ctrl_extra(EXTRA_RESET) | (CTRL_LANES if self.dut_lanes == 2 else 0)
         self.phy_cfg = PHY_CFG_RESET
         self.irq_en = self.irq = self.err = 0
         self.cnt = dict.fromkeys(["frame", "pkt", "line", "ecc_corr", "ecc_err", "crc", "trunc",
                                   "sot0", "sot1", "drop", "ovf", "hs0", "hs1", "hsclk", "lp",
-                                  "misc"], 0)
+                                  "misc", "extra", "deskew"], 0)
         self.frame_info = self.line_info = self.frame_sum = 0
         self.fs_prev = None            # burst index of the previous FS (reference)
         self.frame_time = (None, None)  # bursts of the interval latched in FRAME_TIME
@@ -512,6 +549,7 @@ class Receiver:
         self.in_frame = self.frame_synced = False
         self.lines = self.fsum = self.fnum = 0
         self.sof_pending = False
+        self.lost_pend = False         # a line of the frame was lost (err on the next one)
 
     def ev(self, name):
         """Receiver event: counter, ERR_STATUS bit, IRQ_STATUS bit."""
@@ -679,11 +717,14 @@ class Receiver:
         if not any(armed):
             return
         res = burst_receive(b, self.lanes)
+        if 0 in res.deskew and armed[0]:
+            self.ev("deskew")
         if not all(armed):
             for l in res.sot_err:
                 if armed[l]:
                     self.ev(f"sot{l}")
-            if any(armed[l] and l not in res.sot_err for l in range(self.lanes)):
+            if any(armed[l] and l not in res.sot_err and l not in res.deskew
+                   for l in range(self.lanes)):
                 self.ev("skew")
             return
         problem = burst_problem(self, b, res)
@@ -710,6 +751,10 @@ class Receiver:
         if st == ECC_CORR:
             self.ev("ecc_corr")
         sel = self.vc_match(vc)
+        need = 4 if dt < 0x10 else 4 + wc + 2
+        thr = (self.ctrl >> 16) & 0xFF
+        if thr and real - need > thr:
+            self.ev("extra")           # burst_problem: never between thr and thr + trail
         if dt < 0x10:
             self.log_push(entry, sel and dt == DT_FS, sel and dt == DT_FE)
             if sel and dt == DT_FS:
@@ -719,7 +764,6 @@ class Receiver:
             return
         acc = sel and dt == (self.ctrl >> 8) & 0x3F and dt in (DT_RAW8, DT_RAW10)
         fmt = acc and ((dt == DT_RAW10 and wc % 5 != 0) or (dt == DT_RAW8 and wc == 0))
-        need = 4 + wc + 2
         if fmt:
             self.ev("format")
         elif not acc:
@@ -730,7 +774,7 @@ class Receiver:
             crc_err = crc16(pay) != (m[4 + wc] | m[5 + wc] << 8)
             if crc_err:
                 self.ev("crc")
-            ovf = acc and self.fifo_push(unpack(dt, pay))
+            ovf = acc and self.pixels(dt, pay, "", crc_err or fmt)
             if ovf:
                 self.ev("ovf")
             self.log_push(entry | int(crc_err) << 26 | int(ovf) << 29, False, False)
@@ -747,35 +791,61 @@ class Receiver:
                     else:
                         self.unknown.add("line_time")
                 self.lt_ref, self.lt_ref_exact = idx, exact
-                self.pixels(dt, pay, "")
         else:
             self.ev("trunc")
             self.log_push(entry | 1 << 27, False, False)
-            self.pixels(dt, m[4:real], "trunc")
+            if acc:
+                self.pixels(dt, m[4:real], "trunc", True)
 
-    def fifo_push(self, px):
-        """'nocheck ovf' segment (tready held low): groups beyond the FIFO
-        depth + the two output registers are dropped -> True (ev_ovf)."""
+    def fifo_write(self, px):
+        """'nocheck ovf' segment (tready held low): which pixel groups of an
+        accepted line are written into the FIFO (spec: overflow keeps the line
+        structure). The FIFO only fills, so its level is the number of groups
+        written minus the two output registers. Returns (pixels written,
+        mode 'ok' / 'cut' / 'lost', a group was dropped)."""
+        groups = [px[i:i + 4] for i in range(0, len(px), 4)]
         if not self.out_blocked:
-            return False
-        groups = -(-len(px) // 4)
-        cap = self.cfg["fifo_depth"] + 2
-        if self.fifo_used + groups > cap:
-            self.fifo_used = cap
-            return True
-        self.fifo_used += groups
-        return False
+            return px, "ok", False
+        depth, out, mode, drop = self.cfg["fifo_depth"], [], "ok", False
+        for k, grp in enumerate(groups):
+            eol = k == len(groups) - 1
+            level = max(0, self.fifo_used - 2)
+            if eol:
+                ok = mode != "lost" and level <= depth - 1
+            else:
+                ok = mode == "ok" and level <= depth - 2
+            if ok:
+                out += grp
+                self.fifo_used += 1
+            else:
+                drop = True
+                if eol:
+                    mode = "lost"
+                elif mode == "ok":
+                    mode = "lost" if level >= depth else "cut"
+        return out, mode, drop
 
-    def pixels(self, dt, data, fuzzy):
+    def pixels(self, dt, data, fuzzy, err):
+        """Output of an accepted line; err: CRC / format error or truncation.
+        Returns True when pixel groups were dropped (ev_ovf)."""
         px = unpack(dt, data)
         if not px:
-            return
+            self.lost_pend = True      # a line without a pixel group
+            return False
+        if fuzzy and self.out_blocked:
+            raise NotDeterministic("truncated line while tready is held low")
+        out, mode, drop = self.fifo_write(px)
+        if mode == "lost":
+            self.lost_pend = True
+            return drop
         frame = self.frame_id if self.in_frame else -1
-        self.items.append(LineOut(px, self.sof_pending, fuzzy, frame))
-        self.sof_pending = False
-        self.fsum = (self.fsum + sum(px)) & 0xFFFFFFFF
+        self.items.append(LineOut(out, self.sof_pending, fuzzy, frame,
+                                  err or mode == "cut" or self.lost_pend))
+        self.sof_pending = self.lost_pend = False
+        self.fsum = (self.fsum + sum(out)) & 0xFFFFFFFF
         if fuzzy and frame >= 0:
             self.fuzzy_frames.add(frame)
+        return drop
 
     def frame_start(self, wc, idx):
         if self.in_frame:
@@ -783,6 +853,7 @@ class Receiver:
         self.in_frame = self.frame_synced = True
         self.lines = self.fsum = 0
         self.sof_pending = True
+        self.lost_pend = False
         self.fnum = wc
         self.frame_id += 1
         self.ev("fs")
@@ -802,7 +873,7 @@ class Receiver:
             self.frame_sum = self.fsum
             self.unknown.discard("frame")
             self.frames.append({"info": self.frame_info, "id": self.frame_id, "seg": self.seg,
-                                "sum": None if self.out_blocked else self.frame_sum})
+                                "sum": self.frame_sum})
             self.ev("fe")              # IRQ_STATUS.FE is cleared by the testbench poller
         elif self.frame_synced:
             self.ev("frame_err")
@@ -848,10 +919,21 @@ class Receiver:
         self.burst(b, stop=True)
 
     # ----------------------------------------------------------- registers
-    def write(self, a, d):
+    def write(self, a, d, be=0xF):
+        """Register write; be: byte enables (the bytes not written keep their
+        value, W1C bits outside them are not cleared, commands need byte 0)."""
+        m = sum(0xFF << (8 * i) for i in range(4) if be >> i & 1)
+        if a in (REG["CTRL"], REG["PHY_CFG"], REG["IRQ_EN"], REG["DLY0"], REG["DLY1"]):
+            old = self.read(a)
+            old = old.value & 0x1FF if a in (REG["DLY0"], REG["DLY1"]) else old.value
+            d = (old & ~m) | (d & m)
+        elif a in (REG["IRQ_STATUS"], REG["ERR_STATUS"]):
+            d &= m
+        elif not be & 1:
+            return
         if a == REG["CTRL"]:
             was_on = self.rx_on
-            self.ctrl = d & 0x3F7F
+            self.ctrl = d & CTRL_MASK
             if self.dut_lanes == 1:
                 self.ctrl &= ~CTRL_LANES
             if was_on and not self.rx_on:
@@ -935,6 +1017,8 @@ class Receiver:
             v = c["hs0"] | c["hs1"] << 16
         elif n == "CNT_MISC":
             v = c["hsclk"] | c["lp"] << 16 | c["misc"] << 24
+        elif n == "CNT_EXT":
+            v = c["extra"] | c["deskew"] << 16
         elif n in ("FRAME_INFO", "FRAME_SUM"):
             if "frame" in self.unknown:
                 return Expect("any")
@@ -987,8 +1071,11 @@ class Receiver:
         self.fifo_used = 0
 
     def nocheck(self, what):
-        self.items.append(Unchecked(what))
+        """'nocheck all': bursts are not modelled until the next mark (eye
+        test). 'nocheck ovf': tready is held low (from before the next burst),
+        the FIFO overflows; the output is still predicted exactly."""
         if what == "all":
+            self.items.append(Unchecked(what))
             self.blind = True
             self.blind_segs.add(self.seg)
             self.unknown |= {"frame", "line", "line_time", "frame_time"}
@@ -1014,6 +1101,8 @@ def run_stim(cfg, lines, rx=None):
         op = f[0]
         if op == "wr":
             rx.write(int(f[1], 16), int(f[2], 16))
+        elif op == "wrbe":
+            rx.write(int(f[1], 16), int(f[2], 16), int(f[3], 16))
         elif op in ("rd", "poll"):
             a = int(f[1], 16)
             exps.append((a, rx.read(a, f[2] if op == "rd" and len(f) > 2 else "")))
@@ -1064,7 +1153,8 @@ DEFAULT_CFG = {
 
 DUMP_REGS = ["ID", "INFO", "CTRL", "PHY_CFG", "STATUS", "IRQ_STATUS", "IRQ_EN", "ERR_STATUS",
              "CNT_FRAME", "CNT_PKT", "CNT_LINE", "CNT_ECC", "CNT_CRC", "CNT_SOT", "CNT_DROP",
-             "CNT_BURST", "CNT_MISC", "FRAME_INFO", "LINE_INFO", "FRAME_SUM", "FRAME_TIME",
+             "CNT_BURST", "CNT_MISC", "CNT_EXT", "FRAME_INFO", "LINE_INFO", "FRAME_SUM",
+             "FRAME_TIME",
              "LINE_TIME", "BYTECLK", "DLY0", "DLY1", "LOG_CTRL", "RAW_CTRL"]
 
 
@@ -1111,6 +1201,10 @@ class Gen:
         self.sync(now)
         self.emit(f"wr {REG[name]:03x} {v:08x}")
 
+    def wrbe(self, name, v, be):
+        self.sync()
+        self.emit(f"wrbe {REG[name]:03x} {v:08x} {be:x}")
+
     def rd(self, name, hint="", now=False):
         self.sync(now)
         a = REG[name] if isinstance(name, str) else name
@@ -1126,7 +1220,7 @@ class Gen:
         self.sync()
         for n in DUMP_REGS:
             self.rd(n)
-        for a in (0x048, 0x0FC, 0x300):      # unmapped offsets read 0
+        for a in (0x04C, 0x0FC, 0x300):      # unmapped offsets read 0
             self.rd(a)
         if log:
             for i in range(64):
@@ -1226,7 +1320,7 @@ def gen_random(g):
     vc_any = r.random() < 0.2
     vc = r.randrange(4)
     ctrl = CTRL_PHY_EN | CTRL_RX_EN | (CTRL_LANES if lanes == 2 else 0) | \
-        (CTRL_VC_ANY if vc_any else 0) | vc << 5 | dt << 8
+        (CTRL_VC_ANY if vc_any else 0) | vc << 5 | dt << 8 | ctrl_extra(EXTRA_RESET)
     for n in ("ID", "INFO", "CTRL", "PHY_CFG"):
         g.rd(n)                                    # reset values
     g.wr("PHY_CFG", PHY_CFG_RESET)
@@ -1322,7 +1416,8 @@ def frame(g, vc, dt, w, h, fnum=1, emb=False):
 
 
 def on(g, extra=0):
-    ctrl = CTRL_PHY_EN | CTRL_RX_EN | (CTRL_LANES if g.cfg["lanes"] == 2 else 0) | DT_RAW10 << 8
+    ctrl = CTRL_PHY_EN | CTRL_RX_EN | (CTRL_LANES if g.cfg["lanes"] == 2 else 0) | \
+        DT_RAW10 << 8 | ctrl_extra(EXTRA_RESET)
     g.wr("CTRL", ctrl | extra)
     return ctrl | extra
 
@@ -1501,17 +1596,40 @@ def gen_cmd(g):
 
 
 def gen_ovf(g):
-    """m_axis held off: FIFO overflow in the middle of a frame, then resume."""
+    """m_axis held off (tready low from before the bursts): FIFO overflow. The
+    output keeps its line structure: the line that finds the FIFO almost full
+    is cut to its written groups + its last group (tlast, err), the lines
+    after it are lost; FRAME_SUM counts the written pixels. Then a frame
+    whose first line finds one free slot (its last group gets tuser and err)
+    and a frame whose only line is lost (no output, the next frame is clean),
+    then normal traffic."""
     on(g)
     g.wr("LOG_CTRL", 1 | 2 | 4)
     g.emit("tready 0")
     g.emit("nocheck ovf")
-    frame(g, 0, DT_RAW10, 64, 20)
+    frame(g, 0, DT_RAW10, 64, 20)                    # line 17 cut, 18..20 lost
+    g.emit("wait")
+    g.emit("tready 100")
+    g.emit("delay 20000")
+    for i in range(22):
+        g.rd(REG["LOG"] + 4 * i)
+    g.rd("CNT_DROP")
+    g.mark()
+    g.emit("tready 0")
+    g.emit("nocheck ovf")
+    g.send(g.short(0, DT_FS, 2))                     # 16 x 16 groups + 1: one slot left
+    for _ in range(16):
+        g.send(g.line(0, DT_RAW10, 64))
+    g.send(g.line(0, DT_RAW10, 4))
+    g.send(g.short(0, DT_FE, 2))
+    g.wr("LOG_CTRL", 1 | 2 | 4)
+    frame(g, 0, DT_RAW10, 64, 2, fnum=3)             # line 1: only its last group, line 2 lost
+    frame(g, 0, DT_RAW10, 32, 1, fnum=4)             # lost
     g.emit("wait")
     g.emit("tready 100")
     g.emit("delay 20000")
     g.mark()
-    frame(g, 0, DT_RAW10, 64, 4, fnum=2)
+    frame(g, 0, DT_RAW10, 64, 4, fnum=5)
     g.dump(log=True)
 
 
@@ -1584,8 +1702,88 @@ def gen_eye(g):
     g.dump(log=False)
 
 
+def gen_deskew(g):
+    """D-PHY skew calibration bursts (HS-zero, all-ones sync, 0101...): no
+    sync error, counted (CNT_EXT, lane 0), also between the lines of a frame;
+    with 2 lanes, a deskew sync on one lane only is a skew error."""
+    on(g)
+    g.emit("tready 100")
+    lanes = g.cfg["lanes"]
+
+    def deskew(mask):
+        b = g.long(0, DT_NULL, [0x55] * 64)
+        b.sync = tuple(DESKEW_SYNC if mask >> l & 1 else SYNC for l in range(2))
+        g.send(b)
+
+    deskew(3)
+    g.send(g.short(0, DT_FS, 1))
+    g.send(g.line(0, DT_RAW10, 32))
+    deskew(3)
+    g.send(g.line(0, DT_RAW10, 32))
+    g.send(g.short(0, DT_FE, 1))
+    g.rd("CNT_EXT")
+    g.rd("CNT_SOT")
+    g.rd("ERR_STATUS")
+    if lanes == 2:
+        deskew(1)
+        deskew(2)
+        g.rd("CNT_EXT")
+        g.rd("CNT_MISC")
+        g.rd("ERR_STATUS")
+    frame(g, 0, DT_RAW10, 32, 3, fnum=2)
+    g.dump(log=False)
+
+
+def gen_extra(g):
+    """Bytes after the packet in its burst (CTRL.EXTRA): FS + a line and a
+    line + a line in one burst give ERR EXTRA (the second packet is dropped,
+    as before), a line + LE (4 bytes) stays below the threshold; EXTRA = 0
+    turns the check off, EXTRA = 255 is above a line + 86 bytes. Byte enable
+    writes: CTRL.EXTRA alone, ERR_STATUS bytes, CNT_CLR without byte 0."""
+    ctrl = on(g)
+    g.wr("LOG_CTRL", 1)
+    g.emit("tready 100")
+
+    def two(first, second):
+        first.extra = second.packet()
+        g.send(first)
+
+    two(g.short(0, DT_FS, 1), g.line(0, DT_RAW10, 64))
+    two(g.line(0, DT_RAW10, 64), g.line(0, DT_RAW10, 64))
+    two(g.line(0, DT_RAW10, 64), g.short(0, DT_LE, 2))
+    g.send(g.line(0, DT_RAW10, 64))
+    g.send(g.short(0, DT_FE, 1))
+    g.rd("ERR_STATUS")
+    g.rd("CNT_EXT")
+    g.rd("IRQ_STATUS")
+    g.wrbe("ERR_STATUS", ERR_ALL, 0x1)               # bits 0..7 only: EXTRA stays
+    g.rd("ERR_STATUS")
+    g.wrbe("ERR_STATUS", ERR_ALL, 0x2)
+    g.rd("ERR_STATUS")
+    g.wrbe("CNT_CLR", 1, 0x2)                         # byte 0 not written: no clear
+    g.rd("CNT_EXT")
+    g.wr("CTRL", ctrl & ~CTRL_RX_EN)
+    g.wrbe("CTRL", 0, 0x4)                            # EXTRA = 0, the other bytes kept
+    g.wrbe("CTRL", ctrl, 0x1)                         # RX on again
+    g.rd("CTRL")
+    g.mark()
+    two(g.short(0, DT_FS, 2), g.line(0, DT_RAW10, 64))
+    two(g.line(0, DT_RAW10, 64), g.line(0, DT_RAW10, 64))
+    g.send(g.short(0, DT_FE, 2))
+    g.rd("CNT_EXT")
+    g.wrbe("CTRL", ctrl & ~CTRL_RX_EN, 0x1)
+    g.wrbe("CTRL", ctrl_extra(255), 0x4)              # threshold above 86 bytes + trail
+    g.wrbe("CTRL", ctrl, 0x1)
+    g.mark()
+    g.send(g.short(0, DT_FS, 3))
+    two(g.line(0, DT_RAW10, 64), g.long(0, DT_EMB, [g.rnd.randrange(256) for _ in range(80)]))
+    g.send(g.short(0, DT_FE, 3))
+    g.dump(log=True)
+
+
 TESTS = {"random": gen_random, "lp": gen_lp, "watchdog": gen_watchdog, "clk": gen_clk,
-         "cmd": gen_cmd, "ovf": gen_ovf, "stop": gen_stop, "byteclk": gen_byteclk, "eye": gen_eye}
+         "cmd": gen_cmd, "ovf": gen_ovf, "stop": gen_stop, "byteclk": gen_byteclk, "eye": gen_eye,
+         "deskew": gen_deskew, "extra": gen_extra}
 
 
 # ------------------------------------------------------------------ checker
@@ -1599,7 +1797,8 @@ def read_cfg(path):
 
 
 def read_out(path):
-    """out.txt: '<pixel hex> <tuser> <tlast>' per transfer, 'mark <n>'."""
+    """out.txt: '<pixel hex> <tuser[0]> <tlast> <tuser[1]>' per transfer,
+    'mark <n>'."""
     out = []
     for ln in Path(path).read_text().splitlines():
         f = ln.split()
@@ -1608,7 +1807,7 @@ def read_out(path):
         if f[0] == "mark":
             out.append(("mark", int(f[1])))
         else:
-            out.append(("px", int(f[0], 16), int(f[1]), int(f[2])))
+            out.append(("px", int(f[0], 16), int(f[1]), int(f[2]), int(f[3]) if len(f) > 3 else 0))
     return out
 
 
@@ -1635,7 +1834,7 @@ def read_regs(path):
 
 
 def fmt_out(e):
-    return f"mark {e[1]}" if e[0] == "mark" else f"{e[1]:03x} tuser {e[2]} tlast {e[3]}"
+    return f"mark {e[1]}" if e[0] == "mark" else f"{e[1]:03x} tuser {e[2]} tlast {e[3]} err {e[4]}"
 
 
 def match_output(items, out, errs, max_extra):
@@ -1668,16 +1867,18 @@ def match_output(items, out, errs, max_extra):
                 errs.append(f"output entry {pos}: line {i} pixel {k}: expected {v:03x}, got "
                             f"{fmt_out(out[pos]) if pos < len(out) else 'end of output'}")
                 return sums
-            _, gv, gu, gl = out[pos]
+            _, gv, gu, gl, ge = out[pos]
             last = k == len(it.px) - 1
             eu = int(it.sof and k == 0)
             bad_last = gl and not (last and it.fuzzy in ("", "trunc")) or (last and not it.fuzzy and not gl)
-            if gv != v or gu != eu or bad_last:
+            bad_err = ge != (int(it.err) if gl else 0)
+            if gv != v or gu != eu or bad_last or bad_err:
                 if it.fuzzy == "stop" and gu == eu and not gl and gv != v:
                     errs.append(f"output entry {pos}: stopped line {i} pixel {k}: got {gv:03x} "
                                 f"expected {v:03x}")
                 else:
-                    exp = f"{v:03x} tuser {eu} tlast {int(last and not it.fuzzy)}"
+                    el = int(last and not it.fuzzy)
+                    exp = f"{v:03x} tuser {eu} tlast {el} err {int(it.err) if el else 0}"
                     kind = f"{len(it.px)} px" + (f", {it.fuzzy}" if it.fuzzy else "")
                     errs.append(f"output entry {pos}: line {i} ({kind}) pixel {k}: "
                                 f"got {fmt_out(out[pos])}, expected {exp}")
@@ -1692,11 +1893,13 @@ def match_output(items, out, errs, max_extra):
                 if pos >= len(out) or out[pos][0] != "px":
                     errs.append(f"output entry {pos}: truncated line {i} has no tlast")
                     return sums
-                _, gv, gu, gl = out[pos]
+                _, gv, gu, gl, ge = out[pos]
                 pos += 1
                 got.append(gv)
                 if gu:
                     errs.append(f"output entry {pos - 1}: tuser inside truncated line {i}")
+                if ge != (int(it.err) if gl else 0):
+                    errs.append(f"output entry {pos - 1}: truncated line {i}: err {ge}")
                 if gl:
                     break
                 if len(got) > len(it.px) + max_extra:

@@ -83,6 +83,14 @@ class PixelLaneTest(unittest.TestCase):
         self.assertNotEqual(rx.data[:2], [0x01, 0x02])
         self.assertFalse(m.lane_receive([0x55] * 4, 0xB0, 0, 3).locked)
 
+    def test_aligner_deskew(self):
+        bits = [0] * 20 + m.to_bits([m.DESKEW_SYNC] + [0x55] * 4)
+        self.assertEqual(m.align_search(bits, deskew=True), (12, True))
+        self.assertIsNone(m.align_search(bits))           # plain search: no sync byte
+        rx = m.lane_receive([0x55] * 8, m.DESKEW_SYNC, 0, 5)
+        self.assertFalse(rx.locked)
+        self.assertTrue(rx.deskew)
+
     def test_find_lane_bytes(self):
         lane = [0x2B, 0x60, 0x09, 0x1D, 0x11]
         bits = [1, 0, 1] + [0] * 21 + m.to_bits([m.SYNC] + lane) + [1] * 40
@@ -106,6 +114,18 @@ class BurstTest(unittest.TestCase):
         r = m.burst_receive(self.burst(sync=(m.SYNC, 0x00)), 2)
         self.assertEqual(r.sot_err, [1])
         self.assertTrue(r.skew)
+
+    def test_deskew_lanes(self):
+        r = m.burst_receive(self.burst(sync=(m.DESKEW_SYNC, m.DESKEW_SYNC)), 2)
+        self.assertEqual((r.sot_err, r.deskew, r.skew, r.merged), ([], [0, 1], False, None))
+        r = m.burst_receive(self.burst(sync=(m.SYNC, m.DESKEW_SYNC)), 2)
+        self.assertEqual((r.sot_err, r.deskew, r.skew), ([], [1], True))
+
+    def test_extra_bytes(self):
+        b = self.burst(extra=[1, 2, 3])
+        self.assertEqual(b.sent(), b.packet() + [1, 2, 3])
+        self.assertEqual(m.Burst.parse(b.stim().split()[1:]).extra, [1, 2, 3])
+        self.assertEqual(m.burst_receive(b, 2).real, len(b.packet()) + 3)
 
     def test_merged_real_bytes(self):
         b = self.burst()
@@ -180,6 +200,46 @@ class ReceiverTest(unittest.TestCase):
         b.trunc = 70                                      # the trail could complete it
         self.assertIn("open packet", m.burst_problem(rx, b))
 
+    def test_line_error(self):
+        rx = receiver()
+        rx.burst(m.Burst(0, m.DT_FS, 1))
+        rx.burst(m.Burst(0, m.DT_RAW10, 5, [0] * 5, pflip=3))      # CRC error
+        rx.burst(m.Burst(0, m.DT_RAW10, 3, [0] * 3))               # no pixel group: lost
+        rx.burst(m.Burst(0, m.DT_RAW10, 5, [0] * 5))               # reports the lost line
+        rx.burst(m.Burst(0, m.DT_RAW10, 5, [0] * 5))
+        lines = [it for it in rx.items if isinstance(it, m.LineOut)]
+        self.assertEqual([it.err for it in lines], [True, True, False])
+
+    def test_overflow_keeps_lines(self):
+        rx = receiver()
+        rx.nocheck("ovf")
+        rx.fifo_used = rx.cfg["fifo_depth"] + 2 - 3   # 3 free slots incl. the output registers
+        rx.burst(m.Burst(0, m.DT_FS, 1))
+        rx.burst(m.Burst(0, m.DT_RAW10, 20, m.raw10_pack(list(range(16)))))   # 4 groups
+        rx.burst(m.Burst(0, m.DT_RAW10, 20, m.raw10_pack(list(range(16)))))
+        rx.burst(m.Burst(0, m.DT_RAW10, 5, m.raw10_pack([7] * 4)))
+        lines = [it for it in rx.items if isinstance(it, m.LineOut)]
+        # 2 groups written, then cut: its last group (err); next line lost; the
+        # 1 group line has no free slot either: lost too
+        self.assertEqual([(it.px, it.sof, it.err) for it in lines],
+                         [([0, 1, 2, 3, 4, 5, 6, 7, 12, 13, 14, 15], True, True)])
+        self.assertEqual(read(rx, "CNT_DROP") >> 16, 3)
+        self.assertTrue(rx.lost_pend)
+
+    def test_extra_and_byte_enables(self):
+        rx = receiver()
+        rx.write(m.REG["CTRL"], m.ctrl_extra(64), be=0x4)
+        b = m.Burst(0, m.DT_FS, 1, extra=m.Burst(0, m.DT_RAW10, 80, [0] * 80).packet())
+        self.assertEqual(m.burst_problem(rx, b), "")
+        rx.burst(b)
+        self.assertEqual(read(rx, "CNT_EXT"), 1)
+        self.assertEqual(read(rx, "ERR_STATUS"), 1 << m.ERR["extra"])
+        rx.write(m.REG["ERR_STATUS"], m.ERR_ALL, be=0x1)   # bit 10 is in byte 1
+        self.assertEqual(read(rx, "ERR_STATUS"), 1 << m.ERR["extra"])
+        rx.write(m.REG["CNT_CLR"], 1, be=0x2)
+        self.assertEqual(read(rx, "CNT_EXT"), 1)
+        self.assertIn("trail", m.burst_problem(rx, m.Burst(0, m.DT_FS, 1, extra=[0] * 30)))
+
     def test_lp_fsm(self):
         rx = receiver()
         rx.lp_item(1, "10", 100)                         # escape entry
@@ -231,7 +291,8 @@ def perfect_dut(d):
             px = it.px if it.fuzzy != "stop" else it.px[:3]
             px = px + ([0x155] if it.fuzzy == "trunc" else [])
             for k, v in enumerate(px):
-                out.append(f"{v:03x} {int(it.sof and k == 0)} {int(k == len(px) - 1 and it.fuzzy != 'stop')}")
+                last = int(k == len(px) - 1 and it.fuzzy != 'stop')
+                out.append(f"{v:03x} {int(it.sof and k == 0)} {last} {int(it.err) if last else 0}")
     (d / "out.txt").write_text("\n".join(out) + "\n")
     tend = {i: 1_000_000 * i for i in range(rx.burst_idx)}
     sums = {}

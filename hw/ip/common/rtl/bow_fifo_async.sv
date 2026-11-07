@@ -5,10 +5,11 @@
 //
 // Each pointer crosses into the other clock domain through a 2 flip-flop
 // (ASYNC_REG) synchroniser; full_o / empty_o are conservative (a slot freed
-// or filled on the other side shows up 2-3 cycles later). Push when full and
-// pop when empty are ignored. The FIFO keeps working when one clock stops
-// for a long time (e.g. a gated write clock): the other side just sees the
-// last pointer.
+// or filled on the other side shows up 2-3 cycles later). afull_o: at most
+// one free slot (same conservative view), for writers that must keep a slot
+// in reserve. Push when full and pop when empty are ignored. The FIFO keeps
+// working when one clock stops for a long time (e.g. a gated write clock):
+// the other side just sees the last pointer.
 //
 // Read side: first word fall through. The RAM is read every cycle at
 // rptr + pop, so rdata_o always shows the head of the FIFO; the write
@@ -32,6 +33,7 @@ module bow_fifo_async #(
   input  logic             push_i,
   input  logic [Width-1:0] wdata_i,
   output logic             full_o,
+  output logic             afull_o,    // at most one free slot
 
   input  logic             rclk_i,
   input  logic             rrst_ni,
@@ -44,6 +46,7 @@ module bow_fifo_async #(
 
   logic [AW:0] wbin_q, wbin_d, wgray_q;   // write pointer (wclk_i)
   logic [AW:0] rbin_q, rbin_d, rgray_q;   // read pointer (rclk_i)
+  logic [AW:0] rbin_w, wlevel;           // read pointer seen by the write side
   logic        do_push, do_pop;
 
   (* ASYNC_REG = "TRUE" *) logic [AW:0] rgray_w1_q, rgray_w2_q;   // read pointer in wclk_i
@@ -54,6 +57,14 @@ module bow_fifo_async #(
   assign full_o  = (wgray_q == {~rgray_w2_q[AW:AW-1], rgray_w2_q[AW-2:0]});
   assign do_push = push_i && !full_o;
   assign wbin_d  = wbin_q + (AW + 1)'(do_push);
+
+  always_comb begin
+    rbin_w[AW] = rgray_w2_q[AW];
+    for (int i = int'(AW) - 1; i >= 0; i--) rbin_w[i] = rbin_w[i + 1] ^ rgray_w2_q[i];
+  end
+
+  assign wlevel  = wbin_q - rbin_w;
+  assign afull_o = (wlevel >= (AW + 1)'(Depth - 1));
 
   always_ff @(posedge wclk_i or negedge wrst_ni) begin
     if (!wrst_ni) begin

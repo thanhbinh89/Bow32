@@ -30,7 +30,7 @@ Tên module trong RTL có tiền tố `bow_` (`bow_dphy_lp`, `bow_dphy_align`,
 |----------|---------|
 | Đầu vào | D-PHY v1.x, 1 hoặc 2 data lane, clock lane liên tục hoặc không; KV260: IMX219, 2 lane × 912 Mbit/s |
 | Packet | CSI-2 v1.x: ECC header (sửa 1 bit), CRC-16, VC 2 bit, FS/FE; nhận RAW10 (0x2B) hoặc RAW8 (0x2A) của một VC, packet khác được kiểm CRC rồi bỏ |
-| Đầu ra | AXI4-Stream `tdata[9:0]`, `tuser` = pixel đầu frame, `tlast` = cuối dòng (khung của ISP); RAW8 thành `byte << 2`; tôn trọng `tready` |
+| Đầu ra | AXI4-Stream `tdata[9:0]`, `tuser[0]` = pixel đầu frame, `tlast` = cuối dòng (khung của ISP), `tuser[1]` = dòng lỗi (cùng `tlast`); RAW8 thành `byte << 2`; tôn trọng `tready`, tràn FIFO vẫn giữ khung dòng |
 | Thông lượng | 1 pixel/clock video (200 Mpx/s ở 200 MHz), FIFO 256 nhóm × 4 pixel |
 | Clock | CPU `clk_i`, video `vid_clk_i`, byte `byte_clk_i` = HS clock / 4 (chỉ chạy khi có HS) |
 | Thanh ghi | peripheral bus `0x4000_8000` (4 KiB), ngắt `irq_fast[7]` |
@@ -71,7 +71,7 @@ clock lane: LP-11 │ LP-01 │ LP-00   │ HS-0 (CLK-ZERO) │ clock DDR 456 MH
 | Thời gian (D-PHY v1.2) | Giới hạn | Bow32 (mặc định, video 200 MHz) |
 |---|---|---|
 | T_D-TERM-EN: bật termination sau LP-00 | ≤ 35 ns + 4 UI | ~34 ns: bộ thu LP 8 ns + 2 sync + 2 lọc + 1 FSM (chu kỳ video) |
-| T_HS-SETTLE: bỏ qua dây, tính từ LP-00 | 85 ns + 6 UI … 145 ns + 10 UI | `SETTLE` 14 = 70 ns sau khi thấy LP-00 (~104 ns tính từ chân) |
+| T_HS-SETTLE: bỏ qua dây, tính từ LP-00 | 85 ns + 6 UI … 145 ns + 10 UI | `SETTLE` theo tốc độ lane (driver): giữa cửa sổ, 115 ns + 8 UI tính từ chân; 18 = 90 ns sau khi thấy LP-00 ở 912 Mbit/s (~124 ns tính từ chân; giá trị reset 14 = 70 ns, ~104 ns) |
 | T_CLK-PREPARE + T_CLK-ZERO | ≥ 300 ns | `CLK_SETTLE` 30 = 150 ns, rồi mở cổng byte clock (lane vẫn ở HS-0) |
 | T_CLK-MISS: phát hiện mất clock | ≤ 60 ns | `CLK_MISS` theo tốc độ lane (driver): 1 chu kỳ byte clock + 3 chu kỳ video = 5 (25 ns) ở 912 Mbit/s → cổng đóng ~30–45 ns sau cạnh cuối |
 | T_HS-TRAIL + T_CLK-POST | ≥ ~180 ns (~20 byte clock) | packet cần ~11 byte clock sau byte cuối |
@@ -182,6 +182,12 @@ bộ); từ word sau, mỗi chu kỳ ra một byte `{rx, q1}[o +: 8]`, `sot` đi
 Không chấp nhận sync sai 1 bit. `arm` đã cao lúc nhả reset (bật RX giữa burst)
 không bắt đầu dò: phải chờ burst sau.
 
+Burst **deskew** (skew calibration của D-PHY v1.2, bắt buộc trên 1,5 Gbit/s):
+HS-zero rồi sync toàn bit 1 (`w24[o+8 +: 8] == 0xFF`) thay cho `0xB8`, sau đó
+mẫu `0101…`. Aligner dừng dò, không khoá và không báo lỗi SOT; lane 0 đếm vào
+`CNT_EXT[31:16]`. Hai mẫu không thể khớp cách nhau dưới 8 bit. Deskew chỉ trên
+một lane (lane kia khoá bình thường) là lỗi SKEW như mọi burst lệch lane.
+
 ### Ghép lane (`bow_csi2_lane_merge`)
 
 Byte 2k nằm ở lane 0, byte 2k+1 ở lane 1. Mỗi lane có FIFO 8 byte ghi từ `sot`;
@@ -211,6 +217,16 @@ lại cho burst sau, trước byte đầu của nó (≥ ~20 byte clock).
 - Packet kết thúc khi đủ header + WC + 2 byte, **không bao giờ** theo `eob`: so
   CRC, sự kiện, LOG; byte sau CRC bị bỏ tới burst sau. `eob` khi packet chưa đủ
   byte → TRUNC (unpack kết thúc dòng). Mỗi burst một packet.
+- **EXTRA**: byte theo sau một packet hoàn chỉnh (short hoặc long) trong cùng
+  burst được đếm tới `eob`; quá `CTRL.EXTRA` byte (0 = tắt, reset 64) →
+  `ERR_STATUS.EXTRA` và `CNT_EXT[15:0]`, một lần mỗi burst: burst gần như chắc
+  chắn chứa thêm packet, và các packet đó bị bỏ. Cuối burst (HS-TRAIL, phát hiện
+  LP-11) cũng sinh byte rác, tới ~27 byte mỗi lane ở 912 Mbit/s, nên ngưỡng phải
+  cao hơn (driver: `(105 ns + 12 UI + 60 ns) / 8 UI + 6` byte mỗi lane × số lane
+  + 8, 62 ở 2 × 912 Mbit/s). Vì vậy một short packet (4 byte) theo sau thường
+  không bị phát hiện, một long packet có payload ≥ ~60 byte thì luôn bị.
+- Dòng lỗi: `px_err` đi cùng `eol` khi dòng có lỗi CRC, lỗi FORMAT hoặc bị cắt
+  (TRUNC); unpack đưa nó ra `tuser[1]`.
 - CRC-16: x^16 + x^12 + x^5 + 1 phản xạ (0x8408), khởi tạo 0xFFFF, không XOR
   cuối (CRC-16/MCRF4XX), 1–2 byte mỗi chu kỳ; chạy qua payload rồi qua 2 byte
   CRC nhận được, kết quả 0 là đúng. Pixel đi trước khi biết CRC: lỗi CRC không
@@ -221,21 +237,39 @@ lại cho burst sau, trước byte đầu của nó (≥ ~20 byte clock).
 
 ```
 RAW10: 5 byte -> 4 pixel   P_i = {B_i, B4[2i+1:2i]}        RAW8: P_i = {B_i, 2'b00}
-nhóm FIFO, 44 bit: {sof, eol, số pixel - 1 [1:0], px3 .. px0}, px0 ở [9:0]
+nhóm FIFO, 45 bit: {err, sof, eol, số pixel - 1 [1:0], px3 .. px0}, px0 ở [9:0]
 ```
 
 Dòng RAW8 có WC % 4 ≠ 0 kết thúc bằng một nhóm thiếu; byte thừa của RAW10 bị
 bỏ. Nhóm cuối được giữ lại một bước để `eol` nằm đúng nhóm cuối (cả khi dòng bị
 cắt). `FRAME_SUM` = tổng giá trị 10 bit của mọi pixel đã vào FIFO từ FS tới FE.
-FIFO đầy → nhóm bị bỏ, cờ OVF cho packet đó.
+
+Tràn FIFO **không làm hỏng khung dòng** của đầu ra: nhóm không phải nhóm cuối
+dòng chỉ được ghi khi FIFO còn ≥ 2 chỗ (`afull` của `bow_fifo_async` = 0), nên
+nhóm cuối của một dòng đã bắt đầu luôn còn chỗ:
+
+| Chế độ của dòng | Khi nào | Đầu ra |
+|---|---|---|
+| Ok | đủ chỗ | dòng đủ pixel |
+| Cut | một nhóm thấy FIFO còn 1 chỗ | các nhóm đã ghi + nhóm cuối, `tlast`, `tuser[1]` = 1 (dòng ngắn) |
+| Lost | FIFO đầy | không có gì (cả nhóm cuối); dòng kế tiếp của frame vào được FIFO có `tuser[1]` = 1 |
+
+Mọi nhóm bị bỏ bật cờ OVF của packet đó (`CNT_DROP[31:16]`, LOG). Cờ `sof`
+chuyển sang nhóm kế tiếp khi nhóm mang nó bị bỏ, nên pixel đầu tiên của frame
+tới được đầu ra luôn có `tuser[0]`. `err` của nhóm cuối = lỗi CRC/FORMAT/TRUNC
+của dòng, hoặc dòng bị Cut, hoặc trước đó trong frame có dòng Lost (hay một dòng
+accepted không có nhóm pixel nào, ví dụ RAW10 WC < 5). `FRAME_INFO` vẫn đếm
+packet (dòng) đã nhận, không phải dòng đã ra.
 
 ### FIFO và đầu ra (`bow_fifo_async`, `bow_csi2rx_out`)
 
-FIFO 2 clock 256 nhóm × 44 bit (1 RAMB36), con trỏ gray qua 2 flop `ASYNC_REG`,
+FIFO 2 clock 256 nhóm × 45 bit (1 RAMB36), con trỏ gray qua 2 flop `ASYNC_REG`,
 phía đọc kiểu first-word-fall-through. Đầu ra giữ hai nhóm (`cur`, `next`), lấy
 nhóm mới khi `next` trống; `tready` chỉ đẩy pixel đi: 1 pixel/clock liên tục,
-`tuser` ở pixel 0 của nhóm `sof`, `tlast` ở pixel cuối của nhóm `eol`, mọi
-`m_axis_*` ra từ flop.
+`tuser[0]` ở pixel 0 của nhóm `sof`, `tlast` ở pixel cuối của nhóm `eol`,
+`tuser[1]` = `err` của nhóm `eol` (chỉ cùng `tlast`), mọi `m_axis_*` ra từ flop.
+ISP của Bow32 hiện chỉ dùng `tuser[0]` (frame sai kích thước bị ISP huỷ, dòng
+lỗi CRC thì đi qua).
 
 Thông lượng: đầu ra 200 Mpx/s ở 200 MHz. RAW10 ở 2 × 912 Mbit/s là 182,4 Mpx/s:
 vừa. RAW8 là 228 Mpx/s trong burst: FIFO (1024 pixel) hấp thụ phần dư của một
@@ -249,19 +283,21 @@ như của IMX219; các dòng RAW8 liền nhau liên tục sẽ làm tràn FIFO 
 | [0] SOT | `CNT_SOT` lane 0 / 1 | lane vào HS mà không thấy sync | tap IDELAY ngoài eye |
 | [1] ECC_CORR | `CNT_ECC[15:0]` | header sai 1 bit, đã sửa | eye hẹp |
 | [2] ECC_ERR | `CNT_ECC[31:16]` | header không sửa được, burst bị bỏ | tap sai |
-| [3] CRC | `CNT_CRC[15:0]` | CRC sai (pixel vẫn được đưa ra) | tap sai, nhiễu |
-| [4] TRUNC | `CNT_CRC[31:16]` | burst hết trước khi đủ packet | lỗi bit giữa burst, tắt RX giữa packet |
-| [5] OVF | `CNT_DROP[31:16]` | FIFO pixel đầy, nhóm bị bỏ | RAW8 liền nhau, `tready` thấp lâu |
+| [3] CRC | `CNT_CRC[15:0]` | CRC sai (pixel vẫn được đưa ra, `tuser[1]` ở `tlast`) | tap sai, nhiễu |
+| [4] TRUNC | `CNT_CRC[31:16]` | burst hết trước khi đủ packet (`tuser[1]`) | lỗi bit giữa burst, tắt RX giữa packet |
+| [5] OVF | `CNT_DROP[31:16]` | FIFO pixel đầy, nhóm/dòng bị bỏ (`tuser[1]`) | RAW8 liền nhau, `tready` thấp lâu |
 | [6] SKEW | `CNT_MISC[31:24]` | các lane không cùng khoá, burst bị bỏ | sync hỏng trên một lane |
 | [7] FORMAT | `CNT_MISC[31:24]` | WC không hợp RAW10/RAW8 | cảm biến sai format |
 | [8] FRAME | `CNT_MISC[31:24]` | FS trong frame, FE không có FS | mất FS/FE khi đổi tap, đổi VC |
 | [9] LP | `CNT_MISC[23:16]` | chuỗi LP sai, watchdog HS | escape mode, nhiễu, dây hở |
+| [10] EXTRA | `CNT_EXT[15:0]` | quá `CTRL.EXTRA` byte sau một packet trong burst | cảm biến gửi nhiều packet trong một burst (bị bỏ) |
 
 `ERR_STATUS` là cờ dính (W1C). Bộ đếm bão hoà, xoá bằng `CNT_CLR`.
-`bow_csi2rx_link_errors()` = ECC (cả hai) + CRC + TRUNC + SOT + OVF + misc; link
-tốt là 0. Bộ đếm khác: `CNT_FRAME` (FS), `CNT_PKT` (header đúng hoặc đã sửa, mọi
-VC/DT), `CNT_LINE`, `CNT_DROP[15:0]`, `CNT_BURST` (số lần vào HS mỗi data lane),
-`CNT_MISC[15:0]` (lane clock).
+`bow_csi2rx_link_errors()` = ECC (cả hai) + CRC + TRUNC + SOT + OVF + misc +
+EXTRA; link tốt là 0. Bộ đếm khác: `CNT_FRAME` (FS), `CNT_PKT` (header đúng hoặc
+đã sửa, mọi VC/DT), `CNT_LINE`, `CNT_DROP[15:0]`, `CNT_BURST` (số lần vào HS mỗi
+data lane), `CNT_MISC[15:0]` (lane clock), `CNT_EXT[31:16]` (burst deskew, không
+phải lỗi).
 
 ## Bản đồ thanh ghi (`0x4000_8000`)
 
@@ -269,13 +305,13 @@ VC/DT), `CNT_LINE`, `CNT_DROP[15:0]`, `CNT_BURST` (số lần vào HS mỗi data
 |-------:|-----|:--:|-----|
 | 0x000 | `ID` | R | `0x43533201` ("CS2", phiên bản 1) |
 | 0x004 | `INFO` | R | [3:0] số data lane, [4] PHY (có D-PHY), [15:8] clock video (MHz), [31:16] độ sâu FIFO (nhóm). `kv260_cam`: `0x0100C812`, `kv260`: `0x01003202` |
-| 0x008 | `CTRL` | RW | [0] PHY_EN (0), [1] RX_EN (0), [2] LANES: 0 = 1 lane, 1 = 2 lane (1), [3] CLK_FORCE (0), [4] VC_ANY (0), [6:5] VC (0), [13:8] DT (0x2B) |
+| 0x008 | `CTRL` | RW | [0] PHY_EN (0), [1] RX_EN (0), [2] LANES: 0 = 1 lane, 1 = 2 lane (1), [3] CLK_FORCE (0), [4] VC_ANY (0), [6:5] VC (0), [13:8] DT (0x2B), [23:16] EXTRA: số byte sau packet trong burst trước khi báo EXTRA (64, 0 = tắt) |
 | 0x00C | `PHY_CFG` | RW | chu kỳ video: [7:0] SETTLE (14), [11:8] LP_FILTER (2), [23:16] CLK_SETTLE (30), [31:24] CLK_MISS (8, 0 = tắt) |
 | 0x010 | `STATUS` | R | LP sau bộ lọc `{P,N}`: [1:0] lane clock, [3:2] lane 0, [5:4] lane 1; HS bật: [8] lane clock, [9] lane 0, [10] lane 1; [11] CE (cổng byte clock mở), [12] IN_FRAME, [13] BYTECLK_OK |
 | 0x014 | `IRQ_STATUS` | R/W1C | [0] FS, [1] FE, [2] ERR (một bit `ERR_STATUS` được set), [3] LOG_DONE, [4] RAW_DONE |
 | 0x018 | `IRQ_EN` | RW | bit giống `IRQ_STATUS` (0); `irq = \|(IRQ_STATUS & IRQ_EN)` → `irq_fast[7]` |
-| 0x01C | `ERR_STATUS` | R/W1C | [9:0] cờ dính, xem *Lỗi và bộ đếm* |
-| 0x020 | `CNT_CLR` | W | [0] = 1: xoá mọi bộ đếm 0x024…0x044 |
+| 0x01C | `ERR_STATUS` | R/W1C | [10:0] cờ dính, xem *Lỗi và bộ đếm* |
+| 0x020 | `CNT_CLR` | W | [0] = 1: xoá mọi bộ đếm 0x024…0x048 |
 | 0x024 | `CNT_FRAME` | R | số FS của VC được chọn |
 | 0x028 | `CNT_PKT` | R | packet có header đúng hoặc đã sửa |
 | 0x02C | `CNT_LINE` | R | packet pixel accepted đã đủ byte |
@@ -285,6 +321,7 @@ VC/DT), `CNT_LINE`, `CNT_DROP[15:0]`, `CNT_BURST` (số lần vào HS mỗi data
 | 0x03C | `CNT_DROP` | R | [15:0] long packet bị bộ lọc VC/DT bỏ, [31:16] packet bị tràn FIFO |
 | 0x040 | `CNT_BURST` | R | số lần vào HS: [15:0] lane 0, [31:16] lane 1 |
 | 0x044 | `CNT_MISC` | R | [15:0] số lần vào HS của lane clock, [23:16] lỗi LP, [31:24] lỗi skew + format + frame |
+| 0x048 | `CNT_EXT` | R | [15:0] burst có quá `CTRL.EXTRA` byte sau packet, [31:16] burst deskew (lane 0) |
 | 0x050 | `FRAME_INFO` | R | frame hoàn chỉnh cuối: [15:0] số dòng, [31:16] số frame (WC của FS) |
 | 0x054 | `LINE_INFO` | R | dòng accepted cuối: [15:0] WC, [21:16] DT, [23:22] VC |
 | 0x058 | `FRAME_SUM` | R | tổng giá trị pixel của frame hoàn chỉnh cuối |
@@ -299,8 +336,10 @@ VC/DT), `CNT_LINE`, `CNT_DROP[15:0]`, `CNT_BURST` (số lần vào HS mỗi data
 | 0x800–0x8FC | `RAW[0..63]` | R | [7:0] word lane 0, [15:8] word lane 1 |
 
 W1C: ghi 1 để xoá; nếu phần cứng set đúng chu kỳ đó thì set thắng. Offset không
-có thanh ghi đọc ra 0, ghi bị bỏ qua (không bus error). Bộ đếm 32/16/8 bit bão
-hoà (`CNT_BURST` đầy sau ~60 frame 1080p).
+có thanh ghi đọc ra 0, ghi bị bỏ qua (không bus error). Ghi tôn trọng byte
+enable: byte không ghi giữ nguyên, bit W1C ngoài các byte đó không bị xoá, lệnh
+(`CNT_CLR`, `LOG_CTRL`, `RAW_CTRL`) cần byte 0. Bộ đếm 32/16/8 bit bão hoà
+(`CNT_BURST` đầy sau ~60 frame 1080p).
 
 ```
 LOG entry: [5:0] DT  [7:6] VC  [23:8] WC (sau khi sửa ECC)
@@ -455,7 +494,7 @@ bow_csi2rx_stop(34 + 10);                   /* SAU stream-off: chờ hết frame
 | Hàm | Việc |
 |-----|------|
 | `bow_csi2rx_probe(&lanes, &phy)` | kiểm tra `ID`, đọc `INFO`; `false` nếu không có bộ thu (bitstream cũ: bus error được bắt) |
-| `bow_csi2rx_start(lanes, dt, lane_rate)` | `PHY_CFG` theo `INFO` MHz và tốc độ lane (bit/s, ví dụ `IMX219_LANE_RATE`): SETTLE 70 ns, CLK_SETTLE 150 ns, LP_FILTER 2, CLK_MISS = 1 chu kỳ byte clock (8 UI) + 3 chu kỳ video; `CTRL` = PHY_EN + RX_EN + lane + DT (VC 0), xoá bộ đếm và cờ |
+| `bow_csi2rx_start(lanes, dt, lane_rate)` | `PHY_CFG` theo `INFO` MHz và tốc độ lane (bit/s, ví dụ `IMX219_LANE_RATE`): SETTLE kết thúc giữa cửa sổ T_HS-SETTLE (115 ns + 8 UI từ chân, trừ ~8 ns + 5 chu kỳ video trễ của bộ thu LP và bộ lọc; 70 ns nếu `lane_rate` = 0), CLK_SETTLE 150 ns, LP_FILTER 2, CLK_MISS = 1 chu kỳ byte clock (8 UI) + 3 chu kỳ video; `CTRL` = PHY_EN + RX_EN + lane + DT (VC 0) + EXTRA trên số byte trail (mục *Lớp packet*), xoá bộ đếm và cờ |
 | `bow_csi2rx_stop(ms)` | gọi sau stream-off: chờ hết frame (FE, hoặc IN_FRAME = 0 và không có burst mới trong 2 line time), chờ FSM lane clock đóng cổng (`STATUS.CE` = 0, tối đa 1 ms), rồi `CTRL = 0`; giữ tap |
 | `bow_csi2rx_set_rx(on)` | chỉ RX_EN, quanh việc đổi VC/DT |
 | `bow_csi2rx_clear()` | xoá bộ đếm và `ERR_STATUS` |
@@ -469,7 +508,7 @@ bow_csi2rx_stop(34 + 10);                   /* SAU stream-off: chờ hết frame
 | `bow_csi2rx_byteclk_hz(ms)` | tần số byte clock (max của `BYTECLK` trong `ms`) |
 | `bow_csi2rx_print_status()` | `csi2rx: link ok` / `link errors` / `no data`, bộ đếm, thời gian, PHY; byte clock đo trong 1 frame + 2 ms (clock không liên tục dừng suốt vertical blanking, `BYTECLK` chỉ nhìn 65536 chu kỳ CPU) |
 
-Quy tắc: đổi LANES/VC/VC_ANY/DT khi RX_EN = 0, PHY_CFG và CLK_FORCE khi
+Quy tắc: đổi LANES/VC/VC_ANY/DT/EXTRA khi RX_EN = 0, PHY_CFG và CLK_FORCE khi
 PHY_EN = 0; bật bộ thu trước khi cảm biến stream và tắt sau khi cảm biến gửi
 xong frame cuối; tap ghi vào `DLYn` có hiệu lực ở burst sau. Ngắt: `IRQ_EN`,
 `bow_irq_fast_enable(BOW32_IRQ_FAST_CSI2RX)` (mcause `0x80000017`), ISR ghi 1 vào
@@ -479,8 +518,8 @@ xong frame cuối; tap ghi vào `DLYn` có hiệu lực ở burst sau. Ngắt: `
 
 | Mức | Cách chạy | Kiểm tra |
 |-----|-----------|----------|
-| Mô hình Python | `make test-tools` (`tools/tests/test_csi2_model.py`, 19 test) | vector ECC/CRC, mọi lỗi 1 bit và 2 bit của header, RAW10, aligner ở mọi pha bit, luật của bộ thu, chế độ LOG; checker bắt được lỗi cài vào |
-| IP (Verilator) | `make -C hw/ip/csi2rx/dv test` (cũng trong `make test-ip` và CI) | 30 case: 20 random (seed 1–4 × {2 lane, 2 lane + lỗi, 1 lane + lỗi, 1 trên 2 lane, 1 trên 2 lane + lỗi}, xen kẽ RAW8 và clock liên tục) + directed `lp`, `watchdog`, `clk`, `cmd`, `ovf`, `stop`, `byteclk`, `eye` (`cmd`, `stop` thêm với 1 lane). Pixel (`tuser`/`tlast`), bộ đếm, FRAME/LINE_INFO, FRAME_SUM, FRAME/LINE_TIME, LOG so với mô hình; bất biến PHY (LP-00 → `hs_en` ≤ 4 + LP_FILTER chu kỳ, CE chỉ đổi khi lane clock tĩnh) |
+| Mô hình Python | `make test-tools` (`tools/tests/test_csi2_model.py`, 25 test) | vector ECC/CRC, mọi lỗi 1 bit và 2 bit của header, RAW10, aligner ở mọi pha bit và burst deskew, luật của bộ thu, dòng lỗi, tràn FIFO (Cut/Lost), EXTRA, byte enable, chế độ LOG; checker bắt được lỗi cài vào |
+| IP (Verilator) | `make -C hw/ip/csi2rx/dv test` (cũng trong `make test-ip` và CI) | 32 case: 20 random (seed 1–4 × {2 lane, 2 lane + lỗi, 1 lane + lỗi, 1 trên 2 lane, 1 trên 2 lane + lỗi}, xen kẽ RAW8 và clock liên tục) + directed `lp`, `watchdog`, `clk`, `cmd`, `ovf`, `stop`, `byteclk`, `eye`, `deskew`, `extra` (`cmd`, `stop` thêm với 1 lane). Pixel (`tuser[0]`/`tlast`/`tuser[1]`), bộ đếm, FRAME/LINE_INFO, FRAME_SUM, FRAME/LINE_TIME, LOG so với mô hình, cả khi FIFO tràn (`ovf`: dòng Cut, dòng Lost, `sof` chuyển sang nhóm sau); bất biến PHY (LP-00 → `hs_en` ≤ 4 + LP_FILTER chu kỳ, CE chỉ đổi khi lane clock tĩnh) |
 | FPGA, mức chân (xsim) | `source <Vivado>/settings64.sh; make -C hw/fpga/common/dv test` | unisim `IBUFDS_DPHY`, `IDELAYE3`, `ISERDESE3`, `BUFGCE_DIV`; máy phát D-PHY từng bit ở 912 Mbit/s, clock không liên tục: word ISERDES, không có xung runt, CE chỉ đổi ở HS-0, `RST` mỗi burst ≥ 20 byte clock trước sync, `DLY` → CNTVALUEOUT, pixel và thanh ghi. Cần Vivado, không chạy trong CI; eye không mô phỏng được (unisim không có lệch clock/data) |
 | Hệ thống | `make run TEST=camera`, `make run TEST=csi2` | firmware thật với `csi2_tx_model.sv` và mô hình IMX219 ([../simulation.md](../simulation.md)) |
 | Board | `csi2_test`, lệnh `test` | bên dưới |
@@ -491,8 +530,8 @@ bên kiểm tra lẫn nhau: `csi2_model.py gen` sinh `cfg.txt`/`stim.txt`, testb
 `out.txt`/`regs.txt`, `csi2_model.py check` so sánh. `make -C hw/ip/csi2rx/dv run
 SEED=7 LANES=1 ERRORS=1` (thêm `DUT_LANES=1|2`, `RAW8=1`, `CONTCLK=1`) hoặc
 `make -C hw/ip/csi2rx/dv run TEST=clk` chạy một case và giữ file trong
-`build/csi2rx_dv/<case>/`. Với `SEEDS="1 2 … 40"`: 210/210 case đạt (~195k
-pixel, ~17,5k lần so thanh ghi, mọi vị trí lỗi 1 bit của header).
+`build/csi2rx_dv/<case>/`. Với `SEEDS="1 2 … 40"`: 212/212 case đạt (~199k
+pixel, ~18,7k lần so thanh ghi, mọi vị trí lỗi 1 bit của header).
 
 Trên KV260 + Raspberry Pi camera v2 (J9), 2026-10-30:
 
@@ -521,7 +560,10 @@ Trên KV260 + Raspberry Pi camera v2 (J9), 2026-10-30:
 | ↳ `bow_csi2rx_out` | 17 | 105 | |
 | `bow_dphy_io_xusp` | – | – | 3 `IBUFDS_DPHY`; mỗi lane 1 `IDELAYE3` + 1 `ISERDESE3` chung một `BITSLICE_RX_TX`; 2 `BUFGCE_DIV` |
 
-So sánh: Ibex 3593 LUT, ISP 3780 LUT; cả thiết kế 10001 LUT, 12273 FF.
+So sánh: Ibex 3593 LUT, ISP 3780 LUT; cả thiết kế 10001 LUT, 12273 FF. Số
+liệu đo trước khi thêm EXTRA, deskew, `tuser[1]` và giữ khung khi tràn FIFO
+(2026-11-07); bản mới chưa build lại trên Vivado (thêm: bộ đếm byte sau packet,
+2 bộ đếm 16 bit, so sánh mức FIFO, 1 bit mỗi nhóm FIFO).
 
 ## Giới hạn
 
@@ -529,6 +571,9 @@ So sánh: Ibex 3593 LUT, ISP 3780 LUT; cả thiết kế 10001 LUT, 12273 FF.
   là lỗi LP).
 - Mỗi HS burst một packet: byte sau CRC bị bỏ tới burst sau. IMX219 về LP-11
   sau mỗi packet; cảm biến gửi nhiều packet trong một burst cần sửa lớp packet.
+  Burst có quá `CTRL.EXTRA` byte sau packet được báo (`ERR_STATUS.EXTRA`), các
+  packet trong đó vẫn bị bỏ; một short packet theo sau thường nằm dưới ngưỡng
+  (không bị báo).
 - 1–2 lane, VC 2 bit (CSI-2 v1.x, không có VCX của v2.0), một VC/DT tại một
   thời điểm, ISP chỉ nhận RAW8/RAW10.
 - 1 pixel/clock: RAW8 liền nhau ở 2 × 912 Mbit/s (228 Mpx/s) nhanh hơn
@@ -542,14 +587,15 @@ So sánh: Ibex 3593 LUT, ISP 3780 LUT; cả thiết kế 10001 LUT, 12273 FF.
   được); (b) cuối burst, các byte còn trong pipeline ISERDES → aligner → ghép
   lane (~5–6 byte clock) phải ra trước khi `arm` tắt, mà T_HS-TRAIL + phát hiện
   LP-11 chỉ dài ~8 byte clock ở 912 Mbit/s và ngắn dần (tính theo byte clock)
-  khi tốc độ giảm: dưới ~220 Mbit/s packet bị cắt cụt; (c) `SETTLE` cố định
-  70 ns, trong khi T_HS-SETTLE tối thiểu là 85 ns + 6 UI và aligner nhìn lùi
-  2 word: ở tốc độ thấp nhiễu của HS-PREPARE có thể khớp sync giả (mô phỏng
-  của review).
-- Nhiều packet trong một burst: packet sau packet đầu bị bỏ **không có cờ báo**
-  nào. Nếu có frame mà không có dòng nào, `bow_csi2rx_print_status()` báo
-  `csi2rx: no lines (DT/VC filter?)` (cũng là triệu chứng khi `CTRL.DT`/`VC`
-  không khớp luồng).
+  khi tốc độ giảm: dưới ~220 Mbit/s packet bị cắt cụt; (c) aligner nhìn lùi
+  2 word lúc bắt đầu dò: ở tốc độ thấp, nếu HS-ZERO của máy phát ngắn, nhiễu
+  của HS-PREPARE có thể khớp sync giả (mô phỏng của review; driver nay đặt
+  `SETTLE` giữa cửa sổ T_HS-SETTLE theo tốc độ lane thay cho 70 ns cố định).
+- Nếu có frame mà không có dòng nào, `bow_csi2rx_print_status()` báo
+  `csi2rx: no lines (DT/VC filter?)` (`CTRL.DT`/`VC` không khớp luồng); có
+  `extra` thì cảm biến gửi nhiều packet trong một burst.
+- `SETTLE` mới (18 thay cho 14 ở 912 Mbit/s, ~124 ns thay cho ~104 ns từ chân,
+  vẫn trong cửa sổ 91,6–156 ns) chưa chạy lại trên board.
 - `CLK_FORCE` chỉ dùng khi lane clock đã ở HS (xem mục Debug).
 - Tap ở chế độ COUNT, không bù nhiệt/áp (`EN_VTC 0`): điểm lấy mẫu trôi theo
   nhiệt độ, và chỉ được hiệu chỉnh lại khi được gọi (`cam` thấy lỗi, lệnh `cal`).
@@ -564,12 +610,14 @@ So sánh: Ibex 3593 LUT, ISP 3780 LUT; cả thiết kế 10001 LUT, 12273 FF.
 - 4 lane: `Lanes = 4` trong ghép lane và lớp packet (4 byte/chu kỳ), thêm I/O;
   RAW10 ở 4 × 912 Mbit/s là 365 Mpx/s, cần đầu ra (và ISP) 2 pixel/clock.
 - RAW12 (DT 0x2C, 3 byte → 2 pixel) với đầu ra 12 bit; YUV422 8 bit (DT 0x1E).
-- Nhiều packet trong một burst (đọc header kế tiếp sau CRC) và LS/LE.
+- Nhiều packet trong một burst (đọc header kế tiếp sau CRC; phân biệt với byte
+  rác của trail) và LS/LE.
+- ISP dùng `tuser[1]`: huỷ frame có dòng lỗi (hiện chỉ huỷ khi sai kích thước).
 - Thống kê, ngắt theo dòng/frame: ngắt mỗi N dòng, min/max của `LINE_TIME`,
   jitter của `FRAME_TIME`, đếm frame hỏng.
 - Tự hiệu chỉnh lại eye: ISR theo dõi `ECC_CORR`/`CRC`, hoặc liên tục dò hai
   mép eye (±k tap) để bám theo trôi nhiệt.
-- Deskew của D-PHY v1.2 (burst `0101…`, cần từ 1,5 Gbit/s) để hiệu chỉnh bằng
+- Dùng burst deskew của D-PHY v1.2 (đã nhận ra và bỏ qua) để hiệu chỉnh bằng
   phần cứng thay vì đếm dòng.
 - Lane chậm (80–350 Mbit/s): xả pipeline ở cuối burst (aligner xuất nốt word
   cuối, ghép lane pop hết FIFO rồi mới `eob`), và phát hiện mất clock bằng

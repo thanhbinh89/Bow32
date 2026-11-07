@@ -6,16 +6,17 @@
 //   0x000 ID          R    0x43533201
 //   0x004 INFO        R    [3:0] lanes [4] PHY [15:8] video clock MHz [31:16] FIFO depth
 //   0x008 CTRL        RW   [0] PHY_EN [1] RX_EN [2] LANES (2 lanes) [3] CLK_FORCE
-//                          [4] VC_ANY [6:5] VC [13:8] DT
+//                          [4] VC_ANY [6:5] VC [13:8] DT [23:16] EXTRA (64, 0 = off)
 //   0x00C PHY_CFG     RW   [7:0] SETTLE [11:8] LP_FILTER [23:16] CLK_SETTLE [31:24] CLK_MISS
 //   0x010 STATUS      R    [5:0] LP {P,N} clock, lane 0, lane 1 [10:8] HS on (same order)
 //                          [11] CE [12] IN_FRAME [13] BYTECLK_OK
 //   0x014 IRQ_STATUS  W1C  [0] FS [1] FE [2] ERR [3] LOG_DONE [4] RAW_DONE
 //   0x018 IRQ_EN      RW   same bits, irq_o = |(IRQ_STATUS & IRQ_EN)
 //   0x01C ERR_STATUS  W1C  [0] SOT [1] ECC_CORR [2] ECC_ERR [3] CRC [4] TRUNC [5] OVF
-//                          [6] SKEW [7] FORMAT [8] FRAME [9] LP
-//   0x020 CNT_CLR     W    [0] clear the counters 0x024..0x044
-//   0x024..0x044      R    counters (saturating)
+//                          [6] SKEW [7] FORMAT [8] FRAME [9] LP [10] EXTRA
+//   0x020 CNT_CLR     W    [0] clear the counters 0x024..0x048
+//   0x024..0x048      R    counters (saturating); 0x048 CNT_EXT: [15:0] bursts with
+//                          more than EXTRA bytes after the packet, [31:16] deskew bursts
 //   0x050..0x064      R    FRAME_INFO, LINE_INFO, FRAME_SUM, FRAME_TIME, LINE_TIME, BYTECLK
 //   0x070, 0x074      RW   DLY0, DLY1: [8:0] tap, R [24:16] CNTVALUEOUT
 //   0x080 LOG_CTRL    RW   W [0] ARM [1] TRIG_FS [2] STOP_FE; R [0] ARMED [2:1] modes
@@ -23,10 +24,11 @@
 //   0x084 RAW_CTRL    RW   W [0] ARM [1] NOW; R [0] ARMED [1] NOW [8] DONE
 //   0x400..0x4FC      R    LOG[64]
 //   0x800..0x8FC      R    RAW[64]
-// Unmapped offsets read 0, writes to them are ignored. In W1C registers a
+// Unmapped offsets read 0, writes to them are ignored. Writes honour the
+// byte enables (commands and CNT_CLR are in byte 0). In W1C registers a
 // hardware set wins over a clear in the same cycle.
 //
-// Software changes CTRL.LANES/VC/VC_ANY/DT only while RX_EN = 0 and
+// Software changes CTRL.LANES/VC/VC_ANY/DT/EXTRA only while RX_EN = 0 and
 // PHY_CFG/CLK_FORCE only while PHY_EN = 0: the other clock domains take them
 // through one synchroniser per bit. rx_on_o (= PHY_EN & RX_EN) is a flop: it
 // is the source of the datapath resets.
@@ -107,25 +109,49 @@ module bow_csi2rx_regs import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
   localparam int unsigned IrqRaw = 4;
 
   logic [11:0] a;
-  logic        we, re;
-  logic [31:0] wd;
+  logic        we, re, we0;
+  logic [31:0] wd, bm;
 
-  assign a  = {bus_req_i.addr[11:2], 2'b00};
-  assign we = bus_req_i.req &  bus_req_i.we;
-  assign re = bus_req_i.req & ~bus_req_i.we;
-  assign wd = bus_req_i.wdata;
+  assign a   = {bus_req_i.addr[11:2], 2'b00};
+  assign we  = bus_req_i.req &  bus_req_i.we;
+  assign re  = bus_req_i.req & ~bus_req_i.we;
+  assign wd  = bus_req_i.wdata;
+  assign bm  = {{8{bus_req_i.be[3]}}, {8{bus_req_i.be[2]}},
+                {8{bus_req_i.be[1]}}, {8{bus_req_i.be[0]}}};
+  assign we0 = we && bus_req_i.be[0];          // byte 0 written (commands)
+
+  // register value after a write with byte enables
+  function automatic logic [31:0] wmerge(logic [31:0] old, logic [31:0] d, logic [31:0] m);
+    return (old & ~m) | (d & m);
+  endfunction
 
   // ---------------------------------------------------------- configuration
   csi2_cfg_t             cfg_q;
   logic                  rx_on_q;
   logic [Lanes:0]        lane_en_q;
   logic [Lanes-1:0][8:0] dly_q;
+  logic [31:0]           ctrl_rd, phy_rd, ctrl_w, phy_w;
+  logic [1:0][31:0]      dly_w;
+
+  assign ctrl_rd = {8'h0, cfg_q.extra, 2'b00, cfg_q.dt, 1'b0, cfg_q.vc, cfg_q.vc_any,
+                    cfg_q.clk_force, cfg_q.lanes2, cfg_q.rx_en, cfg_q.phy_en};
+  assign phy_rd  = {cfg_q.clk_miss, cfg_q.clk_settle, 4'h0, cfg_q.lp_filter, cfg_q.settle};
+  assign ctrl_w  = wmerge(ctrl_rd, wd, bm);
+  assign phy_w   = wmerge(phy_rd, wd, bm);
+  for (genvar l = 0; l < 2; l++) begin : g_dly_w
+    if (l < Lanes) begin : g_lane
+      assign dly_w[l] = wmerge({23'h0, dly_q[l]}, wd, bm);
+    end else begin : g_none
+      assign dly_w[l] = '0;
+    end
+  end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       cfg_q            <= '0;
       cfg_q.lanes2     <= (Lanes == 2);
       cfg_q.dt         <= DtRaw10;
+      cfg_q.extra      <= 8'd64;
       cfg_q.settle     <= 8'd14;
       cfg_q.lp_filter  <= 4'd2;
       cfg_q.clk_settle <= 8'd30;
@@ -135,22 +161,23 @@ module bow_csi2rx_regs import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
       lane_en_q        <= '0;
     end else begin
       if (we && (a == 12'h008)) begin
-        cfg_q.phy_en    <= wd[0];
-        cfg_q.rx_en     <= wd[1];
-        cfg_q.lanes2    <= wd[2] && (Lanes == 2);
-        cfg_q.clk_force <= wd[3];
-        cfg_q.vc_any    <= wd[4];
-        cfg_q.vc        <= wd[6:5];
-        cfg_q.dt        <= wd[13:8];
+        cfg_q.phy_en    <= ctrl_w[0];
+        cfg_q.rx_en     <= ctrl_w[1];
+        cfg_q.lanes2    <= ctrl_w[2] && (Lanes == 2);
+        cfg_q.clk_force <= ctrl_w[3];
+        cfg_q.vc_any    <= ctrl_w[4];
+        cfg_q.vc        <= ctrl_w[6:5];
+        cfg_q.dt        <= ctrl_w[13:8];
+        cfg_q.extra     <= ctrl_w[23:16];
       end
       if (we && (a == 12'h00C)) begin
-        cfg_q.settle     <= wd[7:0];
-        cfg_q.lp_filter  <= wd[11:8];
-        cfg_q.clk_settle <= wd[23:16];
-        cfg_q.clk_miss   <= wd[31:24];
+        cfg_q.settle     <= phy_w[7:0];
+        cfg_q.lp_filter  <= phy_w[11:8];
+        cfg_q.clk_settle <= phy_w[23:16];
+        cfg_q.clk_miss   <= phy_w[31:24];
       end
-      if (we && (a == 12'h070)) dly_q[0] <= wd[8:0];
-      if (we && (a == 12'h074) && (Lanes == 2)) dly_q[Lanes-1] <= wd[8:0];
+      if (we && (a == 12'h070)) dly_q[0] <= dly_w[0][8:0];
+      if (we && (a == 12'h074) && (Lanes == 2)) dly_q[Lanes-1] <= dly_w[Lanes-1][8:0];
 
       rx_on_q <= cfg_q.phy_en && cfg_q.rx_en;
       for (int unsigned l = 0; l <= Lanes; l++) begin
@@ -181,8 +208,8 @@ module bow_csi2rx_regs import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
   assign log_req_n = gray_inc4(log_req_q);
   assign raw_req_n = gray_inc4(raw_req_q);
 
-  assign log_arm = we && (a == 12'h080) && wd[0];
-  assign raw_arm = we && (a == 12'h084) && (wd[0] || wd[1]);
+  assign log_arm = we0 && (a == 12'h080) && wd[0];
+  assign raw_arm = we0 && (a == 12'h084) && (wd[0] || wd[1]);
   assign log_fin = log_wait_q && (log_ack_i == log_req_q) && !log_arm;
   assign raw_fin = raw_wait_q && (raw_ack_i == raw_req_q) && !raw_arm;
 
@@ -227,11 +254,13 @@ module bow_csi2rx_regs import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
   assign raw_now_o     = raw_now_q;
 
   // ------------------------------------------------- interrupts and errors
-  logic [4:0] irq_set, irq_status_q, irq_en_q;
-  logic [9:0] err_set, err_status_q;
+  logic [4:0]  irq_set, irq_status_q, irq_en_q;
+  logic [31:0] irq_en_w;
+  logic [10:0] err_set, err_status_q;
 
-  assign err_set = {|ev_i.lp_err, ev_i.pl.frame_err, ev_i.pl.fmt, ev_i.skew, ev_i.pl.ovf,
-                    ev_i.pl.trunc, ev_i.pl.crc_err, ev_i.pl.ecc_err, ev_i.pl.ecc_corr, |ev_i.sot};
+  assign err_set = {ev_i.pl.extra, |ev_i.lp_err, ev_i.pl.frame_err, ev_i.pl.fmt, ev_i.skew,
+                    ev_i.pl.ovf, ev_i.pl.trunc, ev_i.pl.crc_err, ev_i.pl.ecc_err,
+                    ev_i.pl.ecc_corr, |ev_i.sot};
 
   always_comb begin
     irq_set         = '0;
@@ -248,13 +277,15 @@ module bow_csi2rx_regs import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
       irq_en_q     <= '0;
       err_status_q <= '0;
     end else begin
-      irq_status_q <= (irq_status_q & ~(wd[4:0] & {5{we && (a == 12'h014)}})) | irq_set;
-      err_status_q <= (err_status_q & ~(wd[9:0] & {10{we && (a == 12'h01C)}})) | err_set;
-      if (we && (a == 12'h018)) irq_en_q <= wd[4:0];
+      irq_status_q <= (irq_status_q & ~(wd[4:0] & bm[4:0] & {5{we && (a == 12'h014)}})) | irq_set;
+      err_status_q <= (err_status_q & ~(wd[10:0] & bm[10:0] & {11{we && (a == 12'h01C)}})) |
+                      err_set;
+      if (we && (a == 12'h018)) irq_en_q <= irq_en_w[4:0];
     end
   end
 
-  assign irq_o = |(irq_status_q & irq_en_q);
+  assign irq_en_w = wmerge({27'h0, irq_en_q}, wd, bm);
+  assign irq_o    = |(irq_status_q & irq_en_q);
 
   // --------------------------------------------------------------- counters
   function automatic logic [31:0] inc32(logic [31:0] c, logic e);
@@ -273,13 +304,13 @@ module bow_csi2rx_regs import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
 
   logic [31:0]      cnt_frame_q, cnt_pkt_q, cnt_line_q;
   logic [15:0]      cnt_corr_q, cnt_uncorr_q, cnt_crc_q, cnt_trunc_q, cnt_drop_q, cnt_ovf_q;
-  logic [15:0]      cnt_clk_q;
+  logic [15:0]      cnt_clk_q, cnt_extra_q, cnt_deskew_q;
   logic [1:0][15:0] cnt_sot_q, cnt_burst_q;
   logic [7:0]       cnt_lp_q, cnt_misc_q;
   logic [1:0]       n_lp, n_misc;
   logic             cnt_clr;
 
-  assign cnt_clr = we && (a == 12'h020) && wd[0];
+  assign cnt_clr = we0 && (a == 12'h020) && wd[0];
   assign n_lp    = 2'(ev_i.lp_err[0]) + 2'(ev_i.lp_err[1]) + 2'(ev_i.lp_err[2]);
   assign n_misc  = 2'(ev_i.skew) + 2'(ev_i.pl.fmt) + 2'(ev_i.pl.frame_err);
 
@@ -295,6 +326,8 @@ module bow_csi2rx_regs import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
       cnt_drop_q   <= '0;
       cnt_ovf_q    <= '0;
       cnt_clk_q    <= '0;
+      cnt_extra_q  <= '0;
+      cnt_deskew_q <= '0;
       cnt_sot_q    <= '0;
       cnt_burst_q  <= '0;
       cnt_lp_q     <= '0;
@@ -310,6 +343,8 @@ module bow_csi2rx_regs import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
       cnt_drop_q   <= '0;
       cnt_ovf_q    <= '0;
       cnt_clk_q    <= '0;
+      cnt_extra_q  <= '0;
+      cnt_deskew_q <= '0;
       cnt_sot_q    <= '0;
       cnt_burst_q  <= '0;
       cnt_lp_q     <= '0;
@@ -325,6 +360,8 @@ module bow_csi2rx_regs import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
       cnt_drop_q     <= inc16(cnt_drop_q, ev_i.pl.drop);
       cnt_ovf_q      <= inc16(cnt_ovf_q, ev_i.pl.ovf);
       cnt_clk_q      <= inc16(cnt_clk_q, ev_i.hs[0]);
+      cnt_extra_q    <= inc16(cnt_extra_q, ev_i.pl.extra);
+      cnt_deskew_q   <= inc16(cnt_deskew_q, ev_i.deskew);
       cnt_sot_q[0]   <= inc16(cnt_sot_q[0], ev_i.sot[0]);
       cnt_sot_q[1]   <= inc16(cnt_sot_q[1], ev_i.sot[1]);
       cnt_burst_q[0] <= inc16(cnt_burst_q[0], ev_i.hs[1]);
@@ -435,13 +472,12 @@ module bow_csi2rx_regs import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
     unique case (a)
       12'h000: rdata_d = Csi2rxId;
       12'h004: rdata_d = {16'(FifoDepth), VidMhz, 3'b000, HasPhy, 4'(Lanes)};
-      12'h008: rdata_d = {18'h0, cfg_q.dt, 1'b0, cfg_q.vc, cfg_q.vc_any, cfg_q.clk_force,
-                          cfg_q.lanes2, cfg_q.rx_en, cfg_q.phy_en};
-      12'h00C: rdata_d = {cfg_q.clk_miss, cfg_q.clk_settle, 4'h0, cfg_q.lp_filter, cfg_q.settle};
+      12'h008: rdata_d = ctrl_rd;
+      12'h00C: rdata_d = phy_rd;
       12'h010: rdata_d = status;
       12'h014: rdata_d = {27'h0, irq_status_q};
       12'h018: rdata_d = {27'h0, irq_en_q};
-      12'h01C: rdata_d = {22'h0, err_status_q};
+      12'h01C: rdata_d = {21'h0, err_status_q};
       12'h024: rdata_d = cnt_frame_q;
       12'h028: rdata_d = cnt_pkt_q;
       12'h02C: rdata_d = cnt_line_q;
@@ -451,6 +487,7 @@ module bow_csi2rx_regs import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
       12'h03C: rdata_d = {cnt_ovf_q, cnt_drop_q};
       12'h040: rdata_d = {cnt_burst_q[1], cnt_burst_q[0]};
       12'h044: rdata_d = {cnt_misc_q, cnt_lp_q, cnt_clk_q};
+      12'h048: rdata_d = {cnt_deskew_q, cnt_extra_q};
       12'h050: rdata_d = frame_info_q;
       12'h054: rdata_d = line_info_q;
       12'h058: rdata_d = frame_sum_q;
@@ -492,6 +529,7 @@ module bow_csi2rx_regs import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
                             sel_raw_q ? 32'(raw_rdata_i) : rdata_q;
 
   logic unused_bus;
-  assign unused_bus = ^{bus_req_i.addr[31:12], bus_req_i.addr[1:0], bus_req_i.be, wd[31:14]};
+  assign unused_bus = ^{bus_req_i.addr[31:12], bus_req_i.addr[1:0], ctrl_w[31:24], ctrl_w[15:14],
+                        ctrl_w[7], phy_w[15:12], dly_w[0][31:9], dly_w[1], irq_en_w[31:5]};
 
 endmodule

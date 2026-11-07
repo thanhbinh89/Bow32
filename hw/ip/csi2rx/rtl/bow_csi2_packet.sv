@@ -26,6 +26,13 @@
 // * Uncorrectable header: the rest of the burst is ignored.
 // * eob (or sop) while a packet is open: truncated (ev_trunc; the unpacker
 //   ends the line).
+// * px_err_o comes with px_eol_o: the line has a CRC error, a format error
+//   or was truncated (m_axis tuser[1] at tlast).
+// * Bytes that follow a complete packet (short or long) in the same burst
+//   are counted until eob; more than extra_i (CTRL.EXTRA, 0 = off) is
+//   ev_extra, once per burst: the burst most likely holds further packets,
+//   which this layer drops. The trail of the burst also gives some bytes
+//   (up to ~30 per lane at 1 Gbit/s), so extra_i must be above that.
 // * One LOG entry per packet with a decoded header, written when it ends.
 //   For long packets it is written 3 cycles after the end so that the
 //   FIFO overflow flag of the unpacker (px_ovf_i) includes the last group:
@@ -40,6 +47,7 @@ module bow_csi2_packet import bow_csi2rx_pkg::*; (
   input  logic [1:0]   vc_i,            // configuration (static while RX is on)
   input  logic         vc_any_i,
   input  logic [5:0]   dt_i,
+  input  logic [7:0]   extra_i,         // CTRL.EXTRA (static while RX is on)
 
   input  logic         valid_i,         // from the lane merge
   input  logic [15:0]  data_i,
@@ -52,6 +60,7 @@ module bow_csi2_packet import bow_csi2rx_pkg::*; (
   output logic [1:0]   px_valid_o,      // payload bytes: [0] byte 0, [1] byte 1 (only with [0])
   output logic [15:0]  px_data_o,
   output logic         px_eol_o,        // end of the line (in a cycle without bytes)
+  output logic         px_err_o,        // with px_eol_o: CRC / format error or truncated
   input  logic         px_ovf_i,        // unpacker: a group of the line was dropped
 
   output logic         fs_o,            // FS of the selected VC (frame sum = 0, sof pending)
@@ -174,8 +183,8 @@ module bow_csi2_packet import bow_csi2rx_pkg::*; (
   logic             sv, ssop, seob, stwo;
   logic [15:0]      sdat;
   logic [16:0]      rem_q;           // body bytes (payload + CRC) still to come
-  logic [15:0]      crc_q;
-  logic             acc_q;           // the long packet is accepted
+  logic [15:0]      crc_q, crc_d;
+  logic             acc_q, fmt_q;    // the long packet is accepted / has a format error
   logic             body, b1, p0, p1, last, trunc;
 
   assign sv   = dv_q[2];
@@ -191,6 +200,15 @@ module bow_csi2_packet import bow_csi2rx_pkg::*; (
   assign p1    = body && stwo && (rem_q >= 17'd4);
   assign last  = body && ((rem_q == 17'd1) || (stwo && (rem_q == 17'd2)));
   assign trunc = (seob || ssop) && (dst_q != Idle);
+  assign crc_d = b1 ? crc16_byte(crc16_byte(crc_q, sdat[7:0]), sdat[15:8])
+                    : crc16_byte(crc_q, sdat[7:0]);
+
+  // Bytes after a complete packet, until eob (the stage D stream)
+  logic       ended_q, xev_q;
+  logic [8:0] xcnt_q, xcnt_n;
+
+  assign xcnt_n = xcnt_q + ((sv && !ssop && (dst_q == Idle) && ended_q) ? (stwo ? 9'd2 : 9'd1)
+                                                                        : 9'd0);
 
   // =========================================================================
   // Frame state, events, LOG entries
@@ -212,6 +230,11 @@ module bow_csi2_packet import bow_csi2rx_pkg::*; (
       rem_q         <= '0;
       crc_q         <= 16'hFFFF;
       acc_q         <= 1'b0;
+      fmt_q         <= 1'b0;
+      ended_q       <= 1'b0;
+      xev_q         <= 1'b0;
+      xcnt_q        <= '0;
+      px_err_o      <= 1'b0;
       px_raw10_o    <= 1'b0;
       px_sol_o      <= 1'b0;
       px_valid_o    <= '0;
@@ -242,6 +265,7 @@ module bow_csi2_packet import bow_csi2rx_pkg::*; (
       px_sol_o   <= 1'b0;
       px_valid_o <= '0;
       px_eol_o   <= 1'b0;
+      px_err_o   <= 1'b0;
       fs_o       <= 1'b0;
       fe_o       <= 1'b0;
       log_we_o   <= 1'b0;
@@ -283,6 +307,7 @@ module bow_csi2_packet import bow_csi2rx_pkg::*; (
         end
         if (!long_pkt) begin
           // short packet or uncorrectable header: the packet ends here
+          ended_q     <= ok;
           log_we_o    <= 1'b1;
           log_entry_o <= {4'b0000, ecc_q, wc, di};
           log_fs_o    <= is_fs;
@@ -292,6 +317,7 @@ module bow_csi2_packet import bow_csi2rx_pkg::*; (
           dst_q      <= long_pkt ? Body : Idle;
           rem_q      <= {1'b0, wc} + 17'd2;
           acc_q      <= accept;
+          fmt_q      <= fmt;
           px_raw10_o <= raw10;
           px_sol_o   <= accept;
         end
@@ -300,8 +326,7 @@ module bow_csi2_packet import bow_csi2rx_pkg::*; (
       // ---- stage D
       if (body) begin
         rem_q      <= rem_q - (b1 ? 17'd2 : 17'd1);
-        crc_q      <= b1 ? crc16_byte(crc16_byte(crc_q, sdat[7:0]), sdat[15:8])
-                         : crc16_byte(crc_q, sdat[7:0]);
+        crc_q      <= crc_d;
         px_valid_o <= {p1, p0} & {2{acc_q}};
         px_data_o  <= sdat;
       end
@@ -309,14 +334,17 @@ module bow_csi2_packet import bow_csi2rx_pkg::*; (
         dst_q     <= Idle;
         done_q    <= 1'b1;
         px_eol_o  <= acc_q;
+        px_err_o  <= acc_q && ((crc_d != '0) || fmt_q);
         lend_q[0] <= 1'b1;
         trunc_q   <= 1'b0;
+        ended_q   <= 1'b1;
       end
       if (trunc) begin
         ev_o.trunc <= 1'b1;
         dst_q      <= Idle;
         if (dst_q == Body) begin
           px_eol_o  <= acc_q;
+          px_err_o  <= acc_q;
           lend_q[0] <= 1'b1;
           trunc_q   <= 1'b1;
           crc_err_q <= 1'b0;
@@ -325,6 +353,21 @@ module bow_csi2_packet import bow_csi2rx_pkg::*; (
       if (ssop) begin
         dst_q <= Hdr;
         crc_q <= 16'hFFFF;
+      end
+
+      // ---- bytes after a complete packet (several packets in one burst),
+      // saturating at 256. A last word with one body byte holds one byte
+      // after the packet.
+      xcnt_q <= (xcnt_n[8] ? 9'h100 : xcnt_n) +
+                ((last && stwo && (rem_q == 17'd1)) ? 9'd1 : 9'd0);
+      if ((extra_i != '0) && !xev_q && (xcnt_q > {1'b0, extra_i})) begin
+        ev_o.extra <= 1'b1;
+        xev_q      <= 1'b1;
+      end
+      if (seob || ssop) begin
+        ended_q <= 1'b0;
+        xev_q   <= 1'b0;
+        xcnt_q  <= '0;
       end
 
       // ---- complete long packet: CRC result

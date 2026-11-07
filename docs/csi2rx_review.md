@@ -161,3 +161,22 @@ chạy lại để kiểm tra. Mức ưu tiên: **P0** = chặn use case, **P1**
 - F1 xác nhận bằng đọc mã: sau `last`, `dst_q = Idle` tới `sop` kế tiếp, và `trunc` chỉ
   xét `dst_q != Idle`, nên byte của packet thứ hai không sinh sự kiện nào. Mô hình TX hiện
   tại chỉ gửi một packet mỗi burst nên chưa mô phỏng được.
+
+## 10. Giai đoạn 0: đã làm
+
+| Phát hiện | Trạng thái |
+|-----------|------------|
+| F1 | **Phát hiện**, chưa hỗ trợ: byte sau một packet hoàn chỉnh trong cùng burst được đếm tới cuối burst; quá `CTRL.EXTRA` (driver tính theo tốc độ lane, trên số byte rác của trail; reset 64) → `ERR_STATUS.EXTRA`, `CNT_EXT[15:0]`, tính vào `bow_csi2rx_link_errors()`. Long packet theo sau luôn bị báo, short packet (4 byte) thường không. Hỗ trợ thật (đọc header kế tiếp) vẫn ở giai đoạn 1. |
+| F2 | **Sửa**: nhóm không phải nhóm cuối dòng chỉ được ghi khi FIFO còn ≥ 2 chỗ (`afull_o` mới của `bow_fifo_async`), nên dòng đã bắt đầu luôn kết thúc bằng `tlast` (dòng Cut, `tuser[1]`); FIFO đầy thì bỏ cả dòng (Lost) và báo ở dòng sau của frame; `sof` chuyển sang nhóm kế tiếp khi nhóm mang nó bị bỏ. Case `ovf` của DV nay so từng pixel (trước là `nocheck`), thêm frame có dòng đầu Cut và frame mất hết dòng. |
+| F3 | **Sửa ở bộ thu**: `m_axis_tuser_o[1]` cùng `tlast` = dòng lỗi (CRC, FORMAT, TRUNC, Cut, hoặc có dòng Lost / dòng không có pixel trước đó trong frame). ISP của Bow32 chưa dùng (vẫn chỉ huỷ frame sai kích thước). |
+| F4 | **Sửa**: burst deskew (HS-zero + sync `0xFF`) không còn là lỗi SOT, được đếm ở `CNT_EXT[31:16]`; deskew chỉ trên một lane là SKEW. Chưa chấp nhận sync sai 1 bit. |
+| F5 | **Sửa** (driver): `SETTLE` kết thúc giữa cửa sổ T_HS-SETTLE theo tốc độ lane (18 chu kỳ = 90 ns ở 912 Mbit/s và 200 MHz thay cho 14). **Cần chạy lại `csi2_test` trên KV260.** |
+| F9 | **Sửa**: ghi thanh ghi theo byte enable; lệnh cần byte 0. |
+| F6 | Chưa làm: kiểm tra lề sau hiệu chỉnh, bám eye. |
+
+Kiểm chứng: `make -C hw/ip/csi2rx/dv test` 32/32 (thêm `deskew`, `extra`),
+mô hình 25 test, `make lint`, `make sw`, `make test-tools`, mô phỏng hệ thống.
+Sáu lỗi cài vào RTL (bỏ giữ chỗ FIFO, `err` luôn 0, `sof` không chuyển, tắt
+deskew, tắt EXTRA, bỏ qua byte enable) đều bị DV bắt. Testbench xsim mức chân
+(`hw/fpga/common/dv`) đã sửa cho `tuser` 2 bit nhưng chưa chạy (cần Vivado);
+bitstream `kv260_cam` chưa build lại.

@@ -16,6 +16,12 @@
 // is released (receiver enabled in the middle of a burst) does not start a
 // search: the next rising edge does.
 //
+// Deskew (D-PHY v1.2 skew calibration) bursts start with HS-zero and an
+// all-ones sync byte (w24[o +: 8] == 8'h00, w24[o+8 +: 8] == 8'hFF) instead
+// of 0xB8, followed by a 0101... pattern. Such a burst stops the search
+// without a lock and without a sync error (ev_deskew_o); the two patterns
+// can never match within 8 bits of each other.
+//
 // Outputs are flops (one cycle after the word they come from).
 
 module bow_dphy_align (
@@ -27,7 +33,8 @@ module bow_dphy_align (
   output logic [7:0] data_o,         // LSB = first bit on the wire
   output logic       sot_o,          // with the first byte after the sync byte
   output logic       locked_o,
-  output logic       ev_sync_err_o   // pulse: arm_i fell and no sync was found
+  output logic       ev_sync_err_o,  // pulse: arm_i fell and no sync was found
+  output logic       ev_deskew_o     // pulse: deskew burst (all-ones sync)
 );
 
   logic [7:0]  q1_q, q2_q;
@@ -35,7 +42,7 @@ module bow_dphy_align (
   logic [2:0]  off_q;
   logic [23:0] w24;
   logic [15:0] w16;
-  logic [7:0]  hit;
+  logic [7:0]  hit, dsk;
   logic [2:0]  hit_off;
   logic        search;
 
@@ -45,6 +52,7 @@ module bow_dphy_align (
   always_comb begin
     for (int unsigned o = 0; o < 8; o++) begin
       hit[o] = (w24[o +: 8] == 8'h00) && (w24[o + 8 +: 8] == 8'hB8);
+      dsk[o] = (w24[o +: 8] == 8'h00) && (w24[o + 8 +: 8] == 8'hFF);
     end
     hit_off = 3'd0;
     for (int o = 7; o >= 0; o--) begin
@@ -68,12 +76,14 @@ module bow_dphy_align (
       data_o        <= '0;
       sot_o         <= 1'b0;
       ev_sync_err_o <= 1'b0;
+      ev_deskew_o   <= 1'b0;
     end else begin
       q1_q          <= rx_i;
       q2_q          <= q1_q;
       arm_q         <= arm_i;
-      search_q      <= search && (hit == '0);
+      search_q      <= search && (hit == '0) && (dsk == '0);
       ev_sync_err_o <= arm_q && !arm_i && search_q;
+      ev_deskew_o   <= search && (hit == '0) && (dsk != '0);
 
       if (!arm_i) begin
         locked_q <= 1'b0;

@@ -273,7 +273,8 @@ module tb_bow_dphy_io_xusp;
   bus_req_t   bus_req = BUS_REQ_DEFAULT;
   bus_rsp_t   bus_rsp;
   logic       irq;
-  logic       m_tvalid, m_tready = 1'b0, m_tuser, m_tlast;
+  logic       m_tvalid, m_tready = 1'b0, m_tlast;
+  logic [1:0] m_tuser;                // [1] line error: never on this clean link
   logic [9:0] m_tdata;
 
   bow_csi2rx #(
@@ -361,7 +362,7 @@ module tb_bow_dphy_io_xusp;
       end else begin
         px_t e;
         e = exp_px.pop_front();
-        if (m_tdata !== e.data || m_tuser !== e.user || m_tlast !== e.last) begin
+        if (m_tdata !== e.data || m_tuser !== {1'b0, e.user} || m_tlast !== e.last) begin
           err($sformatf("pixel %0d: 0x%03h user %0d last %0d, expected 0x%03h user %0d last %0d",
                         n_px, m_tdata, m_tuser, m_tlast, e.data, e.user, e.last));
         end

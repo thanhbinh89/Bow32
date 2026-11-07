@@ -373,6 +373,7 @@ module bow_h264 import bow_bus_pkg::*; import bow_h264_pkg::*; #(
     .push_i  (!skid_empty),
     .wdata_i (skid_rdata),
     .full_o  (async_full),
+    .afull_o (),
     .rclk_i  (clk_i),
     .rrst_ni (rst_ni),
     .pop_i   (m_axis_tvalid_o && m_axis_tready_i),

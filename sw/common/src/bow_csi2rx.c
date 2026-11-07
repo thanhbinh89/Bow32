@@ -39,6 +39,30 @@ static uint32_t phy_cycles(uint32_t ns, uint32_t mhz) {
   return n < 1u ? 1u : n > 255u ? 255u : n;
 }
 
+/* SETTLE: the HS receiver starts looking for the sync byte in the middle of
+ * T_HS-SETTLE, 85 ns + 6 UI ... 145 ns + 10 UI after LP-00 at the pin, i.e.
+ * 115 ns + 8 UI; the state machine sees LP-00 ~8 ns (LP receiver) + 2
+ * (synchroniser) + LP_FILTER + 1 video cycles after the pin. */
+static uint32_t settle_cycles(uint32_t lane_rate, uint32_t mhz, uint32_t lp_filter) {
+  if (lane_rate == 0) return phy_cycles(70, mhz);
+  uint64_t ui_ps = 1000000000000ull / lane_rate;
+  uint64_t n = ((115000u - 8000u + 8u * ui_ps) * mhz + 500000u) / 1000000u;
+  uint64_t lat = 3u + lp_filter;
+  n = n > lat ? n - lat : 1u;
+  return n > 255u ? 255u : (uint32_t)n;
+}
+
+/* CTRL.EXTRA: bytes the end of a burst may add after a packet on every lane
+ * (T_HS-TRAIL max 105 ns + 12 UI, LP-11 detection ~60 ns, + 6 bytes of
+ * pipeline), times the lanes, + 8. */
+static uint32_t extra_bytes(uint32_t lane_rate, uint32_t lanes) {
+  if (lane_rate == 0) return 64u;
+  uint64_t ui_ps = 1000000000000ull / lane_rate;
+  uint64_t per = (165000u + 12u * ui_ps + 8u * ui_ps - 1u) / (8u * ui_ps) + 6u;
+  uint64_t n = per * lanes + 8u;
+  return n > 255u ? 255u : (uint32_t)n;
+}
+
 /* Clock miss timeout: the clock lane FSM sees one edge per byte clock
  * (8 UI), up to one video cycle late after the synchroniser. One byte clock
  * period, rounded up, + 3 cycles of margin: 5 cycles at 912 Mbit/s and
@@ -60,13 +84,14 @@ bool bow_csi2rx_probe(uint32_t *lanes, bool *phy) {
 
 void bow_csi2rx_start(uint32_t lanes, uint32_t dt, uint32_t lane_rate) {
   uint32_t mhz = CSI2RX_INFO_MHZ(CSI2RX->INFO);
-  uint32_t ctrl = (lanes >= 2 ? CSI2RX_CTRL_LANES2 : 0) | CSI2RX_CTRL_DT(dt);
+  uint32_t ctrl = (lanes >= 2 ? CSI2RX_CTRL_LANES2 : 0) | CSI2RX_CTRL_DT(dt) |
+                  CSI2RX_CTRL_EXTRA(extra_bytes(lane_rate, lanes >= 2 ? 2u : 1u));
   /* PHY_CFG and the stream selection only change while the receiver is off;
    * 1 us lets the LP state machines reach their off state. */
   rx_off();
   bow_delay_us(1);
-  CSI2RX->PHY_CFG = CSI2RX_PHY_SETTLE(phy_cycles(70, mhz)) | CSI2RX_PHY_LP_FILTER(2) |
-                    CSI2RX_PHY_CLK_SETTLE(phy_cycles(150, mhz)) |
+  CSI2RX->PHY_CFG = CSI2RX_PHY_SETTLE(settle_cycles(lane_rate, mhz, 2)) |
+                    CSI2RX_PHY_LP_FILTER(2) | CSI2RX_PHY_CLK_SETTLE(phy_cycles(150, mhz)) |
                     CSI2RX_PHY_CLK_MISS(clk_miss_cycles(lane_rate, mhz));
   CSI2RX->CTRL = ctrl;
   CSI2RX->CTRL = ctrl | CSI2RX_CTRL_PHY_EN | CSI2RX_CTRL_RX_EN;
@@ -139,11 +164,14 @@ void bow_csi2rx_counters(bow_csi2rx_cnt_t *c) {
   c->clk_burst = v & 0xFFFFu;
   c->lp_err = (v >> 16) & 0xFFu;
   c->misc_err = v >> 24;
+  v = CSI2RX->CNT_EXT;
+  c->extra = v & 0xFFFFu;
+  c->deskew = v >> 16;
 }
 
 uint32_t bow_csi2rx_link_errors(const bow_csi2rx_cnt_t *c) {
   return c->ecc_corr + c->ecc_err + c->crc + c->trunc + c->sot[0] + c->sot[1] + c->ovf +
-         c->misc_err;
+         c->misc_err + c->extra;
 }
 
 bool bow_csi2rx_link_check(uint32_t packets, uint32_t timeout_ms) {
@@ -438,8 +466,7 @@ void bow_csi2rx_print_status(void) {
   if (c.packets == 0) {
     bow_puts("csi2rx: no data\n");
   } else if (c.frames > 0 && err == 0 && c.lines == 0) {
-    /* frames without an accepted line: CTRL.DT/VC do not match the stream,
-     * or the sensor sends several packets per HS burst */
+    /* frames without an accepted line: CTRL.DT/VC do not match the stream */
     bow_puts("csi2rx: no lines (DT/VC filter?)\n");
   } else if (c.frames > 0 && err == 0) {
     bow_puts("csi2rx: link ok\n");
@@ -448,8 +475,11 @@ void bow_csi2rx_print_status(void) {
   }
   bow_printf("  frames %u lines/frame %u wc %u dt %02x sum %08x\n", c.frames,
              CSI2RX_FRAME_LINES(fi), CSI2RX_LINE_WC(li), CSI2RX_LINE_DT(li), sum);
-  bow_printf("  errors: ecc %u/%u crc %u trunc %u sot %u/%u drop %u ovf %u misc %u\n", c.ecc_corr,
-             c.ecc_err, c.crc, c.trunc, c.sot[0], c.sot[1], c.drop, c.ovf, c.misc_err);
+  bow_printf("  errors: ecc %u/%u crc %u trunc %u sot %u/%u drop %u ovf %u misc %u extra %u\n",
+             c.ecc_corr, c.ecc_err, c.crc, c.trunc, c.sot[0], c.sot[1], c.drop, c.ovf, c.misc_err,
+             c.extra);
+  if (c.extra) bow_puts("  several packets per HS burst? (extra bytes after packets: dropped)\n");
+  if (c.deskew) bow_printf("  deskew bursts %u\n", c.deskew);
   bow_printf("  timing: frame %u us, line %u ns, byte clock %u kHz\n", muldiv(ft, 1000000u, clk),
              muldiv(lt, 1000000000u, clk), byte_hz / 1000u);
   bow_printf("  phy: lp clk %s d0 %s d1 %s, bursts %u/%u clk %u, delay %u/%u\n",

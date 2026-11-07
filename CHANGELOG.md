@@ -94,6 +94,21 @@
   AXI4-Stream — tái hiện bằng mô phỏng, lỗi CRC không đi theo luồng ảnh, deskew, eye
   không bù nhiệt...), bảng khoảng cách theo use case, kiến trúc PPI / nhiều luồng và lộ
   trình đề xuất ([docs/csi2rx_review.md](docs/csi2rx_review.md)).
+- Bộ thu CSI-2, giai đoạn 0 của review ([docs/csi2rx_review.md](docs/csi2rx_review.md)
+  mục 10):
+  - `m_axis_tuser_o` 2 bit: [1] = dòng lỗi cùng `tlast` (CRC, FORMAT, bị cắt, tràn
+    FIFO, hoặc dòng bị mất trước đó trong frame). Nhóm FIFO 45 bit.
+  - Tràn FIFO giữ khung dòng: dòng đã bắt đầu luôn có `tlast` (nhờ `afull_o` mới của
+    `bow_fifo_async`), FIFO đầy thì bỏ cả dòng, `sof` chuyển sang nhóm kế tiếp.
+  - Burst deskew (sync `0xFF`) không còn là lỗi SOT; `CNT_EXT` (`0x048`): [15:0] burst
+    có byte sau packet vượt `CTRL.EXTRA` ([23:16], reset 64, `ERR_STATUS.EXTRA` [10]:
+    nhiều packet trong một burst), [31:16] burst deskew.
+  - Ghi thanh ghi theo byte enable.
+  - Driver: `SETTLE` giữa cửa sổ T_HS-SETTLE theo tốc độ lane (18 thay cho 14 ở
+    912 Mbit/s), `CTRL.EXTRA` theo tốc độ lane, `extra` trong bộ đếm và
+    `bow_csi2rx_link_errors()`.
+  - DV: case `ovf` so từng pixel khi tràn FIFO; case mới `deskew`, `extra`; lệnh `wrbe`
+    và byte sau packet trong `stim.txt`; cột `tuser[1]` trong `out.txt`.
 - **Mã khối MKV** `bow_mkv` (`hw/ip/mkv`) theo TCVN 14263:2024 "Thuật toán mã khối
   MKV" (lúc đầu theo bản dự thảo, xem Changed): MKV-128 (khoá 128 / 192 / 256 bit)
   và MKV-256 (khoá 256 / 384 / 512 bit), R = 7 / 8 / 9. Lược đồ khoá trong phần cứng (8R + 1 chu kỳ, khoá nửa vòng trong

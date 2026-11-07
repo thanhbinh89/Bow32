@@ -13,6 +13,10 @@
 //                                                                                       |
 //   m_axis <- bow_csi2rx_out <-------------- bow_fifo_async (byte -> video clock) <-----+
 //
+// m_axis_tuser_o[0] = first pixel of a frame, [1] = line error, with tlast:
+// the line has a CRC or format error, was truncated or cut by a FIFO
+// overflow, or lines of the frame were lost before it.
+//
 // Clock domains:
 //   clk_i       CPU: registers, counters, LOG/RAW read (bow_csi2rx_regs)
 //   vid_clk_i   video: LP state machines, PHY control, pixel output
@@ -51,7 +55,7 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
   output logic                  m_axis_tvalid_o,
   input  logic                  m_axis_tready_i,
   output logic [9:0]            m_axis_tdata_o,
-  output logic                  m_axis_tuser_o,   // start of frame (first pixel)
+  output logic [1:0]            m_axis_tuser_o,   // [0] start of frame, [1] line error (tlast)
   output logic                  m_axis_tlast_o,   // end of line
   input  logic                  byte_clk_i,
   output logic                  byte_ce_o,        // video domain flop (clock lane FSM)
@@ -67,7 +71,7 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
 );
 
   localparam int unsigned NumPktEv = $bits(csi2_pkt_ev_t);
-  localparam int unsigned NumBEv   = NumPktEv + 1 + Lanes;   // packet, skew, sot per lane
+  localparam int unsigned NumBEv   = NumPktEv + 2 + Lanes;   // packet, skew, deskew, sot per lane
   localparam int unsigned NumVEv   = 2 * (Lanes + 1);        // hs, lp_err per lane FSM
 
   // =========================================================================
@@ -312,6 +316,7 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
   logic                  lanes2, vc_any;
   logic [1:0]            vc;
   logic [5:0]            dt;
+  logic [7:0]            extra;
 
   always_ff @(posedge byte_clk_i or negedge brst_n) begin
     if (!brst_n) rx_q <= '0;
@@ -319,12 +324,12 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
   end
 
   bow_csi2_sync #(
-    .Width (10)
+    .Width (18)
   ) u_sync_bcfg (
     .clk_i  (byte_clk_i),
     .rst_ni (brst_n),
-    .d_i    ({cfg.lanes2, cfg.vc_any, cfg.vc, cfg.dt}),
-    .q_o    ({lanes2, vc_any, vc, dt})
+    .d_i    ({cfg.lanes2, cfg.vc_any, cfg.vc, cfg.dt, cfg.extra}),
+    .q_o    ({lanes2, vc_any, vc, dt, extra})
   );
 
   bow_csi2_sync #(
@@ -336,7 +341,7 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
     .q_o    (arm)
   );
 
-  logic [Lanes-1:0]      al_valid, al_sot, al_sync_err;
+  logic [Lanes-1:0]      al_valid, al_sot, al_sync_err, al_deskew;
   logic [Lanes-1:0][7:0] al_data;
 
   for (genvar l = 0; l < Lanes; l++) begin : g_align
@@ -349,7 +354,8 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
       .data_o        (al_data[l]),
       .sot_o         (al_sot[l]),
       .locked_o      (),
-      .ev_sync_err_o (al_sync_err[l])
+      .ev_sync_err_o (al_sync_err[l]),
+      .ev_deskew_o   (al_deskew[l])
     );
   end
 
@@ -376,7 +382,7 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
   );
 
   csi2_pkt_ev_t pkt_ev;
-  logic         px_sol, px_raw10, px_eol, px_ovf, fs, fe;
+  logic         px_sol, px_raw10, px_eol, px_err, px_ovf, fs, fe;
   logic [1:0]   px_valid;
   logic [15:0]  px_data;
   logic         log_we, log_fs, log_fe;
@@ -388,6 +394,7 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
     .vc_i          (vc),
     .vc_any_i      (vc_any),
     .dt_i          (dt),
+    .extra_i       (extra),
     .valid_i       (lm_valid),
     .data_i        (lm_data),
     .nbytes_i      (lm_nbytes),
@@ -398,6 +405,7 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
     .px_valid_o    (px_valid),
     .px_data_o     (px_data),
     .px_eol_o      (px_eol),
+    .px_err_o      (px_err),
     .px_ovf_i      (px_ovf),
     .fs_o          (fs),
     .fe_o          (fe),
@@ -414,7 +422,7 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
     .ev_o          (pkt_ev)
   );
 
-  logic              grp_push, fifo_full, fifo_empty, fifo_pop;
+  logic              grp_push, fifo_full, fifo_afull, fifo_empty, fifo_pop;
   logic [GroupW-1:0] grp_wdata, grp_rdata;
 
   bow_csi2_unpack u_unpack (
@@ -425,11 +433,13 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
     .valid_i     (px_valid),
     .data_i      (px_data),
     .eol_i       (px_eol),
+    .err_i       (px_err),
     .fs_i        (fs),
     .fe_i        (fe),
     .push_o      (grp_push),
     .group_o     (grp_wdata),
     .full_i      (fifo_full),
+    .afull_i     (fifo_afull),
     .ovf_o       (px_ovf),
     .frame_sum_o (frame_sum)
   );
@@ -443,6 +453,7 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
     .push_i  (grp_push),
     .wdata_i (grp_wdata),
     .full_o  (fifo_full),
+    .afull_o (fifo_afull),
     .rclk_i  (vid_clk_i),
     .rrst_ni (vdrst_n),
     .pop_i   (fifo_pop),
@@ -477,7 +488,9 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
   // is held in the packet layer and unpacker until the next event of the kind.
   logic [NumBEv-1:0] bev, bev_sys;
 
-  assign bev = {al_sync_err, lm_skew, pkt_ev};
+  // deskew bursts are counted on lane 0 (the other lanes then deskew too,
+  // or the burst is a skew error)
+  assign bev = {al_sync_err, al_deskew[0], lm_skew, pkt_ev};
 
   for (genvar i = 0; i < NumBEv; i++) begin : g_cdc_bev
     bow_cdc_pulse u_cdc (
@@ -494,6 +507,7 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
     ev_sys                 = '0;
     ev_sys.pl              = bev_sys[NumPktEv-1:0];
     ev_sys.skew            = bev_sys[NumPktEv];
+    ev_sys.deskew          = bev_sys[NumPktEv + 1];
     ev_sys.sot[Lanes-1:0]  = bev_sys[NumBEv-1 -: Lanes];
     ev_sys.hs[Lanes:0]     = vev_sys[Lanes:0];
     ev_sys.lp_err[Lanes:0] = vev_sys[NumVEv-1 -: Lanes + 1];
@@ -657,6 +671,6 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
   );
 
   logic unused;
-  assign unused = ^{hs_act[0], cfg.phy_en, cfg.rx_en};
+  assign unused = ^{hs_act[0], cfg.phy_en, cfg.rx_en, al_deskew};
 
 endmodule

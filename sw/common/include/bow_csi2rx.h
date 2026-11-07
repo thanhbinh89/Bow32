@@ -6,12 +6,13 @@
  *
  * The receiver decodes the packets of a CSI-2 camera (1 or 2 data lanes,
  * RAW8 / RAW10) and streams the pixels of one virtual channel and data type
- * into the ISP. The sampling point of every data lane is an IDELAY tap that
- * software finds at run time (bow_csi2rx_calibrate): the capture has no
- * static timing.
+ * into the ISP (AXI4-Stream, tuser[0] = start of frame, tuser[1] = line
+ * error with tlast). The sampling point of every data lane is an IDELAY tap
+ * that software finds at run time (bow_csi2rx_calibrate): the capture has
+ * no static timing.
  *
  * The hardware takes the configuration without handshake, so:
- *   - change CTRL.LANES / VC / VC_ANY / DT only while CTRL.RX_EN = 0,
+ *   - change CTRL.LANES / VC / VC_ANY / DT / EXTRA only while CTRL.RX_EN = 0,
  *   - change PHY_CFG and CTRL.CLK_FORCE only while CTRL.PHY_EN = 0,
  *   - start the receiver before the sensor streams (it must see LP-11 first)
  *     and stop it after the sensor has finished its last frame.
@@ -45,7 +46,9 @@ typedef struct {
   volatile uint32_t CNT_BURST;   /* 0x040 R   HS entries [15:0] lane 0 [31:16] lane 1 */
   volatile uint32_t CNT_MISC;    /* 0x044 R   [15:0] clock lane HS entries [23:16] LP errors
                                   *           [31:24] skew + format + frame errors */
-  uint32_t reserved0[2];         /* 0x048 */
+  volatile uint32_t CNT_EXT;     /* 0x048 R   [15:0] bursts with more than CTRL.EXTRA bytes
+                                  *           after the packet [31:16] deskew bursts */
+  uint32_t reserved0;            /* 0x04C */
   volatile uint32_t FRAME_INFO;  /* 0x050 R   last complete frame: [15:0] lines [31:16] number */
   volatile uint32_t LINE_INFO;   /* 0x054 R   last accepted line: [15:0] WC [21:16] DT [23:22] VC */
   volatile uint32_t FRAME_SUM;   /* 0x058 R   sum of the pixel values of the last frame */
@@ -64,6 +67,7 @@ typedef struct {
 } bow_csi2rx_regs_t;
 
 _Static_assert(__builtin_offsetof(bow_csi2rx_regs_t, CNT_MISC) == 0x044, "CSI2RX CNT offset");
+_Static_assert(__builtin_offsetof(bow_csi2rx_regs_t, CNT_EXT) == 0x048, "CSI2RX CNT_EXT offset");
 _Static_assert(__builtin_offsetof(bow_csi2rx_regs_t, FRAME_INFO) == 0x050, "CSI2RX INFO offset");
 _Static_assert(__builtin_offsetof(bow_csi2rx_regs_t, DLY) == 0x070, "CSI2RX DLY offset");
 _Static_assert(__builtin_offsetof(bow_csi2rx_regs_t, LOG_CTRL) == 0x080, "CSI2RX LOG_CTRL offset");
@@ -88,6 +92,11 @@ _Static_assert(__builtin_offsetof(bow_csi2rx_regs_t, RAW) == 0x800, "CSI2RX RAW 
 #define CSI2RX_CTRL_VC_MASK   (3u << 5)
 #define CSI2RX_CTRL_DT(d)     (((uint32_t)(d) & 0x3Fu) << 8)
 #define CSI2RX_CTRL_DT_MASK   (0x3Fu << 8)
+/* More than EXTRA bytes after a packet in its HS burst: ERR_STATUS.EXTRA (the
+ * burst most likely carries further packets, which are dropped). 0 = off,
+ * reset 64; must be above the trail bytes (bow_csi2rx_start sets it). */
+#define CSI2RX_CTRL_EXTRA(n)   (((uint32_t)(n) & 0xFFu) << 16)
+#define CSI2RX_CTRL_EXTRA_MASK (0xFFu << 16)
 
 #define CSI2RX_PHY_SETTLE(n)     ((uint32_t)(n) & 0xFFu)
 #define CSI2RX_PHY_LP_FILTER(n)  (((uint32_t)(n) & 0xFu) << 8)
@@ -119,7 +128,8 @@ _Static_assert(__builtin_offsetof(bow_csi2rx_regs_t, RAW) == 0x800, "CSI2RX RAW 
 #define CSI2RX_ERR_FORMAT   (1u << 7)
 #define CSI2RX_ERR_FRAME    (1u << 8)
 #define CSI2RX_ERR_LP       (1u << 9)
-#define CSI2RX_ERR_ALL      0x3FFu
+#define CSI2RX_ERR_EXTRA    (1u << 10) /* bytes after a packet in its burst (CTRL.EXTRA) */
+#define CSI2RX_ERR_ALL      0x7FFu
 
 #define CSI2RX_FRAME_LINES(f) ((f) & 0xFFFFu)
 #define CSI2RX_FRAME_NUM(f)   ((f) >> 16)
@@ -172,7 +182,7 @@ _Static_assert(__builtin_offsetof(bow_csi2rx_regs_t, RAW) == 0x800, "CSI2RX RAW 
 
 typedef struct {
   uint32_t frames, packets, lines, ecc_corr, ecc_err, crc, trunc, sot[2], drop, ovf, burst[2],
-      clk_burst, lp_err, misc_err;
+      clk_burst, lp_err, misc_err, extra, deskew;
 } bow_csi2rx_cnt_t;
 
 typedef struct {
@@ -184,12 +194,16 @@ typedef struct {
 bool bow_csi2rx_probe(uint32_t *lanes, bool *phy);
 
 /* PHY_CFG for the video clock of INFO and the lane rate (bit/s per lane,
- * e.g. IMX219_LANE_RATE): SETTLE 70 ns, CLK_SETTLE 150 ns, LP_FILTER 2 and
- * CLK_MISS = one byte clock period (8 UI) + 3 video cycles, since the clock
- * lane activity is seen as byte clock edges. CTRL = PHY_EN | RX_EN | lanes
- * (1 or 2) | dt (VC 0); counters, ERR_STATUS and IRQ_STATUS cleared. Call
- * BEFORE the sensor starts streaming: the receiver must see LP-11 first.
- * Lane rates below ~350 Mbit/s are not supported (docs/ip/csi2rx.md). */
+ * e.g. IMX219_LANE_RATE): SETTLE ends in the middle of T_HS-SETTLE (85 ns +
+ * 6 UI ... 145 ns + 10 UI from LP-00 at the pin, minus the LP receiver and
+ * filter latency; 70 ns if lane_rate is 0), CLK_SETTLE 150 ns, LP_FILTER 2
+ * and CLK_MISS = one byte clock period (8 UI) + 3 video cycles, since the
+ * clock lane activity is seen as byte clock edges. CTRL = PHY_EN | RX_EN |
+ * lanes (1 or 2) | dt (VC 0) | EXTRA above the trail bytes of the lane rate
+ * (T_HS-TRAIL max + LP-11 detection); counters, ERR_STATUS and IRQ_STATUS
+ * cleared. Call BEFORE the sensor starts streaming: the receiver must see
+ * LP-11 first. Lane rates below ~350 Mbit/s are not supported
+ * (docs/ip/csi2rx.md). */
 void bow_csi2rx_start(uint32_t lanes, uint32_t dt, uint32_t lane_rate);
 
 /* Call AFTER the sensor stream-off: waits until the current frame has ended
@@ -205,7 +219,8 @@ void bow_csi2rx_set_rx(bool on);
 void bow_csi2rx_clear(void);
 
 void bow_csi2rx_counters(bow_csi2rx_cnt_t *c);
-/* ecc_corr + ecc_err + crc + trunc + sot + ovf + misc_err (0 = clean link). */
+/* ecc_corr + ecc_err + crc + trunc + sot + ovf + misc_err + extra (0 = clean
+ * link). Deskew bursts are not errors. */
 uint32_t bow_csi2rx_link_errors(const bow_csi2rx_cnt_t *c);
 
 /* Clear the counters, then true once `packets` packets arrived without a

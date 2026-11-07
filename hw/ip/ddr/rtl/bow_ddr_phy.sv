@@ -378,6 +378,7 @@ module bow_ddr_phy import bow_ddr_pkg::*; #(
     .push_i  (1'b1),
     .wdata_i (in_q),
     .full_o  (rf_full),
+    .afull_o (),
     .rclk_i  (clk_i),
     .rrst_ni (rrst_n),
     .pop_i   (rf_pop),

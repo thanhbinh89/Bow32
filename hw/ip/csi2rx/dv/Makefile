@@ -6,7 +6,8 @@
 #
 #   make test                          random cases (SEEDS x lanes x errors) + directed tests
 #   make run SEED=7 LANES=1 ERRORS=1   one random case, dumps in build/csi2rx_dv/<name>
-#   make run TEST=clk                  one directed test (lp watchdog clk cmd ovf stop byteclk eye)
+#   make run TEST=clk                  one directed test (lp watchdog clk cmd ovf stop byteclk eye
+#                                      deskew extra)
 #   make test SEEDS="1 2 3 4 5 6 7 8"
 # Options of 'run': LANES (lanes used), DUT_LANES (Lanes parameter, default LANES),
 # ERRORS=1, RAW8=1, CONTCLK=1.
@@ -25,7 +26,7 @@ DUT_LANES ?= $(LANES)
 ERRORS    ?= 0
 RAW8      ?= 0
 CONTCLK   ?= 0
-DIRECTED  := lp watchdog clk cmd ovf stop byteclk eye
+DIRECTED  := lp watchdog clk cmd ovf stop byteclk eye deskew extra
 
 sim_bin  = $(BUILD)/obj_l$(1)/Vtb_bow_csi2rx
 FLISTS  := -F $(REPO)/hw/ip/common/common.f -F $(REPO)/hw/ip/bus/bus.f -F $(REPO)/hw/ip/csi2rx/csi2rx.f

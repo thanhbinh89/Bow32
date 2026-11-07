@@ -407,7 +407,10 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
   // Camera path: MIPI CSI-2 receiver -> ISP (registers on the peripheral bus,
   // capture buffer on the main bus), I2C0 for the sensor control
   // ---------------------------------------------------------------------------
-  logic       cam_tvalid, cam_tready, cam_tuser, cam_tlast;
+  // cam_tuser[1] (line error at tlast) is not used yet: the ISP drops frames
+  // whose geometry is wrong, a line with a CRC error passes.
+  logic       cam_tvalid, cam_tready, cam_tlast;
+  logic [1:0] cam_tuser;
   logic [9:0] cam_tdata;
 
   bow_csi2rx #(
@@ -440,6 +443,9 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
     .dly_tap_i       (dphy_dly_tap_i)
   );
 
+  logic unused_cam;
+  assign unused_cam = cam_tuser[1];
+
   logic        isp_tvalid, isp_tuser, isp_tlast;
   logic [23:0] isp_tdata;
 
@@ -464,7 +470,7 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
     .s_axis_tvalid_i (cam_tvalid),
     .s_axis_tready_o (cam_tready),
     .s_axis_tdata_i  (cam_tdata),
-    .s_axis_tuser_i  (cam_tuser),
+    .s_axis_tuser_i  (cam_tuser[0]),
     .s_axis_tlast_i  (cam_tlast),
     .m_axis_tvalid_o (isp_tvalid),
     .m_axis_tready_i (isp_tready_i),
