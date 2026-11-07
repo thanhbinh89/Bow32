@@ -38,7 +38,8 @@ deps: $(IBEX_DIR)/rtl/ibex_top.sv
 sw:
 	$(MAKE) -C sw all
 
-# The SoC as built for simulation (DdrEn = 0) and with each LiteDRAM core
+# The SoC as built for simulation (DdrEn = HrEn = 0), with HyperRAM (pads, and the MPS4
+# loopback configuration together with DDR2), and with each LiteDRAM core
 # (DDR2 at 133 MHz, DDR3 at 125 MHz CK), then two CKs that bow_ddr's
 # elaboration checks must refuse (refresh interval, CK above the core's).
 LINT_CMD = $(VERILATOR) --lint-only -Wall hw/lint/verilator_waivers.vlt \
@@ -48,6 +49,8 @@ lint: deps
 	$(LINT_CMD)
 	$(LINT_CMD) -GDdrEn=1\'b1 -GDdrMem=2 -GDdrClkHz=133333333
 	$(LINT_CMD) -GDdrEn=1\'b1 -GDdrMem=3 -GDdrClkHz=125000000
+	$(LINT_CMD) -GHrEn=1\'b1
+	$(LINT_CMD) -GHrEn=1\'b1 -GHrPhyKind=2 -GHrHasLs=1\'b0 -GHrEmuBytes=4194304 -GDdrEn=1\'b1
 	@# the elaboration checks of bow_ddr must refuse a CK the core was not made for
 	@! $(LINT_CMD) -GDdrEn=1\'b1 -GDdrMem=2 -GDdrClkHz=132000000 > /dev/null 2>&1 || \
 	  { echo "lint: bow_ddr accepted the DDR2 core at 132 MHz (tREFI > 7.8 us)"; exit 1; }
@@ -70,6 +73,7 @@ test-ip:
 	$(MAKE) -C hw/ip/h264/dv test
 	$(MAKE) -C hw/ip/mkv/dv test
 	$(MAKE) -C hw/ip/ddr/dv test
+	$(MAKE) -C hw/ip/hyperram/dv test
 
 test-fpga-dv:
 	$(MAKE) -C hw/fpga/common/dv test

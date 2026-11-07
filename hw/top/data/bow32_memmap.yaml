@@ -27,6 +27,7 @@ main_bus:
   - {name: axil,   base: 0x50000000, size: 0x00010000, desc: "AXI4-Lite window (devices of the FPGA block design)"}
   - {name: vram,   base: 0x24000000, size: 0x00100000, desc: "Video RAM (1 MiB, UltraRAM): DMA buffers, H.264 stream"}
   - {name: ddr,    base: 0x80000000, size: 0x20000000, desc: "DDR2/DDR3 SDRAM window (bow_ddr, 512 MiB decode, real size = DRAM size)"}
+  - {name: hyperram, base: 0x60000000, size: 0x10000000, desc: "HyperRAM window (bow_hyperram, 256 MiB decode, real size = device size)"}
 
 # Devices on the peripheral bus (second bow_bus_xbar behind 'periph').
 periph_bus:
@@ -44,6 +45,7 @@ periph_bus:
   - {name: mkv,        base: 0x4000B000, size: 0x1000, desc: "MKV block cipher (TCVN 14263:2024): MKV-128 / MKV-256"}
   - {name: ddr_ctrl,   base: 0x4000C000, size: 0x2000, desc: "DDR controller CSRs (LiteDRAM: DFII, BIST, init status)"}
   - {name: ddr_phy,    base: 0x4000E000, size: 0x1000, desc: "DDR PHY and bus bridge registers (bow_ddr)"}
+  - {name: hyperram_reg, base: 0x4000F000, size: 0x1000, desc: "HyperRAM controller registers (bow_hyperram: HyperBus master, PHY, BIST)"}
 
 # Ibex fast interrupts: irq_fast_i[line] -> mcause = 0x80000000 | (16 + line)
 irq_fast:
@@ -59,3 +61,4 @@ irq_fast:
   - {name: dma,   line: 9, desc: "DMA channel done / stream packet / bus error"}
   - {name: mkv,   line: 10, desc: "MKV command done / command error"}
   - {name: ddr,   line: 11, desc: "DDR PHY / bridge: capture / phase done, errors"}
+  - {name: hyperram, line: 12, desc: "HyperRAM: command / capture / BIST done, errors"}

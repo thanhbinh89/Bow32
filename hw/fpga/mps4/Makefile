@@ -9,6 +9,8 @@
 #                             (absolute path, e.g. $PWD/build/sw/hello/hello.vmem)
 #   make DDR_LOOPBACK=0       DDR pads on the FMC+ DDR2 card instead of the
 #                             loopback build (build only until the card exists)
+#   make HR_LOOPBACK=0        HyperRAM pads on the card's S80KS2562 instead of the
+#                             loopback build (default: DDR_LOOPBACK)
 #   make JOBS=8               parallel Vivado jobs
 #
 # Loading: python3 tools/bow32_mps4.py deploy (copies $(OUT)/sdcard/MB/
@@ -27,6 +29,7 @@ FLASH_VMEM   ?=
 VIVADO       ?= vivado
 JOBS         ?= 4
 DDR_LOOPBACK ?= 1
+HR_LOOPBACK  ?= $(DDR_LOOPBACK)
 
 BIT    := $(OUT)/bow32_mps4.bit
 SD_DIR := $(OUT)/sdcard
@@ -40,7 +43,7 @@ rom:
 bitstream: rom
 	@mkdir -p $(OUT)
 	cd $(OUT) && $(VIVADO) -mode batch -nojournal -log vivado.log \
-	  -source $(CURDIR)/tcl/build.tcl -tclargs $(OUT) $(ROM_VMEM) "$(FLASH_VMEM)" $(JOBS) $(DDR_LOOPBACK)
+	  -source $(CURDIR)/tcl/build.tcl -tclargs $(OUT) $(ROM_VMEM) "$(FLASH_VMEM)" $(JOBS) $(DDR_LOOPBACK) $(HR_LOOPBACK)
 
 # MB/HBI0376B/board.txt points the MCC at BOW32/bow32.txt (FPGA image,
 # oscillators, resets); 8.3 names, lower case files, upper case directories.

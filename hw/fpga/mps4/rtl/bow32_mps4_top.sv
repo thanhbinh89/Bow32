@@ -37,7 +37,7 @@
 //   PB4..PB7  USER_SW[0..3]    switches, input only, IN = 1 when on
 //   USER_SW[4..7] are not connected. Status LEDs (not GPIO):
 //   USER_nLED[8] blinks (1.5 Hz) while the SoC is out of reset,
-//   USER_nLED[9] lit while all three MMCMs are locked (DDR clocks running).
+//   USER_nLED[9] lit while all five MMCMs are locked (DDR and HyperRAM clocks running).
 // TRM "minimum RTL" (Table 3-2): MMB_IDCLK, MMB_SCK, QSPI_SCLK,
 // IOFPGA_SYSWDT, WDOG_RREQ, CFG_DATAOUT, AUD_RST, USD_CLK, SH_nRST, PEX_nPERST
 // low; QSPI_nCS, SMBM_nWAIT high (bow32.txt: FPGA_SCC/SMB/DDR FALSE).
@@ -53,6 +53,18 @@
 //   DdrLoopback = 0  FMC+_DDR2_HyperRam card on the FMC+ connector (FMC VADJ
 //                    1.5 V), build only until the card exists
 //
+// HyperRAM (bow_hyperram in u_soc: HyperBus master for the S80KS2562 of the
+// same card, registers at 0x4000_F000, window 0x6000_0000, 32 MiB) with its
+// clocks (bow_hyperram_clk_xusp: hr_clk 100 MHz, write clock with fine phase
+// shift, read capture clock with fine phase shift, fed by the oscillator
+// BUFG of u_clk) and pads (bow_hyperram_io_xilinx, constr/hyperram_*.xdc):
+//   HrLoopback = 1  pads on unconnected balls of bank 65, read data from the
+//                   on-chip HyperRAM emulator bow_hyperram_dev (4 MiB of
+//                   UltraRAM) come back through the pads (Makefile
+//                   HR_LOOPBACK=1, the default)
+//   HrLoopback = 0  the card's S80KS2562 behind its TXV0108 level shifters
+//                   (FMC HB / LA pins, VADJ 1.5 V)
+//
 // No camera, no video and no AXI4-Lite device (as on hw/fpga/kv260): the
 // ISP and the CSI-2 receiver run on the SoC clock with the D-PHY inputs tied
 // to LP-11, the AXI4-Lite window answers with a bus error after the timeout.
@@ -60,7 +72,8 @@
 module bow32_mps4_top import bow_ddr_pkg::*; #(
   parameter     RomInitFile   = "",
   parameter     FlashInitFile = "",
-  parameter bit DdrLoopback   = 1'b1
+  parameter bit DdrLoopback   = 1'b1,
+  parameter bit HrLoopback    = 1'b1
 ) (
   input  wire        osc_clk_i,        // OSCCLKA[2], 100 MHz
   input  logic       iofpga_nrst_i,    // IOFPGA_nRST, active low
@@ -106,7 +119,18 @@ module bow32_mps4_top import bow_ddr_pkg::*; #(
   inout  wire        ddr_dqs_n_io,
   output wire        ddr_ls_oe_n_o,    // level shifters OE# (card: OE_N)
   output wire        ddr_ls_dir_dq_o,  // DQ_DIR
-  output wire        ddr_ls_dir_dqs_o  // DQS_DIR
+  output wire        ddr_ls_dir_dqs_o, // DQS_DIR
+
+  // HyperRAM pads
+  output wire        hr_ck_p_o,
+  output wire        hr_ck_n_o,
+  output wire        hr_cs_n_o,
+  output wire        hr_rst_n_o,
+  inout  wire [7:0]  hr_dq_io,
+  inout  wire        hr_rwds_io,
+  output wire        hr_ls_oe_n_o,     // level shifters OE# (card: FMC_HB_OE_N)
+  output wire        hr_ls_dir_dq_o,   // FMC_HB_DIR
+  output wire        hr_ls_dir_rwds_o  // FMC_HB_RWDS_DIR
 );
 
   localparam int unsigned SysClkHz = 50_000_000;
@@ -128,10 +152,20 @@ module bow32_mps4_top import bow_ddr_pkg::*; #(
   localparam int unsigned DdrPhyKind   = DdrLoopback ? 2 : 1;      // 2 = loopback emulator
   localparam int unsigned DdrEmuBytes  = DdrLoopback ? (4 << 20) : 0;   // 4 MiB of UltraRAM
 
+  // HyperRAM configuration (bow32_top parameters, docs/ip/hyperram.md): CK 100
+  // MHz (VCO 1200 MHz / 12), 672 fine phase steps per CK, S80KS2562 32 MiB
+  localparam int unsigned HrDivide    = 12;
+  localparam int unsigned HrClkHz     = 100_000_000;
+  localparam int unsigned HrPsSteps   = 56 * HrDivide;
+  localparam int unsigned HrPhyKind   = HrLoopback ? 2 : 1;
+  localparam int unsigned HrEmuBytes  = HrLoopback ? (1 << 20) : 0;    // 1 MiB: 32 UltraRAM (more
+                                                                        // pushes the DDR loopback
+                                                                        // logic away from its pads)
+
   // ---------------------------------------------------------------------------
   // Clocks and resets
   // ---------------------------------------------------------------------------
-  logic clk_sys, ddr_clk, ddr_sys_clk, ddr_wclk, ddr_wclk90, ddr_rd_clk;
+  logic clk_sys, ddr_clk, ddr_sys_clk, ddr_wclk, ddr_wclk90, ddr_rd_clk, osc_ibuf;
   logic locked_sys, ddr_locked;
   logic ddr_ps_en, ddr_ps_inc, ddr_ps_done, ddr_wps_en, ddr_wps_inc, ddr_wps_done;
 
@@ -151,6 +185,7 @@ module bow32_mps4_top import bow_ddr_pkg::*; #(
     .ddr_wclk_o   (ddr_wclk),
     .ddr_wclk90_o (ddr_wclk90),
     .ddr_rd_clk_o (ddr_rd_clk),
+    .clk_ibuf_o   (osc_ibuf),
     .locked_sys_o (locked_sys),
     .locked_ddr_o (ddr_locked),
     .ps_en_i      (ddr_ps_en),
@@ -159,6 +194,30 @@ module bow32_mps4_top import bow_ddr_pkg::*; #(
     .wps_en_i     (ddr_wps_en),
     .wps_inc_i    (ddr_wps_inc),
     .wps_done_o   (ddr_wps_done)
+  );
+
+  // HyperRAM clocks: constr/mps4.xdc names them after the pins of u_hr_clk
+  logic hr_clk, hr_wclk, hr_rd_clk, hr_locked;
+  logic hr_ps_en, hr_ps_inc, hr_ps_done, hr_wps_en, hr_wps_inc, hr_wps_done;
+
+  bow_hyperram_clk_xusp #(
+    .ClkInPeriodNs (10.0),
+    .InDivide      (1),
+    .VcoMult       (12.0),
+    .HrDivide      (HrDivide)
+  ) u_hr_clk (
+    .clk_in_i    (osc_ibuf),
+    .rst_i       (~iofpga_nrst_i),
+    .hr_clk_o    (hr_clk),
+    .hr_wclk_o   (hr_wclk),
+    .hr_rd_clk_o (hr_rd_clk),
+    .locked_o    (hr_locked),
+    .ps_en_i     (hr_ps_en),
+    .ps_inc_i    (hr_ps_inc),
+    .ps_done_o   (hr_ps_done),
+    .wps_en_i    (hr_wps_en),
+    .wps_inc_i   (hr_wps_inc),
+    .wps_done_o  (hr_wps_done)
   );
 
   // Asynchronous, released through bow_rstmgr inside the SoC.
@@ -176,6 +235,11 @@ module bow32_mps4_top import bow_ddr_pkg::*; #(
   ddr_io_in_t  ddr_io_i;   // pads -> PHY, ddr_rd_clk domain
   logic [31:0] ddr_dbg;    // emulator status -> bow_ddr DBG register
 
+  bow_hyperram_pkg::hr_io_out_t hr_io_o;   // PHY -> pads, hr_clk domain
+  bow_hyperram_pkg::hr_io_in_t  hr_io_i;   // pads -> PHY, hr_rd_clk domain
+  logic                         hr_rwds_pad;
+  logic [31:0]                  hr_dbg;    // emulator status -> bow_hyperram DBG register
+
   bow32_top #(
     .ClkFreqHz     (SysClkHz),
     .BootBaud      (115_200),
@@ -190,7 +254,14 @@ module bow32_mps4_top import bow_ddr_pkg::*; #(
     .DdrClkHz      (DdrClkHz),
     .DdrPsSteps    (DdrPsSteps),
     .DdrPhyKind    (DdrPhyKind),
-    .DdrEmuBytes   (DdrEmuBytes)
+    .DdrEmuBytes   (DdrEmuBytes),
+    .HrEn          (1'b1),
+    .HrClkHz       (HrClkHz),
+    .HrPsSteps     (HrPsSteps),
+    .HrPhyKind     (HrPhyKind),
+    .HrHasLs       (!HrLoopback),
+    .HrMemBytes    (32 << 20),
+    .HrEmuBytes    (HrEmuBytes)
   ) u_soc (
     .clk_i        (clk_sys),
     .rst_ni       (rst_n),
@@ -261,6 +332,20 @@ module bow32_mps4_top import bow_ddr_pkg::*; #(
     .ddr_io_o       (ddr_io_o),
     .ddr_io_i       (ddr_io_i),
     .ddr_dbg_i      (ddr_dbg),
+    // HyperRAM: clocks and phase steps of u_hr_clk, pad bundle of u_hr_io
+    .hr_clk_i       (hr_clk),
+    .hr_rst_ni      (hr_locked),
+    .hr_rd_clk_i    (hr_rd_clk),
+    .hr_ps_en_o     (hr_ps_en),
+    .hr_ps_inc_o    (hr_ps_inc),
+    .hr_ps_done_i   (hr_ps_done),
+    .hr_wps_en_o    (hr_wps_en),
+    .hr_wps_inc_o   (hr_wps_inc),
+    .hr_wps_done_i  (hr_wps_done),
+    .hr_io_o        (hr_io_o),
+    .hr_io_i        (hr_io_i),
+    .hr_rwds_pad_i  (hr_rwds_pad),
+    .hr_dbg_i       (hr_dbg),
     .sys_rst_no   (sys_rst_n),
     .core_sleep_o ()
   );
@@ -354,6 +439,74 @@ module bow32_mps4_top import bow_ddr_pkg::*; #(
   );
 
   // ---------------------------------------------------------------------------
+  // HyperRAM: pads (+ loopback emulator)
+  // ---------------------------------------------------------------------------
+  logic            hr_lb_dq_en, hr_lb_rwds_en;
+  logic [1:0][7:0] hr_lb_dq;
+  logic [1:0]      hr_lb_rwds;
+
+  // HyperRAM emulator of the loopback build (bow_hyperram_dev): answers the
+  // PHY's transactions through the pads; the card build has the real
+  // S80KS2562 instead. 4 MiB of the 32 MiB device: software keeps to the
+  // first HrEmuBytes (EMU register), a word beyond is a DBG error.
+  if (HrLoopback) begin : g_hr_lb
+    logic hr_lb_rst_n;
+
+    bow_rst_sync u_hr_lb_rst (
+      .clk_i  (hr_clk),
+      .rst_ni (hr_locked),
+      .rst_no (hr_lb_rst_n)
+    );
+
+    bow_hyperram_dev #(
+      .MemBytes   (HrEmuBytes),
+      .UseUram    (1'b1),
+      .TcsmCycles (400),          // 4 us at 100 MHz (CR1[1:0] = 01)
+      .WaitCycles (10000)         // 100 us: below the driver's 150 us wake-up wait
+    ) u_hr_dev (
+      .clk_i        (hr_clk),
+      .rst_ni       (hr_lb_rst_n),
+      .io_i         (hr_io_o),
+      .lb_dq_en_o   (hr_lb_dq_en),
+      .lb_dq_o      (hr_lb_dq),
+      .lb_rwds_en_o (hr_lb_rwds_en),
+      .lb_rwds_o    (hr_lb_rwds),
+      .dbg_o        (hr_dbg)
+    );
+  end else begin : g_hr_card
+    assign hr_lb_dq_en   = 1'b0;
+    assign hr_lb_dq      = '0;
+    assign hr_lb_rwds_en = 1'b0;
+    assign hr_lb_rwds    = '0;
+    assign hr_dbg        = '0;
+  end
+
+  bow_hyperram_io_xilinx #(
+    .Loopback (HrLoopback),
+    .HasLs    (!HrLoopback)         // TXV0108 DIR / OE on the card
+  ) u_hr_io (
+    .clk_i         (hr_clk),
+    .wclk_i        (hr_wclk),
+    .rd_clk_i      (hr_rd_clk),
+    .io_o_i        (hr_io_o),
+    .io_i_o        (hr_io_i),
+    .rwds_pad_o    (hr_rwds_pad),
+    .lb_dq_en_i    (hr_lb_dq_en),
+    .lb_dq_i       (hr_lb_dq),
+    .lb_rwds_en_i  (hr_lb_rwds_en),
+    .lb_rwds_i     (hr_lb_rwds),
+    .ck_p_o        (hr_ck_p_o),
+    .ck_n_o        (hr_ck_n_o),
+    .cs_n_o        (hr_cs_n_o),
+    .rst_n_o       (hr_rst_n_o),
+    .dq_io         (hr_dq_io),
+    .rwds_io       (hr_rwds_io),
+    .ls_oe_n_o     (hr_ls_oe_n_o),
+    .ls_dir_dq_o   (hr_ls_dir_dq_o),
+    .ls_dir_rwds_o (hr_ls_dir_rwds_o)
+  );
+
+  // ---------------------------------------------------------------------------
   // GPIO and user components
   // ---------------------------------------------------------------------------
   // PA0..PA7: LEDs (output only)
@@ -384,7 +537,7 @@ module bow32_mps4_top import bow_ddr_pkg::*; #(
     end
   end
   assign led_n_o[8] = ~heartbeat_q[24];
-  assign led_n_o[9] = ~ddr_locked;
+  assign led_n_o[9] = ~(ddr_locked & hr_locked);
 
   // ---------------------------------------------------------------------------
   // Minimum RTL tie-offs (MPS4 TRM Table 3-2)

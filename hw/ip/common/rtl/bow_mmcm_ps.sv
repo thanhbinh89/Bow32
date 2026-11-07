@@ -1,9 +1,10 @@
 // Copyright Bow32 contributors.
 // SPDX-License-Identifier: Apache-2.0
 //
-// MMCM fine phase-shift stepper of the DDR IP (ddr_clk domain, which is also
-// the PSCLK of the MMCMs). bow_ddr_dfi has two: the read phase
-// (rd_clk, ddr_ps_*) and the write phase (wclk / wclk90, ddr_wps_*).
+// MMCM fine phase-shift stepper (MMCME4 PSEN / PSINCDEC / PSDONE), clocked by
+// the PSCLK of the MMCM. Users: the DDR IP (bow_ddr_dfi: read phase rd_clk,
+// write phase wclk / wclk90, in the ddr_clk domain) and the HyperRAM IP
+// (bow_hyperram_ctrl: read phase hr_rd_clk, write phase hr_wclk, hr_clk).
 //
 // go_i takes target_i (signed fine steps) and ref_i:
 //   * |target_i - ref_i| > Limit: refused, done_o + err_o, no step (read
@@ -21,12 +22,13 @@
 //   * no PSDONE within Timeout cycles after a PSEN: stop, done_o + err_o;
 //     now_o keeps the steps that were acknowledged.
 // now_o resets to 0 with rst_ni, which must be the reset of the MMCM phase
-// itself (bow_ddr_dfi: ddr_rst_ni only, the MMCMs lost lock or were reset):
+// itself (bow_ddr_dfi: ddr_rst_ni only; bow_hyperram: hr_rst_ni only; the
+// MMCMs lost lock or were reset):
 // a SoC reset leaves the MMCM phases where they are, so the steppers keep
 // counting through it (and finish a move that was running). go_i while busy_o
 // is ignored (bow_ddr_dfi waits for both steppers to be idle).
 
-module bow_ddr_ps #(
+module bow_mmcm_ps #(
   parameter int unsigned Limit   = 1008,
   parameter int unsigned Timeout = 64
 ) (

@@ -6,7 +6,8 @@
 # docs/fpga/MPS4/hpi0376b_FPGA_ALL_PINS.xlsx (MPS4 rev B pinout, V9); the
 # trailing comment of each pin line is the board net and its bank.
 # The DDR2 pads are in constr/ddr_loopback.xdc or constr/ddr_card.xdc
-# (tcl/build.tcl adds one of them, DDR_LOOPBACK=1/0).
+# (tcl/build.tcl adds one of them, DDR_LOOPBACK=1/0), the HyperRAM pads in
+# constr/hyperram_loopback.xdc or constr/hyperram_card.xdc (HR_LOOPBACK=1/0).
 
 # ---- Clock: OSCCLKA[2] = OSC2 of sdcard/bow32.txt, 100 MHz ----------------------
 set_property PACKAGE_PIN AW23    [get_ports osc_clk_i]       ;# OSCCLKA<2>     bank 64 (GC)
@@ -173,6 +174,75 @@ set_bus_skew -from [get_cells -hierarchical -filter "$rfifo/rgray_q_reg*"] \
 set_clock_uncertainty [expr {$ddr_period / 4}] \
   -from [get_clocks ddr_clk] -to [get_clocks {ddr_wclk ddr_wclk90}]
 
+# ---- HyperRAM clocks (u_soc/g_hr.u_hr, docs/ip/hyperram.md) ---------------------------------
+# Names of the MMCM outputs of bow_hyperram_clk_xusp (u_hr_clk), see its header:
+# MMCM_H = controller clock hr_clk (static 270 deg) and write clock hr_wclk
+# (0 deg + fine phase shift: hr_clk + T/4 at write phase 0), MMCM_R = read
+# capture clock (any phase, calibrated). Both are fed by the oscillator through
+# their own BUFGCE (u_hr_clk/u_in_bufg, next to u_clk/u_clk_in_bufg in the
+# clock region of the pin). The DDR MMCMs fill that region and the ones next
+# to it (MMCM_B, MMCM_A, MMCM_W of the cascade), so the two HyperRAM MMCMs sit
+# further along the CMT column: the dedicated route of this net may use the
+# vertical clock routing of the column. Nothing depends on the insertion delay
+# (HyperRAM clocks asynchronous to the others, read phase calibrated).
+# DONT_TOUCH: opt_design otherwise merges the two BUFGCEs (same IBUF driver) into
+# one that feeds all four MMCMs of the oscillator, and the clock placement fails.
+set_property DONT_TOUCH true [get_cells {u_clk/u_clk_in_bufg u_hr_clk/u_in_bufg}]
+set_property CLOCK_DEDICATED_ROUTE SAME_CMT_COLUMN [get_nets -of_objects [get_pins u_hr_clk/u_in_bufg/O]]
+create_generated_clock -name hr_clk    [get_pins u_hr_clk/u_mmcm_h/CLKOUT0]
+create_generated_clock -name hr_wclk   [get_pins u_hr_clk/u_mmcm_h/CLKOUT1]
+create_generated_clock -name hr_rd_clk [get_pins u_hr_clk/u_mmcm_r/CLKOUT0]
+set hr_period 10.000   ;# hr_clk = tCK (hr_wclk, hr_rd_clk alike)
+# Clock domains:
+#   clk_sys    window (read / write buffers, bus slave), registers, the clk_sys
+#              side of the command / response FIFOs and of the command handshake
+#   hr_clk     controller, PHY register, CK / CS# / RESET# / DIR / OE pads and
+#              the T flops, the emulator of the loopback build, PSCLK
+#   hr_rd_clk  read capture (IDDRE1), write side of the PHY's read FIFO
+#   hr_wclk    DQ / RWDS ODDRE1 only, fed by the PHY register (hr_clk)
+# SoC <-> HyperRAM, asynchronous: every path goes through a CDC of
+# bow_hyperram (bow_fifo_async command / response FIFOs: gray pointers + dual
+# clock RAM; the four phase command handshake with quasi-static arguments and
+# results; bow_sync levels, bow_cdc_pulse events, bow_rst_sync; quasi-static
+# capture / statistics / BIST results read after their event). Like the DDR
+# crossings: a data path limit of one CK period instead of clock groups.
+set_max_delay -datapath_only $hr_period \
+  -from [get_clocks clk_sys] -to [get_clocks {hr_clk hr_rd_clk}]
+set_max_delay -datapath_only $hr_period \
+  -from [get_clocks {hr_clk hr_rd_clk}] -to [get_clocks clk_sys]
+set_clock_groups -asynchronous -group [get_clocks clk_sys] -group [get_clocks hr_wclk]
+# Read capture clock <-> hr_clk: the read phase moves at run time, so the
+# synchronous analysis means nothing: the read FIFO (gray pointers + dual
+# clock RAM), its overflow flag, the reset synchronisers.
+set_max_delay -datapath_only $hr_period -from [get_clocks hr_rd_clk] -to [get_clocks hr_clk]
+set_max_delay -datapath_only $hr_period -from [get_clocks hr_clk] -to [get_clocks hr_rd_clk]
+# Gray pointers of the three FIFOs (read data, commands, responses): bus skew
+# of at most one period of the faster clock (hr_clk). XDC has no loops.
+set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ u_soc/g_hr.u_hr/u_phy/u_rfifo/wgray_q_reg*}] \
+             -to   [get_cells -hierarchical -filter {NAME =~ u_soc/g_hr.u_hr/u_phy/u_rfifo/wgray_r1_q_reg*}] [expr {$hr_period - 0.07}]
+set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ u_soc/g_hr.u_hr/u_phy/u_rfifo/rgray_q_reg*}] \
+             -to   [get_cells -hierarchical -filter {NAME =~ u_soc/g_hr.u_hr/u_phy/u_rfifo/rgray_w1_q_reg*}] [expr {$hr_period - 0.07}]
+set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ u_soc/g_hr.u_hr/u_cmd_fifo/wgray_q_reg*}] \
+             -to   [get_cells -hierarchical -filter {NAME =~ u_soc/g_hr.u_hr/u_cmd_fifo/wgray_r1_q_reg*}] [expr {$hr_period - 0.07}]
+set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ u_soc/g_hr.u_hr/u_cmd_fifo/rgray_q_reg*}] \
+             -to   [get_cells -hierarchical -filter {NAME =~ u_soc/g_hr.u_hr/u_cmd_fifo/rgray_w1_q_reg*}] [expr {$hr_period - 0.07}]
+set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ u_soc/g_hr.u_hr/u_resp_fifo/wgray_q_reg*}] \
+             -to   [get_cells -hierarchical -filter {NAME =~ u_soc/g_hr.u_hr/u_resp_fifo/wgray_r1_q_reg*}] [expr {$hr_period - 0.07}]
+set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ u_soc/g_hr.u_hr/u_resp_fifo/rgray_q_reg*}] \
+             -to   [get_cells -hierarchical -filter {NAME =~ u_soc/g_hr.u_hr/u_resp_fifo/rgray_w1_q_reg*}] [expr {$hr_period - 0.07}]
+# PHY register -> DQ / RWDS ODDRE1 (C = ~hr_wclk). Vivado models the 270 deg
+# of hr_clk as clock latency, not in the waveform, so its default edge pair
+# (launch hr_clk rise@0, capture hr_wclk fall@5) would ask for the data before
+# they are launched (rise@0 + 7.5 ns of phase). The real pair is launch at
+# 0.75T, capture at the next ~hr_wclk edge, 1.5T: one more hr_wclk period for
+# setup (3T/4 of budget), and hold against the edge just before it (0.5T,
+# T/4 of margin: what -setup 2 alone leaves; no -hold 1 here).
+set_multicycle_path -setup 2 -from [get_clocks hr_clk] -to [get_clocks hr_wclk]
+# Write phase (WPS): hr_wclk moves by up to +-3T/16 against hr_clk (the
+# controller refuses more, bow_hyperram_ctrl). The extra uncertainty keeps
+# setup (phase -3T/16) and hold (phase +3T/16) over that whole range.
+set_clock_uncertainty [expr {3 * $hr_period / 16}] -from [get_clocks hr_clk] -to [get_clocks hr_wclk]
+
 # ---- Asynchronous board I/O --------------------------------------------------------------
 # UART, GPIO pins and resets are synchronised inside the SoC (bow_rstmgr,
 # bow_sync) or go straight to the MMCM reset.
@@ -190,6 +260,14 @@ set_false_path -from [get_ports {ddr_dq_io[*] ddr_dqs_p_io ddr_dqs_n_io}]
 set_false_path -to [get_ports {ddr_ck_* ddr_cke_o ddr_cs_n_o ddr_ras_n_o ddr_cas_n_o ddr_we_n_o \
                                ddr_ba_o[*] ddr_a_o[*] ddr_odt_o ddr_ls_*}]
 
+# ---- HyperRAM pads (pins in hyperram_loopback.xdc / hyperram_card.xdc) ----------------------
+# Read data: IDDRE1 on hr_rd_clk, the capture phase is calibrated at run time;
+# the RWDS pad level also enters a bow_sync (latency indication).
+set_false_path -from [get_ports {hr_dq_io[*] hr_rwds_io}]
+# Outputs: each pin is driven by an ODDRE1 in its I/O tile; the level shifter
+# pins are static in a loopback build. Output enables of DQ / RWDS:
+# hyperram_card.xdc.
+set_false_path -to [get_ports {hr_ck_* hr_cs_n_o hr_rst_n_o hr_ls_*}]
 # ---- Bitstream -------------------------------------------------------------------------------
 # Compressed: smaller file on the microSD card, faster load by the MCC.
 set_property BITSTREAM.GENERAL.COMPRESS TRUE [current_design]
