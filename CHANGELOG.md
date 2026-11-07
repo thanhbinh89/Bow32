@@ -214,6 +214,13 @@
   PS-PL, nhả `pl_resetn0`).
 - `bow32_flash.py monitor` là terminal tương tác; báo lỗi rõ khi adapter không
   gửi được BREAK.
+- Đánh giá IP MKV cho SoC camera AI ([docs/mkv_security_review.md](docs/mkv_security_review.md)):
+  mô hình đe doạ, chuẩn tham chiếu (TCVN 14263, QĐ 724/QĐ-BTTTT, ISO/IEC 19790, 17825,
+  CRA, CWE), phát hiện về tiêm lỗi, kênh kề, khoá, tích hợp, kiểm chứng, lộ trình P0–P2.
+  `make -C hw/ip/mkv/dv review` (`tb_mkv_review.sv`, không thuộc `make test`) chạy 8 thí
+  nghiệm: lỗi 2 bit trong một byte khoá vòng và dòng RAM bị tráo cho bản mã sai mà không
+  `FAULT`, `dout_q` không được kiểm, `CLEAR` / xoá sau reset cắt ngắn được, FSM, giữ bus
+  144 chu kỳ, không giới hạn số lần thử.
 
 ### Changed
 - **MKV theo TCVN 14263:2024** thay cho bản dự thảo. Bản chuẩn khác bản dự thảo ở
