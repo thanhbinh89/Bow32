@@ -90,6 +90,8 @@ module bow_ddr_clk_xusp #(
   output logic ddr_wclk_o,
   output logic ddr_wclk90_o,
   output logic ddr_rd_clk_o,
+  output logic clk_ibuf_o,     // the oscillator after its IBUF (not buffered): other clock
+                               // modules with their own BUFGCE (HyperRAM), see "Input clock"
   output logic locked_sys_o,   // MMCM_A locked: clk_sys_o, ddr_clk_o, ddr_sys_clk_o
   output logic locked_ddr_o,   // MMCM_A, MMCM_W and MMCM_B locked
 
@@ -133,6 +135,13 @@ module bow_ddr_clk_xusp #(
     .I (clk_in_ibuf),
     .O (clk_in)
   );
+
+  // Other clock modules (MPS4: bow_hyperram_clk_xusp) take the IBUF output and
+  // add their own BUFGCE, in the clock region of this pin like u_clk_in_bufg:
+  // a BUFGCE driven by a clock-capable input reaches at most three MMCMs, in
+  // its own and the vertically adjacent clock regions (MPS4: MMCM_B, MMCM_A,
+  // then MMCM_W above MMCM_A for its cascade), so this tree stays as it is.
+  assign clk_ibuf_o = clk_in_ibuf;
 
   // ---------------------------------------------------------------------------
   // Lock-loss reset. An MMCM keeps its fine phase shift until RST, also through

@@ -145,6 +145,20 @@ module bow32_kv260_top #(
     .ddr_io_o       (),
     .ddr_io_i       ('0),
     .ddr_dbg_i      ('0),
+    // no HyperRAM on this board (HrEn = 0: stub)
+    .hr_clk_i       (1'b0),
+    .hr_rst_ni      (1'b0),
+    .hr_rd_clk_i    (1'b0),
+    .hr_ps_en_o     (),
+    .hr_ps_inc_o    (),
+    .hr_ps_done_i   (1'b0),
+    .hr_wps_en_o    (),
+    .hr_wps_inc_o   (),
+    .hr_wps_done_i  (1'b0),
+    .hr_io_o        (),
+    .hr_io_i        ('0),
+    .hr_rwds_pad_i  (1'b0),
+    .hr_dbg_i       ('0),
     .sys_rst_no   (),
     .core_sleep_o ()
   );
