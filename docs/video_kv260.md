@@ -53,9 +53,9 @@ streaming 1280x720 @30 fps
 waiting 5 s for exposure / white balance
 recording 45 frames (skip 1)
   rec: 45 frames 1280x720, 30/2 fps, QP 30, 23300 bytes per frame
-  frame 1: 3456 bytes, 13718 us
+  frame 1: 3456 bytes, QP 30, 13718 us
   ...
-  frame 45: 24512 bytes, 13719 us
+  frame 45: 24512 bytes, QP 29, 13719 us
   rec: 45 frames, 979164 bytes (QP 23..30, largest 24928)
   979164/979164 bytes, 90.3 KiB/s
 video.mp4: 45 frames 1280x720 @ 15.00 fps, 979164 bytes (12.4 s transfer), also video.h264
@@ -122,7 +122,9 @@ DROP để xả encoder và bản quay giữ nguyên các frame đã đủ (`PKT
 - **Tốc độ truyền**: UART 921600 baud ≈ 90 KB/s: 1 MiB mất ~12 s.
 - **Thông lượng encoder**: 392 chu kỳ/MB ở 200 MHz. Camera 1080p30 của IMX219
   đưa 120 macroblock mỗi 16 dòng × 18,9 µs = 302 µs; encoder cần 235 µs: kịp.
-  Khi không kịp (ví dụ cảnh rất chi tiết ở QP thấp làm CAVLC chậm), encoder bỏ
-  pixel (`ERR_OVF`, ứng dụng báo `warning`) nhưng stream vẫn hợp lệ.
+  CAVLC cần tới 455–630 chu kỳ/MB với cảnh rất chi tiết / nhiễu ở QP thấp
+  ([ip/h264_review.md](ip/h264_review.md#3-thông-lượng-thực-tế)): quá ~504 thì không
+  kịp, encoder bỏ pixel (`ERR_OVF`, ứng dụng báo `warning` và số frame có strip
+  cũ, mỗi dòng `frame` ghi `stale strips`) nhưng stream vẫn hợp lệ.
 - **Màu**: ISP xuất BT.709 video range (Y 16…235), SPS báo đúng (VUI), mọi
   trình phát hiển thị đúng màu.

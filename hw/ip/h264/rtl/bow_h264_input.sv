@@ -8,7 +8,10 @@
 //   frame either starts a coded frame or is skipped (SKIP frames between two
 //   coded frames, FRAMES coded frames in total, 0 = until STOP). A frame
 //   that arrives while the previous one is still being received is not
-//   coded (and not counted).
+//   coded (and not counted). idr_pic_id alternates 0, 1, 0... over all the
+//   coded frames since reset, START does not restart it: two IDR pictures in
+//   a row always differ in idr_pic_id (clause 7.4.3), also across STOP /
+//   START in one stream.
 // * Luma goes to the luma strip buffer, 8 pixels per 64 bit word. Chroma is
 //   the rounded mean of every 2x2 block: the horizontal pair sums of the even
 //   lines wait in a line buffer for the odd lines. 8 chroma samples per word.
@@ -20,7 +23,9 @@
 //   coded (with stale samples) so that the bit stream stays valid.
 // * A frame that ends early (SOF before `height` lines, or enable_i low) is
 //   completed the same way (err_input_o). Shorter lines are flagged too,
-//   longer lines and frames are cropped. The last strip of a frame whose
+//   longer lines and frames are cropped. Both errors are also kept per frame
+//   (frame_t.err_ovf / err_input, sticky from its start of frame; the last
+//   strip carries them to FRAME_INFO). The last strip of a frame whose
 //   height is not a multiple of 16 is completed by the engine, which repeats
 //   the last line (strip_t.last_line).
 //
@@ -117,7 +122,6 @@ module bow_h264_input import bow_h264_pkg::*; #(
       left_q     <= frames_i;
       skip_q     <= skip_i;
       skip_cnt_q <= '0;
-      idr_q      <= 1'b0;
     end else if (stop_i || !enable_i) begin
       armed_q <= 1'b0;
     end else if (start_frame) begin
@@ -146,6 +150,7 @@ module bow_h264_input import bow_h264_pkg::*; #(
   logic [SW:0]       used_q;                // slots allocated and not yet released
   logic              do_alloc, do_push;
   logic [MbW-1:0]    recv;
+  logic              drop;                  // a strip buffer word of the frame is dropped
 
   assign px_in = start_frame || in_frame;
   assign px_x  = start_frame ? '0 : x_q;
@@ -212,12 +217,19 @@ module bow_h264_input import bow_h264_pkg::*; #(
       done_q  <= done_d;
       alloc_q <= alloc_d;
       if (start_frame) begin
-        frame_q.qp       <= qp_i;
-        frame_q.deblock  <= deblock_i;
-        frame_q.idr_id   <= idr_q;
-        frame_q.seq_last <= !inf_q && (left_q == 16'd1);
-        base_q           <= next_slot_q;
-        push_q           <= '0;
+        frame_q.qp        <= qp_i;
+        frame_q.deblock   <= deblock_i;
+        frame_q.idr_id    <= idr_q;
+        frame_q.seq_last  <= !inf_q && (left_q == 16'd1);
+        frame_q.err_ovf   <= 1'b0;
+        frame_q.err_input <= short_line;
+        base_q            <= next_slot_q;
+        push_q            <= '0;
+      end else begin
+        // before the last strip is pushed: its pushing needs all the lines
+        // (abort, frame end) and a slot (no drop after that)
+        if (drop)                frame_q.err_ovf   <= 1'b1;
+        if (abort || short_line) frame_q.err_input <= 1'b1;
       end
       if (do_alloc) next_slot_q <= next_slot_q + SW'(1);
       used_q <= used_q + (SW + 1)'(do_alloc) - (SW + 1)'(strip_free_i);
@@ -339,13 +351,14 @@ module bow_h264_input import bow_h264_pkg::*; #(
                        crbuf_q[1], crbuf_q[0]};
 
   // ------------------------------------------------------------------ errors
+  assign drop = p_valid_q && !slot_ok && ((p_x_q[2:0] == 3'd7) || (p_y_q[0] && p_x_q[3:0] == 4'd15));
+
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       err_ovf_o   <= 1'b0;
       err_input_o <= 1'b0;
     end else begin
-      err_ovf_o   <= p_valid_q && !slot_ok && ((p_x_q[2:0] == 3'd7) ||
-                                               (p_y_q[0] && p_x_q[3:0] == 4'd15));
+      err_ovf_o   <= drop;
       err_input_o <= abort || short_line;
     end
   end

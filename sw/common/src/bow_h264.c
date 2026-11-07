@@ -11,8 +11,9 @@ void bow_h264_init(uint32_t width, uint32_t height, uint32_t qp, bool deblock) {
   H264->STATUS = 0xFFu; /* clear the W1C flags */
   H264->SIZE = (height << 16) | width;
   H264->QP = qp;
+  /* the encoder keeps the order of CTRL, QP and CMD writes in the video
+   * domain, a START right after this finds EN */
   H264->CTRL = H264_CTRL_EN | (deblock ? H264_CTRL_DEBLOCK : 0u);
-  (void)H264->CTRL; /* EN reaches the video domain before a START */
 }
 
 void bow_h264_start(uint32_t frames, uint32_t skip) {

@@ -9,6 +9,8 @@ package bow_h264_pkg;
 
   localparam int unsigned CoordW   = 12;    // frame size (max 4095)
   localparam int unsigned MbW      = 8;     // macroblock coordinates
+  localparam int unsigned SizeMin  = 16;    // SIZE: smallest width / height
+  localparam int unsigned SizeMax  = 4080;  // SIZE: 255 macroblocks (MbW), multiple of 16
   localparam int unsigned LevelW   = 16;    // stored levels (|level| <= 2063)
   localparam int unsigned LevelMax = 2063;  // largest |level| CAVLC codes with suffixLength 0
   localparam int unsigned QpMin    = 10;    // QP range of the encoder (docs/ip/h264.md)
@@ -28,13 +30,31 @@ package bow_h264_pkg;
   typedef logic signed [15:0] s16_t;
   typedef logic signed [17:0] s18_t;
 
-  // Parameters of one coded frame, latched at its start of frame
+  // Parameters of one coded frame, latched at its start of frame. The error
+  // flags are sticky over the frame: the last strip carries all of them to
+  // the end of the NAL unit (FRAME_INFO).
   typedef struct packed {
     logic [5:0] qp;
     logic       deblock;    // slice header: deblocking filter on
     logic       idr_id;     // idr_pic_id
     logic       seq_last;   // last frame of the sequence (STATUS.DONE after it)
+    logic       err_ovf;    // pixels of this frame dropped (no strip slot)
+    logic       err_input;  // this frame was short (SOF early, EN low, short lines)
   } frame_t;
+
+  // Control of the video domain, one record per transfer of the register
+  // file (bow_cdc_hs). Writes that come while a transfer is under way are
+  // merged into the next record: EN, DEBLOCK and QP are the newest values,
+  // `dis` keeps an EN 1 -> 0 that the merge would hide, START / STOP the last
+  // command (STOP cancels a START not yet sent and the other way round).
+  typedef struct packed {
+    logic       dis;        // EN was low in between: the video side sees it low first
+    logic       en;
+    logic       deblock;
+    logic [5:0] qp;
+    logic       start;
+    logic       stop;
+  } ctrl_t;
 
   // One strip of 16 lines in the strip buffers (input -> macroblock engine)
   typedef struct packed {

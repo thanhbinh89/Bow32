@@ -16,7 +16,15 @@
 // encoder in vid_clk_i (200 MHz on the KV260). The input must accept one
 // pixel per clock (no back-pressure, like the ISP output); when the encoder
 // is slower than the camera, pixels are dropped and STATUS.ERR_OVF is set,
-// the bit stream stays valid. The output stream back-pressures the encoder.
+// the bit stream stays valid (FRAME_INFO tells which frame). The output
+// stream back-pressures the encoder.
+//
+// Clock crossings, for any ratio of the two clocks: the control (EN,
+// DEBLOCK, QP, START, STOP) as ordered records and the errors as sticky
+// flags through bow_cdc_hs; the end of a frame with bow_cdc_pulse (frames
+// end at least one macroblock = 392 video cycles apart, the frame
+// statistics are held until the next one: the CPU clock must not be more
+// than ~100 times slower than the video clock); BUSY / ARMED as levels.
 //
 // SPS / PPS are written by software (sw/common/src/bow_h264.c), every frame
 // is one Annex B NAL unit "00 00 00 01 65 ..." padded with zero bytes to a
@@ -51,13 +59,36 @@ module bow_h264 import bow_bus_pkg::*; import bow_h264_pkg::*; #(
   localparam int unsigned YAW = $clog2(NumStrips * 2 * MaxWidth);
   localparam int unsigned CAW = $clog2(NumStrips * MaxWidth / 2);
 
+  // ================================================================ resets
+  // vrst_n: the video domain. xrst_n: the CPU side of every clock crossing,
+  // which must be reset whenever the video side is (bow_cdc_hs,
+  // bow_fifo_async: both sides asserted together); the register file then
+  // sends the control again.
+  /* verilator lint_off SYNCASYNCNET */
+  logic vrst_n, xrst_n;
+  /* verilator lint_on SYNCASYNCNET */
+
+  bow_rst_sync u_vrst (
+    .clk_i  (vid_clk_i),
+    .rst_ni (vid_rst_ni & rst_ni),
+    .rst_no (vrst_n)
+  );
+
+  bow_rst_sync u_xrst (
+    .clk_i  (clk_i),
+    .rst_ni (vid_rst_ni & rst_ni),
+    .rst_no (xrst_n)
+  );
+
   // =========================================================== registers
-  logic              en_sys, deblock_sys, qp_upd_sys, start_sys, stop_sys;
   logic [CoordW-1:0] width, height;
-  logic [5:0]        qp_sys;
   logic [15:0]       frames;
   logic [7:0]        skip;
-  logic              busy_sys, armed_sys, frame_done_sys, seq_done_sys, err_ovf_sys, err_in_sys;
+  logic              ctrl_valid_sys, ctrl_ready_sys;
+  ctrl_t             ctrl_sys;
+  logic              busy_sys, armed_sys, frame_done_sys, err_valid_sys;
+  logic [1:0]        err_sys;
+  frame_t            frame_info;
   logic [23:0]       frame_bytes;
   logic [31:0]       frame_cycles, mb_cycles;
   logic              out_empty;
@@ -68,24 +99,22 @@ module bow_h264 import bow_bus_pkg::*; import bow_h264_pkg::*; #(
   ) u_regs (
     .clk_i,
     .rst_ni,
+    .cdc_rst_ni     (xrst_n),
     .bus_req_i      (reg_req_i),
     .bus_rsp_o      (reg_rsp_o),
-    .enable_o       (en_sys),
-    .deblock_o      (deblock_sys),
     .width_o        (width),
     .height_o       (height),
-    .qp_o           (qp_sys),
-    .qp_upd_o       (qp_upd_sys),
     .frames_o       (frames),
     .skip_o         (skip),
-    .start_o        (start_sys),
-    .stop_o         (stop_sys),
+    .ctrl_valid_o   (ctrl_valid_sys),
+    .ctrl_ready_i   (ctrl_ready_sys),
+    .ctrl_o         (ctrl_sys),
     .busy_i         (busy_sys || !out_empty),
     .armed_i        (armed_sys),
     .frame_done_i   (frame_done_sys),
-    .seq_done_i     (seq_done_sys),
-    .err_ovf_i      (err_ovf_sys),
-    .err_input_i    (err_in_sys),
+    .frame_info_i   (frame_info),
+    .err_ovf_i      (err_valid_sys && err_sys[0]),
+    .err_input_i    (err_valid_sys && err_sys[1]),
     .frame_bytes_i  (frame_bytes),
     .frame_cycles_i (frame_cycles),
     .mb_cycles_i    (mb_cycles),
@@ -93,71 +122,85 @@ module bow_h264 import bow_bus_pkg::*; import bow_h264_pkg::*; #(
   );
 
   // ===================================================== clock crossings
-  /* verilator lint_off SYNCASYNCNET */
-  logic vrst_n;
-  /* verilator lint_on SYNCASYNCNET */
+  // Control: one record per transfer, applied in two cycles. The first one
+  // takes QP / DEBLOCK and holds EN low if the record has seen EN low
+  // (`dis`: the input aborts a frame and disarms as before); the second one
+  // sets EN and issues START / STOP, so a START always finds the EN of its
+  // record.
+  logic  ctrl_valid, apply_q, en, deblock, start, stop;
+  ctrl_t ctrl;
+  logic [5:0] qp_q;
 
-  bow_rst_sync u_vrst (
-    .clk_i  (vid_clk_i),
-    .rst_ni (vid_rst_ni & rst_ni),
-    .rst_no (vrst_n)
+  bow_cdc_hs #(
+    .Width ($bits(ctrl_t))
+  ) u_cdc_ctrl (
+    .src_clk_i   (clk_i),
+    .src_rst_ni  (xrst_n),
+    .src_valid_i (ctrl_valid_sys),
+    .src_ready_o (ctrl_ready_sys),
+    .src_data_i  (ctrl_sys),
+    .dst_clk_i   (vid_clk_i),
+    .dst_rst_ni  (vrst_n),
+    .dst_valid_o (ctrl_valid),
+    .dst_data_o  (ctrl)
   );
 
-  logic en, deblock, qp_upd, start, stop;
-
-  bow_sync u_sync_en (.clk_i (vid_clk_i), .rst_ni (vrst_n), .d_i (en_sys), .q_o (en));
-  bow_sync u_sync_db (.clk_i (vid_clk_i), .rst_ni (vrst_n), .d_i (deblock_sys), .q_o (deblock));
-
-  bow_cdc_pulse u_cdc_qp (
-    .src_clk_i (clk_i), .src_rst_ni (rst_ni), .src_pulse_i (qp_upd_sys),
-    .dst_clk_i (vid_clk_i), .dst_rst_ni (vrst_n), .dst_pulse_o (qp_upd));
-  bow_cdc_pulse u_cdc_start (
-    .src_clk_i (clk_i), .src_rst_ni (rst_ni), .src_pulse_i (start_sys),
-    .dst_clk_i (vid_clk_i), .dst_rst_ni (vrst_n), .dst_pulse_o (start));
-  bow_cdc_pulse u_cdc_stop (
-    .src_clk_i (clk_i), .src_rst_ni (rst_ni), .src_pulse_i (stop_sys),
-    .dst_clk_i (vid_clk_i), .dst_rst_ni (vrst_n), .dst_pulse_o (stop));
-
-  // QP: captured when its pulse arrives (the register is stable by then)
-  logic [5:0] qp_q;
   always_ff @(posedge vid_clk_i or negedge vrst_n) begin
-    if (!vrst_n)      qp_q <= 6'd30;
-    else if (qp_upd)  qp_q <= qp_sys;
+    if (!vrst_n) begin
+      apply_q <= 1'b0;
+      en      <= 1'b0;
+      deblock <= 1'b1;
+      qp_q    <= 6'd30;
+    end else begin
+      apply_q <= ctrl_valid;
+      if (ctrl_valid) begin
+        en      <= ctrl.en && !ctrl.dis;
+        deblock <= ctrl.deblock;
+        qp_q    <= ctrl.qp;
+      end else if (apply_q) begin
+        en      <= ctrl.en;
+      end
+    end
   end
 
-  logic busy, armed, frame_done, seq_done, err_ovf, err_in;
+  assign start = apply_q && ctrl.start;
+  assign stop  = apply_q && ctrl.stop;
 
-  bow_sync u_sync_busy (.clk_i, .rst_ni, .d_i (busy), .q_o (busy_sys));
-  bow_sync u_sync_armed (.clk_i, .rst_ni, .d_i (armed), .q_o (armed_sys));
+  logic busy, armed, frame_done, err_ovf, err_in, err_ready;
 
+  bow_sync u_sync_busy (.clk_i, .rst_ni (xrst_n), .d_i (busy), .q_o (busy_sys));
+  bow_sync u_sync_armed (.clk_i, .rst_ni (xrst_n), .d_i (armed), .q_o (armed_sys));
+
+  // end of a frame; FRAME_INFO, FRAME_BYTES, FRAME_CYCLES and MB_CYCLES are
+  // held until the next one
   bow_cdc_pulse u_cdc_done (
     .src_clk_i (vid_clk_i), .src_rst_ni (vrst_n), .src_pulse_i (frame_done),
-    .dst_clk_i (clk_i), .dst_rst_ni (rst_ni), .dst_pulse_o (frame_done_sys));
-  bow_cdc_pulse u_cdc_seq (
-    .src_clk_i (vid_clk_i), .src_rst_ni (vrst_n), .src_pulse_i (seq_done),
-    .dst_clk_i (clk_i), .dst_rst_ni (rst_ni), .dst_pulse_o (seq_done_sys));
+    .dst_clk_i (clk_i), .dst_rst_ni (xrst_n), .dst_pulse_o (frame_done_sys));
 
-  // errors can come every cycle: at most one pulse per 16 video cycles
-  logic [1:0] err_pend_q, err_pulse;
-  logic [3:0] err_div_q;
+  // errors can come every cycle: sticky until a transfer takes them
+  logic [1:0] err_pend_q;
 
   always_ff @(posedge vid_clk_i or negedge vrst_n) begin
     if (!vrst_n) begin
       err_pend_q <= '0;
-      err_div_q  <= '0;
     end else begin
-      err_div_q  <= err_div_q + 4'd1;
-      err_pend_q <= (err_pend_q | {err_in, err_ovf}) & ~err_pulse;
+      err_pend_q <= (err_ready ? '0 : err_pend_q) | {err_in, err_ovf};
     end
   end
-  assign err_pulse = (err_div_q == '0) ? err_pend_q : '0;
 
-  bow_cdc_pulse u_cdc_ovf (
-    .src_clk_i (vid_clk_i), .src_rst_ni (vrst_n), .src_pulse_i (err_pulse[0]),
-    .dst_clk_i (clk_i), .dst_rst_ni (rst_ni), .dst_pulse_o (err_ovf_sys));
-  bow_cdc_pulse u_cdc_in (
-    .src_clk_i (vid_clk_i), .src_rst_ni (vrst_n), .src_pulse_i (err_pulse[1]),
-    .dst_clk_i (clk_i), .dst_rst_ni (rst_ni), .dst_pulse_o (err_in_sys));
+  bow_cdc_hs #(
+    .Width (2)
+  ) u_cdc_err (
+    .src_clk_i   (vid_clk_i),
+    .src_rst_ni  (vrst_n),
+    .src_valid_i (err_pend_q != '0),
+    .src_ready_o (err_ready),
+    .src_data_i  (err_pend_q),
+    .dst_clk_i   (clk_i),
+    .dst_rst_ni  (xrst_n),
+    .dst_valid_o (err_valid_sys),
+    .dst_data_o  (err_sys)
+  );
 
   // ================================================================ input
   logic           y_we, c_we;
@@ -292,10 +335,11 @@ module bow_h264 import bow_bus_pkg::*; import bow_h264_pkg::*; #(
   end
 
   // ========================================================= CAVLC + packer
-  logic        tk_valid, tk_ready, tk_seq_last, cavlc_busy;
+  logic        tk_valid, tk_ready, cavlc_busy;
   logic [1:0]  tk_kind;
   logic [5:0]  tk_len;
   logic [31:0] tk_bits;
+  frame_t      tk_frame;
 
   bow_h264_cavlc #(
     .MaxWidth (MaxWidth)
@@ -313,11 +357,11 @@ module bow_h264 import bow_bus_pkg::*; import bow_h264_pkg::*; #(
     .tk_kind_o     (tk_kind),
     .tk_len_o      (tk_len),
     .tk_bits_o     (tk_bits),
-    .tk_seq_last_o (tk_seq_last),
+    .tk_frame_o    (tk_frame),
     .busy_o        (cavlc_busy)
   );
 
-  logic        out_push, out_full, out_last, pack_busy, pack_seq_last;
+  logic        out_push, out_full, out_last, pack_busy;
   logic [31:0] out_data;
 
   bow_h264_bitpack u_pack (
@@ -328,18 +372,16 @@ module bow_h264 import bow_bus_pkg::*; import bow_h264_pkg::*; #(
     .tk_kind_i     (tk_kind),
     .tk_len_i      (tk_len),
     .tk_bits_i     (tk_bits),
-    .tk_seq_last_i (tk_seq_last),
+    .tk_frame_i    (tk_frame),
     .out_push_o    (out_push),
     .out_full_i    (out_full),
     .out_data_o    (out_data),
     .out_last_o    (out_last),
     .frame_done_o  (frame_done),
     .frame_bytes_o (frame_bytes),
-    .seq_last_o    (pack_seq_last),
+    .frame_o       (frame_info),
     .busy_o        (pack_busy)
   );
-
-  assign seq_done = frame_done && pack_seq_last;
 
   // ========================================================= output FIFO
   // A two word FIFO in front of the dual clock FIFO keeps the full flag of
@@ -374,7 +416,7 @@ module bow_h264 import bow_bus_pkg::*; import bow_h264_pkg::*; #(
     .wdata_i (skid_rdata),
     .full_o  (async_full),
     .rclk_i  (clk_i),
-    .rrst_ni (rst_ni),
+    .rrst_ni (xrst_n),
     .pop_i   (m_axis_tvalid_o && m_axis_tready_i),
     .rdata_o (out_rdata),
     .empty_o (out_empty)
@@ -425,8 +467,9 @@ module bow_h264 import bow_bus_pkg::*; import bow_h264_pkg::*; #(
     .level_o (ts_level)
   );
 
+  // (an error still on its way to STATUS counts: BUSY low means it is there)
   assign busy = armed || in_active || !strip_empty || mb_busy || (slot_full_q != '0) ||
-                cavlc_busy || pack_busy || !skid_empty;
+                cavlc_busy || pack_busy || !skid_empty || (err_pend_q != '0) || !err_ready;
 
   logic unused;
   assign unused = ^{strip_full, strip_level, ts_full, ts_level, skid_level};
