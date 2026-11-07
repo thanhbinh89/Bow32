@@ -8,7 +8,8 @@ RTL, và có sẵn công cụ để học và bring-up: bộ đếm lỗi, log p
 PHY, bản đồ eye. RTL: `hw/ip/csi2rx/rtl/` (độc lập công nghệ) và I/O của FPGA
 `hw/fpga/common/rtl/bow_dphy_io_xusp.sv`. Driver: `sw/common/include/bow_csi2rx.h`.
 Mô hình tham chiếu: `tools/csi2/csi2_model.py`. Chạy trên board:
-[../camera_kv260.md](../camera_kv260.md).
+[../camera_kv260.md](../camera_kv260.md). Đánh giá cho camera công nghiệp và SoC
+camera AI: [../csi2rx_review.md](../csi2rx_review.md).
 
 ```
           FPGA (bow_dphy_io_xusp)                     bow_csi2rx

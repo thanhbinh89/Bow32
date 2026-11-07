@@ -210,6 +210,7 @@ Bow32/
 | [docs/ip/](docs/ip/) | Đặc tả từng IP và thanh ghi: CPU, UART, GPIO, flash, sysctrl, bộ nhớ, ISP, bộ thu CSI-2, H.264, DMA, MKV, DDR, I2C, cầu AXI4-Lite |
 | [docs/ip/isp.md](docs/ip/isp.md) | ISP: pipeline, công thức từng stage, thống kê, capture, thanh ghi |
 | [docs/ip/csi2rx.md](docs/ip/csi2rx.md) | Bộ thu MIPI CSI-2: D-PHY, I/O UltraScale+, CDC, packet, thanh ghi, hiệu chỉnh eye, ràng buộc |
+| [docs/csi2rx_review.md](docs/csi2rx_review.md) | Đánh giá bộ thu CSI-2 cho camera công nghiệp và SoC camera AI: phát hiện, khoảng cách, kiến trúc và lộ trình đề xuất |
 | [docs/camera_kv260.md](docs/camera_kv260.md) | Chạy camera trên KV260: bitstream, ứng dụng `camera` và `csi2_test`, chụp ảnh về PC |
 | [docs/ip/h264.md](docs/ip/h264.md) | Bộ mã hoá H.264: kiến trúc, các khối, quyết định của encoder, stream, thanh ghi, kiểm chứng |
 | [docs/ip/dma.md](docs/ip/dma.md) | DMA: chế độ M2M / stream, ring buffer, thanh ghi |
