@@ -25,7 +25,8 @@ DDR2/DDR3 từ RTL tới FPGA, ưu tiên bo RAM mở rộng
 | `sw/apps/ddr`, `tools/bow32_ddr.py` | ứng dụng thử nghiệm và công cụ trên PC |
 
 Đánh giá bo RAM và lý do chọn kiến trúc: [../ddr_board_review.md](../ddr_board_review.md);
-chạy trên MPS4: [../ddr_mps4.md](../ddr_mps4.md).
+chạy trên MPS4: [../ddr_mps4.md](../ddr_mps4.md); khoảng cách tới mục tiêu công nghiệp và
+SoC camera AI: [../ddr_review_industrial_ai.md](../ddr_review_industrial_ai.md).
 
 | Thông số | Giá trị |
 |----------|---------|
