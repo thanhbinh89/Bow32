@@ -467,6 +467,7 @@ module bow_hyperram_ctrl import bow_hyperram_pkg::*; #(
   logic        x_go;            // ... and starts it now
   logic        x_tcsm_ok;       // its CS# low time fits TCSM
   logic        x_bad_cr0;       // REG_WR CR0 with a reserved initial latency code
+  logic        xps_ran_q;       // PS_GO / WPS_GO: the stepper ran (an error is then a PSDONE timeout)
   logic [7:0]  pair_x_a_q, pair_x_b_q;
 
   assign eng_idle    = (est_q == EIdle) && !rd_busy_i;
@@ -813,6 +814,7 @@ module bow_hyperram_ctrl import bow_hyperram_pkg::*; #(
       ack_q       <= 1'b0;
       xerr_q      <= 1'b0;
       xcode_err_q <= ErrNone;
+      xps_ran_q   <= 1'b0;
       xrdata_q    <= '0;
       rfs_cnt_q   <= '0;
       cfg_q       <= CfgReset;
@@ -874,12 +876,14 @@ module bow_hyperram_ctrl import bow_hyperram_pkg::*; #(
                 xst_q     <= XAck;
               end
               HcPsGo: begin
-                ps_go <= 1'b1;
-                xst_q <= XPs;
+                ps_go      <= 1'b1;
+                xps_ran_q  <= 1'b0;
+                xst_q      <= XPs;
               end
               HcWpsGo: begin
-                wps_go <= 1'b1;
-                xst_q  <= XPs;
+                wps_go     <= 1'b1;
+                xps_ran_q  <= 1'b0;
+                xst_q      <= XPs;
               end
               HcRfifoSync: begin
                 rfifo_sync_o <= 1'b1;
@@ -922,9 +926,12 @@ module bow_hyperram_ctrl import bow_hyperram_pkg::*; #(
         end
 
         XPs: begin
+          if ((xcode_q == HcPsGo) ? ps_busy : wps_busy) xps_ran_q <= 1'b1;   // PSEN sent
           if ((xcode_q == HcPsGo && ps_done) || (xcode_q == HcWpsGo && wps_done)) begin
             xerr_q      <= (xcode_q == HcPsGo) ? ps_err : wps_err;
-            xcode_err_q <= ((xcode_q == HcPsGo) ? ps_err : wps_err) ? ErrArg : ErrNone;   // beyond the limit
+            // refused at once (beyond the limit: the stepper never ran) or no
+            // PSDONE (it ran: the MMCM did not answer)
+            xcode_err_q <= !((xcode_q == HcPsGo) ? ps_err : wps_err) ? ErrNone : (xps_ran_q ? ErrPs : ErrArg);
             xst_q       <= XAck;
           end
         end
@@ -981,14 +988,20 @@ module bow_hyperram_ctrl import bow_hyperram_pkg::*; #(
   logic reg_wr_done;
   assign reg_wr_done = at_end && is_regwr;
 
-  // Recovery after RESET# or a WAKE pulse: the device state is known from the
-  // start of the pulse (power-on registers after RESET# or deep power down,
-  // CR1[5] = 0 after hybrid sleep) and the device is unusable for pulse + wait
-  // cycles. Both are kept here, in the board domain: a channel reset in the
-  // middle (SoC reset, CORE_RST) cuts the engine's own sequencing, but POWER
-  // still returns to active after the time latched at the start, and the
-  // shadows still match the device. CR1[1:0] is read only (not reset).
-  logic [16:0] rec_left_q;
+  // Recovery after RESET# or a WAKE pulse, kept here in the board domain: a
+  // channel reset in the middle (SoC reset, CORE_RST) cuts the engine's own
+  // sequencing, but POWER still returns to active after the time latched when
+  // the recovery started, and the shadows still match the device.
+  //   * RESET#: from its first cycle the device is being reset (power-on
+  //     registers); unusable for RESET# low + wait.
+  //   * WAKE: the state changes when the CS# pulse is complete (power-on
+  //     registers after deep power down, CR1[5] = 0 after hybrid sleep); a
+  //     pulse cut by a channel reset leaves POWER at DPD / HS (the device may
+  //     not have taken a short pulse as a wake-up: WAKE again; a pulse on a
+  //     device that did wake is an ignored transaction). Unusable for the wait
+  //     after the pulse.
+  // CR1[1:0] is read only (not reset).
+  logic [17:0] rec_left_q;        // up to 2 * 0xFFFF + 2 (TRST fields at their maximum)
 
   always_ff @(posedge clk_i or negedge brd_rst_ni) begin
     if (!brd_rst_ni) begin
@@ -1002,8 +1015,8 @@ module bow_hyperram_ctrl import bow_hyperram_pkg::*; #(
         cr0_q      <= Cr0Default;
         cr1_q      <= {Cr1Default[15:2], cr1_q[1:0]};
         pwr_q      <= PwrWait;
-        rec_left_q <= 17'(cfg_q.trst_low) + 17'(cfg_q.trst_wait) + 17'd2;
-      end else if (run && is_wake && c_q == 16'd2) begin
+        rec_left_q <= 18'(cfg_q.trst_low) + 18'(cfg_q.trst_wait) + 18'd2;
+      end else if (is_wake && at_end) begin     // the CS# pulse is complete
         if (pwr_q == PwrDpd) begin      // out of deep power down: power-on state
           cr0_q <= Cr0Default;
           cr1_q <= {Cr1Default[15:2], cr1_q[1:0]};
@@ -1011,10 +1024,10 @@ module bow_hyperram_ctrl import bow_hyperram_pkg::*; #(
           cr1_q[5] <= 1'b0;             // out of hybrid sleep
         end
         pwr_q      <= PwrWait;
-        rec_left_q <= 17'(wake_cs_q) + 17'(cfg_q.twake_wait) + 17'd2;
+        rec_left_q <= 18'(cfg_q.twake_wait) + 18'd2;
       end else if (pwr_q == PwrWait) begin
         if (rec_left_q == '0) pwr_q <= PwrActive;
-        else                  rec_left_q <= rec_left_q - 17'd1;
+        else                  rec_left_q <= rec_left_q - 18'd1;
       end
       // CR1[1:0] (distributed refresh interval) is read only and depends on the
       // device's temperature grade: a REG_RD of CR1 brings it into the shadow

@@ -188,13 +188,21 @@ module bow_hyperram_regs import bow_bus_pkg::*; import bow_hyperram_pkg::*; #(
     );
   end
 
+  // The synchroniser flops reset with the channel (to 0), so the value is
+  // taken only once they have been out of the reset for 3 cycles: until then
+  // (and during the reset) CR0 / CR1 read their defaults, PS_NOW / WPS_NOW 0
+  // and POWER 3 (recovering): the board-domain state is not known yet, and a
+  // 0 there would read "active" in the middle of a WAKE / RESET# recovery.
+  logic [1:0] qwarm_q;
   always_ff @(posedge clk_i or negedge lnk_ni) begin
     if (!lnk_ni) begin
       q_prev_q <= '0;
-      q_val_q  <= {32'd0, 2'd0, Cr1Default, Cr0Default};
+      q_val_q  <= {32'd0, 2'd3, Cr1Default, Cr0Default};
+      qwarm_q  <= '0;
     end else begin
       q_prev_q <= q_s;
-      if (q_prev_q == q_s) q_val_q <= q_s;
+      if (qwarm_q != 2'd3)       qwarm_q <= qwarm_q + 2'd1;
+      else if (q_prev_q == q_s)  q_val_q <= q_s;
     end
   end
 
@@ -349,6 +357,17 @@ module bow_hyperram_regs import bow_bus_pkg::*; import bow_hyperram_pkg::*; #(
   logic busy;
   assign busy = (cst_q != CIdle);
 
+  // lnk_up_q: 0 in the channel reset (CORE_RST, link down), 1 from the first
+  // clock edge after it (the reset net itself is not used as data). The command
+  // FSM takes a CMD only with lnk_up_q = 1: a CMD in the first cycle after the
+  // release is refused like one during the reset (cmd_dead_ev below), never
+  // carried out and refused at the same time.
+  logic lnk_up_q;
+  always_ff @(posedge clk_i or negedge lnk_ni) begin
+    if (!lnk_ni) lnk_up_q <= 1'b0;
+    else         lnk_up_q <= 1'b1;
+  end
+
   always_ff @(posedge clk_i or negedge lnk_ni) begin
     if (!lnk_ni) begin
       cst_q     <= CIdle;
@@ -376,7 +395,7 @@ module bow_hyperram_regs import bow_bus_pkg::*; import bow_hyperram_pkg::*; #(
       inval_q  <= 1'b0;
       cdone_ev <= 1'b0;
       cerr_ev  <= 1'b0;
-      if (cmd_wr) begin
+      if (cmd_wr && lnk_up_q) begin
         if (busy || !one_hot || (hr_cmd && !clk_ok_q)) begin
           cerr_ev <= 1'b1;
           ecode_q <= busy ? ecode_q : (!one_hot ? ErrArg : ErrDisable);   // malformed / no CLK_OK
@@ -481,18 +500,19 @@ module bow_hyperram_regs import bow_bus_pkg::*; import bow_hyperram_pkg::*; #(
 
   logic [31:0] ev_set;
 
-  // CMD while the channel is in reset (CORE_RST, link down): the command FSM is
-  // held in reset with it, so the refusal is raised here, in the rst_ni domain
-  // (ERR_CODE[7:0] reads ErrDisable meanwhile). lnk_up_q: 0 in the channel
-  // reset, 1 from the cycle after it (the reset net itself is not used as data).
-  logic cmd_dead_ev, lnk_up_q;
-  always_ff @(posedge clk_i or negedge lnk_ni) begin
-    if (!lnk_ni) lnk_up_q <= 1'b0;
-    else         lnk_up_q <= 1'b1;
-  end
+  // CMD while the channel is in reset (lnk_up_q = 0): the command FSM is held
+  // in reset with it, so the refusal is raised here, in the rst_ni domain.
+  // dead_code_q keeps ERR_CODE[7:0] at ErrDisable after such a refusal until
+  // the next CMD, also once the reset is over (ecode_q was reset with the link).
+  logic cmd_dead_ev, dead_code_q;
   always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) cmd_dead_ev <= 1'b0;
-    else         cmd_dead_ev <= cmd_wr && !lnk_up_q;
+    if (!rst_ni) begin
+      cmd_dead_ev <= 1'b0;
+      dead_code_q <= 1'b0;
+    end else begin
+      cmd_dead_ev <= cmd_wr && !lnk_up_q;
+      if (cmd_wr) dead_code_q <= !lnk_up_q;
+    end
   end
   assign lnk_up_o = lnk_up_q;
   always_comb begin
@@ -610,7 +630,7 @@ module bow_hyperram_regs import bow_bus_pkg::*; import bow_hyperram_pkg::*; #(
         RegErrAdOff:  rdata = win_err_addr_i;
         RegEmuOff:    rdata = {27'd0, 5'(EmuLog2)};
         RegDbgOff:    rdata = dbg_s;
-        RegErrCdOff:  rdata = {16'd0, err_code_i, lnk_up_q ? ecode_q : ErrDisable};
+        RegErrCdOff:  rdata = {16'd0, err_code_i, (lnk_up_q && !dead_code_q) ? ecode_q : ErrDisable};
         RegWbTmoOff:  rdata = {16'd0, wb_tmo_q};
         RegBCtrlOff:  rdata = bctrl_q;
         RegBAddrOff:  rdata = baddr_q;

@@ -217,6 +217,19 @@ mọi khối và cửa sổ đếm chúng); `unique case` của thanh ghi lệnh
 bit (chặn mô phỏng có assertion, `make run ... ASSERT=1`). Chạy được với Verilator 5.020 (bản
 của CI) và xsim (`make xsim CFG=card`).
 
+Mục 9b của testbench là các kiểm tra hồi quy cho từng bản sửa của hai vòng review PR #6: khối
+ghi posted đang staged khi một REG_RD chờ sau nó (56 lần, ba cách khối rời bộ đệm), INVAL sau
+BIST khi một line đang nạp, khối posted bị controller từ chối (`WR_ERR`, line bị bỏ), `CORE_RST`
+khi một lần đọc đang chờ (`NOT_READY`), CMD trong reset kênh và ở chu kỳ đầu sau khi nhả (đúng
+một trong `CMD_DONE` / `CMD_ERR`, `ERR_CODE` 5 giữ qua reset), `CORE_RST` giữa lúc hồi phục WAKE
+(POWER vẫn về hoạt động, chip dùng được), `CMD_DONE` của WAKE chỉ sau hồi phục, `BIST_FADDR`,
+`ERR_CODE` 7 của bước pha và `BIST_GO`, bản sao CR1 sau HW_RESET / DPD, và (chân) `CORE_RST` ở 40
+điểm của một line fill không gây chồng lái DQ/RWDS. Mô hình chip đếm các pha CA bị cắt có chủ
+đích ở đây (`ca_abort_ok`) thay vì báo lỗi; emulator không có móc đó nên lỗi 0E của nó chỉ được
+miễn đúng số lần cắt trong các kiểm tra này. `make -C hw/ip/hyperram/dv mutants` (không nằm
+trong `make test`, 18 bản dựng) gỡ từng bản sửa trong một bản sao RTL và chạy cấu hình liên
+quan: cả 18 phải FAIL.
+
 ### Bộ thu CSI-2
 
 `hw/ip/csi2rx/dv/` so bộ thu với mô hình Python `tools/csi2/csi2_model.py`, được

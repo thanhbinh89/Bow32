@@ -165,7 +165,9 @@ _Static_assert(__builtin_offsetof(bow_hr_regs_t, CAP) == 0x100, "HR CAP offset")
 #define HR_ERR_POWER 4u     /* device in deep power down / hybrid sleep */
 #define HR_ERR_DISABLE 5u   /* EN = 0, no clock, channel in reset */
 #define HR_ERR_RFIFO 6u     /* read FIFO broken */
-#define HR_ERR_ARG 7u       /* argument refused: ID0 / ID1 write, reserved CR0 latency code */
+#define HR_ERR_ARG 7u       /* argument refused: malformed CMD, ID0 / ID1 write, reserved CR0
+                             * latency code, phase step beyond its limit, BIST_GO during a run */
+#define HR_ERR_PS 8u        /* phase step: no PSDONE from the MMCM */
 #define HR_PWR_ACTIVE 0u
 #define HR_PWR_DPD 1u
 #define HR_PWR_HS 2u
@@ -289,8 +291,10 @@ bool bow_hr_set_wphase(int32_t phase);             /* write phase (WPS_GO) */
 int32_t bow_hr_phase_now(void);
 int32_t bow_hr_wphase_now(void);
 bool bow_hr_rfifo_sync(void);
-/* Capture of one device register read (and the read itself): cap[64]. */
-bool bow_hr_capture_reg(uint32_t sel, uint32_t *cap, uint16_t *value);
+/* Capture of one device register read (and the read itself): cap[64]. Returns
+ * whether the capture was taken; *read_ok whether the read worked (*value is 0
+ * otherwise). Either pointer may be NULL. */
+bool bow_hr_capture_reg(uint32_t sel, uint32_t *cap, uint16_t *value, bool *read_ok);
 /* Half cycle index of the first byte A in a capture (RWDS high for one
  * sample after two low ones, from half cycle 2 * from on), -1 if none. */
 int32_t bow_hr_cap_first_a(const uint32_t *cap, uint32_t from);

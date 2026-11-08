@@ -31,6 +31,8 @@
 #   make model-seeds MCFG=card SEEDS="1 2"   /   make model-run MCFG=fast SEED=3
 #   make lint        Verilator -Wall on the four models and both testbenches (warnings of
 #                    the DV files only; the RTL is linted by the top level make lint)
+#   make mutants     undo each fix of the PR #6 reviews in a copy of the RTL (mutants.py,
+#                    MUTANTS="name ..." to pick): every one must FAIL (18 builds, not in test)
 #   make xsim CFG=card SEED=1 / make model-xsim MCFG=card SEED=1   one configuration
 #                    under Vivado xsim (optional, XSIM_BIN; xelab --timescale 1ps/1ps:
 #                    the RTL has no timescale)
@@ -230,8 +232,18 @@ lint:
 	@$(VERILATOR) --lint-only --timing -Wall -Wno-TIMESCALEMOD --top-module tb_bow_hyperram $(G_card) \
 	  $(FLISTS) $(IP_SRCS) 2>&1 | grep -E "^%Error|^%Warning[^ ]* [^ ]*/hw/ip/hyperram/dv/" \
 	  | grep -v "^%Error: Exiting due to" >> $(BUILD)/lint.log || true
+	@# the emulator bow_hyperram_dev (RTL, but no SoC lint elaborates it: only
+	@# the MPS4 top and the system testbench instantiate it)
+	@$(VERILATOR) --lint-only --timing -Wall -Wno-TIMESCALEMOD --top-module bow_hyperram_dev $(FLISTS) 2>&1 \
+	  | grep -E "^%(Warning|Error)" | grep -v -E "^%Warning[^ ]* [^ ]*_pkg.sv" \
+	  | grep -v "^%Error: Exiting due to" >> $(BUILD)/lint.log || true
 	@if [ -s $(BUILD)/lint.log ]; then cat $(BUILD)/lint.log; echo "hyperram_dv lint: warnings / errors"; exit 1; fi
-	@echo "hyperram_dv lint: OK (4 models and both testbenches, -Wall)"
+	@echo "hyperram_dv lint: OK (4 models, the emulator and both testbenches, -Wall)"
+
+# ------------------------------------------------------- mutants (optional)
+MUTANT_JOBS ?= 4
+mutants:
+	python3 mutants.py --build $(BUILD)/mutants --jobs $(MUTANT_JOBS) $(MUTANTS)
 
 # ------------------------------------------------------------- xsim (optional)
 XSIM_DIR = $(BUILD)/xsim_$(1)
@@ -269,6 +281,6 @@ model-xsim:
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: build build-all run case test test-ci seeds rdhold model model-build model-run model-case \
+.PHONY: build build-all run case test test-ci seeds rdhold mutants model model-build model-run model-case \
         model-seeds lint xsim model-xsim clean
 SHELL := /bin/bash

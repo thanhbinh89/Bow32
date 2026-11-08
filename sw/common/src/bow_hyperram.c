@@ -38,7 +38,7 @@ static bool timed_out(uint32_t start, uint32_t us) {
 const char *bow_hr_err_name(uint32_t code) {
   static const char *const names[] = {"none", "read data did not start", "RWDS not a strobe",
                                       "longer than tCSM", "device asleep", "disabled",
-                                      "read FIFO broken", "argument refused"};
+                                      "read FIFO broken", "argument refused", "phase shift timeout"};
   return code < sizeof(names) / sizeof(names[0]) ? names[code] : "?";
 }
 
@@ -255,15 +255,15 @@ static bool wait_cap(void) {
   return true;
 }
 
-bool bow_hr_capture_reg(uint32_t sel, uint32_t *cap, uint16_t *value) {
+bool bow_hr_capture_reg(uint32_t sel, uint32_t *cap, uint16_t *value, bool *read_ok) {
   BOW_HR_WR(STATUS, HR_ST_CAP_DONE);
   if (!bow_hr_cmd(HR_CMD_CAP_ARM)) return false;
   uint16_t v = 0;
-  bool rd = bow_hr_reg_read(sel, &v);   /* may fail before calibration */
-  if (value) *value = v;
+  bool rd = bow_hr_reg_read(sel, &v);   /* may fail at a bad phase: the capture still shows why */
+  if (value) *value = rd ? v : 0u;      /* REG_DATA keeps an older value when the read failed */
+  if (read_ok) *read_ok = rd;
   if (!wait_cap()) return false;
   read_cap(cap);
-  (void)rd;
   return true;
 }
 
@@ -314,7 +314,7 @@ static void print_map(const char *title, const uint8_t *good, uint32_t n) {
 static bool sweep_point(uint32_t kind, uint32_t td, uint32_t *cap, int32_t *first) {
   if (kind == 0u) {
     static const uint8_t id0[2] = {0x0E, 0x86};
-    if (!bow_hr_capture_reg(HR_REG_ID0, cap, NULL)) return false;
+    if (!bow_hr_capture_reg(HR_REG_ID0, cap, NULL, NULL)) return false;
     *first = bow_hr_cap_first_a(cap, td);
     return cap_match(cap, *first, id0, 2u);
   }
@@ -528,7 +528,8 @@ bool bow_hr_bist(uint32_t waddr, uint32_t words, uint32_t burst, uint32_t mode, 
   if (!bow_hr_cmd(HR_CMD_BIST_GO)) return false;
   /* time of the run: per burst CA + 2x latency + CS# high + RD_HOLD (< 2L + 16
    * cycles) and its words, per pass; twice that, at least HR_BIST_TIMEOUT_US */
-  uint32_t b = (burst == 0u || burst > 255u) ? 255u : burst, mhz = BOW_HR_RD(CLK_HZ) / 1000000u;
+  uint32_t b = burst & 0xFFu, mhz = BOW_HR_RD(CLK_HZ) / 1000000u;   /* BIST_CTRL[15:8], as the hardware */
+  if (b == 0u) b = 1u;                                              /* 0: one word per burst */
   uint32_t passes = ((mode & HR_BIST_WRITE) ? 1u : 0u) + ((mode & HR_BIST_READ) ? 1u : 0u);
   uint64_t cyc = ((uint64_t)words / b + 1u) * (2u * cr0_l(BOW_HR_RD(CR0)) + 16u + b) * passes;
   uint64_t us = 2u * cyc / (mhz ? mhz : 1u) + HR_BIST_TIMEOUT_US;

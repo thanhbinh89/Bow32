@@ -41,6 +41,12 @@ set_property IOSTANDARD LVCMOS15 $hr_ports
 # the LVCMOS15 defaults (12 mA, slow).
 set_property DRIVE 8   [get_ports {hr_ck_* hr_dq_io[*] hr_rwds_io}]
 set_property SLEW FAST [get_ports {hr_ck_* hr_dq_io[*] hr_rwds_io}]
+# DQ / RWDS: weak pull-down. The TXV0108 data inputs are always active, also
+# with OE# high ("should be kept at a valid logic level", data sheet function
+# table), but the FPGA releases DQ / RWDS during a channel reset (no drive
+# overlap with shifters still driving a cut read, HR_IO_OUT_RST) and from
+# configuration to the first PHY cycle: the pull-down holds them low then.
+set_property PULLTYPE PULLDOWN [get_ports {hr_dq_io[*] hr_rwds_io}]
 
 # ---- Timing ---------------------------------------------------------------------------------
 # DQ / RWDS data: ODDRE1 in the I/O tile, fixed pin timing. Clocks, read

@@ -301,7 +301,6 @@ module bow_hyperram_win import bow_bus_pkg::*; import bow_hyperram_pkg::*; #(
   assign ev_range_o     = rng_q;
   assign ev_timeout_o   = tmo_q;
   assign ev_rd_err_o    = rderr_q;
-  assign ev_wr_err_o    = post_refused;   // with the pout_q update: WR_ERR no later than WIN_IDLE
   assign err_addr_o     = err_addr_q;
 
   // ===========================================================================
@@ -319,6 +318,7 @@ module bow_hyperram_win import bow_bus_pkg::*; import bow_hyperram_pkg::*; #(
   logic rdata_in, rerr_in, rwdone_in, pack_in, post_refused;
   assign pack_in   = rpop && (rk == WrespWdone || rk == WrespErr) && (pout_q != '0);
   assign post_refused = pack_in && (rk == WrespErr);
+  assign ev_wr_err_o  = post_refused;   // with the pout_q update: WR_ERR no later than WIN_IDLE
   assign rdata_in  = rpop && (rk == WrespData || rk == WrespDataW);
   assign rerr_in   = rpop && (rk == WrespErr) && !pack_in;
   assign rwdone_in = rpop && (rk == WrespWdone) && !pack_in;

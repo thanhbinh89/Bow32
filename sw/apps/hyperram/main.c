@@ -25,9 +25,10 @@
  *            %04x ID1 %04x CR0 %04x, latency %u fixed|variable, TCSM %u cycles";
  *            failures "hyperram: init: <reason>" | "hyperram: calibration failed: <reason>"
  *   cal, eye the eye lines and the read phase line of init; eye then
- *            "hyperram: eye: read phase %d and RD_DLY %u restored" (phase, RD_DLY and
- *            the 32 bytes at offset 0 are put back) | "... RD_DLY %u, not restored:
- *            run cal or init" (a sweep failed: the window is closed)
+ *            "hyperram: eye: read phase %d and RD_DLY %u restored[, window closed as
+ *            before]" (phase, RD_DLY, the window state and the 32 bytes at offset 0
+ *            of an open window are put back) | "... RD_DLY %u not restored, window
+ *            closed: run cal or init" (ID0 fails at the old setting)
  *   calw     "hyperram: write eye |<map>|", "hyperram: write phase %d width %u"
  *   bist     "bist: words %u at %08x, bursts of %u, data prbs|count seed %08x,
  *            write|read|both: errors %u, cycles %u (%s)" (%s = "%u.%02u MB/s" of the
@@ -41,7 +42,9 @@
  *   reg      "reg ID0|ID1|CR0|CR1: %04x"
  *   cap      "cap ID0|ID1|CR0|CR1: value %04x, t_D %u, first byte A at half cycle %d",
  *            then 4 lines "cap %2u: <16 x rw:xx/yy>" (RWDS rise fall, DQ rise / fall);
- *            "cap ID0|...: failed (STATUS %08x ERR_CODE %08x)" when nothing was captured
+ *            "cap ID0|...: failed (STATUS %08x ERR_CODE %08x)" when nothing was captured;
+ *            "cap ID0|...: read failed (ERR_CODE %08x), t_D ..." then the 4 lines when
+ *            the read itself failed (command error)
  *   phase    "read|write phase %d (of %u per CK)[, refused]"
  *   power    "hyperram: power active|deep power down|hybrid sleep|recovering"
  *   bench    "bench: CPU write %s, posted write %s, read (line buffer) %s, uncached
@@ -339,20 +342,26 @@ static bool cmd_cap(const char *a) {
   if (!at_end(a) && (!reg_sel(&a, &sel) || !at_end(a))) return false;
   if (!need_present()) return false;
   uint32_t td = bow_hr_td();
-  bool ok = bow_hr_capture_reg(sel, cap, &v);
+  bool rd_ok = false;
+  bool ok = bow_hr_capture_reg(sel, cap, &v, &rd_ok);
   if (!ok) {   /* no capture (e.g. before init: the read is refused): nothing to show */
     bow_printf("cap %s: failed (STATUS %08x ERR_CODE %08x)\n", reg_name(sel), BOW_HR_RD(STATUS), BOW_HR_RD(ERR_CODE));
     return false;
   }
   int32_t first = bow_hr_cap_first_a(cap, td);
-  bow_printf("cap %s: value %04x, t_D %u, first byte A at half cycle %d\n", reg_name(sel), v, td, first);
+  if (rd_ok) {
+    bow_printf("cap %s: value %04x, t_D %u, first byte A at half cycle %d\n", reg_name(sel), v, td, first);
+  } else {     /* the capture of a failed read is what shows why it failed */
+    bow_printf("cap %s: read failed (ERR_CODE %08x), t_D %u, first byte A at half cycle %d\n", reg_name(sel),
+               BOW_HR_RD(ERR_CODE), td, first);
+  }
   for (uint32_t i = 0; i < 64u; i++) {
     uint32_t c = cap[i];
     if (i % 16u == 0) bow_printf("cap %2u:", i);
     bow_printf(" %u%u:%02x/%02x", HR_CAP_RWDS_R(c), HR_CAP_RWDS_F(c), HR_CAP_DQ_R(c), HR_CAP_DQ_F(c));
     if (i % 16u == 15u) bow_puts("\n");
   }
-  return ok;
+  return rd_ok;
 }
 
 static bool cmd_reg(const char *a) {
@@ -422,26 +431,34 @@ static bool execute(const char *line) {
     if (!need_present()) return false;
     if (!app.inited && !app_init(true)) return false;
     if (!eye) return bow_hr_calibrate(step, true, &app.cal);
-    /* eye: the maps only. The sweeps move the read phase and RD_DLY and write
-     * the calibration pattern at window offset 0: all three are put back */
+    /* eye: the maps only. The sweeps move the read phase and RD_DLY, write the
+     * calibration pattern at window offset 0 and open / close the window: all
+     * of it is put back as it was (a window that was closed: the 32 bytes could
+     * not be read before, they hold the pattern afterwards). The old setting is
+     * checked with an ID0 read before the window reopens; if it fails, the
+     * window stays closed and the next cal / eye starts with init */
     int32_t old = bow_hr_phase_now();
-    uint32_t lat = BOW_HR_RD(LAT), keep[8];
-    bool saved = true;
-    for (uint32_t i = 0; i < 8u; i++) saved &= bow_probe_read32(BOW32_HYPERRAM_BASE + 4u * i, &keep[i]);
+    uint32_t lat = BOW_HR_RD(LAT), ctrl = BOW_HR_RD(CTRL), keep[8];
+    bool was_open = (ctrl & HR_CTRL_INIT_DONE) != 0u, saved = was_open;
+    for (uint32_t i = 0; saved && i < 8u; i++) saved = bow_probe_read32(BOW32_HYPERRAM_BASE + 4u * i, &keep[i]);
     bool ok = bow_hr_calibrate(step, true, NULL);
+    BOW_HR_WR(CTRL, ctrl & ~HR_CTRL_INIT_DONE);
     BOW_HR_WR(LAT, lat);
-    bool back = bow_hr_set_phase(old) && bow_hr_rfifo_sync() && bow_hr_apply();
     uint16_t id0 = 0;
-    back = back && bow_hr_reg_read(HR_REG_ID0, &id0) && id0 == HR_ID0_S80KS2562;
-    bool open = ok && back && saved && (BOW_HR_RD(CTRL) & HR_CTRL_INIT_DONE);
-    if (open) {
-      for (uint32_t i = 0; i < 8u; i++) open &= bow_probe_write32(BOW32_HYPERRAM_BASE + 4u * i, keep[i]);
-      open = open && bow_hr_flush() && bow_hr_inval();
+    bool back = bow_hr_set_phase(old) && bow_hr_rfifo_sync() && bow_hr_apply() &&
+                bow_hr_reg_read(HR_REG_ID0, &id0) && id0 == HR_ID0_S80KS2562;
+    if (back && was_open) {
+      BOW_HR_WR(CTRL, ctrl);
+      for (uint32_t i = 0; back && saved && i < 8u; i++) back = bow_probe_write32(BOW32_HYPERRAM_BASE + 4u * i, keep[i]);
+      back = back && saved && bow_hr_flush();
+      if (!back) BOW_HR_WR(CTRL, ctrl & ~HR_CTRL_INIT_DONE);
     }
-    if (!open) app.inited = false;   /* the next cal / eye starts with init */
-    bow_printf("hyperram: eye: read phase %d and RD_DLY %u%s\n", bow_hr_phase_now(), HR_LAT_RD_DLY(BOW_HR_RD(LAT)),
-               open ? " restored" : ", not restored: run cal or init");
-    return open;
+    (void)bow_hr_inval();
+    if (!back) app.inited = false;
+    bow_printf("hyperram: eye: read phase %d and RD_DLY %u %s\n", bow_hr_phase_now(), HR_LAT_RD_DLY(BOW_HR_RD(LAT)),
+               !back ? "not restored, window closed: run cal or init"
+                     : (was_open ? "restored" : "restored, window closed as before"));
+    return ok && back;
   }
   if ((a = match(line, "calw"))) {
     uint32_t step = 8;

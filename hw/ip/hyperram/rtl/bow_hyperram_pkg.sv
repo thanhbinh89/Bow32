@@ -70,7 +70,9 @@ package bow_hyperram_pkg;
   // A reset can cut a read whose data the level shifters still drive towards
   // the FPGA (DIR = HyperRAM -> FPGA): OE# and DIR change at the first edge of
   // the reset, the FPGA drives again only after the reset, at least one cycle
-  // later (the shifters' outputs are off by then: no drive overlap).
+  // later (the shifters' outputs are off by then: no drive overlap). Meanwhile
+  // the board keeps the released lines at a valid level (MPS4 card build: FPGA
+  // pull-downs, constr/hyperram_card.xdc).
   localparam hr_io_out_t HR_IO_OUT_RST = '{
     cs_n: 1'b1, rst_n: 1'b1, ls_oe_n: 1'b1, default: '0
   };
@@ -195,6 +197,8 @@ package bow_hyperram_pkg;
   localparam logic [7:0] ErrArg     = 8'd7;   // argument refused: malformed CMD, ID0 / ID1 write,
                                               // reserved CR0 latency code, phase step beyond its
                                               // limit, BIST_GO during a run
+  localparam logic [7:0] ErrPs      = 8'd8;   // phase step: no PSDONE from the MMCM (the phase
+                                              // moved by the steps acknowledged so far)
 
   // ---------------------------------------------------------------------------
   // Command channel (bow_hyperram_regs -> bow_hyperram_ctrl), one at a time

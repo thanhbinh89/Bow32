@@ -117,6 +117,8 @@
 // declaration): capture violations count in n_relaxed instead of errors, a
 // command captured with a violation is ignored, a write word captured with
 // one is stored inverted (the DDR models' wr_relax_i, for the same purpose).
+// Abort hook: ca_abort_ok (also a variable): a command-address phase cut by
+// CS# counts in n_ca_aborted instead of an ECa error (channel reset tests).
 // Testbench API (hierarchical calls): peek(waddr) = {byte A, byte B} (an
 // unwritten word reads uninit_word(waddr) = {8'hDE, waddr[7:0]}), poke(waddr,
 // v), peek_byte / poke_byte(baddr) with the bus byte address (2n = byte A,
@@ -697,6 +699,12 @@ module hyperram_model #(
   // mask).
   bit          wr_relax = 1'b0;
   int          n_relaxed = 0;
+  // ca_abort_ok (set hierarchically by a testbench that cuts transactions on
+  // purpose, e.g. a channel reset of the controller in the middle of a read):
+  // CS# rising before the 6 command-address edges counts in n_ca_aborted
+  // instead of an ECa error (the device ignores the transaction either way)
+  bit          ca_abort_ok = 1'b0;
+  int          n_ca_aborted = 0;
   bit          garbled = 1'b0;        // relax: this transaction's CA was captured with a violation
   bit          garble_rel = 1'b0;     // relax: RWDS of the garbled transaction released
   bit          word_bad = 1'b0;       // relax: the write word being assembled had a violation
@@ -1003,7 +1011,8 @@ module hyperram_model #(
       error(ETcsm, $sformatf("tCSM: CS# low for %0d ns (> %0d ns)", (now - t_cs_fall) / 1000, TCsm / 1000));
     end
     if (!dec) begin
-      error(ECa, $sformatf("CS# rose after %0d of the 6 command-address edges", n_edges));
+      if (ca_abort_ok) n_ca_aborted++;
+      else error(ECa, $sformatf("CS# rose after %0d of the 6 command-address edges", n_edges));
     end else if (garbled) begin
       note("relax: a transaction with a violated command-address capture was ignored");
     end else begin

@@ -42,7 +42,13 @@
   của MCC), `verify` 340/340 case so với mô hình Python, BIST trên toàn 1 MiB 0 lỗi ở 184,4 MB/s
   (đỉnh 200 MB/s), hybrid sleep / deep power down, 24/24 lần `init` từ 24 pha xuất phát; DDR 18/18
   trên cùng bitstream. Trên bo lộ ra một lỗi của hiệu chỉnh đọc (đã sửa: bản đồ mắt gập theo T/2,
-  [docs/ip/hyperram.md](docs/ip/hyperram.md) mục 4).
+  [docs/ip/hyperram.md](docs/ip/hyperram.md) mục 4). Sau review của PR #6 (42 / 49 phát hiện được
+  xác nhận, đều đã sửa) chạy lại 2026-11-08: self-test 19/19 ba lượt, `verify` 60/60, DDR 18/18.
+  Vòng review thứ hai (của chính các bản sửa) xác nhận thêm 5 phát hiện; khi viết test hồi quy
+  cho từng bản sửa (mục 9b của testbench IP) lộ thêm hai lỗi RTL quanh reset kênh (POWER đọc
+  "hoạt động" ngay sau reset kênh giữa lúc hồi phục; reset kênh cắt ngang xung WAKE), đều đã sửa.
+  `make -C hw/ip/hyperram/dv mutants`: 18 bản RTL, mỗi bản gỡ một bản sửa, đều bị testbench bắt.
+  Bitstream sau vòng hai chạy trên MPS4: self-test 19/19 ba lượt, `verify` 60/60, DDR 18/18.
 - Arm MPS4: bản build có cả DDR và HyperRAM (`HR_LOOPBACK`, mặc định theo `DDR_LOOPBACK`),
   hai MMCM HyperRAM (`bow_hyperram_clk_xusp`) sau BUFGCE riêng từ cùng oscillator, wrapper
   chân `bow_hyperram_io_xilinx`, XDC loopback (bank 65) và bo RAM (khe FMC+), ràng buộc CDC

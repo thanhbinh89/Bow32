@@ -436,7 +436,7 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
   assign uart1_rx = gpiob_af_in[1];
 
   logic unused_af;
-  assign unused_af = ^{gpiob_af_in[7:2], gpiob_af_in[0], dma_tready[1]};
+  assign unused_af = ^{gpiob_af_in[7:2], gpiob_af_in[0]};
 
   // ---------------------------------------------------------------------------
   // Camera path: MIPI CSI-2 receiver -> ISP (registers on the peripheral bus,
@@ -555,6 +555,8 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
   );
 
   assign h264_tready = dma_tready[0];
+  logic unused_dma;
+  assign unused_dma = dma_tready[1];   // channel 1 has no stream source
 
   // ---------------------------------------------------------------------------
   // MKV block cipher (TCVN 14263:2024), registers only

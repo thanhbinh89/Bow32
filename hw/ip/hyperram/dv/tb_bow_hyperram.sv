@@ -44,8 +44,9 @@
 //      is set for its duration: the sweep moves CA and data out of tIS / tIH
 //      on purpose)
 //   5  device registers: REG_RD ID0 / ID1 / CR0 / CR1 against the model and the
-//      CR0 / CR1 shadow registers (CR1: the writable bits; a shadow that keeps
-//      the read-only [1:0] of its reset value is a NOTE)
+//      CR0 / CR1 shadow registers (also CR1[1:0] after a REG_RD CR1); the
+//      controller's guards (ID0 write, reserved CR0 latency: ERR_CODE ARG) and
+//      WAKE while active (no CS# pulse)
 //   6  window traffic in all 8 modes of RBUF_EN / WRAP_FILL / WPOST: random
 //      byte / halfword / word reads and writes (hot region and the whole
 //      device), FLUSH, INVAL, against a byte reference and (pads) the model's
@@ -352,6 +353,7 @@ module tb_bow_hyperram import bow_bus_pkg::*; import bow_hyperram_pkg::*; #(
 
   // ================================================================ errors
   int tb_errs = 0, proto_errs = 0, notes = 0, rtl_issues = 0, rtl_waived = 0;
+  int emu_cut_waived = 0;   // emulator errors 0E of the channel reset tests (9b), expected
 
   // conditional text (string operands: no padding of the shorter literal)
   function automatic string pick(bit c, string a, string b);
@@ -1276,6 +1278,56 @@ module tb_bow_hyperram import bow_bus_pkg::*; import bow_hyperram_pkg::*; #(
     return 32'd1 << b;
   endfunction
 
+  // a register write on the register port directly, also while the bus
+  // engine is busy with a window access (exact cycle of the write)
+  // one access on a port with Ibex-like timing (the request in the cycle
+  // after the previous access ends at the earliest): exact races
+  task automatic acc_direct(input bit port, input bit we, input logic [31:0] addr, input logic [31:0] wd,
+                            output logic [31:0] rd, output bit err);
+    bus_req_t r;
+    bit       g;
+    r       = '0;
+    r.req   = 1'b1;
+    r.we    = we;
+    r.be    = 4'hF;
+    r.addr  = addr;
+    r.wdata = wd;
+    @(posedge clk);
+    #1;
+    if (port == PMem) mem_req = r; else reg_req = r;
+    do begin
+      @(negedge clk);
+      g = (port == PMem) ? mem_rsp.gnt : reg_rsp.gnt;
+      @(posedge clk);
+      #1;
+    end while (!g);
+    if (port == PMem) mem_req = '0; else reg_req = '0;
+    @(negedge clk);
+    rd  = (port == PMem) ? mem_rsp.rdata : reg_rsp.rdata;
+    err = (port == PMem) ? mem_rsp.err : reg_rsp.err;
+  endtask
+
+  task automatic reg_wr_direct(input logic [11:0] off, input logic [31:0] v);
+    bus_req_t r;
+    bit       g;
+    r       = '0;
+    r.req   = 1'b1;
+    r.we    = 1'b1;
+    r.be    = 4'hF;
+    r.addr  = RegBase | 32'(off);
+    r.wdata = v;
+    @(posedge clk);
+    #1;
+    reg_req = r;
+    do begin
+      @(negedge clk);
+      g = reg_rsp.gnt;
+      @(posedge clk);
+      #1;
+    end while (!g);
+    reg_req = '0;
+  endtask
+
   localparam logic [31:0] StBad = (32'd1 << StRdErr) | (32'd1 << StWrErr) | (32'd1 << StRfifoErr) |
                                   (32'd1 << StBusTimeout) | (32'd1 << StTcsmErr) | (32'd1 << StBroken) |
                                   (32'd1 << StRfifoBrk) | (32'd1 << StBistErr);
@@ -1730,6 +1782,318 @@ module tb_bow_hyperram import bow_bus_pkg::*; import bow_hyperram_pkg::*; #(
           info($sformatf("ST: rd %0d wr %0d rd words %0d wr words %0d 2x %0d reg %0d failed %0d bist %0d hits %0d misses %0d flushes %0d",
                          s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], s[10]));
         end
+
+        // ------------------------ 9b regressions of the PR #6 review fixes
+        // Each check fails with its fix reverted (see docs/simulation.md).
+        begin : review_regress
+          logic [31:0] d0, d1, dst, dctl, dec, dt0, rv, dbg0, dbg1;
+          logic [15:0] r16x;
+          bit          dok, dok2, de, dpend, bad;
+          int          dp, dw, dhits, dcont0, lost;
+
+          clear_status();
+          // staged posted block vs a REG_RD written with the driver's own
+          // protocol: the block must reach the device and WIN_IDLE return
+          // (1: the block leaves by the WB_TMO timeout, 2: by a write to the
+          // next block, 3: by FLUSH; the REG_RD d cycles later)
+          hr_window(1'b1, 1'b1, 1'b1);
+          lost = 0;
+          for (int variant = 1; variant <= 3; variant++) begin
+            for (int d = 0; d < ((variant == 1) ? 40 : 8); d++) begin
+              logic [31:0] wa;
+              wa = 32'h9000 + 32'(128 * d) + 32'(variant * 32'h2000);
+              for (int k = 0; k < 8; k++) win_write_ref(wa + 32'(4 * k), 32'hA5A5_0000 | 32'(256 * d + k), 4'hF, "stage race");
+              if (variant == 1) begin
+                repeat (32 + d) @(posedge clk);
+              end else if (variant == 2) begin
+                win_write_ref(wa + 32'h40, 32'h5A5A_0000 | 32'(d), 4'hF, "stage race (next block)");
+                repeat (d) @(posedge clk);
+              end else begin
+                hr_cmd(CmdFlush, dok);
+                if (!dok) error("stage race: FLUSH failed");
+                repeat (d) @(posedge clk);
+              end
+              hr_reg_read(2, r16x, dok);
+              if (!dok) error($sformatf("stage race %0d / %0d: REG_RD CR0 failed (STATUS %08h)", variant, d, st_last));
+              hr_flush(dok);
+              if (!dok) begin
+                error($sformatf("stage race %0d / %0d: WIN_IDLE never came back after the REG_RD", variant, d));
+                break;
+              end
+              bad = 1'b0;
+              if (Pads) begin
+                for (int k = 0; k < 32; k++) if (u_hr.peek_byte(wa + 32'(k)) !== ref_b[wa + 32'(k)]) bad = 1'b1;
+              end else begin
+                hr_cmd_must(CmdInval, "INVAL (stage race)");
+                for (int k = 0; k < 8; k++) begin
+                  win_rd(wa + 32'(4 * k), rv, de);
+                  if (de || rv != (32'hA5A5_0000 | 32'(256 * d + k))) bad = 1'b1;
+                end
+              end
+              if (bad) begin
+                lost++;
+                error($sformatf("stage race %0d / %0d: the posted block %07h is not in the device", variant, d, wa));
+              end
+            end
+          end
+          info($sformatf("stage race: 56 posted blocks with a REG_RD behind them, %0d lost", lost));
+          clear_status();
+
+          // the automatic INVAL after a BIST while a line fill is in flight acts
+          // at once: a line cached before the BIST never hits after BIST_DONE
+          // (the fill answers its word first and keeps filling meanwhile)
+          hr_window(1'b1, 1'b1, 1'b0);
+          lost = 0;
+          for (int dly = 0; dly < 12; dly++) begin
+            logic [31:0] xb, xexp;
+            xb   = 32'h0000_8000;
+            xexp = {16'((32'(xb) / 2 + 1) ^ 32'h2468), 16'((32'(xb) / 2) ^ 32'h2468)};
+            for (int k = 0; k < 8; k++) win_wr(xb + 32'(4 * k), 32'hBEEF_0000 + 32'(k), 4'hF, de);
+            hr_flush(dok);
+            hr_cmd_must(CmdInval, "INVAL (BIST / fill race)");
+            for (int k = 0; k < 8; k++) win_rd(xb + 32'(4 * k), rv, de);   // the line is cached
+            repeat (40) @(posedge clk);
+            reg_wr(RegBAddrOff, xb / 2);
+            reg_wr(RegBLenOff, 32'd16);
+            reg_wr(RegBSeedOff, 32'h2468);
+            reg_wr(RegBCtrlOff, 32'd1 | 32'd4 | (32'd16 << 8));      // write, counter data, bursts of 16
+            reg_wr(RegStatusOff, sbit(StBistDone) | sbit(StBistErr) | sbit(StCmdDone) | sbit(StCmdErr));
+            acc_direct(PReg, 1'b1, RegBase | 32'(RegCmdOff), sbit(CmdBistGo), rv, de);
+            repeat (dly) @(posedge clk);
+            acc_direct(PMem, 1'b0, MemBase + 32'h0004_0000 + 32'(32'h100 * dly), '0, rv, de);   // a miss: a fill
+            // (an explicit block: xsim 2025.2 never left the one-statement form)
+            do begin
+              acc_direct(PReg, 1'b0, RegBase | 32'(RegStatusOff), '0, dst, de);
+            end while (!dst[StBistDone]);
+            acc_direct(PMem, 1'b0, MemBase + xb, '0, rv, de);
+            if (de || rv != xexp) begin
+              lost++;
+              error($sformatf("BIST / fill race (delay %0d): line read %08h after BIST_DONE, BIST wrote %08h", dly, rv, xexp));
+            end
+            hr_cmd_must(CmdInval, "INVAL (BIST / fill race end)");
+            for (int k = 0; k < 32; k++) ref_b.delete(xb + 32'(k));
+          end
+          clear_status();
+
+          // BIST_FADDR with BIST_ADDR != 0 (written with one seed, checked with another)
+          hr_bist(32'h5_2000, 64, 16, 1, 32'h11, dok, d0);
+          hr_bist(32'h5_2000, 64, 16, 2, 32'h22, dok, d0);
+          reg_rd(RegBFAddrOff, d1);
+          if (d0 == 0 || d1 != 32'h5_2000) error($sformatf("BIST_FADDR %08h (BIST_ERRS %0d), expected 00052000", d1, d0));
+          hr_cmd_must(CmdInval, "INVAL (BIST_FADDR)");
+          clear_status();
+
+          // PS_GO / WPS_GO beyond the limit: refused, ERR_CODE = ARG, no move
+          phase_now(dp);
+          hr_set_phase(dp + 2 * int'(PsSteps) + 1, dok);
+          dok2 = st_last[StCmdErr];
+          reg_rd(RegErrCdOff, dec);
+          phase_now(dw);
+          if (dok || !dok2 || dec[7:0] != ErrArg || dw != dp) begin
+            error($sformatf("PS_GO beyond the limit: accepted %0d CMD_ERR %0d ERR_CODE %08h phase %0d -> %0d", dok, dok2, dec, dp, dw));
+          end
+          wphase_now(dp);
+          hr_set_wphase((3 * int'(PsSteps)) / 16 + 1, dok);
+          dok2 = st_last[StCmdErr];
+          reg_rd(RegErrCdOff, dec);
+          wphase_now(dw);
+          if (dok || !dok2 || dec[7:0] != ErrArg || dw != dp) begin
+            error($sformatf("WPS_GO beyond the limit: accepted %0d CMD_ERR %0d ERR_CODE %08h phase %0d -> %0d", dok, dok2, dec, dp, dw));
+          end
+          clear_status();
+
+          // BIST_GO while a run is in progress: refused, ERR_CODE = ARG
+          reg_wr(RegBAddrOff, 32'h4_0000);
+          reg_wr(RegBLenOff, 32'd16384);
+          reg_wr(RegBSeedOff, 32'h5);
+          reg_wr(RegBCtrlOff, 32'd1 | (32'd16 << 8));
+          reg_wr(RegStatusOff, sbit(StBistDone) | sbit(StBistErr));
+          hr_cmd(CmdBistGo, dok);
+          hr_cmd(CmdBistGo, dok2);
+          dst = st_last;
+          reg_rd(RegErrCdOff, dec);
+          if (!dok || dok2 || !dst[StCmdErr] || dec[7:0] != ErrArg) begin
+            error($sformatf("BIST_GO during a run: first %0d second %0d CMD_ERR %0d ERR_CODE %08h", dok, dok2, dst[StCmdErr], dec));
+          end
+          hr_cmd(CmdBistStop, dok);
+          wait_st(sbit(StBistBusy), 0, CmdTmoPs, dok);
+          if (!dok) error("BIST_STOP: the run did not stop");
+          hr_cmd_must(CmdInval, "INVAL (BIST_GO)");
+          clear_status();
+
+          // (pads) CR1 shadow right after HW_RESET and after a WAKE from deep
+          // power down, before any REG_RD CR1: the device keeps CR1[1:0]
+          if (Pads) begin
+            hr_cmd(CmdHwReset, dok);
+            reg_rd(RegCr1Off, d1);
+            if (!dok || d1[15:0] != u_hr.cr1) error($sformatf("CR1 shadow %04h after HW_RESET, device %04h", d1[15:0], u_hr.cr1));
+            hr_configure(cfg, dok);
+            if (!dok) error("configuration after HW_RESET failed");
+            hr_deep_power_down(dok);
+            #(64'd3_500_000);
+            hr_wake(dok2);
+            reg_rd(RegCr1Off, d1);
+            if (!dok || !dok2 || d1[15:0] != u_hr.cr1) begin
+              error($sformatf("CR1 shadow %04h after a WAKE from DPD (DPD %0d WAKE %0d), device %04h", d1[15:0], dok, dok2, u_hr.cr1));
+            end
+            hr_configure(cfg, dok);
+            if (!dok) error("configuration after deep power down failed");
+            hr_cmd_must(CmdInval, "INVAL (CR1 shadow)");
+            ref_b.delete();                       // HW_RESET / DPD: the array is gone
+            for (int i = 0; i < 32; i++) ref_b[i] = CalPattern[i];
+            write_pattern(dok);
+            clear_status();
+          end
+
+          // CMD_DONE of a WAKE from hybrid sleep only after the recovery: POWER active
+          hr_hybrid_sleep(dok);
+          #(64'd3_500_000);
+          hr_cmd(CmdWake, dok2);
+          dst = st_last;
+          if (!dok || !dok2 || dst[5:4] != 2'd0) error($sformatf("WAKE: STATUS %08h at CMD_DONE (POWER %0d)", dst, dst[5:4]));
+          wait_power(PwrActive, dok);
+          hr_cmd_must(CmdInval, "INVAL (WAKE)");
+          clear_status();
+
+          // a channel reset in the middle of a WAKE recovery: POWER still returns
+          // to active (the recovery time runs in the board domain), the device works
+          hr_hybrid_sleep(dok);
+          #(64'd3_500_000);
+          reg_wr(RegCmdOff, sbit(CmdWake));
+          wait_st(32'd3 << StPwr0, 32'd3 << StPwr0, CmdTmoPs, dok);
+          if (!dok) error("WAKE: POWER never showed the recovery");
+          reg_rd(RegCtrlOff, dctl);
+          reg_wr(RegCtrlOff, dctl | (32'd1 << CtrlCoreRst));
+          repeat (16) @(posedge clk);
+          reg_wr(RegCtrlOff, dctl & ~(32'd1 << CtrlCoreRst));
+          wait_power(PwrActive, dok);
+          reg_rd(RegStatusOff, dst);
+          if (!dok) error($sformatf("CORE_RST during the WAKE recovery: POWER %0d, never active", dst[5:4]));
+          hr_recover(dok);
+          hr_reg_read(0, r16x, dok2);
+          if (!dok || !dok2 || r16x != Id0Val) error($sformatf("after CORE_RST in the WAKE recovery: READY %0d, ID0 %04h", dok, r16x));
+          clear_status();
+
+          // a posted block refused by the controller (TCSM): WR_ERR, and the read
+          // buffer line that took the store (write through) is dropped
+          hr_window(1'b1, 1'b1, 1'b1);
+          win_rd(32'h0001_5000, d0, de);
+          reg_rd(RegTim0Off, dt0);
+          reg_wr(RegTim0Off, (dt0 & ~32'hFFF) | 32'd8);
+          hr_cmd(CmdApply, dok);
+          win_wr(32'h0001_5000, ~d0, 4'hF, de);
+          hr_flush(dok2);
+          dst = st_last;                          // the poll that saw WIN_IDLE
+          reg_wr(RegTim0Off, dt0);
+          hr_cmd(CmdApply, dok);
+          win_rd(32'h0001_5000, d1, de);
+          if (!dst[StWrErr] || d1 != d0) begin
+            error($sformatf("refused posted block: WR_ERR %0d, read back %08h (device %08h, written %08h)", dst[StWrErr], d1, d0, ~d0));
+          end
+          clear_status();
+
+          // CTRL.CORE_RST while a window read waits for its fill: NOT_READY,
+          // neither BUS_TIMEOUT nor BROKEN (the channel reset tests below cut
+          // transactions on purpose: a cut command-address phase is no error)
+          if (Pads) u_hr.ca_abort_ok = 1'b1;
+          if (PhyKind == 2) reg_rd(RegDbgOff, dbg0);   // the emulator has no hook: its cut-CA error 0E
+          hr_window(1'b1, 1'b1, 1'b0);
+          hr_cmd_must(CmdInval, "INVAL (CORE_RST read)");
+          clear_status();
+          reg_rd(RegCtrlOff, dctl);
+          dpend = 1'b0;
+          fork
+            win_rd(32'h0001_6000, d0, de);
+            begin
+              wait (mem_req.req);
+              repeat (4) @(posedge clk);
+              dpend = mem_req.req && !mem_rsp.gnt;
+              reg_wr_direct(RegCtrlOff, dctl | (32'd1 << CtrlCoreRst));
+            end
+          join
+          repeat (40) @(posedge clk);
+          reg_rd(RegStatusOff, dst);
+          if (!dpend || !de || !dst[StNotReady] || dst[StBusTimeout] || dst[StBroken]) begin
+            error($sformatf("CORE_RST during a read: pending %0d bus error %0d STATUS %08h", dpend, de, dst));
+          end
+          // a CMD written while CORE_RST holds the channel: CMD_ERR, ERR_CODE
+          // DISABLE, which stays after the reset until the next CMD
+          reg_wr(RegStatusOff, sbit(StCmdDone) | sbit(StCmdErr));
+          reg_wr(RegCmdOff, sbit(CmdInval));
+          repeat (50) @(posedge clk);
+          reg_rd(RegStatusOff, dst);
+          reg_rd(RegErrCdOff, dec);
+          if (!dst[StCmdErr] || dst[StCmdDone] || dec[7:0] != ErrDisable) begin
+            error($sformatf("CMD during CORE_RST: STATUS %08h, ERR_CODE %08h", dst, dec));
+          end
+          reg_wr(RegCtrlOff, dctl);
+          repeat (64) @(posedge clk);
+          reg_rd(RegErrCdOff, dec);
+          if (dec[7:0] != ErrDisable) error($sformatf("ERR_CODE %08h after the reset that refused a CMD (DISABLE expected)", dec));
+          hr_recover(dok);
+          reg_rd(RegErrCdOff, dec);
+          if (!dok || dec[7:0] != ErrNone) error($sformatf("recovery after CORE_RST: READY %0d, ERR_CODE %08h", dok, dec));
+          clear_status();
+
+          // a CMD k cycles after CORE_RST is released: carried out or refused,
+          // never both (the first cycle after the release was both)
+          for (int k = 0; k < 8; k++) begin
+            reg_rd(RegCtrlOff, dctl);
+            reg_wr(RegCtrlOff, dctl | (32'd1 << CtrlCoreRst));
+            repeat (16) @(posedge clk);
+            reg_wr(RegStatusOff, sbit(StCmdDone) | sbit(StCmdErr));
+            reg_wr_direct(RegCtrlOff, dctl);
+            repeat (k) @(posedge clk);
+            reg_wr_direct(RegCmdOff, sbit(CmdInval));
+            repeat (40) @(posedge clk);
+            reg_rd(RegStatusOff, dst);
+            if (dst[StCmdDone] == dst[StCmdErr]) begin
+              error($sformatf("CMD %0d cycles after the CORE_RST release: CMD_DONE %0d CMD_ERR %0d", k, dst[StCmdDone], dst[StCmdErr]));
+            end
+            hr_recover(dok);
+            if (!dok) error($sformatf("recovery after CORE_RST (k %0d) failed", k));
+          end
+          clear_status();
+
+          // (pads) CORE_RST at 40 points of a line fill: no DQ / RWDS drive overlap
+          if (Pads) begin
+            dhits = 0;
+            for (int k = 0; k < 40; k++) begin
+              hr_cmd_must(CmdInval, "INVAL (CORE_RST fill)");
+              reg_rd(RegCtrlOff, dctl);
+              dcont0 = u_brd.contention;
+              fork
+                win_rd(32'h0001_8000 + 32'(64 * k), d0, de);
+                begin
+                  wait (mem_req.req);
+                  repeat (k) @(posedge clk);
+                  reg_wr_direct(RegCtrlOff, dctl | (32'd1 << CtrlCoreRst));
+                end
+              join
+              hr_recover(dok);
+              if (!dok) error($sformatf("recovery after CORE_RST at fill point %0d failed (STATUS %08h)", k, st_last));
+              if (u_brd.contention != dcont0) dhits++;
+            end
+            if (dhits != 0) error($sformatf("CORE_RST during a fill: DQ / RWDS contention at %0d of 40 points", dhits));
+            clear_status();
+          end
+          if (Pads) begin
+            u_hr.ca_abort_ok = 1'b0;
+            info($sformatf("channel reset tests: %0d command-address phases cut (expected)", u_hr.n_ca_aborted));
+          end
+          if (PhyKind == 2) begin
+            reg_rd(RegDbgOff, dbg1);
+            if (dbg1[15:0] != dbg0[15:0]) begin
+              if (dbg0[15:0] != 16'd0 || dbg1[23:16] != 8'h0E) begin
+                error($sformatf("emulator DBG %08h after the channel reset tests (before %08h): not only cut CA phases", dbg1, dbg0));
+              end else begin
+                emu_cut_waived = int'(dbg1[15:0]);
+                info($sformatf("channel reset tests: %0d command-address phases cut (emulator error 0E, expected)", emu_cut_waived));
+              end
+            end
+          end
+          hr_cmd_must(CmdInval, "INVAL (end of 9b)");
+        end
       end
 
       // --------------------------------------------------------- 10 end
@@ -1737,7 +2101,8 @@ module tb_bow_hyperram import bow_bus_pkg::*; import bow_hyperram_pkg::*; #(
       reg_rd(RegStatusOff, st);
       if ((st & StBad) != 0) error($sformatf("final STATUS %08h: error flags", st));
       reg_rd(RegDbgOff, v);
-      if (PhyKind == 2 && (v[31] || v[15:0] != 16'd0)) begin
+      if (PhyKind == 2 && (v[31] || v[15:0] != 16'd0) &&
+          !(emu_cut_waived != 0 && v[23:16] == 8'h0E && int'(v[15:0]) == emu_cut_waived)) begin
         error($sformatf("emulator DBG %08h: protocol error code %02h", v, v[23:16]));
       end
       if (PhyKind == 2) info($sformatf("emulator DBG %08h", v));
@@ -1756,6 +2121,30 @@ module tb_bow_hyperram import bow_bus_pkg::*; import bow_hyperram_pkg::*; #(
     $display("tb_bow_hyperram: %s (%0d errors: testbench %0d, bus protocol %0d) at %0t ps",
              pick(tb_errs + proto_errs == 0, "PASS", "FAIL"), tb_errs + proto_errs, tb_errs, proto_errs, $time);
     $finish;
+  end
+
+  // ======================================================= white-box contracts
+  // Two contracts of the review fixes that a register poll cannot see (they
+  // are a few cycles wide behind the CDC): a posted block refused by the
+  // controller raises STATUS.WR_ERR no later than STATUS.WIN_IDLE (a FLUSH poll
+  // that sees WIN_IDLE also sees the loss), and WAKE / HW_RESET are acknowledged
+  // only once POWER has left "recovering".
+  if (!Stub) begin : g_contracts
+    bit wb_refused = 1'b0, ack_prev = 1'b0;
+    always @(posedge clk) begin
+      if (g_ip.dut.u_regs.status[StWinIdle] && wb_refused) begin
+        if (!g_ip.dut.u_regs.status[StWrErr]) error("STATUS: WIN_IDLE before WR_ERR after a refused posted block");
+        wb_refused <= 1'b0;
+      end
+      if (g_ip.dut.u_win.post_refused) wb_refused <= 1'b1;
+    end
+    always @(posedge hr_clk) begin
+      if (g_ip.dut.u_ctrl.ack_q && !ack_prev && g_ip.dut.u_ctrl.pwr_q == PwrWait &&
+          (g_ip.dut.u_ctrl.xcode_q == HcWake || g_ip.dut.u_ctrl.xcode_q == HcHwReset)) begin
+        error("WAKE / HW_RESET acknowledged while POWER is still recovering");
+      end
+      ack_prev <= g_ip.dut.u_ctrl.ack_q;
+    end
   end
 
 endmodule

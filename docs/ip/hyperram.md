@@ -161,15 +161,21 @@ của thiết bị là t = k; L, cố định/biến đổi lấy từ **bản s
   ID0 dùng để hiệu chỉnh. Không có cạnh CK thì thiết bị giữ nguyên đầu ra, nên giữ CS# thấp
   thêm một chu kỳ (CK dừng) cho byte B trọn một chu kỳ, giá 1 chu kỳ mỗi giao dịch đọc.
 * REG_WR cập nhật bản sao: CR0 đổi latency của mọi giao dịch sau đó; CR0[15] = 0 → deep power
-  down, CR1[5] = 1 → hybrid sleep (cửa sổ bị chặn). REG_RD CR1 đưa trường chỉ-đọc CR1[1:0] vào
-  bản sao. WAKE: xung CS# `TWAKE[15:0]` chu kỳ không có CK, chờ `TWAKE[31:16]`; WAKE khi thiết
-  bị đang hoạt động thì không làm gì (`CMD_DONE`, không có xung CS# vô nghĩa). HW_RESET: RESET#
-  thấp `TRST[15:0]`, chờ `TRST[31:16]`. Bản sao được đặt ngay khi bắt đầu hồi phục (sau RESET#
-  hay ra khỏi DPD: trạng thái bật nguồn, dữ liệu mất; ra khỏi HS: CR1[5] = 0), còn thời gian hồi
-  phục (xung + chờ) được chốt và đếm trong miền reset của bo: một reset kênh giữa chừng (reset
-  SoC, `CORE_RST`) vẫn để POWER về hoạt động đúng lúc. Ghi ID0/ID1, ghi CR0 với mã latency dành
-  riêng, bước pha vượt giới hạn và `BIST_GO` khi BIST đang chạy bị từ chối với `ERR_CODE` =
-  `ARG` (7).
+  down, CR1[5] = 1 → hybrid sleep (cửa sổ bị chặn). REG_RD CR1 đưa trường chỉ-đọc CR1[1:0]
+  (chu kỳ refresh, theo cấp nhiệt độ của chip) vào bản sao; HW_RESET và ra khỏi DPD giữ trường đó
+  (chip không đổi nó). WAKE: xung CS# `TWAKE[15:0]` chu kỳ không có CK, chờ `TWAKE[31:16]`; WAKE
+  khi thiết bị đang hoạt động thì không làm gì (`CMD_DONE`, không có xung CS# vô nghĩa), WAKE khi
+  đang hồi phục chờ hồi phục xong rồi mới quyết. HW_RESET: RESET# thấp `TRST[15:0]`, chờ
+  `TRST[31:16]`. `CMD_DONE` của WAKE / HW_RESET chỉ tới khi hồi phục xong (POWER = hoạt động).
+  Trạng thái nguồn và bản sao nằm trong miền reset của bo: RESET# đặt bản sao về trạng thái bật
+  nguồn ngay từ chu kỳ đầu; WAKE đổi trạng thái khi xung CS# đã trọn (ra khỏi DPD: trạng thái bật
+  nguồn, dữ liệu mất; ra khỏi HS: CR1[5] = 0), một xung bị reset kênh cắt ngang để POWER ở DPD /
+  HS (chip có thể chưa coi xung ngắn là lệnh thức: WAKE lại; xung thừa trên chip đã thức chỉ là một
+  giao dịch bị bỏ qua). Thời gian hồi phục được chốt lúc bắt đầu và đếm trong miền của bo: một
+  reset kênh giữa chừng (reset SoC, `CORE_RST`) vẫn để POWER về hoạt động đúng lúc. Ghi ID0/ID1,
+  ghi CR0 với mã latency dành riêng, bước pha vượt giới hạn và `BIST_GO` khi BIST đang chạy bị từ
+  chối với `ERR_CODE` = `ARG` (7); bước pha mà MMCM không trả PSDONE: `ERR_CODE` = 8 (pha đã đi
+  được số bước đã xác nhận).
 
 ### 2.4 PHY (`bow_hyperram_phy`) và wrapper chân
 
@@ -225,7 +231,9 @@ một chip, đầu vào **không được thả nổi**. Các giá trị mặc �
 ra như sau:
 
 * Lúc nghỉ: DIR = FPGA → HyperRAM, FPGA lái DQ/RWDS = 0 (`IDLE_DRIVE`): không đầu vào nào thả
-  nổi lâu.
+  nổi lâu. Trong reset kênh (và từ lúc nạp cấu hình tới chu kỳ PHY đầu tiên) FPGA thả DQ/RWDS để
+  không chồng lái với level shifter còn đang lái một lần đọc bị cắt; mạch vào của TXV0108 luôn
+  hoạt động (cả khi OE# = 1) nên bản bo RAM bật pull-down yếu của chân FPGA cho DQ/RWDS.
 * RWDS: FPGA nhả ở t = −2, DIR → đọc ở t = −1 (tắt đầu ra A ≤ 7 ns trước khi CS# tới thiết bị
   và thiết bị lái RWDS).
 * Đọc: thiết bị có thể lái DQ từ r_{t_D−1}; DIR → đọc ở t_D − 2 (`RDIR_LEAD` = 2), FPGA nhả DQ
@@ -273,7 +281,7 @@ Giá trị reset ở dưới là của MPS4 (CK 100 MHz); `TIM0`, `TRST`, `TWAKE
 | 0x04C | `ERR_ADDR` | R | địa chỉ bus của truy cập cửa sổ lỗi gần nhất |
 | 0x050 | `EMU` | R | [4:0] log2 dung lượng emulator (0 = không có) |
 | 0x054 | `DBG` | R | từ debug của bo (emulator: [31] lỗi, [29:28] nguồn, [23:16] mã lỗi đầu, [15:0] số lỗi), từng bit qua bộ đồng bộ |
-| 0x058 | `ERR_CODE` | R | [7:0] mã lỗi của lệnh cuối, [15:8] của giao dịch lỗi cuối: 0 không lỗi, 1 không có dữ liệu đọc, 2 RWDS không phải strobe, 3 vượt tCSM, 4 thiết bị đang ngủ, 5 chưa EN / không có clock / kênh đang reset, 6 FIFO đọc hỏng, 7 đối số bị từ chối (lệnh CMD sai dạng, ghi ID0/ID1, mã latency CR0 dành riêng, bước pha vượt giới hạn, `BIST_GO` khi BIST đang chạy) |
+| 0x058 | `ERR_CODE` | R | [7:0] mã lỗi của lệnh cuối, [15:8] của giao dịch lỗi cuối: 0 không lỗi, 1 không có dữ liệu đọc, 2 RWDS không phải strobe, 3 vượt tCSM, 4 thiết bị đang ngủ, 5 chưa EN / không có clock / kênh đang reset, 6 FIFO đọc hỏng, 7 đối số bị từ chối (lệnh CMD sai dạng, ghi ID0/ID1, mã latency CR0 dành riêng, bước pha vượt giới hạn, `BIST_GO` khi BIST đang chạy), 8 bước pha: MMCM không trả PSDONE |
 | 0x05C | `WB_TMO` | RW | [15:0] write buffer tự đẩy sau N chu kỳ `clk_i` không có ghi (0 = tắt). Reset 64 |
 | 0x060 | `BIST_CTRL` | RW | [0] lượt ghi, [1] lượt đọc, [2] dữ liệu đếm (0 = PRBS), [15:8] word mỗi burst |
 | 0x064 | `BIST_ADDR` | RW | địa chỉ word HyperRAM đầu tiên |
@@ -287,13 +295,16 @@ Giá trị reset ở dưới là của MPS4 (CK 100 MHz); `TIM0`, `TRST`, `TWAKE
 | 0x100..0x1FC | `CAP[0..63]` | R | chụp thô: [7:0] DQ cạnh lên, [15:8] DQ cạnh xuống, [16] RWDS lên, [17] RWDS xuống |
 
 * `CMD` bị từ chối (`CMD_ERR`) khi đang có lệnh (BUSY), khi có nhiều bit (`ERR_CODE` 7), khi kênh
-  đang reset (`CORE_RST`, mất link: cả FLUSH / INVAL; `ERR_CODE` đọc 5), hoặc (lệnh cho phía hr)
-  khi chưa có `CLK_OK` (5). Đối số (cấu hình cho APPLY, đích pha, thanh ghi thiết bị, BIST) được chép
+  đang reset (`CORE_RST`, mất link, và chu kỳ đầu sau khi nhả: cả FLUSH / INVAL; `ERR_CODE` đọc 5,
+  giữ sau reset tới lệnh kế tiếp), hoặc (lệnh cho phía hr) khi chưa có `CLK_OK` (5). Mỗi lần ghi
+  `CMD` hoặc được làm, hoặc bị từ chối, không bao giờ cả hai. Đối số (cấu hình cho APPLY, đích pha, thanh ghi thiết bị, BIST) được chép
   lúc ghi `CMD` và giữ yên tới khi xong.
 * `READY` = `CLK_OK` & `APPLIED` & `INIT_DONE` & !`CORE_RST` & !`BROKEN` & POWER = hoạt động.
 * `PS_NOW`, `WPS_NOW`, `CR0`, `CR1`, POWER đi qua bộ đồng bộ từng bit và được nhận khi hai mẫu
   liên tiếp bằng nhau (chỉ đổi trong các lệnh); kết quả BIST, thống kê, `CAP` là tĩnh sau sự
-  kiện tương ứng.
+  kiện tương ứng. Trong reset kênh và 3 chu kỳ sau đó (bộ đồng bộ reset cùng kênh) `CR0` / `CR1`
+  đọc giá trị mặc định, `PS_NOW` / `WPS_NOW` đọc 0 và POWER đọc 3 (đang hồi phục): trạng thái của
+  bo chưa biết, không bao giờ đọc nhầm "hoạt động" giữa lúc hồi phục.
 
 ## 4. Khởi tạo và hiệu chỉnh (driver `bow_hr_init`)
 
@@ -363,12 +374,19 @@ latency dành riêng, 0D xung WAKE sai độ dài, 0E CS# lên khi CA chưa xong
   (độ trễ ngẫu nhiên theo seed, đếm tranh chấp và đầu vào thả nổi); 5 cấu hình: loopback, bo RAM,
   nối thẳng 166 MHz, stub, chip tắt DQ trước byte cuối ([../simulation.md](../simulation.md)).
   Nó đã tìm ra ba lỗi (đã sửa): burst BIST bị từ chối làm treo `BIST_BUSY`, `WIN_IDLE` lên trước
-  khi khối ghi posted vào chip, `unique case` của thanh ghi lệnh.
+  khi khối ghi posted vào chip, `unique case` của thanh ghi lệnh. Mục 9b của testbench kiểm từng
+  bản sửa của hai vòng review PR #6 (cuộc đua khối ghi đang staged ↔ REG_RD, INVAL sau BIST khi
+  line đang nạp, khối posted bị từ chối, `CORE_RST` khi đang đọc / giữa hồi phục WAKE / ở chu kỳ
+  đầu sau khi nhả, mã `ERR_CODE`, `BIST_FADDR`, bản sao CR1, không chồng lái DQ/RWDS); `make -C
+  hw/ip/hyperram/dv mutants` gỡ từng bản sửa trong một bản sao RTL (18 đột biến): cả 18 phải FAIL.
 * `make test-fpga-dv` (cần Vivado): `tb_bow_hyperram_io_xilinx` chạy hai wrapper của bo với
   model unisim (ODDRE1/IDDRE1/IOBUF/MMCME4_ADV): hợp đồng thời gian chân, mức nghỉ và SRVAL, bắt
   mẫu đọc khi dịch pha, pha ghi ±T/4, mất lock; `make -C hw/fpga/common/dv mutants` kiểm chính testbench này bằng
   42 bản hỏng có chủ đích của hai wrapper ([../simulation.md](../simulation.md)).
-* `make lint`: SoC với `HrEn` = 0, 1 (chân) và 1 (loopback cùng DDR); `xvlog` của Vivado không lỗi.
+* `make lint`: SoC với `HrEn` = 0, 1 (chân) và 1 (loopback cùng DDR); `make -C hw/ip/hyperram/dv
+  lint` thêm emulator và các mô hình. `xvlog` của Vivado dịch toàn bộ SoC không lỗi, và `make -C
+  hw/ip/hyperram/dv xsim CFG=card` chạy testbench IP bằng xsim (không tham chiếu trước khai báo:
+  Verilator chấp nhận, xvlog thì không).
 * `make test-tools`: mô hình Python của dữ liệu BIST / xorshift, parser và lệnh của
   `tools/bow32_hyperram.py` trên bo giả.
 * Build MPS4: timing, kiểm tra CDC (`tcl/timing_checks.tcl`, `report_cdc`), bus skew của 3 FIFO.

@@ -189,6 +189,14 @@ hẹp — gặp một lần trên bo (82/84 điểm tốt), đã sửa và kiể
 phát, rồi self-test 19/19 bốn lần, `verify` 60/60. Với chip thật qua level shifter, mắt sẽ hẹp
 hơn và phụ thuộc trễ của bo.
 
+Lượt 2026-11-08, bitstream dựng lại sau hai vòng sửa của review PR #6 (setup WNS +0,488 ns, hold
+WHS +0,010 ns): self-test 19/19 (bản đầy đủ), 19/19 (rút gọn) sau `RESET` của MCC và sau khi nạp
+lại firmware; `verify` 40/40 (seed 2026) và 20/20 (seed 99); `cal` pha −114, `RD_DLY` 12; `eye`
+bước 1: ID0 651 / 672, mẫu 645 / 672, pha và `RD_DLY` được trả lại; `bench`: ghi 7,99, ghi posted
+28,22, đọc read buffer 20,77, đọc không buffer 7,14 MB/s, BIST 64 KiB ghi 188,1 / đọc 180,7 MB/s;
+WAKE khi đang thức không làm gì (`DBG` = 0), hybrid sleep / deep power down như trên; `cap` trước
+`init` bị từ chối gọn (`ERR_CODE` 5); DDR 18/18 trên cùng bitstream.
+
 Sau khi thử: `bow32_mps4.py restore` (dòng `APPFILE` về `CA5DS\ca5ds.txt`, `board.txt` trùng
 từng byte bản giữ); FPGA vẫn chạy Bow32 tới lần `REBOOT` hay tắt nguồn kế tiếp.
 
@@ -214,10 +222,14 @@ HyperRAM giả lập 1 MiB, chạy `test quick` và kiểm tra `DBG` của emula
   (lái 1,5 V, tham chiếu 1,8 V), méo duty của CK qua level shifter.
 * Hiệu chỉnh cả pha ghi: `bow32_hyperram.py cal --write`.
 
-Kết quả build bản bo RAM (2026-11-07, chưa chạy trên bo vì bo RAM chưa gắn): đạt mọi ràng buộc,
-setup WNS +0,103 ns, hold WHS +0,011 ns, 8/8 bus skew; `hr_clk` → `hr_wclk` +3,357 / +0,428 ns.
-Hai điểm riêng của bản này:
+Kết quả build bản bo RAM (2026-11-08, sau hai vòng sửa của review; chưa chạy trên bo vì bo RAM
+chưa gắn): đạt mọi ràng buộc, setup WNS +0,098 ns, hold WHS +0,001 ns, 8/8 bus skew; `hr_clk` →
+`hr_wclk` hold +0,714 ns (bản 2026-11-07: WNS +0,103 ns, `hr_clk` → `hr_wclk` +3,357 / +0,428 ns).
+Ba điểm riêng của bản này:
 
+* DQ/RWDS có pull-down yếu của chân FPGA (`PULLTYPE PULLDOWN` trong `constr/hyperram_card.xdc`):
+  mạch vào của TXV0108 luôn hoạt động, kể cả khi OE# = 1, mà FPGA thả các chân này trong reset kênh
+  (để không chồng lái với một lần đọc bị cắt) và từ lúc nạp cấu hình tới chu kỳ PHY đầu tiên.
 * Chân dữ liệu của DDR2 và HyperRAM trên bo RAM đều ở bank 71 (vùng clock X4Y11), cách các MMCM
   của DDR sáu vùng. Đường DQS của DDR (flop PHY → ODDR, nửa chu kỳ trừ độ bất định T/4) hụt
   −0,07 ns với gốc clock Vivado tự chọn; `constr/ddr_card.xdc` đặt gốc của `ddr_wclk` ở X4Y6 (vùng
