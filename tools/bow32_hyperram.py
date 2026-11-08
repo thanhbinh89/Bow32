@@ -299,7 +299,7 @@ def main(argv=None, open_serial=None):
     p.add_argument("--step", type=int, default=4, help="phase sweep step (4)")
     p.add_argument("--write", action="store_true", help="then the write phase scan (card)")
     p.add_argument("--init", action="store_true", help="init again first")
-    p = sub.add_parser("eye", help="eye maps only (the phase is restored and verified)")
+    p = sub.add_parser("eye", help="eye maps only (read phase, RD_DLY and the 32 bytes at offset 0 restored)")
     p.add_argument("--step", type=int, default=4)
     sub.add_parser("bench", help="CPU and BIST bandwidth")
     p = sub.add_parser("verify", help="BIST / fill with host seeds, dumps compared here")

@@ -22,9 +22,10 @@
 //     write phase 0 (bow_hyperram_clk_xusp), so the ODDRE1 samples at (j+0.75)T,
 //     a 3T/4 path from the PHY register: dq[0] on the pin during
 //     [(j+0.75)T, (j+1.25)T), centred on the CK rising edge of pin cycle j+1,
-//     dq[1] during [(j+1.25)T, (j+1.75)T). The write phase (+-T/4) moves the
-//     sample point within T/2 .. T: the board XDC adds T/4 of uncertainty on
-//     the clk_i -> wclk_i paths.
+//     dq[1] during [(j+1.25)T, (j+1.75)T). The write phase (the controller's
+//     limit +-3T/16) moves the sample point within 9T/16 .. 15T/16: the board
+//     XDC adds 3T/16 of uncertainty on the clk_i -> wclk_i paths (at +-T/4 the
+//     hold margin at the ODDRE1 would be zero).
 //   * Output enables: an ODDRE1 on IOBUF.T is not placed at the pin on
 //     UltraScale+, so T comes from fabric flops on clk_i (KEEP, one per pad):
 //     the driver switches at (j+1)T plus the flop -> pad delay.

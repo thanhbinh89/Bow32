@@ -156,6 +156,16 @@ _Static_assert(__builtin_offsetof(bow_hr_regs_t, CAP) == 0x100, "HR CAP offset")
 #define HR_ST_RFIFO_BROKEN (1u << 21)
 #define HR_ST_WIN_IDLE (1u << 22)
 #define HR_ST_W1C 0x000FFF00u
+
+/* ERR_CODE[7:0] (command) / [15:8] (transaction) */
+#define HR_ERR_NONE 0u
+#define HR_ERR_RD_TMO 1u    /* read data did not start in time */
+#define HR_ERR_RWDS 2u      /* RWDS not a strobe (STRICT) */
+#define HR_ERR_TCSM 3u      /* longer than TCSM: refused */
+#define HR_ERR_POWER 4u     /* device in deep power down / hybrid sleep */
+#define HR_ERR_DISABLE 5u   /* EN = 0, no clock, channel in reset */
+#define HR_ERR_RFIFO 6u     /* read FIFO broken */
+#define HR_ERR_ARG 7u       /* argument refused: ID0 / ID1 write, reserved CR0 latency code */
 #define HR_PWR_ACTIVE 0u
 #define HR_PWR_DPD 1u
 #define HR_PWR_HS 2u

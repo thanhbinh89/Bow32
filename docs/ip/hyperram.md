@@ -120,10 +120,15 @@ Các điểm sau được đối chiếu với hình 30, 31, 33 của datasheet 
   cửa sổ nên nếu không chờ, một lệnh ngủ có thể vượt mặt khối ghi còn trong FIFO).
 * `WPOST = 0`: mỗi lần ghi là một giao dịch, trả lời sau khi controller báo xong.
 * **Lỗi bus** (không truy cập thiết bị): offset ≥ 32 MiB (`RANGE`), cửa sổ chưa sẵn sàng
-  (`NOT_READY`: chưa `INIT_DONE`, thiết bị ngủ, `CORE_RST`, mất link). Đọc lỗi (không có dữ
-  liệu, RWDS sai) → lỗi bus, `RD_ERR`, line bị bỏ. Không có trả lời trong 2^18 chu kỳ, hoặc mất
-  clock HyperRAM khi link vẫn lên → lỗi bus, `BUS_TIMEOUT`, cửa sổ **chết** (`STATUS.BROKEN`)
-  tới `CORE_RST`: một câu trả lời muộn không bao giờ bị nhận nhầm. `ERR_ADDR` giữ địa chỉ.
+  (`NOT_READY`: chưa `INIT_DONE`, thiết bị ngủ, `CORE_RST`, mất link — kể cả một truy cập đang
+  chờ khi `CORE_RST` / mất link xảy ra). Đọc lỗi (không có dữ liệu, RWDS sai) → lỗi bus,
+  `RD_ERR`, line bị bỏ. Không có trả lời trong 2^18 chu kỳ, hoặc mất clock HyperRAM khi link vẫn
+  lên → lỗi bus, `BUS_TIMEOUT`, cửa sổ **chết** (`STATUS.BROKEN`) tới `CORE_RST`: một câu trả
+  lời muộn không bao giờ bị nhận nhầm. `ERR_ADDR` giữ địa chỉ.
+* Một khối posted bị từ chối: `STATUS.WR_ERR` lên cùng lúc với câu trả lời (không muộn hơn
+  `WIN_IDLE`), và read buffer bị xoá (line có thể đã nhận dữ liệu ghi mà thiết bị không có).
+* `INVAL` (lệnh, hoặc IP tự gửi) có hiệu lực ngay: mọi line, kể cả line đang fill (truy cập
+  đang chờ fill đó vẫn được trả lời từ dữ liệu của fill, nhưng line không còn hợp lệ).
 
 ### 2.3 Controller (`bow_hyperram_ctrl`)
 
@@ -156,10 +161,15 @@ của thiết bị là t = k; L, cố định/biến đổi lấy từ **bản s
   ID0 dùng để hiệu chỉnh. Không có cạnh CK thì thiết bị giữ nguyên đầu ra, nên giữ CS# thấp
   thêm một chu kỳ (CK dừng) cho byte B trọn một chu kỳ, giá 1 chu kỳ mỗi giao dịch đọc.
 * REG_WR cập nhật bản sao: CR0 đổi latency của mọi giao dịch sau đó; CR0[15] = 0 → deep power
-  down, CR1[5] = 1 → hybrid sleep (cửa sổ bị chặn). WAKE: xung CS# `TWAKE[15:0]` chu kỳ không
-  có CK, chờ `TWAKE[31:16]`; ra khỏi DPD thì bản sao về mặc định (thiết bị ở trạng thái bật
-  nguồn, dữ liệu mất), ra khỏi HS thì CR1[5] = 0. HW_RESET: RESET# thấp `TRST[15:0]`, chờ
-  `TRST[31:16]`, bản sao về mặc định. Ghi CR0 với mã latency dành riêng bị từ chối.
+  down, CR1[5] = 1 → hybrid sleep (cửa sổ bị chặn). REG_RD CR1 đưa trường chỉ-đọc CR1[1:0] vào
+  bản sao. WAKE: xung CS# `TWAKE[15:0]` chu kỳ không có CK, chờ `TWAKE[31:16]`; WAKE khi thiết
+  bị đang hoạt động thì không làm gì (`CMD_DONE`, không có xung CS# vô nghĩa). HW_RESET: RESET#
+  thấp `TRST[15:0]`, chờ `TRST[31:16]`. Bản sao được đặt ngay khi bắt đầu hồi phục (sau RESET#
+  hay ra khỏi DPD: trạng thái bật nguồn, dữ liệu mất; ra khỏi HS: CR1[5] = 0), còn thời gian hồi
+  phục (xung + chờ) được chốt và đếm trong miền reset của bo: một reset kênh giữa chừng (reset
+  SoC, `CORE_RST`) vẫn để POWER về hoạt động đúng lúc. Ghi ID0/ID1, ghi CR0 với mã latency dành
+  riêng, bước pha vượt giới hạn và `BIST_GO` khi BIST đang chạy bị từ chối với `ERR_CODE` =
+  `ARG` (7).
 
 ### 2.4 PHY (`bow_hyperram_phy`) và wrapper chân
 
@@ -190,17 +200,20 @@ RWDS làm clock): được arm `RD_DLY` chu kỳ sau token của controller, nó
 thấp rồi một mẫu cao = byte A, mẫu thấp kế = byte B. Mức cao của pha CA (chỉ báo 2×) kéo dài
 nhiều mẫu nên không bao giờ bị lấy nhầm. Chế độ `STRICT` (mặc định): RWDS phải đảo mỗi nửa
 chu kỳ, nếu không → lỗi `RWDS` (thay vì trả dữ liệu lệch); không tới byte A đầu tiên trong
-`ARM_LEAD + RD_TMO` chu kỳ → lỗi `RD_TMO`. Arm sớm tới `ARM_LEAD − 1` chu kỳ hay muộn tới
-`ARM_LEAD − 2` chu kỳ (lệch `RD_DLY`) vẫn đúng dữ liệu; lệch hơn thì giao dịch báo lỗi, không
-bao giờ trả dữ liệu sai lặng lẽ.
+`ARM_LEAD + RD_TMO` chu kỳ → lỗi `RD_TMO`. Lệch `RD_DLY`: arm muộn tới `ARM_LEAD − 2` chu kỳ vẫn
+đúng dữ liệu, muộn hơn → `RD_TMO`; arm sớm vẫn đúng suốt khoảng latency (bộ căn chỉ cần hai
+mẫu RWDS thấp trước byte A), tới khi điểm arm chạm mức RWDS của pha CA hoặc byte A không tới trong
+`ARM_LEAD + RD_TMO` chu kỳ, sớm hơn thì giao dịch báo lỗi. Không bao giờ trả dữ liệu sai lặng lẽ
+(nên "đọc vẫn đúng" không chứng minh `RD_DLY` nằm gần giá trị hiệu chỉnh: dùng chụp thô).
 
 **Chụp thô**: `CAP_ARM` rồi giao dịch kế tiếp: 64 chu kỳ luồng mẫu từ chu kỳ controller của
 t = 0 vào `CAP[0..63]` = {RWDS xuống, RWDS lên, DQ xuống, DQ lên}. Chỉ số c của byte A đầu tiên
 cho `RD_DLY = c − t_D`.
 
 **Mức RWDS của pha CA** (latency biến đổi) đi thẳng từ pad qua `bow_sync` trên `hr_clk`:
-`LAT_SMP` = 6 lấy mẫu ở cạnh lên của chu kỳ CA thứ 2 tại pad (ra quyết định đúng lúc cho L ≥ 4;
-L = 3 dùng 5).
+`LAT_SMP` = n lấy mức RWDS tại pad ngay trước r_(n−3) (6: cuối chu kỳ CA thứ 2, ngay trước r3),
+quyết định ở chu kỳ controller min(n, L + 2) + 2, đúng lúc cho L ≥ 4 (L = 3 dùng 5). Giới hạn trên:
+mức đó phải tới pad (qua level shifter) trước khi thiết bị đổi RWDS sau f3.
 
 ### 2.5 Level shifter của bo RAM (TXV0108)
 
@@ -217,7 +230,9 @@ ra như sau:
   và thiết bị lái RWDS).
 * Đọc: thiết bị có thể lái DQ từ r_{t_D−1}; DIR → đọc ở t_D − 2 (`RDIR_LEAD` = 2), FPGA nhả DQ
   một chu kỳ trước (`OE_PRE` = 1). Sau CS# lên thiết bị nhả trong ≤ 5 ns (+ U6 ≤ 4,8 ns): DIR về
-  ở t_E + 1 + 2 (`RDIR_TAIL` = 2), FPGA lái lại sau `OE_POST` = 1.
+  ở t_C + 1 + 2 (t_C = t_E + `RD_HOLD`: lúc CS# lên; `RDIR_TAIL` = 2), FPGA lái lại sau
+  `OE_POST` = 1. Một reset kênh giữa lúc đọc thả DQ/RWDS ngay (thanh ghi chân của PHY về
+  `HR_IO_OUT_RST`) và chỉ lái lại sau reset, ít nhất một chu kỳ sau khi OE# = 1: không chồng lái.
 * Ghi bộ nhớ: thiết bị nhả RWDS ≤ 5 ns sau f3 (+ trễ U6): DIR → ghi ở t = 5 (`RW_DIR`), FPGA lái
   preamble từ t = 6 (`RW_OE`), tới thiết bị trước f_{t_D−1} khi t_D ≥ 8. **Latency cố định (2×)
   là bắt buộc trên bo RAM** (t_D = 2L + 3 ≥ 9); với latency biến đổi và L = 4 (t_D = 7) không đủ
@@ -258,7 +273,7 @@ Giá trị reset ở dưới là của MPS4 (CK 100 MHz); `TIM0`, `TRST`, `TWAKE
 | 0x04C | `ERR_ADDR` | R | địa chỉ bus của truy cập cửa sổ lỗi gần nhất |
 | 0x050 | `EMU` | R | [4:0] log2 dung lượng emulator (0 = không có) |
 | 0x054 | `DBG` | R | từ debug của bo (emulator: [31] lỗi, [29:28] nguồn, [23:16] mã lỗi đầu, [15:0] số lỗi), từng bit qua bộ đồng bộ |
-| 0x058 | `ERR_CODE` | R | [7:0] mã lỗi của lệnh cuối, [15:8] của giao dịch lỗi cuối: 1 không có dữ liệu đọc, 2 RWDS không phải strobe, 3 vượt tCSM, 4 thiết bị đang ngủ, 5 chưa EN / không có clock, 6 FIFO đọc hỏng |
+| 0x058 | `ERR_CODE` | R | [7:0] mã lỗi của lệnh cuối, [15:8] của giao dịch lỗi cuối: 0 không lỗi, 1 không có dữ liệu đọc, 2 RWDS không phải strobe, 3 vượt tCSM, 4 thiết bị đang ngủ, 5 chưa EN / không có clock / kênh đang reset, 6 FIFO đọc hỏng, 7 đối số bị từ chối (lệnh CMD sai dạng, ghi ID0/ID1, mã latency CR0 dành riêng, bước pha vượt giới hạn, `BIST_GO` khi BIST đang chạy) |
 | 0x05C | `WB_TMO` | RW | [15:0] write buffer tự đẩy sau N chu kỳ `clk_i` không có ghi (0 = tắt). Reset 64 |
 | 0x060 | `BIST_CTRL` | RW | [0] lượt ghi, [1] lượt đọc, [2] dữ liệu đếm (0 = PRBS), [15:8] word mỗi burst |
 | 0x064 | `BIST_ADDR` | RW | địa chỉ word HyperRAM đầu tiên |
@@ -271,8 +286,9 @@ Giá trị reset ở dưới là của MPS4 (CK 100 MHz); `TIM0`, `TRST`, `TWAKE
 | 0x080..0x0BC | `ST[0..15]` | R | thống kê (chụp bằng SNAP): giao dịch đọc, ghi, word đọc, word ghi, giao dịch 2×, truy cập thanh ghi, giao dịch lỗi/bị từ chối, giao dịch BIST, read buffer trúng, trượt, lần đẩy write buffer |
 | 0x100..0x1FC | `CAP[0..63]` | R | chụp thô: [7:0] DQ cạnh lên, [15:8] DQ cạnh xuống, [16] RWDS lên, [17] RWDS xuống |
 
-* `CMD` bị từ chối (`CMD_ERR`) khi đang có lệnh (BUSY), khi có nhiều bit, hoặc (lệnh cho phía hr)
-  khi chưa có `CLK_OK`. Đối số (cấu hình cho APPLY, đích pha, thanh ghi thiết bị, BIST) được chép
+* `CMD` bị từ chối (`CMD_ERR`) khi đang có lệnh (BUSY), khi có nhiều bit (`ERR_CODE` 7), khi kênh
+  đang reset (`CORE_RST`, mất link: cả FLUSH / INVAL; `ERR_CODE` đọc 5), hoặc (lệnh cho phía hr)
+  khi chưa có `CLK_OK` (5). Đối số (cấu hình cho APPLY, đích pha, thanh ghi thiết bị, BIST) được chép
   lúc ghi `CMD` và giữ yên tới khi xong.
 * `READY` = `CLK_OK` & `APPLIED` & `INIT_DONE` & !`CORE_RST` & !`BROKEN` & POWER = hoạt động.
 * `PS_NOW`, `WPS_NOW`, `CR0`, `CR1`, POWER đi qua bộ đồng bộ từng bit và được nhận khi hai mẫu
@@ -325,8 +341,10 @@ mảng nhớ đã mất); driver vẫn gọi `INVAL` cho chắc. Đừng dùng c
 
 ## 6. Emulator HyperRAM (`bow_hyperram_dev`)
 
-Thiết bị HyperRAM 2.0 tổng hợp được, ở mức thanh ghi chân của PHY: CA, latency 1×/2× (2× ngẫu
-nhiên khi latency biến đổi), đọc/ghi bộ nhớ (tuyến tính, wrapped 16/32/64/128, hybrid), thanh
+Thiết bị HyperRAM 2.0 tổng hợp được, ở mức thanh ghi chân của PHY: CA, latency 1×/2× (latency
+biến đổi: 2× cho "va chạm refresh" rút mỗi giao dịch một lần từ LFSR 4 bit chu kỳ 15, đúng 3 trong
+mỗi 15 giao dịch bất kể thời điểm; một LFSR chạy mỗi chu kỳ bị khoá vào chu kỳ vòng lặp của CPU
+và không cho 2× nào), đọc/ghi bộ nhớ (tuyến tính, wrapped 16/32/64/128, hybrid), thanh
 ghi ID/CR, mặt nạ RWDS, DPD/HS/WAKE, RESET#. Bộ nhớ 8 byte mỗi hàng với byte enable (UltraRAM
 trên MPS4, 1 MiB = 32 UltraRAM, đọc trễ 3 chu kỳ với flop cuối trong fabric để đường tới ODDR của chân ngắn). Kiểm tra giao thức, mã lỗi ở `DBG`: 01 bit CA dành riêng, 02 ghi thanh ghi
 sai, 03 FPGA lái RWDS khi thiết bị lái, 04 FPGA lái DQ khi thiết bị lái, 05 thiếu preamble /
@@ -348,7 +366,7 @@ latency dành riêng, 0D xung WAKE sai độ dài, 0E CS# lên khi CA chưa xong
   khi khối ghi posted vào chip, `unique case` của thanh ghi lệnh.
 * `make test-fpga-dv` (cần Vivado): `tb_bow_hyperram_io_xilinx` chạy hai wrapper của bo với
   model unisim (ODDRE1/IDDRE1/IOBUF/MMCME4_ADV): hợp đồng thời gian chân, mức nghỉ và SRVAL, bắt
-  mẫu đọc khi dịch pha, pha ghi ±T/4, mất lock; `make mutants` kiểm chính testbench này bằng
+  mẫu đọc khi dịch pha, pha ghi ±T/4, mất lock; `make -C hw/fpga/common/dv mutants` kiểm chính testbench này bằng
   42 bản hỏng có chủ đích của hai wrapper ([../simulation.md](../simulation.md)).
 * `make lint`: SoC với `HrEn` = 0, 1 (chân) và 1 (loopback cùng DDR); `xvlog` của Vivado không lỗi.
 * `make test-tools`: mô hình Python của dữ liệu BIST / xorshift, parser và lệnh của

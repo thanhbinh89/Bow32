@@ -94,7 +94,7 @@ Một giao thức duy nhất cho toàn SoC: chính là bus native của Ibex (t�
 OBI) — `req/gnt` để bắt tay, `rvalid` **đúng 1 chu kỳ** sau `gnt`. Thiết bị chậm
 giữ `gnt = 0`. Chi tiết: [bus.md](bus.md).
 
-* **Main crossbar**: 3 host (instr, data, DMA) × 8 device. Mỗi device có arbiter
+* **Main crossbar**: 3 host (instr, data, DMA) × 9 device. Mỗi device có arbiter
   round-robin riêng → instruction fetch từ flash, load/store vào SRAM và DMA ghi
   VRAM có thể diễn ra cùng chu kỳ. Grant chưa được nhận thì bị khoá (thiết bị chậm như cầu
   AXI4-Lite luôn thấy một request ổn định).

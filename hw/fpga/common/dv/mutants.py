@@ -21,6 +21,7 @@ Exit code 0 when every selected mutant was killed (its test printed FAIL).
 import argparse
 import concurrent.futures
 import os
+import shutil
 import subprocess
 import sys
 
@@ -183,6 +184,7 @@ def run(build, mutant):
     name, tb, cfg, path, old, new, nth = mutant
     target, cfg_var, top = TESTS[tb]
     mdir = os.path.join(build, name)
+    shutil.rmtree(mdir, ignore_errors=True)   # no stale sim.log may decide the verdict
     os.makedirs(mdir, exist_ok=True)
     text = make_mutant(path, old, new, nth)
     if text is None:

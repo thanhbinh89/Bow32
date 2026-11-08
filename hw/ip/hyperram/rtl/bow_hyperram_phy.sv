@@ -8,7 +8,8 @@
 //   transaction cycle t in the cycle its counter is at t; this module
 //   registers it (io_o = "PHY cycle", bow_hyperram_pkg contract), so the pins
 //   show it two hr_clk cycles after the controller cycle. Reset (link reset)
-//   = HR_IO_OUT_IDLE: CS# high at once, shifters isolated.
+//   = HR_IO_OUT_RST: CS# high at once, shifters isolated, DQ / RWDS released
+//   (driven low again by the controller's idle intent after the reset).
 //
 // Read stream: io_i is registered once on hr_rd_clk and pushed every hr_rd_clk
 //   cycle into bow_fifo_async (Depth 16, {rwds fall, rwds rise, dq fall, dq
@@ -96,7 +97,7 @@ module bow_hyperram_phy import bow_hyperram_pkg::*; (
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      io_q <= HR_IO_OUT_IDLE;
+      io_q <= HR_IO_OUT_RST;
     end else begin
       io_q <= pin_d_i;
     end

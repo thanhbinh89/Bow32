@@ -51,7 +51,6 @@ static bool t_refused(void) {
   BOW_HR_WR(CTRL, BOW_HR_RD(CTRL) & ~HR_CTRL_INIT_DONE);
   BOW_HR_WR(STATUS, HR_ST_W1C);
   if (bow_hr_cmd(HR_CMD_APPLY | HR_CMD_SNAP)) ok = detail("two CMD bits accepted%s%s", 0, 0);
-  if (bow_hr_reg_write(HR_REG_ID0, 0x1234u)) ok = detail("ID0 write accepted%s%s", 0, 0);
   if (bow_probe_read32(BOW32_HYPERRAM_BASE, &v)) ok = detail("window read while not READY: %08x%s", v, 0);
   if (!(BOW_HR_RD(STATUS) & HR_ST_NOT_READY)) ok = detail("no NOT_READY (STATUS %08x)%s", BOW_HR_RD(STATUS), 0);
   BOW_HR_WR(STATUS, HR_ST_W1C);
@@ -60,6 +59,7 @@ static bool t_refused(void) {
 
 static bool t_init(void) {
   if (!app_init(true)) return detail("init failed (STATUS %08x ERR_CODE %08x)", BOW_HR_RD(STATUS), BOW_HR_RD(ERR_CODE));
+  BOW_HR_WR(STATUS, HR_ST_W1C);   /* the sweeps' bad phases are expected errors; [19] counts from here */
   return true;
 }
 
@@ -71,6 +71,17 @@ static bool t_regs(void) {
   if (id0 != HR_ID0_S80KS2562 || id1 != HR_ID1_HYPERRAM2) return detail("ID0 %04x ID1 %04x", id0, id1);
   if (cr0 != (BOW_HR_RD(CR0) & 0xFFFFu)) return detail("CR0 %04x, shadow %04x", cr0, BOW_HR_RD(CR0));
   if ((cr1 & 3u) != 1u && (cr1 & 3u) != 2u) return detail("CR1 %04x: refresh interval field%s", cr1, 0);
+  if ((BOW_HR_RD(CR1) & 3u) != (cr1 & 3u)) return detail("CR1 shadow %04x, device %04x", BOW_HR_RD(CR1), cr1);
+  /* the controller's guards (EN = 1 and the device ready here: not EN / power refusals) */
+  if (bow_hr_reg_write(HR_REG_ID0, 0x1234u)) return detail("ID0 write accepted%s%s", 0, 0);
+  if ((BOW_HR_RD(ERR_CODE) & 0xFFu) != HR_ERR_ARG) return detail("ID0 write: ERR_CODE %08x%s", BOW_HR_RD(ERR_CODE), 0);
+  if (bow_hr_reg_write(HR_REG_CR0, (uint16_t)((cr0 & ~0x00F0u) | 0x0080u))) {   /* latency code 1000 */
+    return detail("CR0 with a reserved latency code accepted%s%s", 0, 0);
+  }
+  if ((BOW_HR_RD(ERR_CODE) & 0xFFu) != HR_ERR_ARG || (BOW_HR_RD(CR0) & 0xFFFFu) != cr0) {
+    return detail("reserved CR0 latency: ERR_CODE %08x, CR0 shadow %04x", BOW_HR_RD(ERR_CODE), BOW_HR_RD(CR0));
+  }
+  BOW_HR_WR(STATUS, HR_ST_CMD_ERR);
   return true;
 }
 
@@ -114,16 +125,37 @@ static bool t_fill(void) {
   return mt_ok(ok, &r);
 }
 
+static uint32_t cap_byte(const uint32_t *cap, uint32_t s) {   /* sample s: rise / fall of cycle s/2 */
+  return (s & 1u) ? HR_CAP_DQ_F(cap[s >> 1]) : HR_CAP_DQ_R(cap[s >> 1]);
+}
+
+static uint32_t line_word(uint32_t i) { return (0x5A000000u | (i << 16) | (i << 4) | i) ^ seed0; }
+
 static bool t_rbuf(void) {
-  uint32_t a = BOW32_HYPERRAM_BASE + 0x400u, st0[16], st1[16], v, bad = 0;
+  uint32_t a = BOW32_HYPERRAM_BASE + 0x400u, st0[16], st1[16], v, bad = 0, cap[64];
+  for (uint32_t i = 0; i < 8u; i++) *(volatile uint32_t *)(uintptr_t)(a + 4u * i) = line_word(i);
   if (!bow_hr_flush() || !bow_hr_inval() || !bow_hr_snap(st0)) return detail("flush / snap failed%s%s", 0, 0);
+  BOW_HR_WR(STATUS, HR_ST_CAP_DONE);
+  if (!bow_hr_cmd(HR_CMD_CAP_ARM)) return detail("CAP_ARM failed%s%s", 0, 0);   /* captures the fill below */
   for (uint32_t i = 0; i < 8u; i++) {   /* critical word 5 first, the rest hits */
     uint32_t w = (5u + i) & 7u;
-    if (!bow_probe_read32(a + 4u * w, &v)) bad++;
+    if (!bow_probe_read32(a + 4u * w, &v) || v != line_word(w)) bad++;
   }
   if (!bow_hr_snap(st1)) return detail("snap failed%s%s", 0, 0);
   uint32_t miss = st1[HR_STAT_MISSES] - st0[HR_STAT_MISSES], hit = st1[HR_STAT_HITS] - st0[HR_STAT_HITS];
   if (bad || miss != 1u || hit < 7u) return detail("line read: %u misses, %u hits", miss, hit);
+  /* the fill on the bus: wrapped (WRAP_FILL and CR0 wrapping 32 bytes), it
+   * starts at the word asked for (5); linear, at the start of the line */
+  uint32_t t0 = bow_cycles();
+  while (!(BOW_HR_RD(STATUS) & HR_ST_CAP_DONE) && (uint32_t)(bow_cycles() - t0) < 100000u) {
+  }
+  if (!(BOW_HR_RD(STATUS) & HR_ST_CAP_DONE)) return detail("no capture of the fill%s%s", 0, 0);
+  for (uint32_t i = 0; i < 64u; i++) cap[i] = BOW_HR_RD(CAP[i]);
+  bool wrapped = (BOW_HR_RD(CTRL) & HR_CTRL_WRAP_FILL) && (BOW_HR_RD(CR0) & 3u) == 3u;
+  uint32_t want = line_word(wrapped ? 5u : 0u), got = 0;
+  int32_t f = bow_hr_cap_first_a(cap, bow_hr_td());
+  for (uint32_t k = 0; f >= 0 && k < 4u && (uint32_t)f + k < 128u; k++) got |= cap_byte(cap, (uint32_t)f + k) << (8u * k);
+  if (f < 0 || got != want) return detail("fill: first word on the bus %08x, expected %08x", got, want);
   /* write through: the line and the memory get the store */
   *(volatile uint32_t *)(uintptr_t)(a + 12u) = 0xC0DEF00Du ^ seed0;
   if (*(volatile uint32_t *)(uintptr_t)(a + 12u) != (0xC0DEF00Du ^ seed0)) return detail("line not updated%s%s", 0, 0);
@@ -204,7 +236,9 @@ static bool t_variable(void) {
   if (!ok) mt_report(&r);
   uint32_t n = st1[HR_STAT_RD_TXN] + st1[HR_STAT_WR_TXN] - st0[HR_STAT_RD_TXN] - st0[HR_STAT_WR_TXN];
   uint32_t x2 = st1[HR_STAT_LAT2X] - st0[HR_STAT_LAT2X];
-  if (ok && (n == 0u || x2 >= n)) ok = detail("variable latency: %u transactions, %u with 2x", n, x2);
+  if (ok && (n == 0u || x2 >= n || (app.info.emu_bytes != 0u && x2 == 0u))) {
+    ok = detail("variable latency: %u transactions, %u with 2x", n, x2);
+  }
   c.fixed = app.cfg.fixed;
   if (!bow_hr_configure(&c)) ok = detail("back to fixed latency failed%s%s", 0, 0);
   return ok;
@@ -251,7 +285,7 @@ static bool t_limits(void) {
 static bool t_irq(void) {
   uint32_t bit = MIE_FAST(BOW32_IRQ_FAST_HYPERRAM);
   bool ok = true;
-  BOW_HR_WR(STATUS, HR_ST_W1C);
+  BOW_HR_WR(STATUS, HR_ST_CMD_DONE);   /* only its own bit: the error flags are checked by [19] */
   BOW_HR_WR(IRQ_EN, HR_ST_CMD_DONE);
   if (CSR_READ(mip) & bit) ok = detail("irq pending before the command%s%s", 0, 0);
   BOW_HR_WR(CMD, HR_CMD_SNAP);
@@ -282,11 +316,11 @@ bool self_test(bool quick, uint32_t seed) {
   bow_printf("hyperram: self-test (%s, seed %u)\n", quick ? "quick" : "full", seed0);
 
   check(t_present(), "IP present: ID, INFO, CLK_HZ, HyperRAM clock");
-  check(app.present && t_refused(), "refused: 2 CMD bits, ID0 write, window while not READY");
+  check(app.present && t_refused(), "refused: 2 CMD bits, window while not READY");
   check(app.present && t_init(), "init: RESET#, ID0 eye, CR0 / CR1, pattern eye, window open");
   region = quick ? 0x10000u : (app.info.test_bytes < (1u << 20) ? app.info.test_bytes : (1u << 20));
   bool mem = app.inited;
-  check(mem && t_regs(), "device registers: ID0, ID1, CR0 = shadow, CR1");
+  check(mem && t_regs(), "registers: ID0 ID1 CR0 CR1, ID0 / bad CR0 refused");
   check(mem && t_walk(), "window: walking ones / zeros on the data bits");
   check(mem && t_lines(), "window: address lines (unique word at 0 and every 2^k)");
   check(mem && t_addr(), "window: address in address, inverted");

@@ -9,7 +9,8 @@
 # (board, S80KS2562 with the data sheet checks) or the RTL's loopback
 # emulator; and the self-test of the models alone (tb_hyperram_model.sv).
 #
-#   make test        build and run IP_CONFIGS (lb card direct stub) and ozf with SEED (1),
+#   make test        build and run IP_CONFIGS (lb card direct stub) with SEED (1) and ozf
+#                    with SEED_ozf (8: a seed that needs RD_HOLD),
 #                    JOBS (8) jobs; every case runs, then "hyperram_dv: n / 5 IP cases pass";
 #                    about 1.5 minutes from scratch
 #   make test-ci     the same (CI)
@@ -36,7 +37,8 @@
 #
 # IP configurations (one Verilator model each, build/hyperram_dv/obj_<cfg>):
 #   lb      MPS4 loopback build: pad twin in Loopback + bow_hyperram_dev (1 MiB), 100 MHz,
-#           672 steps; the emulator's DBG must stay 0
+#           672 steps, also variable latency (the emulator's refresh collisions); the
+#           emulator's DBG must stay 0
 #   card    FMC+_DDR2_HyperRam card (TXV0108) + S80KS2562 model, 100 MHz, fixed latency 4,
 #           write phase calibration
 #   direct  direct board + S80KS2562 model, 166.67 MHz, 336 steps, latency 6, also variable
@@ -74,11 +76,12 @@ A      := $(if $(filter 1,$(ASSERT)),_a,)
 
 # --------------------------------------------------------- IP configurations
 # Verilator -G parameters of tb_bow_hyperram; X_*: the same for xelab
-G_lb     := -GPhyKind=2 "-GHasLs=1'b0" -GTckPs=10000 -GClkHz=100000000 -GPsSteps=672 -GEmuBytes=1048576
+G_lb     := -GPhyKind=2 "-GHasLs=1'b0" -GTckPs=10000 -GClkHz=100000000 -GPsSteps=672 -GEmuBytes=1048576 \
+            "-GVarLat=1'b1"
 G_card   := -GPhyKind=1 "-GHasLs=1'b1" -GTckPs=10000 -GClkHz=100000000 -GPsSteps=672
 G_direct := -GPhyKind=1 "-GHasLs=1'b0" -GTckPs=6000 -GClkHz=166666667 -GPsSteps=336 "-GVarLat=1'b1"
 G_stub   := -GPhyKind=1 "-GHasLs=1'b1" "-GStub=1'b1" -GTckPs=10000 -GClkHz=100000000 -GPsSteps=672
-X_lb     := PhyKind=2 HasLs=0 TckPs=10000 ClkHz=100000000 PsSteps=672 EmuBytes=1048576
+X_lb     := PhyKind=2 HasLs=0 TckPs=10000 ClkHz=100000000 PsSteps=672 EmuBytes=1048576 VarLat=1
 X_card   := PhyKind=1 HasLs=1 TckPs=10000 ClkHz=100000000 PsSteps=672
 X_direct := PhyKind=1 HasLs=0 TckPs=6000 ClkHz=166666667 PsSteps=336 VarLat=1
 X_stub   := PhyKind=1 HasLs=1 Stub=1 TckPs=10000 ClkHz=100000000 PsSteps=672
@@ -147,12 +150,18 @@ build-all:
 	@$(MAKE) --no-print-directory -j4 build JOBS=$(JOBS)
 
 TEST_CFGS = $(IP_CONFIGS) ozf
+# ozf runs with a seed whose device turns DQ off before the last byte is out
+# when RD_HOLD = 0 (make rdhold: seeds 8 and 13): a broken RD_HOLD fails it
+SEED_ozf  ?= 8
+case_seed  = $(or $(SEED_$(1)),$(SEED))
+TEST_RUNS  = $(foreach c,$(TEST_CFGS),$(c).$(call case_seed,$(c)))
+
 test: build-all
-	@$(MAKE) --no-print-directory -k -j$(JOBS) $(foreach c,$(TEST_CFGS),c/$(c).$(SEED)); rc=$$?; \
-	  n=0; for c in $(TEST_CFGS); do \
-	    grep -q "^tb_bow_hyperram: PASS" $(BUILD)/$${c}$(A)_s$(SEED)/sim.log 2>/dev/null && n=$$((n + 1)); \
+	@$(MAKE) --no-print-directory -k -j$(JOBS) $(addprefix c/,$(TEST_RUNS)); rc=$$?; \
+	  n=0; for r in $(TEST_RUNS); do c=$${r%.*}; s=$${r##*.}; \
+	    grep -q "^tb_bow_hyperram: PASS" $(BUILD)/$${c}$(A)_s$${s}/sim.log 2>/dev/null && n=$$((n + 1)); \
 	  done; \
-	  echo "hyperram_dv: $$n / $(words $(TEST_CFGS)) IP cases pass (SEED $(SEED))"; exit $$rc
+	  echo "hyperram_dv: $$n / $(words $(TEST_CFGS)) IP cases pass ($(TEST_RUNS))"; exit $$rc
 
 test-ci: test
 
@@ -210,15 +219,18 @@ model-seeds: $(call m_bin,$(MCFG))
 # ------------------------------------------------------------------- lint
 LINT_TOPS := hyperram_clk_model bow_hyperram_io_sim hyperram_board_model hyperram_model
 lint:
+	@command -v $(VERILATOR) > /dev/null 2>&1 || { echo "hyperram_dv lint: $(VERILATOR) not found"; exit 1; }
 	@mkdir -p $(BUILD)
+	@# warnings of the DV files only (the RTL has its own lint at the top level),
+	@# every error wherever it is (e.g. an RTL file that no longer parses)
 	@for m in $(LINT_TOPS) tb_hyperram_model; do \
 	  $(VERILATOR) --lint-only --timing -Wall -Wno-TIMESCALEMOD --top-module $$m $(M_SRCS) 2>&1; \
-	done | grep -E "^%(Warning|Error)" | grep -v "bow_hyperram_pkg.sv" | grep -v "^%Error: Exiting due to" \
-	  > $(BUILD)/lint.log || true
+	done | grep -E "^%(Warning|Error)" | grep -v -E "^%Warning[^ ]* [^ ]*bow_hyperram_pkg.sv" \
+	  | grep -v "^%Error: Exiting due to" > $(BUILD)/lint.log || true
 	@$(VERILATOR) --lint-only --timing -Wall -Wno-TIMESCALEMOD --top-module tb_bow_hyperram $(G_card) \
-	  $(FLISTS) $(IP_SRCS) 2>&1 | grep -E "^%(Warning|Error)" | grep "/hw/ip/hyperram/dv/" \
-	  >> $(BUILD)/lint.log || true
-	@if [ -s $(BUILD)/lint.log ]; then cat $(BUILD)/lint.log; echo "hyperram_dv lint: warnings"; exit 1; fi
+	  $(FLISTS) $(IP_SRCS) 2>&1 | grep -E "^%Error|^%Warning[^ ]* [^ ]*/hw/ip/hyperram/dv/" \
+	  | grep -v "^%Error: Exiting due to" >> $(BUILD)/lint.log || true
+	@if [ -s $(BUILD)/lint.log ]; then cat $(BUILD)/lint.log; echo "hyperram_dv lint: warnings / errors"; exit 1; fi
 	@echo "hyperram_dv lint: OK (4 models and both testbenches, -Wall)"
 
 # ------------------------------------------------------------- xsim (optional)

@@ -205,11 +205,11 @@ make -C hw/ip/hyperram/dv model                   # tự kiểm tra các mô hì
 
 | Cấu hình | Nội dung |
 |----------|----------|
-| `lb` | bản loopback của MPS4: pad twin ở chế độ loopback + `bow_hyperram_dev` 1 MiB, 100 MHz, 672 bước pha |
+| `lb` | bản loopback của MPS4: pad twin ở chế độ loopback + `bow_hyperram_dev` 1 MiB, 100 MHz, 672 bước pha; cả latency biến đổi (emulator cho 2× ở 3 trong mỗi 15 giao dịch) |
 | `card` | bo RAM (TXV0108) + mô hình S80KS2562, 100 MHz, latency cố định 4, quét pha ghi |
 | `direct` | nối thẳng + mô hình chip, 166,67 MHz, latency 6, cả latency biến đổi (trùng refresh) |
 | `stub` | `bow_hyperram_stub` (`HrEn = 0`) |
-| `ozf` | như `direct` nhưng chip có thể tắt DQ trước khi byte cuối ra (tOZ không có min): `RD_HOLD` = 1 phải giữ đọc đúng; `make rdhold` cho thấy với `RD_HOLD` = 0 hai seed (8, 13) mất hẳn mắt ID0 |
+| `ozf` | như `direct` nhưng chip có thể tắt DQ trước khi byte cuối ra (tOZ không có min): `RD_HOLD` = 1 phải giữ đọc đúng; `make rdhold` cho thấy với `RD_HOLD` = 0 hai seed (8, 13) mất hẳn mắt ID0, nên `make test` chạy `ozf` với seed 8 (`SEED_ozf`) bất kể `SEED`: `RD_HOLD` hỏng là ca này hỏng |
 
 Testbench này đã tìm ra ba lỗi RTL (đã sửa): một burst BIST bị từ chối làm lượt chạy treo
 `BIST_BUSY`; `WIN_IDLE` lên 1 khi khối ghi posted còn trong FIFO lệnh (nay controller trả lời
@@ -280,9 +280,10 @@ của DQ/RWDS và trạng thái lái), mức nghỉ trước clock, trong GSR v�
 mẫu đọc khi testbench lái DQ/RWDS và pha đọc đang dịch, dữ liệu tự lái đọc lại qua IOBUF/IDDR,
 pha ghi +T/4, −T/4, +17 bước rồi về 0 (DQ/RWDS dịch, CK/CS# không), `hr_wclk` = `hr_clk` +
 T/4 lúc lock, PSDONE, độ rộng xung khi dịch pha, reset và mất lock của từng MMCM đưa cả hai
-pha về 0. `make mutants` chạy thêm 42 bản hỏng có chủ đích của hai wrapper (đảo ODDR, đổi
+pha về 0. `make -C hw/fpga/common/dv mutants` chạy thêm 42 bản hỏng có chủ đích của hai wrapper (đảo ODDR, đổi
 byte, cực tính T, SRVAL, thứ tự chân level shifter, mux loopback, chế độ IDDR, pha 270°, cổng
-PS, logic mất lock…): cả 42 phải FAIL.
+PS, logic mất lock…): cả 42 phải FAIL (mỗi bản dựng trong thư mục sạch; một bản không dựng được
+tính là lỗi của chính `mutants.py`, không phải "bị bắt").
 
 ```bash
 make -C hw/fpga/common/dv test-hr-io                        # 3 cấu hình x seed 1 2 3, ~1 phút

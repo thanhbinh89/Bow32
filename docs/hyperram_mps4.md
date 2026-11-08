@@ -122,7 +122,7 @@ không báo vi phạm (`DBG`).
 
 ```bash
 python3 tools/bow32_hyperram.py -p $PORT cal --step 2     # init nếu cần, quét pha đọc
-python3 tools/bow32_hyperram.py -p $PORT eye --step 1     # chỉ in mắt (pha được trả lại và kiểm lại)
+python3 tools/bow32_hyperram.py -p $PORT eye --step 1     # chỉ in mắt (pha, RD_DLY, 32 byte đầu được trả lại, kiểm lại)
 ```
 
 Mỗi ký tự của dòng `eye` là một pha của `hr_rd_clk` trong một chu kỳ CK: `#` = đọc đúng (ID0
@@ -172,7 +172,7 @@ giao dịch 32 bit qua hai miền clock, nhưng đọc trúng read buffer nhanh 
 | | Kết quả |
 |---|---|
 | Self-test | 19/19 (bản đầy đủ), rồi 19/19 (bản rút gọn) sau `RESET` của MCC và sau khi nạp lại firmware |
-| Mắt đọc (bước / 672, quét bước 1) | ID0: 653 điểm tốt, mẫu: 646; hai vùng xấu ~5–7 điểm (~0,1 ns) ở hai lần chuyển dữ liệu mỗi chu kỳ; dải liên tục dài nhất 322–324 bước, `RD_DLY` 12 (byte A đầu tiên ở nửa chu kỳ 46) |
+| Mắt đọc (bước / 672, quét bước 1; 1 bước = 14,9 ps) | ID0: 653 điểm tốt (19 xấu: hai vùng ~9–10 điểm), mẫu: 646 (26 xấu: hai vùng ~13 điểm); mỗi vùng ~0,14–0,19 ns, ở hai lần chuyển dữ liệu mỗi chu kỳ; dải liên tục dài nhất 322–324 bước, `RD_DLY` 12 (byte A đầu tiên ở nửa chu kỳ 46) |
 | `verify` | 40/40 (seed 2026), 200/200 (seed 7); bitstream cuối: 40/40, 60/60 (seed 99) |
 | `init` (bitstream cuối, firmware có hiệu chỉnh gập T/2) | 24/24 từ 24 pha xuất phát rải trên nửa chu kỳ; tâm 5253–5257 (hoặc tương đương +336), `RD_DLY` 12 / 11 |
 | BIST (toàn 1 MiB, 524 288 word, ghi + đọc) | PRBS và đếm: 0 lỗi, 184,4 MB/s (burst 255); burst 64: ghi 160,0 / đọc 140,7 MB/s |
@@ -226,10 +226,28 @@ Hai điểm riêng của bản này:
   báo CDC-13 cho mỗi đường chân → D của IDDRE1 (9 của DDR, 9 của HyperRAM); `timing_checks.tcl`
   coi đúng các đường này là dự kiến, mọi CDC-13 khác vẫn là lỗi.
 
-Chạy bo RAM (khi đã gắn và `FMC_FORCE: 1V5` đã được nhóm dùng chung đồng ý): kịch bản
-`card_run.sh` trong thư mục làm việc dừng ngay nếu `config.txt` chưa là `1V5`, rồi chạy `deploy`,
-`init` + thanh ghi thiết bị, mắt đọc, `cal --write`, self-test, `verify`, `bench`, ngủ / thức, và
-self-test DDR2 trên cùng bo. Sau khi thử: `restore`, và trả `FMC_FORCE` về `1V2` nếu nhóm kia cần.
+Chạy bo RAM (khi đã gắn và `FMC_FORCE: 1V5` đã được nhóm dùng chung đồng ý; build bản bo RAM ở
+trên, `PORT` như mục 2):
+
+```bash
+python3 tools/bow32_mps4.py show            # dừng nếu config.txt chưa có FMC_FORCE: 1V5
+python3 tools/bow32_mps4.py deploy
+H="python3 tools/bow32_hyperram.py -p $PORT"
+$H cmd info stat
+$H cmd init "reg ID0" "reg ID1" "reg CR0" "reg CR1" "cap ID0" stat   # RESET#, mắt ID0, thanh ghi
+$H eye --step 2                             # mắt đọc qua level shifter
+$H cal --write --step 2                     # pha ghi
+$H test
+$H verify -n 40 --seed 2026
+$H bench
+$H cmd sleep "rd 60000000" wake "rd 60000000" stat   # hybrid sleep: lỗi bus rồi đọc được
+python3 tools/bow32_flash.py -p $PORT flash build/sw/ddr/ddr.bin       # DDR2 trên cùng bo
+python3 tools/bow32_ddr.py -p $PORT test
+python3 tools/bow32_ddr.py -p $PORT cal --write --step 2
+python3 tools/bow32_mps4.py restore
+```
+
+Sau khi thử: `restore`, và trả `FMC_FORCE` về `1V2` nếu nhóm kia cần.
 
 ## 6. Sự cố
 

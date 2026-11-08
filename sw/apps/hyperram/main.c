@@ -24,7 +24,10 @@
  *            width %u RD_DLY %u (first byte A at half cycle %u)", "hyperram: ready: ID0
  *            %04x ID1 %04x CR0 %04x, latency %u fixed|variable, TCSM %u cycles";
  *            failures "hyperram: init: <reason>" | "hyperram: calibration failed: <reason>"
- *   cal, eye the eye lines and the read phase line of init
+ *   cal, eye the eye lines and the read phase line of init; eye then
+ *            "hyperram: eye: read phase %d and RD_DLY %u restored" (phase, RD_DLY and
+ *            the 32 bytes at offset 0 are put back) | "... RD_DLY %u, not restored:
+ *            run cal or init" (a sweep failed: the window is closed)
  *   calw     "hyperram: write eye |<map>|", "hyperram: write phase %d width %u"
  *   bist     "bist: words %u at %08x, bursts of %u, data prbs|count seed %08x,
  *            write|read|both: errors %u, cycles %u (%s)" (%s = "%u.%02u MB/s" of the
@@ -37,7 +40,8 @@
  *   rd, wr   "%08x: %08x" | "%08x: bus error"
  *   reg      "reg ID0|ID1|CR0|CR1: %04x"
  *   cap      "cap ID0|ID1|CR0|CR1: value %04x, t_D %u, first byte A at half cycle %d",
- *            then 4 lines "cap %2u: <16 x rw:xx/yy>" (RWDS rise fall, DQ rise / fall)
+ *            then 4 lines "cap %2u: <16 x rw:xx/yy>" (RWDS rise fall, DQ rise / fall);
+ *            "cap ID0|...: failed (STATUS %08x ERR_CODE %08x)" when nothing was captured
  *   phase    "read|write phase %d (of %u per CK)[, refused]"
  *   power    "hyperram: power active|deep power down|hybrid sleep|recovering"
  *   bench    "bench: CPU write %s, posted write %s, read (line buffer) %s, uncached
@@ -336,6 +340,10 @@ static bool cmd_cap(const char *a) {
   if (!need_present()) return false;
   uint32_t td = bow_hr_td();
   bool ok = bow_hr_capture_reg(sel, cap, &v);
+  if (!ok) {   /* no capture (e.g. before init: the read is refused): nothing to show */
+    bow_printf("cap %s: failed (STATUS %08x ERR_CODE %08x)\n", reg_name(sel), BOW_HR_RD(STATUS), BOW_HR_RD(ERR_CODE));
+    return false;
+  }
   int32_t first = bow_hr_cap_first_a(cap, td);
   bow_printf("cap %s: value %04x, t_D %u, first byte A at half cycle %d\n", reg_name(sel), v, td, first);
   for (uint32_t i = 0; i < 64u; i++) {
@@ -413,10 +421,27 @@ static bool execute(const char *line) {
     if (!at_end(a) && !parse_num(a, &step)) return false;
     if (!need_present()) return false;
     if (!app.inited && !app_init(true)) return false;
+    if (!eye) return bow_hr_calibrate(step, true, &app.cal);
+    /* eye: the maps only. The sweeps move the read phase and RD_DLY and write
+     * the calibration pattern at window offset 0: all three are put back */
     int32_t old = bow_hr_phase_now();
-    bool ok = bow_hr_calibrate(step, true, eye ? NULL : &app.cal);
-    if (eye && ok) ok = bow_hr_set_phase(old) && bow_hr_rfifo_sync() && bow_hr_calibrate(step, false, NULL);
-    return ok;
+    uint32_t lat = BOW_HR_RD(LAT), keep[8];
+    bool saved = true;
+    for (uint32_t i = 0; i < 8u; i++) saved &= bow_probe_read32(BOW32_HYPERRAM_BASE + 4u * i, &keep[i]);
+    bool ok = bow_hr_calibrate(step, true, NULL);
+    BOW_HR_WR(LAT, lat);
+    bool back = bow_hr_set_phase(old) && bow_hr_rfifo_sync() && bow_hr_apply();
+    uint16_t id0 = 0;
+    back = back && bow_hr_reg_read(HR_REG_ID0, &id0) && id0 == HR_ID0_S80KS2562;
+    bool open = ok && back && saved && (BOW_HR_RD(CTRL) & HR_CTRL_INIT_DONE);
+    if (open) {
+      for (uint32_t i = 0; i < 8u; i++) open &= bow_probe_write32(BOW32_HYPERRAM_BASE + 4u * i, keep[i]);
+      open = open && bow_hr_flush() && bow_hr_inval();
+    }
+    if (!open) app.inited = false;   /* the next cal / eye starts with init */
+    bow_printf("hyperram: eye: read phase %d and RD_DLY %u%s\n", bow_hr_phase_now(), HR_LAT_RD_DLY(BOW_HR_RD(LAT)),
+               open ? " restored" : ", not restored: run cal or init");
+    return open;
   }
   if ((a = match(line, "calw"))) {
     uint32_t step = 8;

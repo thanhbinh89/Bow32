@@ -78,6 +78,7 @@ module bow_hyperram_win import bow_bus_pkg::*; import bow_hyperram_pkg::*; #(
   output logic              ev_range_o,
   output logic              ev_timeout_o,
   output logic              ev_rd_err_o,  // a read answered with a bus error by the controller
+  output logic              ev_wr_err_o,  // a posted block refused by the controller
   output logic [31:0]       err_addr_o,
   output logic              st_hit_o,     // statistics pulses
   output logic              st_miss_o,
@@ -142,7 +143,6 @@ module bow_hyperram_win import bow_bus_pkg::*; import bow_hyperram_pkg::*; #(
   logic [7:0][3:0]                  wbe_q;
   logic [15:0]                      wbage_q;   // cycles since the last posted write
   logic                             flush_pend_q;
-  logic                             inval_pend_q;
   logic [4:0]                       pout_q;    // posted blocks pushed, not answered yet
 
   // pusher: one command (header + up to 8 data entries) into the FIFO
@@ -301,6 +301,7 @@ module bow_hyperram_win import bow_bus_pkg::*; import bow_hyperram_pkg::*; #(
   assign ev_range_o     = rng_q;
   assign ev_timeout_o   = tmo_q;
   assign ev_rd_err_o    = rderr_q;
+  assign ev_wr_err_o    = post_refused;   // with the pout_q update: WR_ERR no later than WIN_IDLE
   assign err_addr_o     = err_addr_q;
 
   // ===========================================================================
@@ -315,8 +316,9 @@ module bow_hyperram_win import bow_bus_pkg::*; import bow_hyperram_pkg::*; #(
   assign rpop = !wr_empty_i;
   assign wr_pop_o = rpop;
 
-  logic rdata_in, rerr_in, rwdone_in, pack_in;
+  logic rdata_in, rerr_in, rwdone_in, pack_in, post_refused;
   assign pack_in   = rpop && (rk == WrespWdone || rk == WrespErr) && (pout_q != '0);
+  assign post_refused = pack_in && (rk == WrespErr);
   assign rdata_in  = rpop && (rk == WrespData || rk == WrespDataW);
   assign rerr_in   = rpop && (rk == WrespErr) && !pack_in;
   assign rwdone_in = rpop && (rk == WrespWdone) && !pack_in;
@@ -390,7 +392,6 @@ module bow_hyperram_win import bow_bus_pkg::*; import bow_hyperram_pkg::*; #(
       wbe_q        <= '0;
       wbage_q      <= '0;
       flush_pend_q <= 1'b0;
-      inval_pend_q <= 1'b0;
       pout_q       <= '0;
       pb_q         <= 1'b0;
       ph_q         <= 1'b0;
@@ -404,7 +405,16 @@ module bow_hyperram_win import bow_bus_pkg::*; import bow_hyperram_pkg::*; #(
     end else begin
       // ---- commands
       if (flush_i) flush_pend_q <= 1'b1;
-      if (inval_i) inval_pend_q <= 1'b1;
+
+      // ---- invalidate at once (CMD.INVAL, the IP's own INVAL after BIST /
+      // WAKE / HW_RESET, a refused posted block whose data may sit in a line):
+      // every line, also one still filling (its words keep arriving, the line
+      // stays invalid; the access waiting for it is answered from the fill
+      // data). A fill starting in this cycle keeps its line (assigned below).
+      if (inval_i || post_refused) begin
+        lv_q <= '0;
+        wv_q <= '0;
+      end
 
       // ---- start a read (slow path)
       if (start_rd) begin
@@ -569,12 +579,6 @@ module bow_hyperram_win import bow_bus_pkg::*; import bow_hyperram_pkg::*; #(
       // an abort by a lost clock while the link is up: dead as well
       if (abort_i && clk_lost_i && (fill_q || wwait_q || bst_q == BWait)) dead_q <= 1'b1;
 
-      // ---- invalidate (not while a fill is in flight)
-      if (inval_pend_q && !fill_q && !start_rd) begin
-        lv_q         <= '0;
-        wv_q         <= '0;
-        inval_pend_q <= 1'b0;
-      end
     end
   end
 

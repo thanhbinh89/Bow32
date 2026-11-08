@@ -73,7 +73,7 @@ module bow_hyperram import bow_bus_pkg::*; import bow_hyperram_pkg::*; #(
   // Registers
   // ===========================================================================
   cfg_t        cfg_src, cfg;
-  logic        ready, rbuf_en, wrap_fill, wpost, flush, inval, clk_ok;
+  logic        ready, rbuf_en, wrap_fill, wpost, flush, inval, clk_ok, lnk_up;
   logic [15:0] wb_tmo;
   logic        hc_req, hc_req_s, hc_ack, hc_err;
   logic [3:0]  hc_code;
@@ -87,7 +87,8 @@ module bow_hyperram import bow_bus_pkg::*; import bow_hyperram_pkg::*; #(
   logic [63:0][17:0] cap;
   logic        applied, bist_busy, rfifo_broken, chan_idle;
   logic        ev_rd_err, ev_wr_err, ev_tcsm, ev_bist_done, ev_bist_err, ev_rfifo_err, ev_cap_done;
-  logic        win_idle, win_dead, win_nrdy, win_range, win_tmo, win_rderr, win_hit, win_miss, win_flush;
+  logic        win_idle, win_dead, win_nrdy, win_range, win_tmo, win_rderr, win_wrerr, win_hit, win_miss,
+               win_flush;
   logic [31:0] win_err_addr;
 
   bow_hyperram_regs #(
@@ -120,6 +121,8 @@ module bow_hyperram import bow_bus_pkg::*; import bow_hyperram_pkg::*; #(
     .win_range_i     (win_range),
     .win_tmo_i       (win_tmo),
     .win_rderr_i     (win_rderr),
+    .win_wrerr_i     (win_wrerr),
+    .lnk_up_o        (lnk_up),
     .win_err_addr_i  (win_err_addr),
     .win_hit_i       (win_hit),
     .win_miss_i      (win_miss),
@@ -196,7 +199,7 @@ module bow_hyperram import bow_bus_pkg::*; import bow_hyperram_pkg::*; #(
     .mem_rsp_o,
     .ready_i        (ready),
     .abort_i        (!clk_ok || core_rst),
-    .clk_lost_i     (!clk_ok),
+    .clk_lost_i     (!clk_ok && lnk_up),      // CORE_RST / link down: NOT_READY, not a timeout
     .rbuf_en_i      (rbuf_en),
     .wrap_fill_i    (wrap_fill),
     .wpost_i        (wpost),
@@ -209,6 +212,7 @@ module bow_hyperram import bow_bus_pkg::*; import bow_hyperram_pkg::*; #(
     .ev_range_o     (win_range),
     .ev_timeout_o   (win_tmo),
     .ev_rd_err_o    (win_rderr),
+    .ev_wr_err_o    (win_wrerr),
     .err_addr_o     (win_err_addr),
     .st_hit_o       (win_hit),
     .st_miss_o      (win_miss),

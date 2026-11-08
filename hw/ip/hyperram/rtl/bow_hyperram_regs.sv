@@ -63,6 +63,8 @@ module bow_hyperram_regs import bow_bus_pkg::*; import bow_hyperram_pkg::*; #(
   input  logic              win_range_i,
   input  logic              win_tmo_i,
   input  logic              win_rderr_i,
+  input  logic              win_wrerr_i,     // a posted block refused (same cycle as the ack)
+  output logic              lnk_up_o,        // the channel is out of reset (a flop: usable as data)
   input  logic [31:0]       win_err_addr_i,
   input  logic              win_hit_i,
   input  logic              win_miss_i,
@@ -377,7 +379,7 @@ module bow_hyperram_regs import bow_bus_pkg::*; import bow_hyperram_pkg::*; #(
       if (cmd_wr) begin
         if (busy || !one_hot || (hr_cmd && !clk_ok_q)) begin
           cerr_ev <= 1'b1;
-          ecode_q <= busy ? ecode_q : ErrDisable;
+          ecode_q <= busy ? ecode_q : (!one_hot ? ErrArg : ErrDisable);   // malformed / no CLK_OK
         end else if (!hr_cmd) begin
           flush_q  <= cmdv[CmdFlush];
           inval_q  <= cmdv[CmdInval];
@@ -478,14 +480,29 @@ module bow_hyperram_regs import bow_bus_pkg::*; import bow_hyperram_pkg::*; #(
                  !win_dead_i && (pwr_s == PwrActive);
 
   logic [31:0] ev_set;
+
+  // CMD while the channel is in reset (CORE_RST, link down): the command FSM is
+  // held in reset with it, so the refusal is raised here, in the rst_ni domain
+  // (ERR_CODE[7:0] reads ErrDisable meanwhile). lnk_up_q: 0 in the channel
+  // reset, 1 from the cycle after it (the reset net itself is not used as data).
+  logic cmd_dead_ev, lnk_up_q;
+  always_ff @(posedge clk_i or negedge lnk_ni) begin
+    if (!lnk_ni) lnk_up_q <= 1'b0;
+    else         lnk_up_q <= 1'b1;
+  end
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) cmd_dead_ev <= 1'b0;
+    else         cmd_dead_ev <= cmd_wr && !lnk_up_q;
+  end
+  assign lnk_up_o = lnk_up_q;
   always_comb begin
     ev_set               = '0;
     ev_set[StCmdDone]    = cdone_ev;
-    ev_set[StCmdErr]     = cerr_ev;
+    ev_set[StCmdErr]     = cerr_ev || cmd_dead_ev;
     ev_set[StCapDone]    = ev_s[6];
     ev_set[StBistDone]   = ev_s[3];
     ev_set[StRdErr]      = ev_s[0] || win_rderr_i;
-    ev_set[StWrErr]      = ev_s[1];
+    ev_set[StWrErr]      = ev_s[1] || win_wrerr_i;
     ev_set[StRfifoErr]   = ev_s[5];
     ev_set[StBusTimeout] = win_tmo_i;
     ev_set[StNotReady]   = win_nrdy_i;
@@ -593,7 +610,7 @@ module bow_hyperram_regs import bow_bus_pkg::*; import bow_hyperram_pkg::*; #(
         RegErrAdOff:  rdata = win_err_addr_i;
         RegEmuOff:    rdata = {27'd0, 5'(EmuLog2)};
         RegDbgOff:    rdata = dbg_s;
-        RegErrCdOff:  rdata = {16'd0, err_code_i, ecode_q};
+        RegErrCdOff:  rdata = {16'd0, err_code_i, lnk_up_q ? ecode_q : ErrDisable};
         RegWbTmoOff:  rdata = {16'd0, wb_tmo_q};
         RegBCtrlOff:  rdata = bctrl_q;
         RegBAddrOff:  rdata = baddr_q;

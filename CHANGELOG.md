@@ -37,7 +37,7 @@
   driver ở 5 cấu hình (loopback, bo RAM, nối thẳng 166 MHz, stub, chip tắt DQ sớm), trong
   `make test-ip` và CI (Verilator 5.020); `tb_bow_hyperram_io_xilinx`
   (xsim, unisim) cho hai wrapper chân / clock của bo, cấu hình bo RAM / nối thẳng / loopback,
-  và 42 bản đột biến của hai wrapper trong `make mutants` (đều bị bắt).
+  và 42 bản đột biến của hai wrapper trong `make -C hw/fpga/common/dv mutants` (đều bị bắt).
 - Đã chạy trên Arm MPS4 (bản loopback, 2026-11-07, hai lượt): self-test 19/19 (cả sau `RESET`
   của MCC), `verify` 340/340 case so với mô hình Python, BIST trên toàn 1 MiB 0 lỗi ở 184,4 MB/s
   (đỉnh 200 MB/s), hybrid sleep / deep power down, 24/24 lần `init` từ 24 pha xuất phát; DDR 18/18

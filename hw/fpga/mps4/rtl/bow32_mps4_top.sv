@@ -57,9 +57,11 @@
 // same card, registers at 0x4000_F000, window 0x6000_0000, 32 MiB) with its
 // clocks (bow_hyperram_clk_xusp: hr_clk 100 MHz, write clock with fine phase
 // shift, read capture clock with fine phase shift, fed by the oscillator
-// BUFG of u_clk) and pads (bow_hyperram_io_xilinx, constr/hyperram_*.xdc):
+// IBUF of u_clk (clk_ibuf_o) through its own BUFGCE: one BUFGCE drives at most
+// three MMCMs and the DDR clocking has three, see mps4.xdc) and pads
+// (bow_hyperram_io_xilinx, constr/hyperram_*.xdc):
 //   HrLoopback = 1  pads on unconnected balls of bank 65, read data from the
-//                   on-chip HyperRAM emulator bow_hyperram_dev (4 MiB of
+//                   on-chip HyperRAM emulator bow_hyperram_dev (1 MiB of
 //                   UltraRAM) come back through the pads (Makefile
 //                   HR_LOOPBACK=1, the default)
 //   HrLoopback = 0  the card's S80KS2562 behind its TXV0108 level shifters

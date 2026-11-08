@@ -57,8 +57,9 @@
 //   7b (pads) FLUSH: the posted block must be in the device when WIN_IDLE
 //      reads 1 (24 tries); a posted write right before bow_hr_hybrid_sleep
 //      must survive the sleep (6 tries)
-//   8  VarLat: variable latency (CR0[3] = 0) traffic and BIST with the model's
-//      refresh collisions (2x latency counted by the model and by ST[4])
+//   8  VarLat: variable latency (CR0[3] = 0) traffic and BIST with the
+//      device's refresh collisions (2x latency counted by ST[4] and, pin
+//      model, by the model; the emulator of lb draws 3 in 15 transactions)
 //   9  hybrid sleep (window refused, WAKE after tHSIN, data kept, CR1[5] back
 //      to 0), deep power down (WAKE after tDPDIN, data lost, CR0 back to its
 //      default, a read buffer line kept from before is a NOTE,
@@ -1357,8 +1358,17 @@ module tb_bow_hyperram import bow_bus_pkg::*; import bow_hyperram_pkg::*; #(
       if (!ok) error($sformatf("enable / APPLY failed (STATUS %08h)", st_last));
       reg_rd(RegTim0Off, v);
       if (v != cfg.tim0) error($sformatf("TIM0 %08h, written %08h", v, cfg.tim0));
-      hr_cmd(CmdHwReset, ok);
-      if (!ok) error($sformatf("HW_RESET failed (STATUS %08h)", st_last));
+      begin
+        int n_rst0;
+        n_rst0 = u_hr.n_rst;
+        hr_cmd(CmdHwReset, ok);
+        if (!ok) error($sformatf("HW_RESET failed (STATUS %08h)", st_last));
+        // the device itself must have seen exactly one RESET# pulse (the CR0
+        // shadow below is only the controller's own view)
+        if (Pads && u_hr.n_rst != n_rst0 + 1) begin
+          error($sformatf("HW_RESET: the device saw %0d RESET# pulses", u_hr.n_rst - n_rst0));
+        end
+      end
       reg_rd(RegCr0Off, v);
       if (v[15:0] != Cr0Default) error($sformatf("CR0 shadow after HW_RESET %04h", v[15:0]));
 
@@ -1374,7 +1384,7 @@ module tb_bow_hyperram import bow_bus_pkg::*; import bow_hyperram_pkg::*; #(
       reg_rd(RegStatusOff, v);
       if (!v[StCmdErr]) error($sformatf("CMD with two bits: STATUS %08h without CMD_ERR", v));
       reg_rd(RegErrCdOff, v);
-      info($sformatf("CMD with two bits refused (ERR_CODE %08h)", v));
+      if (v[7:0] != ErrArg) error($sformatf("CMD with two bits: ERR_CODE %08h (ARG expected)", v));
       clear_status();
 
       // --------------------------------------------------- 4 init
@@ -1413,9 +1423,31 @@ module tb_bow_hyperram import bow_bus_pkg::*; import bow_hyperram_pkg::*; #(
         if (!ok || r16[15:2] != c1[15:2] || (Pads && r16 != u_hr.cr1)) begin
           error($sformatf("CR1: REG_RD %04h, shadow %04h, model %04h", r16, c1[15:0], u_hr.cr1));
         end
-        if (r16[1:0] != c1[1:0]) begin
-          note($sformatf("CR1 shadow %04h keeps the read-only refresh interval [1:0] of its reset value; the device reads %04h (REG_RD does not update the shadow)",
-                         c1[15:0], r16));
+        if (r16[1:0] != c1[1:0]) begin   // REG_RD CR1 takes the read-only refresh interval into the shadow
+          error($sformatf("CR1 shadow %04h after REG_RD CR1 %04h: refresh interval [1:0] not taken", c1[15:0], r16));
+        end
+        // the controller's own guards (EN = 1, device active): ERR_CODE[7:0] = ARG,
+        // nothing on the pads; WAKE while active is a no-op (no CS# pulse)
+        begin
+          logic [31:0] e0, c0b;
+          int unsigned tid0;
+          tid0 = u_hr.txn_id;
+          hr_reg_write(0, 16'h1234, ok);
+          reg_rd(RegErrCdOff, e0);
+          if (ok || e0[7:0] != ErrArg) error($sformatf("REG_WR ID0 %s, ERR_CODE %08h", pick(ok, "accepted", "refused"), e0));
+          hr_reg_write(2, {c0[15:8], 4'b1000, c0[3:0]}, ok);   // reserved initial latency code
+          reg_rd(RegErrCdOff, e0);
+          reg_rd(RegCr0Off, c0b);
+          if (ok || e0[7:0] != ErrArg || c0b[15:0] != c0[15:0] || (Pads && u_hr.cr0 != c0[15:0])) begin
+            error($sformatf("REG_WR CR0 latency code 1000 %s: ERR_CODE %08h, shadow %04h, model %04h",
+                            pick(ok, "accepted", "refused"), e0, c0b[15:0], u_hr.cr0));
+          end
+          hr_cmd(CmdWake, ok);
+          if (!ok) error($sformatf("WAKE while active refused (STATUS %08h)", st_last));
+          reg_rd(RegStatusOff, v);
+          if (v[5:4] != 2'd0) error($sformatf("WAKE while active: POWER %0d", v[5:4]));
+          if (Pads && u_hr.txn_id != tid0) error($sformatf("guards / WAKE: %0d CS# pulses on the pads", u_hr.txn_id - tid0));
+          clear_status();
         end
         reg_rd(RegTim0Off, v);
         info($sformatf("CR0 %04h CR1 %04h TIM0 %08h LAT %08h", c0[15:0], c1[15:0], v, cfg.lat_reg));

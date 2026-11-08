@@ -294,7 +294,6 @@ module bow_hyperram_ctrl import bow_hyperram_pkg::*; #(
   logic        posted_q;
   logic        wrapped_q;        // window read: wrapped order
   logic [15:0] wake_cs_q;        // KWake: CS# low cycles
-  pwr_e        wake_from_q;
 
   // staging buffer of a window write: 16 HyperRAM words {maskB, maskA, B, A}
   logic [15:0][17:0] stg_q;
@@ -467,12 +466,13 @@ module bow_hyperram_ctrl import bow_hyperram_pkg::*; #(
   logic        x_sel;           // the executor waits for a register transaction
   logic        x_go;            // ... and starts it now
   logic        x_tcsm_ok;       // its CS# low time fits TCSM
+  logic        x_bad_cr0;       // REG_WR CR0 with a reserved initial latency code
   logic [7:0]  pair_x_a_q, pair_x_b_q;
-  logic        est_n_idle;      // EWait ends this cycle
 
   assign eng_idle    = (est_q == EIdle) && !rd_busy_i;
   assign x_needs_txn = (xcode_q == HcRegRd) || (xcode_q == HcRegWr);
   assign x_sel       = (xst_q == XWait) && x_needs_txn;
+  assign x_bad_cr0   = (xcode_q == HcRegWr) && (reg_sel_i == 2'd2) && !cr0_lat_valid(reg_wdata_i[7:4]);
   // register read: 1 word at 2x latency at most (+ rd_hold); register write: t_E = 5
   assign x_tcsm_ok   = (xcode_q == HcRegWr) ? (12'd5 <= cfg_q.tcsm)
                                             : (12'(2 * lat_l) + 12'd4 + 12'(cfg_q.rd_hold)
@@ -497,7 +497,16 @@ module bow_hyperram_ctrl import bow_hyperram_pkg::*; #(
   // descriptor of what would start
   always_comb begin
     nx = '{k: KMemRd, src: SrcWin, linear: 1'b1, waddr: '0, n: 8'd2};
-    if (x_sel) begin
+    if (est_q == EStage) begin
+      // a window write block being staged starts at stage_done, whatever the
+      // executor waits for: its data entries are already out of the FIFO (an
+      // executor command waiting in XWait starts only once the engine is idle)
+      nx.src    = SrcWin;
+      nx.k      = KMemWr;
+      nx.linear = 1'b1;
+      nx.waddr  = 32'({hdr_q.line, hdr_q.first, 1'b0});
+      nx.n      = {3'd0, 4'({1'b0, hdr_q.last} - {1'b0, hdr_q.first}) + 4'd1, 1'b0};
+    end else if (x_sel) begin
       nx.src    = SrcExec;
       nx.k      = (xcode_q == HcRegWr) ? KRegWr : KRegRd;
       nx.linear = 1'b1;
@@ -510,14 +519,9 @@ module bow_hyperram_ctrl import bow_hyperram_pkg::*; #(
       nx.waddr  = bist_req_addr;
       nx.n      = bist_req_n;
     end else begin
-      // window (from the header, or the staged header in EStage)
+      // window read (from the header at the FIFO head)
       nx.src = SrcWin;
-      if (est_q == EStage) begin
-        nx.k      = KMemWr;
-        nx.linear = 1'b1;
-        nx.waddr  = 32'({hdr_q.line, hdr_q.first, 1'b0});
-        nx.n      = {3'd0, 4'({1'b0, hdr_q.last} - {1'b0, hdr_q.first}) + 4'd1, 1'b0};
-      end else if (wop_e'(wh.op) == WopRdLine) begin
+      if (wop_e'(wh.op) == WopRdLine) begin
         nx.k      = KMemRd;
         nx.linear = !(wh.wrap && cr0_q[1:0] == 2'b11);
         nx.waddr  = 32'({wh.line, (nx.linear ? 3'd0 : wh.crit), 1'b0});
@@ -562,7 +566,7 @@ module bow_hyperram_ctrl import bow_hyperram_pkg::*; #(
 
   // executor engine ops
   assign x_go        = x_sel && eng_idle && ready_dev && x_tcsm_ok &&
-                       !(xcode_q == HcRegWr && !reg_sel_i[1]);
+                       !(xcode_q == HcRegWr && !reg_sel_i[1]) && !x_bad_cr0;
   assign x_eng_start = x_go;
   assign go          = win_start || bist_start_txn || x_eng_start;
 
@@ -590,7 +594,6 @@ module bow_hyperram_ctrl import bow_hyperram_pkg::*; #(
       posted_q   <= 1'b0;
       wrapped_q  <= 1'b0;
       wake_cs_q  <= '0;
-      wake_from_q <= PwrActive;
       stg_wr_q   <= '0;
       stg_left_q <= '0;
       hdr_q      <= '0;
@@ -684,7 +687,8 @@ module bow_hyperram_ctrl import bow_hyperram_pkg::*; #(
         est_q <= ERst;
         c_q   <= '0;
       end
-      if ((xst_q == XWait) && eng_idle && xcode_q == HcWake && cfg_q.en) begin
+      if ((xst_q == XWait) && eng_idle && xcode_q == HcWake && cfg_q.en &&
+          (pwr_q == PwrDpd || pwr_q == PwrHs)) begin
         est_q       <= ERun;
         c_q         <= '0;
         k_q         <= KWake;
@@ -693,7 +697,6 @@ module bow_hyperram_ctrl import bow_hyperram_pkg::*; #(
         fixed_q     <= 1'b1;
         cd_q        <= 16'd2;
         wake_cs_q   <= cfg_q.twake_cs;
-        wake_from_q <= pwr_q;
         crdoff_q    <= '1;
         cdiron_q    <= '1;
         carm_q      <= '1;
@@ -840,7 +843,8 @@ module bow_hyperram_ctrl import bow_hyperram_pkg::*; #(
               end
               HcBistGo: begin
                 if (bist_busy) begin
-                  xerr_q <= 1'b1;
+                  xerr_q      <= 1'b1;
+                  xcode_err_q <= ErrArg;     // a run is in progress
                 end else begin
                   bist_start <= 1'b1;
                 end
@@ -887,14 +891,23 @@ module bow_hyperram_ctrl import bow_hyperram_pkg::*; #(
                   xerr_q      <= 1'b1;
                   xcode_err_q <= ErrDisable;
                   xst_q       <= XAck;
+                end else if (xcode_q == HcWake && pwr_q == PwrActive) begin
+                  xst_q <= XAck;           // awake: no CS# pulse (it would be an aborted transaction)
+                end else if (xcode_q == HcWake && pwr_q == PwrWait) begin
+                  xst_q <= XWait;          // a recovery runs: wait for its end, then decide
                 end else begin
                   xst_q <= XEng;           // the engine starts this cycle
                 end
               end
               HcRegRd, HcRegWr: begin
                 if (xcode_q == HcRegWr && !reg_sel_i[1]) begin
-                  xerr_q <= 1'b1;          // ID0 / ID1 are read only
-                  xst_q  <= XAck;
+                  xerr_q      <= 1'b1;     // ID0 / ID1 are read only
+                  xcode_err_q <= ErrArg;
+                  xst_q       <= XAck;
+                end else if (x_bad_cr0) begin
+                  xerr_q      <= 1'b1;     // reserved latency code: the device's
+                  xcode_err_q <= ErrArg;   // latency would be undefined
+                  xst_q       <= XAck;
                 end else if (!(ready_dev && x_tcsm_ok)) begin
                   xerr_q      <= 1'b1;
                   xcode_err_q <= !cfg_q.en ? ErrDisable : ((pwr_q != PwrActive) ? ErrPower : ErrTcsm);
@@ -910,8 +923,9 @@ module bow_hyperram_ctrl import bow_hyperram_pkg::*; #(
 
         XPs: begin
           if ((xcode_q == HcPsGo && ps_done) || (xcode_q == HcWpsGo && wps_done)) begin
-            xerr_q <= (xcode_q == HcPsGo) ? ps_err : wps_err;
-            xst_q  <= XAck;
+            xerr_q      <= (xcode_q == HcPsGo) ? ps_err : wps_err;
+            xcode_err_q <= ((xcode_q == HcPsGo) ? ps_err : wps_err) ? ErrArg : ErrNone;   // beyond the limit
+            xst_q       <= XAck;
           end
         end
 
@@ -928,8 +942,8 @@ module bow_hyperram_ctrl import bow_hyperram_pkg::*; #(
               xrdata_q    <= rd_err_i ? 16'd0 : reg_rd_word;
               xst_q       <= XAck;
             end
-          end else if (est_q == EIdle) begin
-            xst_q <= XAck;               // reset / wake / register write finished
+          end else if (est_q == EIdle && pwr_q != PwrWait) begin
+            xst_q <= XAck;               // reset / wake (and its recovery) / register write finished
           end
         end
 
@@ -967,27 +981,40 @@ module bow_hyperram_ctrl import bow_hyperram_pkg::*; #(
   logic reg_wr_done;
   assign reg_wr_done = at_end && is_regwr;
 
+  // Recovery after RESET# or a WAKE pulse: the device state is known from the
+  // start of the pulse (power-on registers after RESET# or deep power down,
+  // CR1[5] = 0 after hybrid sleep) and the device is unusable for pulse + wait
+  // cycles. Both are kept here, in the board domain: a channel reset in the
+  // middle (SoC reset, CORE_RST) cuts the engine's own sequencing, but POWER
+  // still returns to active after the time latched at the start, and the
+  // shadows still match the device. CR1[1:0] is read only (not reset).
+  logic [16:0] rec_left_q;
+
   always_ff @(posedge clk_i or negedge brd_rst_ni) begin
     if (!brd_rst_ni) begin
-      cr0_q    <= Cr0Default;
-      cr1_q    <= Cr1Default;
-      pwr_q    <= PwrActive;
-      ps_ref_q <= '0;
+      cr0_q      <= Cr0Default;
+      cr1_q      <= Cr1Default;
+      pwr_q      <= PwrActive;
+      ps_ref_q   <= '0;
+      rec_left_q <= '0;
     end else begin
       if (est_q == ERst && c_q == 16'd0) begin
-        cr0_q <= Cr0Default;
-        cr1_q <= Cr1Default;
-        pwr_q <= PwrWait;
-      end
-      if (run && is_wake && c_q == 16'd2) pwr_q <= PwrWait;
-      if (est_q == EWait && est_n_idle) begin
-        pwr_q <= PwrActive;
-        if (xcode_q == HcWake && wake_from_q == PwrDpd) begin
-          cr0_q <= Cr0Default;          // out of deep power down: power-on state
-          cr1_q <= Cr1Default;
-        end else if (xcode_q == HcWake) begin
+        cr0_q      <= Cr0Default;
+        cr1_q      <= {Cr1Default[15:2], cr1_q[1:0]};
+        pwr_q      <= PwrWait;
+        rec_left_q <= 17'(cfg_q.trst_low) + 17'(cfg_q.trst_wait) + 17'd2;
+      end else if (run && is_wake && c_q == 16'd2) begin
+        if (pwr_q == PwrDpd) begin      // out of deep power down: power-on state
+          cr0_q <= Cr0Default;
+          cr1_q <= {Cr1Default[15:2], cr1_q[1:0]};
+        end else begin
           cr1_q[5] <= 1'b0;             // out of hybrid sleep
         end
+        pwr_q      <= PwrWait;
+        rec_left_q <= 17'(wake_cs_q) + 17'(cfg_q.twake_wait) + 17'd2;
+      end else if (pwr_q == PwrWait) begin
+        if (rec_left_q == '0) pwr_q <= PwrActive;
+        else                  rec_left_q <= rec_left_q - 17'd1;
       end
       // CR1[1:0] (distributed refresh interval) is read only and depends on the
       // device's temperature grade: a REG_RD of CR1 brings it into the shadow
@@ -1008,7 +1035,6 @@ module bow_hyperram_ctrl import bow_hyperram_pkg::*; #(
     end
   end
 
-  assign est_n_idle = (c_q + 16'd1 >= (xcode_q == HcWake ? cfg_q.twake_wait : cfg_q.trst_wait));
 
   assign cfg_o     = cfg_q;
   assign applied_o = applied_q;

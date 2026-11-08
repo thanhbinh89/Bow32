@@ -140,7 +140,7 @@ module bow_hyperram_bist (
         chk_x_q <= xs32(chk_x_q);
         if (rdata_i != exp_w) begin
           if (errs_q == 32'd0) begin
-            faddr_q <= base_q + chk_a_q;
+            faddr_q <= chk_a_q;       // chk_a_q is the absolute word address
             fexp_q  <= exp_w;
             fgot_q  <= rdata_i;
           end

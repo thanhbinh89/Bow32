@@ -38,7 +38,7 @@ static bool timed_out(uint32_t start, uint32_t us) {
 const char *bow_hr_err_name(uint32_t code) {
   static const char *const names[] = {"none", "read data did not start", "RWDS not a strobe",
                                       "longer than tCSM", "device asleep", "disabled",
-                                      "read FIFO broken"};
+                                      "read FIFO broken", "argument refused"};
   return code < sizeof(names) / sizeof(names[0]) ? names[code] : "?";
 }
 
@@ -373,7 +373,16 @@ static bool sweep(uint32_t kind, uint32_t step, bool verbose, bow_hr_cal_t *cal)
   cal->phase = centre;
   if (!bow_hr_set_phase(centre) || !bow_hr_rfifo_sync()) return false;
   cal->phase = bow_hr_phase_now();
+  /* variable latency: the measured transaction may have been 2x (a refresh
+   * collision); its own latency comes from the 2x counter of the statistics */
+  uint32_t cr0 = BOW_HR_RD(CR0), st0[16], st1[16];
+  bool var = !(cr0 & HR_CR0_FIXED);
+  if (var && !bow_hr_snap(st0)) return false;
   if (!sweep_point(kind, td, cap, &first)) return false;
+  if (var) {
+    if (!bow_hr_snap(st1)) return false;
+    if (st1[HR_STAT_LAT2X] != st0[HR_STAT_LAT2X]) td = 2u * cr0_l(cr0) + 3u;
+  }
   uint32_t dly = (uint32_t)first / 2u;
   if (dly < td || dly - td > 31u) return false;
   cal->rd_dly = dly - td;
@@ -410,9 +419,12 @@ bool bow_hr_calibrate(uint32_t step, bool verbose, bow_hr_cal_t *cal) {
     if (verbose) bow_printf("hyperram: calibration failed: ID0 %04x at phase %d\n", v, c.phase);
     return false;
   }
-  /* fine sweep with the memory pattern (window open meanwhile) */
+  /* fine sweep with the memory pattern (window open meanwhile). The sweep
+   * needs line fills: the read buffer is on for it whatever the caller set
+   * (CTRL is restored below; stores update the lines also with RBUF_EN = 0,
+   * so no line goes stale meanwhile) */
   uint32_t ctrl = BOW_HR_RD(CTRL);
-  BOW_HR_WR(CTRL, ctrl | HR_CTRL_INIT_DONE);
+  BOW_HR_WR(CTRL, ctrl | HR_CTRL_INIT_DONE | HR_CTRL_RBUF_EN);
   bool ok = write_pattern() && sweep(1u, step, verbose, &c) && bow_hr_inval() && check_pattern() &&
             bow_hr_reg_read(HR_REG_ID0, &v) && v == HR_ID0_S80KS2562;
   BOW_HR_WR(CTRL, ok ? (ctrl | HR_CTRL_INIT_DONE) : (ctrl & ~HR_CTRL_INIT_DONE));
@@ -514,9 +526,26 @@ bool bow_hr_bist(uint32_t waddr, uint32_t words, uint32_t burst, uint32_t mode, 
   BOW_HR_WR(BIST_CTRL, (mode & 7u) | HR_BIST_BURST(burst));
   BOW_HR_WR(STATUS, HR_ST_BIST_DONE | HR_ST_BIST_ERR);
   if (!bow_hr_cmd(HR_CMD_BIST_GO)) return false;
+  /* time of the run: per burst CA + 2x latency + CS# high + RD_HOLD (< 2L + 16
+   * cycles) and its words, per pass; twice that, at least HR_BIST_TIMEOUT_US */
+  uint32_t b = (burst == 0u || burst > 255u) ? 255u : burst, mhz = BOW_HR_RD(CLK_HZ) / 1000000u;
+  uint32_t passes = ((mode & HR_BIST_WRITE) ? 1u : 0u) + ((mode & HR_BIST_READ) ? 1u : 0u);
+  uint64_t cyc = ((uint64_t)words / b + 1u) * (2u * cr0_l(BOW_HR_RD(CR0)) + 16u + b) * passes;
+  uint64_t us = 2u * cyc / (mhz ? mhz : 1u) + HR_BIST_TIMEOUT_US;
+  uint32_t sys_mhz = bow_clk_hz() / 1000000u, lim = 0x7FFFFFFFu / (sys_mhz ? sys_mhz : 1u);
+  uint32_t tmo = us > lim ? lim : (uint32_t)us;   /* within the 32-bit cycle counter */
   uint32_t t0 = bow_cycles();
   while (!(BOW_HR_RD(STATUS) & HR_ST_BIST_DONE)) {
-    if (timed_out(t0, HR_BIST_TIMEOUT_US)) return false;
+    if (timed_out(t0, tmo)) {
+      /* never leave it running: a later BIST_GO would be refused and window
+       * accesses would interleave with its bursts */
+      (void)bow_hr_cmd(HR_CMD_BIST_STOP);
+      uint32_t t1 = bow_cycles();
+      while (!(BOW_HR_RD(STATUS) & HR_ST_BIST_DONE) && !timed_out(t1, HR_CMD_TIMEOUT_US)) {
+      }
+      (void)bow_hr_inval();
+      return false;
+    }
   }
   r->done = true;
   r->cycles = BOW_HR_RD(BIST_CYCLES);

@@ -66,6 +66,14 @@ package bow_hyperram_pkg;
   localparam hr_io_out_t HR_IO_OUT_IDLE = '{
     cs_n: 1'b1, rst_n: 1'b1, dq_oe: 1'b1, rwds_oe: 1'b1, ls_oe_n: 1'b1, default: '0
   };
+  // The PHY register in the channel reset: the same, but DQ / RWDS released.
+  // A reset can cut a read whose data the level shifters still drive towards
+  // the FPGA (DIR = HyperRAM -> FPGA): OE# and DIR change at the first edge of
+  // the reset, the FPGA drives again only after the reset, at least one cycle
+  // later (the shifters' outputs are off by then: no drive overlap).
+  localparam hr_io_out_t HR_IO_OUT_RST = '{
+    cs_n: 1'b1, rst_n: 1'b1, ls_oe_n: 1'b1, default: '0
+  };
 
   // ---------------------------------------------------------------------------
   // HyperBus protocol
@@ -182,8 +190,11 @@ package bow_hyperram_pkg;
   localparam logic [7:0] ErrRwds    = 8'd2;   // RWDS did not toggle as a strobe (strict)
   localparam logic [7:0] ErrTcsm    = 8'd3;   // transaction longer than TCSM: refused
   localparam logic [7:0] ErrPower   = 8'd4;   // device in deep power down / hybrid sleep
-  localparam logic [7:0] ErrDisable = 8'd5;   // EN = 0
+  localparam logic [7:0] ErrDisable = 8'd5;   // EN = 0, no CLK_OK, channel in reset
   localparam logic [7:0] ErrRfifo   = 8'd6;   // read FIFO broken
+  localparam logic [7:0] ErrArg     = 8'd7;   // argument refused: malformed CMD, ID0 / ID1 write,
+                                              // reserved CR0 latency code, phase step beyond its
+                                              // limit, BIST_GO during a run
 
   // ---------------------------------------------------------------------------
   // Command channel (bow_hyperram_regs -> bow_hyperram_ctrl), one at a time

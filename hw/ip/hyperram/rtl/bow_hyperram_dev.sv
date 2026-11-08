@@ -13,8 +13,11 @@
 // the same cycle, so the emulator answers in the timing of the pins:
 //   * transaction: cs_n falls (t = 0); CA bytes on the first three ck_en
 //     cycles (t = 1..3); t_D = 4 for a register write, else L + 3 or 2L + 3
-//     (L = CR0 latency; 2x when CR0[3] = 1, or for a refresh collision drawn
-//     at random (RefreshPct16 / 16) in variable latency mode);
+//     (L = CR0 latency; 2x when CR0[3] = 1, or for a refresh collision in
+//     variable latency mode: one draw per transaction from a 4-bit LFSR of
+//     period 15, 2x when it is below RefreshPct16, so exactly RefreshPct16 - 1
+//     of every 15 transactions whatever their timing: a per-cycle draw locked
+//     onto the period of a CPU loop and gave no 2x at all);
 //   * RWDS (lb_rwds_en): the latency indication in t = 1..3 (every
 //     transaction), low from t = 4 in reads, then high / low with byte A / B
 //     of every word (t >= t_D), low after the last word;
@@ -53,7 +56,7 @@ module bow_hyperram_dev import bow_hyperram_pkg::*; #(
   parameter logic [1:0]  Cr1Ro         = 2'b01,      // CR1[1:0]: 01 4 us
   parameter int unsigned TcsmCycles    = 400,        // 4 us at 100 MHz
   parameter int unsigned CshiCycles    = 1,
-  parameter int unsigned RefreshPct16  = 4,          // variable latency: P(2x) = n / 16
+  parameter int unsigned RefreshPct16  = 4,          // variable latency: (n - 1) of 15 transactions 2x
   parameter int unsigned TrpCycles     = 20,         // 200 ns at 100 MHz
   parameter int unsigned TrhCycles     = 20,
   parameter int unsigned WakeMinCycles = 20,         // CS# pulse 200 ns (DPD; HS needs 60 ns)
@@ -309,7 +312,6 @@ module bow_hyperram_dev import bow_hyperram_pkg::*; #(
       ecode_q    <= '0;
       ecnt_q     <= '0;
     end else begin
-      lfsr_q <= {lfsr_q[2:0], lfsr_q[3] ^ lfsr_q[2]};
       if (cs) begin
         t_q   <= t_q + 16'd1;
         csl_q <= csl_q + 16'd1;
@@ -356,6 +358,7 @@ module bow_hyperram_dev import bow_hyperram_pkg::*; #(
               st_q    <= DCa;
               ca_n_q  <= '0;
               lat2x_q <= cr0_q[3] || (32'(lfsr_q) < RefreshPct16);
+              lfsr_q  <= {lfsr_q[2:0], lfsr_q[3] ^ lfsr_q[2]};   // the next transaction's draw
             end
           end
         end
