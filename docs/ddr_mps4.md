@@ -69,7 +69,12 @@ IP). Vì `MMCM_A` cũng tạo `clk_sys`, trên MPS4 việc này reset luôn cả
 `locked_sys`): mất lock của MMCM DDR là lỗi phần cứng, sau đó firmware khởi động lại từ đầu.
 
 LED: đèn trong nút **PB1** (`USER_nLED[8]`) nhấp nháy khi SoC chạy, đèn trong nút **PB2**
-(`USER_nLED[9]`) sáng khi cả ba MMCM đã lock; 8 LED người dùng là GPIO PA0..PA7.
+(`USER_nLED[9]`) sáng khi mọi MMCM đã lock (ba của DDR và hai của HyperRAM); 8 LED người dùng
+là GPIO PA0..PA7.
+
+Cùng bitstream có bộ điều khiển HyperRAM với cây clock riêng (BUFGCE riêng từ cùng IBUF của
+`OSCCLKA[2]`, hai MMCM): [hyperram_mps4.md](hyperram_mps4.md). Cây clock DDR ở trên giữ
+nguyên vị trí (`MMCM_B`, `MMCM_A`, `MMCM_W` ở vùng clock của chân và hai vùng phía trên).
 
 ## 2. Nạp bitstream qua thẻ microSD
 

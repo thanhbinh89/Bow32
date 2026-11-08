@@ -454,7 +454,7 @@ module bow_ddr_dfi import bow_ddr_pkg::*; #(
   logic        ps_go_q, wps_go_q, ps_busy, wps_busy, ps_done, wps_done, ps_err, wps_err;
   logic [15:0] sync_ref_q, ps_now, wps_now;
 
-  bow_ddr_ps #(
+  bow_mmcm_ps #(
     .Limit   (2 * PsSteps),
     .Timeout (64)
   ) u_ps_rd (
@@ -472,7 +472,7 @@ module bow_ddr_dfi import bow_ddr_pkg::*; #(
     .ps_done_i (ps_done_i)
   );
 
-  bow_ddr_ps #(
+  bow_mmcm_ps #(
     .Limit   (PsSteps / 4),
     .Timeout (64)
   ) u_ps_wr (

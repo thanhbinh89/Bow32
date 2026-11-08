@@ -9,7 +9,6 @@ litedram/generated/ddr3/litedram_ddr3_pkg.sv
 litedram/generated/ddr2/litedram_ddr2.v
 litedram/generated/ddr3/litedram_ddr3.v
 rtl/bow_ddr_pkg.sv
-rtl/bow_ddr_ps.sv
 rtl/bow_ddr_dfi.sv
 rtl/bow_ddr_win.sv
 rtl/bow_ddr_csr.sv

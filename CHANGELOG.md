@@ -23,6 +23,55 @@
     trong `tb_bow_ddr_rst`, mô hình DRAM kiểm thêm nợ REF trung bình theo JEDEC (hoãn tối đa
     8, trả trước tối đa 8) với chế độ nóng `hot_i`; `make -C hw/ip/ddr/dv regress NSEEDS=n` và workflow hằng đêm
     `ddr-nightly.yml` (25 seed).
+- **HyperRAM** `bow_hyperram` (`hw/ip/hyperram`): bộ điều khiển HyperBus tự viết cho
+  HyperRAM 2.0 x8 (Infineon S80KS2562, 32 MiB) của bo RAM mở rộng. Cửa sổ 256 MiB ở
+  `0x6000_0000` (device thứ 9 của main crossbar, 32 MiB có thiết bị, ngoài vùng → lỗi bus),
+  thanh ghi ở `0x4000_F000`, ngắt `irq_fast[12]` ([docs/ip/hyperram.md](docs/ip/hyperram.md)).
+  - Controller (miền CK): bộ thực thi lệnh (APPLY, bước pha đọc/ghi, chụp thô, HW_RESET,
+    đọc/ghi CR0/CR1, WAKE, BIST, thống kê), lịch giao dịch theo HyperBus (CA 48 bit, latency
+    1×/2× cố định hoặc theo RWDS, mặt nạ RWDS khi ghi, burst tuyến tính / wrapped), mọi
+    thông số thời gian là thanh ghi tính từ tần số CK, giao dịch vượt tCSM bị từ chối, CS#
+    giữ thấp thêm `RD_HOLD` chu kỳ sau word đọc cuối, bản sao CR0/CR1 và trạng thái nguồn
+    (deep power down, hybrid sleep) giữ qua reset SoC.
+  - Cửa sổ bus: read buffer 4 line × 32 byte (line fill wrapped, word cần trước), ghi
+    posted gộp khối 32 byte (đẩy thành một burst), write-through, `NOT_READY` / `RANGE` /
+    timeout → `BROKEN` tới `CORE_RST`; hai FIFO 2 clock (gray) tới controller.
+  - PHY: `ODDRE1`/`IDDRE1` qua wrapper chân của bo, FIFO đọc 2 clock chạy liên tục, bộ căn
+    dữ liệu theo RWDS (chế độ `STRICT` báo lỗi thay vì trả dữ liệu lệch), chụp thô 64 chu
+    kỳ; điều khiển DIR/OE của level shifter TXV0108 theo từng chu kỳ.
+  - BIST trong phần cứng (PRBS xorshift32 / đếm, đo băng thông thật của HyperBus).
+  - HyperRAM giả lập tổng hợp được `bow_hyperram_dev` (UltraRAM, kiểm tra giao thức, mã lỗi
+    ở `DBG`) cho bản loopback trên bo khi chưa có chip.
+  - `HrEn = 0`: bản stub (KV260).
+- Driver `sw/common/src/bow_hyperram.c` (khởi tạo, hiệu chỉnh pha đọc bằng chụp thô và pha
+  ghi, BIST, nguồn), ứng dụng `sw/apps/hyperram` (shell, self-test 19 mục) và
+  `tools/bow32_hyperram.py` (self-test, hiệu chỉnh, mắt đọc, băng thông, `verify` so dữ liệu
+  đọc lại với mô hình Python của BIST và xorshift).
+- Mô phỏng: test hệ thống `hyperram` (firmware thật trên SoC + mô hình clock/pad + HyperRAM
+  giả lập); `hw/ip/hyperram/dv`: mô hình S80KS2562 mức chân viết từ datasheet (thời gian,
+  thanh ghi, mọi kiểu burst, nguồn, 21 bộ đếm vi phạm), mô hình bo TXV0108 (độ trễ theo seed,
+  tranh chấp, đầu vào thả nổi), mô hình clock MMCM và pad twin; `tb_bow_hyperram` lái IP như
+  driver ở 5 cấu hình (loopback, bo RAM, nối thẳng 166 MHz, stub, chip tắt DQ sớm), trong
+  `make test-ip` và CI (Verilator 5.020); `tb_bow_hyperram_io_xilinx`
+  (xsim, unisim) cho hai wrapper chân / clock của bo, cấu hình bo RAM / nối thẳng / loopback,
+  và 42 bản đột biến của hai wrapper trong `make -C hw/fpga/common/dv mutants` (đều bị bắt).
+- Đã chạy trên Arm MPS4 (bản loopback, 2026-11-07, hai lượt): self-test 19/19 (cả sau `RESET`
+  của MCC), `verify` 340/340 case so với mô hình Python, BIST trên toàn 1 MiB 0 lỗi ở 184,4 MB/s
+  (đỉnh 200 MB/s), hybrid sleep / deep power down, 24/24 lần `init` từ 24 pha xuất phát; DDR 18/18
+  trên cùng bitstream. Trên bo lộ ra một lỗi của hiệu chỉnh đọc (đã sửa: bản đồ mắt gập theo T/2,
+  [docs/ip/hyperram.md](docs/ip/hyperram.md) mục 4). Sau review của PR #6 (42 / 49 phát hiện được
+  xác nhận, đều đã sửa) chạy lại 2026-11-08: self-test 19/19 ba lượt, `verify` 60/60, DDR 18/18.
+  Vòng review thứ hai (của chính các bản sửa) xác nhận thêm 5 phát hiện; khi viết test hồi quy
+  cho từng bản sửa (mục 9b của testbench IP) lộ thêm hai lỗi RTL quanh reset kênh (POWER đọc
+  "hoạt động" ngay sau reset kênh giữa lúc hồi phục; reset kênh cắt ngang xung WAKE), đều đã sửa.
+  `make -C hw/ip/hyperram/dv mutants`: 18 bản RTL, mỗi bản gỡ một bản sửa, đều bị testbench bắt.
+  Bitstream sau vòng hai chạy trên MPS4: self-test 19/19 ba lượt, `verify` 60/60, DDR 18/18.
+- Arm MPS4: bản build có cả DDR và HyperRAM (`HR_LOOPBACK`, mặc định theo `DDR_LOOPBACK`),
+  hai MMCM HyperRAM (`bow_hyperram_clk_xusp`) sau BUFGCE riêng từ cùng oscillator, wrapper
+  chân `bow_hyperram_io_xilinx`, XDC loopback (bank 65) và bo RAM (khe FMC+), ràng buộc CDC
+  và bus skew, kiểm tra trong `tcl/timing_checks.tcl`; hướng dẫn chạy
+  [docs/hyperram_mps4.md](docs/hyperram_mps4.md).
+
 - **SDRAM DDR2/DDR3** `bow_ddr` (`hw/ip/ddr`): controller **LiteDRAM** trên PHY riêng
   của Bow32. Cửa sổ bộ nhớ 512 MiB ở `0x8000_0000` trên main crossbar (3 × 8), CSR của
   LiteDRAM ở `0x4000_C000` (8 KiB), thanh ghi PHY/cầu ở `0x4000_E000`, ngắt
@@ -243,6 +292,9 @@
   MPS4 ghi / đọc 213,7 / 213,7 MB/s, so với 233,5 / 226,4 MB/s ở 7,8 µs. `REF_STARVE` của
   emulator / mô hình DRAM kiểm thêm nợ REF trung bình (hoãn tối đa 8, trả trước tối đa 8)
   bên cạnh 9 × tREFI không có REF.
+- `bow_ddr_ps` chuyển sang `hw/ip/common` thành `bow_mmcm_ps` (dùng chung cho DDR và HyperRAM).
+- `bow_ddr_clk_xusp` xuất thêm đầu ra IBUF của oscillator (`clk_ibuf_o`) cho các cây clock
+  khác; cây clock DDR giữ nguyên.
 - **MKV theo TCVN 14263:2024** thay cho bản dự thảo. Bản chuẩn khác bản dự thảo ở
   ba điểm của thuật toán, nên là một mã khác (dữ liệu mã bằng IP cũ không giải mã
   được bằng IP mới) ([docs/ip/mkv.md](docs/ip/mkv.md), "So với bản dự thảo"):

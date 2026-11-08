@@ -19,6 +19,7 @@ Tệp này được sinh tự động từ `hw/top/data/bow32_memmap.yaml`. Sử
 | 5 | `axil` | `0x50000000` | `0x5000FFFF` | 64 KiB | AXI4-Lite window (devices of the FPGA block design) |
 | 6 | `vram` | `0x24000000` | `0x240FFFFF` | 1 MiB | Video RAM (1 MiB, UltraRAM): DMA buffers, H.264 stream |
 | 7 | `ddr` | `0x80000000` | `0x9FFFFFFF` | 512 MiB | DDR2/DDR3 SDRAM window (bow_ddr, 512 MiB decode, real size = DRAM size) |
+| 8 | `hyperram` | `0x60000000` | `0x6FFFFFFF` | 256 MiB | HyperRAM window (bow_hyperram, 256 MiB decode, real size = device size) |
 
 ## Peripheral bus
 
@@ -38,6 +39,7 @@ Tệp này được sinh tự động từ `hw/top/data/bow32_memmap.yaml`. Sử
 | 11 | `mkv` | `0x4000B000` | `0x4000BFFF` | 4 KiB | MKV block cipher (TCVN 14263:2024): MKV-128 / MKV-256 |
 | 12 | `ddr_ctrl` | `0x4000C000` | `0x4000DFFF` | 8 KiB | DDR controller CSRs (LiteDRAM: DFII, BIST, init status) |
 | 13 | `ddr_phy` | `0x4000E000` | `0x4000EFFF` | 4 KiB | DDR PHY and bus bridge registers (bow_ddr) |
+| 14 | `hyperram_reg` | `0x4000F000` | `0x4000FFFF` | 4 KiB | HyperRAM controller registers (bow_hyperram: HyperBus master, PHY, BIST) |
 
 Truy cập vào địa chỉ không được ánh xạ trả về bus error (Ibex sinh exception *load/store/instruction access fault*).
 
@@ -57,3 +59,4 @@ Truy cập vào địa chỉ không được ánh xạ trả về bus error (Ibe
 | 9 | `0x80000019` | `dma` | DMA channel done / stream packet / bus error |
 | 10 | `0x8000001A` | `mkv` | MKV command done / command error |
 | 11 | `0x8000001B` | `ddr` | DDR PHY / bridge: capture / phase done, errors |
+| 12 | `0x8000001C` | `hyperram` | HyperRAM: command / capture / BIST done, errors |

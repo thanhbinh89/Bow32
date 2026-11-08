@@ -9,13 +9,14 @@
 #
 # Every failed check prints a CRITICAL WARNING; the result is their number.
 #   * clock periods: the exceptions of constr/mps4.xdc use fixed numbers
-#     (clk_sys 20 ns, ddr_clk 7.5 ns, ddr_sys 30 ns);
+#     (clk_sys 20 ns, ddr_clk 7.5 ns, ddr_sys 30 ns, hr_clk 10 ns);
 #   * each clock pair with paths between two different clocks has the
 #     constraint the XDC means (report_clock_interaction, column
 #     Inter-Clock Constraints): "Max Delay Datapath Only" between the
 #     asynchronous pairs, "Timed" (no exception at all) for the DFI between
 #     LiteDRAM and the PHY (ddr_sys <-> ddr_clk, both directions must have
-#     paths) and for the PHY -> write clock ODDR paths. Any other pair is
+#     paths) and for the PHY -> write clock ODDR paths (DDR and HyperRAM:
+#     hr_clk -> hr_wclk). Any other pair is
 #     unexpected: e.g. a path from ddr_sys to the write clocks, a DFI path
 #     cut by an exception, a crossing that no max delay covers;
 #   * check_timing: no unclocked or multiply clocked register, no constant
@@ -29,7 +30,7 @@ proc bow32_mps4_timing_checks {out_dir} {
   set failed 0
 
   # ---- periods
-  foreach {name period} {clk_sys 20.000 ddr_clk 7.500 ddr_sys 30.000} {
+  foreach {name period} {clk_sys 20.000 ddr_clk 7.500 ddr_sys 30.000 hr_clk 10.000} {
     set clk [get_clocks -quiet $name]
     if {[llength $clk] != 1} {
       puts "CRITICAL WARNING: clock $name not found (constr/mps4.xdc)"
@@ -45,11 +46,13 @@ proc bow32_mps4_timing_checks {out_dir} {
   set async "Max Delay Datapath Only"
   set want [dict create]
   foreach {a b} {clk_sys ddr_sys  clk_sys ddr_clk  clk_sys ddr_rd_clk
-                 ddr_clk ddr_rd_clk  ddr_sys ddr_rd_clk} {
+                 ddr_clk ddr_rd_clk  ddr_sys ddr_rd_clk
+                 clk_sys hr_clk  clk_sys hr_rd_clk  hr_clk hr_rd_clk} {
     dict set want [list $a $b] $async
     dict set want [list $b $a] $async
   }
-  foreach {a b} {ddr_sys ddr_clk  ddr_clk ddr_sys  ddr_clk ddr_wclk  ddr_clk ddr_wclk90} {
+  foreach {a b} {ddr_sys ddr_clk  ddr_clk ddr_sys  ddr_clk ddr_wclk  ddr_clk ddr_wclk90
+                 hr_clk hr_wclk} {
     dict set want [list $a $b] "Timed"
   }
   set clocks [get_property NAME [get_clocks]]
@@ -108,7 +111,8 @@ proc bow32_mps4_timing_checks {out_dir} {
   set rpt [file join $out_dir ddr_cdc_paths.rpt]
   file delete -force $rpt
   foreach {a b} {clk_sys ddr_sys  clk_sys ddr_clk  clk_sys ddr_rd_clk
-                 ddr_clk ddr_rd_clk  ddr_sys ddr_rd_clk} {
+                 ddr_clk ddr_rd_clk  ddr_sys ddr_rd_clk
+                 clk_sys hr_clk  clk_sys hr_rd_clk  hr_clk hr_rd_clk} {
     report_timing -from [get_clocks $a] -to [get_clocks $b] -max_paths 2 -file $rpt -append
     report_timing -from [get_clocks $b] -to [get_clocks $a] -max_paths 2 -file $rpt -append
   }
@@ -123,13 +127,25 @@ proc bow32_mps4_timing_checks {out_dir} {
   # all (none in the design): CDC-11 (one launch flop fans out to several
   # synchronisers of a destination clock), CDC-12 (multi-clock fan-in to a
   # synchroniser), CDC-13 / CDC-14 (a 1-bit / multi-bit crossing ending on a
-  # non-flop primitive, e.g. an SRL).
+  # non-flop primitive, e.g. an SRL). One CDC-13 is expected: in the card
+  # builds the DDR / HyperRAM data pads are inout ports without an input delay
+  # (the read capture is calibrated at run time, the port -> IDDRE1 paths are
+  # false paths in constr/mps4.xdc), so each pad -> IDDRE1 D path shows up as
+  # a crossing from the "input port clock"; any other CDC-13 is an error.
   set n_rst 0
+  set n_pad 0
   foreach line [split [report_cdc -details -return_string] "\n"] {
     if {[regexp {^\s*\d+\s+(CDC-1[01234])\s} $line -> id]} {
       set to [lindex $line end]
+      set from [lindex $line end-1]
       if {$id eq "CDC-10" && [regexp {/(u_rst_[a-z_]+|u_wrst|u_rrst)/sync_q_reg\[0\]/CLR$} $to]} {
         incr n_rst
+        continue
+      }
+      if {$id eq "CDC-13" && [regexp {^(ddr_(dq_io\[\d+\]|dqs_p_io)|hr_(dq_io\[\d+\]|rwds_io))$} $from] &&
+          [regexp {^u_(ddr|hr)_io/g_(dq|dqs|rwds)[^/]*/?[^/]*u_iddr/D$} $to] &&
+          [llength [get_ports -quiet $from]] == 1} {
+        incr n_pad
         continue
       }
       puts "CRITICAL WARNING: $id ending at $to (see cdc.rpt)"
@@ -137,6 +153,7 @@ proc bow32_mps4_timing_checks {out_dir} {
     }
   }
   puts "INFO: CDC-10 at reset synchroniser CLR pins (expected): $n_rst"
+  puts "INFO: CDC-13 from data pads to their IDDRE1 (expected in card builds): $n_pad"
 
   return $failed
 }

@@ -195,7 +195,6 @@ hai phía. Reset cầu = reset liên kết hoặc `CTRL.CORE_RST`: giữ hai c�
 | `bow_ddr_regs.sv` | thanh ghi PHY/cầu, STATUS/IRQ, phía `clk_i` của kênh lệnh |
 | `bow_ddr_dfi.sv` | bộ chuyển DFI + thực thi lệnh phía `ddr_clk` (APPLY, bước pha, RFIFO_SYNC, CAP_ARM, đếm ACT/REF) |
 | `bow_ddr_phy.sv` | PHY không phụ thuộc công nghệ (giữ từ v1) |
-| `bow_ddr_ps.sv` | bước pha MMCM (PSEN/PSDONE) |
 | `bow_ddr_dev.sv`, `bow_ddr_lb.sv` | thiết bị DDR2/DDR3 tổng hợp được có kiểm tra JEDEC; emulator loopback |
 | `bow_ddr_stub.sv` | bản thay thế khi `DdrEn = 0` |
 | `bow_ddr_pkg.sv` | kiểu dùng chung: lệnh, cấu hình PHY, bundle chân, pha DFI |
