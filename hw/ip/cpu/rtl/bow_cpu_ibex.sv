@@ -34,6 +34,7 @@ module bow_cpu_ibex import bow_bus_pkg::*; #(
   input  logic        irq_timer_i,
   input  logic        irq_external_i,
   input  logic [14:0] irq_fast_i,
+  input  logic        irq_nm_i,       // non-maskable interrupt (fatal alert)
 
   output logic        core_sleep_o
 );
@@ -113,7 +114,7 @@ module bow_cpu_ibex import bow_bus_pkg::*; #(
     .irq_timer_i,
     .irq_external_i,
     .irq_fast_i,
-    .irq_nm_i                (1'b0),
+    .irq_nm_i,
 
     .scramble_key_valid_i    (1'b0),
     .scramble_key_i          ('0),

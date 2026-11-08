@@ -135,11 +135,20 @@ giữ `gnt = 0`. Chi tiết: [bus.md](bus.md).
 | CSI2RX (FS, FE, lỗi, LOG/RAW xong) | `irq_fast_i[7]` | `0x80000017` |
 | H264 (frame xong, đủ FRAMES, lỗi) | `irq_fast_i[8]` | `0x80000018` |
 | DMA (kênh xong, packet, lỗi bus) | `irq_fast_i[9]` | `0x80000019` |
-| MKV (lệnh xong, lệnh lỗi) | `irq_fast_i[10]` | `0x8000001A` |
+| MKV (lệnh xong, lệnh lỗi, lỗi phần cứng) | `irq_fast_i[10]` | `0x8000001A` |
 | DDR (APPLY, chụp thô / bước pha xong, lỗi) | `irq_fast_i[11]` | `0x8000001B` |
 
 `irq_timer_i`, `irq_external_i`, `irq_software_i` đang nối 0 — chỗ trống để học
 thêm CLINT/PLIC (xem [roadmap.md](roadmap.md)).
+
+**NMI** (`irq_nm_i`, `mcause` `0x8000001F`, vector `mtvec + 0x7C`): alert nghiêm trọng
+của MKV — khối mã khối tự khoá sau `FaultLimit` lỗi phần cứng ([ip/mkv.md](ip/mkv.md)).
+Không tắt được bằng `mie`; handler mặc định `bow_nmi_handler()` in thông báo rồi dừng.
+Boot ROM gặp NMI cũng in `ROM trap` và dừng.
+
+**Tường lửa DMA:** DMA đi qua `bow_bus_deny` trước main crossbar: yêu cầu của nó tới
+cửa sổ MKV (`0x4000_B000…0x4000_BFFF`) trả lỗi bus, không tới được thanh ghi khoá và
+không mã / giải mã thay CPU được.
 
 ## Quyết định thiết kế (và vì sao)
 

@@ -120,11 +120,11 @@ python3 tools/bow32_flash.py -p /dev/ttyUSB0 flash build/sw/video/video.bin
 python3 tools/bow32_video.py -p /dev/ttyUSB0 --fast 921600 rec -n 45 --skip 1 -o video.mp4
 ```
 
-Mã khối MKV (bitstream nào cũng có), xem [docs/mkv_kv260.md](docs/mkv_kv260.md):
+Mã khối MKV (bitstream nào cũng có; KV260 hay Arm MPS4), xem [docs/mkv_kv260.md](docs/mkv_kv260.md):
 
 ```bash
 python3 tools/bow32_flash.py -p /dev/ttyUSB0 flash build/sw/mkv/mkv.bin
-python3 tools/bow32_mkv.py -p /dev/ttyUSB0 test          # self-test: mkv: PASS (13/13)
+python3 tools/bow32_mkv.py -p /dev/ttyUSB0 test          # self-test: mkv: PASS (19/19)
 python3 tools/bow32_mkv.py -p /dev/ttyUSB0 verify -n 120 # khoá/khối ngẫu nhiên, so với mô hình
 ```
 
@@ -214,7 +214,7 @@ Bow32/
 | [docs/ip/h264.md](docs/ip/h264.md) | Bộ mã hoá H.264: kiến trúc, các khối, quyết định của encoder, stream, thanh ghi, kiểm chứng |
 | [docs/ip/dma.md](docs/ip/dma.md) | DMA: chế độ M2M / stream, ring buffer, thanh ghi |
 | [docs/ip/mkv.md](docs/ip/mkv.md) | Mã khối MKV: thuật toán (TCVN 14263:2024), so với bản dự thảo, kiến trúc, thanh ghi, kiểm chứng |
-| [docs/mkv_kv260.md](docs/mkv_kv260.md) | Chạy và kiểm chứng IP MKV trên KV260: `test`, `kat`, `verify`, `bench` |
+| [docs/mkv_kv260.md](docs/mkv_kv260.md) | Chạy và kiểm chứng IP MKV trên Arm MPS4 và KV260: `test`, `kat`, `verify`, `bench` |
 | [docs/mkv_security_review.md](docs/mkv_security_review.md) | Đánh giá IP MKV cho SoC camera AI: mô hình đe doạ, chuẩn tham chiếu, phát hiện (tiêm lỗi, kênh kề, khoá, tích hợp), lộ trình sửa |
 | [docs/ip/ddr.md](docs/ip/ddr.md) | DDR2/DDR3: lõi LiteDRAM (sinh, CSR), cầu bus, bộ chuyển DFI, PHY, level shifter, khởi tạo, hiệu chỉnh, thanh ghi, kiểm chứng |
 | [docs/ddr_mps4.md](docs/ddr_mps4.md) | Chạy bộ điều khiển DDR trên Arm MPS4: build, thẻ microSD, `test`, `cal`, `verify`, `bench` |

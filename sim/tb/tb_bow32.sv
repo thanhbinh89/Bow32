@@ -1466,8 +1466,9 @@ module tb_bow32;
       // tools/bow32_mkv.py (expected value: tools/mkv/mkv_model.py enc 128 ...)
       "mkv": begin
         expect_text(0, "mkv: Bow32 MKV IP, MKV-128 + MKV-256, 4 cycles per round with fault detection");
+        expect_text(0, "mkv: power-on self-test PASS");
         expect_text(0, "> ");
-        video_cmd("test quick", "mkv: PASS (13/13)\nok\n> ");
+        video_cmd("test quick", "mkv: PASS (19/19)\nok\n> ");
         video_cmd("key 128 000102030405060708090a0b0c0d0e0f", "key MKV-128/128 R=7 (114 cycles)\nok\n> ");
         video_cmd("enc 00112233445566778899aabbccddeeff", "out c098d0b88df6c0f81a906eef34e0c43a\nok\n> ");
         video_cmd("dec c098d0b88df6c0f81a906eef34e0c43a", "out 00112233445566778899aabbccddeeff\nok\n> ");

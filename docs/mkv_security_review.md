@@ -15,8 +15,13 @@ Phạm vi: RTL (`bow_mkv.sv`, `bow_mkv_core.sv`, `bow_mkv_pkg.sv`), driver
    khớp mô hình ở mọi trạng thái nửa vòng và mọi khoá vòng, 10/10 lỗi tiêm vào mỗi seed bị
    phát hiện.
 3. Thêm 8 thí nghiệm cho những mô hình lỗi mà testbench chưa có
-   (`hw/ip/mkv/dv/tb_mkv_review.sv`, chạy bằng `make -C hw/ip/mkv/dv review`, mục 7). Đây
-   không phải test đạt/không đạt: mỗi thí nghiệm in ra IP **đang** làm gì.
+   (`hw/ip/mkv/dv/tb_mkv_review.sv`, chạy bằng `make -C hw/ip/mkv/dv review`, mục 7). Ở
+   commit được đánh giá chúng chỉ in ra IP **đang** làm gì; sau khi sửa chúng là test
+   đạt / không đạt (mục 8).
+
+**Trạng thái sau khi sửa:** xem [mục 8](#8-trạng-thái-sau-khi-sửa). Các phát hiện P0/P1
+trong IP đã được sửa và có test; những việc ở mức SoC (PMP, OTP, TRNG, key manager),
+kênh kề và AEAD còn mở.
 
 ## 1. Kết luận
 
@@ -380,11 +385,12 @@ trong một camera AI:
 ## 7. Chạy lại
 
 ```bash
-make -C hw/ip/mkv/dv test     # test có sẵn: RTL ↔ mô hình, tiêm lỗi có hướng (4 seed)
-make -C hw/ip/mkv/dv review   # 8 thí nghiệm của tài liệu này
+make -C hw/ip/mkv/dv test     # RTL ↔ mô hình, tiêm lỗi có hướng (4 seed), rồi review
+make -C hw/ip/mkv/dv review   # 8 thí nghiệm của tài liệu này (đạt / không đạt)
+make -C hw/ip/mkv/dv mutants  # mỗi biện pháp bị bỏ đi phải làm test hỏng
 ```
 
-Kết quả của `review` ở commit được đánh giá (Verilator 5.020):
+Kết quả của `review` ở commit được đánh giá (Verilator 5.020), trước khi sửa:
 
 ```
 RESULT E1 dout_q bit flip in the check pass: NOT DETECTED: wrong result released with DONE, no FAULT
@@ -400,3 +406,59 @@ RESULT E8 50 fault attempts: 50 detected, 50 new keys accepted after a fault
 Lỗi được tiêm bằng `force`/`release` một thanh ghi trong một chu kỳ, hay ghi thẳng vào RAM
 khoá vòng, giống `tb_bow_mkv.sv`. Đây là mô hình lỗi ở mức RTL: nó cho biết cơ chế phát hiện
 có che một loại lỗi hay không, chứ không đo xác suất tạo được lỗi đó trên silicon hay FPGA.
+
+## 8. Trạng thái sau khi sửa
+
+Các phát hiện trong IP được sửa trên nhánh `fix/mkv-review` (đặt trên commit của tài liệu
+này). Mô tả đầy đủ ở [ip/mkv.md](ip/mkv.md) (mục "Phát hiện lỗi", bản đồ thanh ghi,
+"Bảo mật"). "Thí nghiệm" là mục 7, "test" là `tb_bow_mkv.sv` (danh sách trong
+[ip/mkv.md](ip/mkv.md), mục "Kiểm chứng"), "mutant" là `make -C hw/ip/mkv/dv mutants`.
+
+| | Phát hiện | Trạng thái | Đã làm | Kiểm chứng |
+|---|---|---|---|---|
+| F1 | RAM khoá vòng chỉ có parity, không gắn địa chỉ | **Đã sửa** | 8 từ mã Hsiao (39,32) xen kẽ mỗi dòng (56 bit kiểm tra thay cho 32 bit parity), địa chỉ dòng cộng vào bit kiểm tra; kiểm ở mọi lần đọc của `ENC`, `DEC`, lần so của `KEY`, lượt đọc lại của `CLEAR`. Thấy mọi lỗi 1–3 bit mỗi từ mã, mọi chùm tới 24 bit liền nhau, dòng đọc nhầm địa chỉ | E2, E3; test lỗi 1 bit, 2 bit trong một byte, cả byte, 24 bit liền nhau, bit kiểm tra, dòng bị chép; 3 mutant |
+| F2 | `dout_q` nằm ngoài phép kiểm | **Đã sửa** | bản bù `dout_n_q` ghi cùng lúc, so ở `Check` và suốt lúc kết quả còn đọc được; lệch thì `DOUT` ra 0 ngay và `FAULT` | E1; test lật bit trong lượt kiểm tra, sau khi đã cho đọc, ở bản bù; 2 mutant |
+| F3 | Thao tác xoá không được kiểm | **Đã sửa** | `Clear` ghi 0 rồi đọc lại 32 dòng (phải bằng 0 với mã đúng), bộ đếm chu kỳ phải khớp bộ đếm dòng ở mọi chu kỳ, phát hiện lỗi chạy cả khi xoá; bị cắt thì xoá lại và báo `FAULT`, không bao giờ `DONE`. `KEY` cũng đọc lại các dòng phía trên `h[2R]` nó đã xoá. Chưa làm: ghi dữ liệu giả ngẫu nhiên trước khi ghi 0 (cần TRNG, cùng nhóm với S1) | E4, E5; test cắt ngắn lúc ghi 0, lúc đọc lại, sau reset, dòng cũ khi `KEY`; 3 mutant |
+| F4 | Không giới hạn số lần thử, lỗi chỉ báo qua ngắt | **Đã sửa** | bộ đếm lỗi (kèm bản bù) và `LOCKED` (mubi4) trong miền power-on reset; `FaultLimit` = 4 lỗi → tự khoá tới lần bật nguồn sau: chỉ `CLEAR` chạy, không truy cập nào bị giữ, mọi thứ còn lại bị xoá; alert nghiêm trọng (`STATUS.ALERT`, `alert_fatal_o`) nối vào **NMI** của Ibex, `alert_fault_o` cho từng lỗi; ví dụ trong tài liệu không còn tự thử lại. Giới hạn: bộ đếm mất khi tắt nguồn (sản phẩm cần bộ đếm trong OTP / flash) | E8; test lockout (khoá ở lỗi thứ 4, reset hệ thống không gỡ, bộ đếm bị sửa thì khoá, power-on reset gỡ); 5 mutant |
+| F5 | FSM nhị phân, `KEY_VALID` tách rời engine | **Đã sửa** | FSM 6 bit mã thưa (khoảng cách Hamming 3); `STATUS.KEY_VALID` = AND của khối thanh ghi và engine, và hai bên lệch là lỗi; cờ `chk`, `op_key`, `ks_valid`, `dout_ok` dạng mubi4 | E6 (cả lật 1 bit lẫn nhảy `Check` → `Clear`); test lật từng bit của FSM ở mọi trạng thái, từng bit của cờ, `KEY_VALID` bị bật; 3 mutant |
+| F6 | Bộ so sánh là điểm hỏng đơn, không tự kiểm được | **Đã sửa** | hai bộ so sánh khác cấu trúc cho mỗi quyết định (`ENC`/`DEC`: `st = in` và `st ⊕ in_n` toàn 1; `KEY`: dữ liệu và mã), cờ cho ra kết quả ghép từ cả hai; lệnh `TEST` (`CMD[4]`) làm lệch lượt hai, phải cho `FAULT` (không bị đếm), không có `FAULT` thì IP tự khoá; driver chạy `TEST` trong tự kiểm tra lúc khởi động | test bộ so sánh kẹt + lỗi, `TEST` của `KEY`/`ENC`/`DEC`, `TEST` bị mất; app (16), (18) trên board; 4 mutant |
+| F7 | Phần dư thừa không được bảo vệ khỏi tối ưu hoá | Một phần | thuộc tính `keep` cho mọi thanh ghi dư thừa (bản bù, cờ mubi4, bộ đếm, `LOCKED`); ghi chú cho flow ASIC (`dont_touch` / `size_only`). Chưa: cell `prim_*`, kiểm tương đương và tiêm lỗi trên netlist | `kv260_cam` sau implementation: MKV 2 792 FF (trước 2 278), các bản sao còn trong netlist |
+| F8 | Không có tự kiểm tra khi khởi động | Một phần | `bow_mkv_selftest()`: KAT Phụ lục A của cả 6 phiên bản (mã hoá và giải mã) và 3 lệnh `TEST`; `bow_mkv_set_key()` từ chối nạp khoá khi nó chưa qua; app chạy nó lúc khởi động. Chưa: trong boot ROM hay BIST phần cứng | app (18); `mkv: power-on self-test PASS` trong mô phỏng hệ thống và trên board |
+| S1, S2 | Không masking / hiding | Chưa | cần TRNG và thiết kế lại datapath; S-box của MKV không có cấu trúc nghịch đảo trên GF(2⁸) như AES, nên các S-box masking quen thuộc không dùng lại được. Đo TVLA trước khi chọn (P2) | |
+| K1 | Khoá đi qua phần mềm | Chưa (SoC) | cần OTP / key manager | |
+| K2 | Mọi master dùng được và thay được khoá | Một phần | `KEY_LOCK` (`CTRL[4]`, chỉ reset gỡ), chính sách `NO_ENC` / `NO_DEC`; DMA bị chặn khỏi cửa sổ MKV bằng tường lửa `bow_bus_deny` trước cổng DMA. Chưa: PMP / ePMP và chế độ U cho ứng dụng, thuộc tính đặc quyền trên bus | test `KEY_LOCK` và chính sách; app (15), (17): DMA không đọc / ghi được MKV; 2 mutant |
+| K3 | Dữ liệu nằm lại lâu hơn cần | **Đã sửa** | mất `KEY_VALID` (ghi `KEY`, đổi phiên bản) thì engine xoá lược đồ khoá và `DOUT` ngay; `KEY` bị từ chối xoá các từ khoá; `DIN` chỉ ghi | test xoá khi mất `KEY_VALID`, `KEY` bị từ chối; 3 mutant |
+| K4 | Không báo lỗi bus | Một phần | đọc `CMD`/`KEY`/`DIN`, ghi `ID`/`INFO`/`CYCLES`/`DOUT`, offset không có: lỗi bus. Chưa: toàn vẹn đầu-cuối trên bus | test lỗi bus; app (13) |
+| K5 | Scan / DFT | Chưa (ASIC) | | |
+| P1 | Chỉ có ECB | Chưa | CTR / CMAC / AEAD trong phần mềm là bước kế tiếp | |
+| P2 | Thông lượng, tải CPU | Chưa | stream DMA, pipeline (P2) | |
+| P3 | Một truy cập giữ bus 144 chu kỳ | **Đã sửa** | `CTRL.NOSTALL`: không truy cập nào bị giữ (ghi khi đang bận bị bỏ, `ERR`; `DOUT` ra 0), driver tự hỏi vòng `BUSY`; khi `LOCKED` cũng không giữ. Mặc định vẫn giữ để tương thích | E7; test `NOSTALL`; app (14); 2 mutant |
+| V1 | Kiểm chứng so với công nghiệp | Một phần | assertion SVA (không có kết quả khi bận, chỉ cho ra khi cả hai bộ so sánh đồng ý, sau lỗi luôn là lần xoá, xoá chỉ xong khi đếm đúng); E1–E8 thành test đạt / không đạt trong `make test`; tiêm lỗi 48 điểm mỗi seed; 33 mutant (`make mutants`). Chưa: coverage, formal, tiêm lỗi mọi flop × mọi chu kỳ, netlist | |
+| V2 | Mô tả thanh ghi một nguồn | Chưa | | |
+| D1 | Driver | **Đã sửa** | `bow_mkv_wipe()`, `bow_mkv_error()` phân biệt phiên bản / tự kiểm tra / không có khoá / từ chối / `FAULT` / `LOCKED`; `bow_mkv_ecb` kiểm `ERR`/`FAULT` dính của cả lần gọi; ghi rõ không reentrant | app (13)–(18) |
+
+Kết quả của `review` sau khi sửa (Verilator 5.022):
+
+```
+RESULT E1 dout_q bit flip in the check pass: FIXED: FAULT, STATUS 00001020
+RESULT E2 two-bit flip in one byte of h[13]: FIXED: FAULT, STATUS 00001020
+RESULT E3 row h[12] := h[11]: FIXED: FAULT, STATUS 00001020
+RESULT E4 CLEAR cut short: FIXED: DONE 0, FAULT 1, 0 round key rows left
+RESULT E5 reset wipe cut short: FIXED: STATUS 00001020, 0 round key rows left
+RESULT E6 FSM bit flip in Check of KEY: FIXED: KEY_VALID 0, FAULT 1, engine key schedule 0
+RESULT E6 FSM Check -> Clear in KEY: FIXED: KEY_VALID 0, FAULT 1
+RESULT E7 CMD write right after KEY (R = 9): FIXED: stalls 144 cycles by default, 0 with NOSTALL (dropped, ERR)
+RESULT E8 50 fault attempts: FIXED: 4 detected, 4 new keys accepted, then LOCKED (fatal alert)
+tb_mkv_review: PASS (9/9)
+```
+
+(`STATUS 00001020`: `FAULT`, `FAULTS` = 1.)
+
+Trên board (Arm MPS4, 2026-11-08, bitstream `mps4`, timing đạt): tự kiểm tra lúc
+khởi động của driver PASS, `test` 19/19 (cả lỗi bus, `NOSTALL`, chính sách, `TEST`,
+DMA bị chặn), `kat` 6/6, `verify` 360/360 và 1 800/1 800 khối so với mô hình
+([mkv_kv260.md](mkv_kv260.md)).
+
+Thứ tự đề xuất cho phần còn mở: AEAD trong phần mềm (P1) và PMP cho ứng dụng (K2) trước
+khi dùng với dữ liệu thật; rồi TRNG, OTP / key manager và masking (S1, K1) khi nhắm mức
+chứng nhận có kiểm thử vật lý.
