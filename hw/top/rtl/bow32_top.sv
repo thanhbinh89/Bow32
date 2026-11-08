@@ -4,13 +4,14 @@
 // Bow32 SoC top level (technology independent).
 //
 //   Ibex (instr) --+                          +--> ROM    8 KiB
-//   Ibex (data) ---+--> main xbar (3 x 8) ----+--> FLASH  128 KiB (memory window)
+//   Ibex (data) ---+--> main xbar (3 x 9) ----+--> FLASH  128 KiB (memory window)
 //   DMA --(no MKV)-+                          +--> SRAM   16 KiB
 //                                             +--> VRAM   1 MiB (DMA buffers)
 //                                             +--> ISP capture buffer -------------+
 //                                             +--> AXI4-Lite bridge --> m_axil_*   |
 //                                             +--> DDR2/DDR3 window 512 MiB (bow_ddr) --> ddr_io_* (PHY bundle)
-//                                             +--> periph xbar (1 x 14)            |
+//                                             +--> HyperRAM window 256 MiB (bow_hyperram) --> hr_io_* (PHY bundle)
+//                                             +--> periph xbar (1 x 15)            |
 //                                                    +--> SYSCTRL (+ reset manager)|
 //                                                    +--> FLASH_CTRL               |
 //                                                    +--> UART0                    |
@@ -25,6 +26,7 @@
 //                                                    +--> MKV block cipher (fatal alert -> Ibex NMI)
 //                                                    +--> DDR controller CSRs (LiteDRAM)
 //                                                    +--> DDR PHY registers         |
+//                                                    +--> HyperRAM registers        |
 //                                                                           | |    |
 //   dphy_* (D-PHY I/O) --> CSI-2 RX (bow_csi2rx) --RAW10--> ISP (bow_isp) <-+-+----+
 //                                             +--> isp_* (RGB888/YUV444 AXI4-Stream)
@@ -74,7 +76,20 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
   parameter int unsigned        DdrClkHz      = 133_333_333,
   parameter int unsigned        DdrPsSteps    = 504,
   parameter int unsigned        DdrPhyKind    = 1,
-  parameter int unsigned        DdrEmuBytes   = 0
+  parameter int unsigned        DdrEmuBytes   = 0,
+  // HyperRAM (docs/ip/hyperram.md): HyperBus master for a HyperRAM 2.0 x8
+  // device of HrMemBytes (S80KS2562: 32 MiB). HrClkHz = CK, HrPsSteps = MMCM
+  // fine phase steps per CK, HrPhyKind 1 pads / 2 loopback emulator, HrHasLs =
+  // level shifter controls on the pads, HrEmuBytes = emulator storage (INFO,
+  // EMU). HrEn = 0: stub (window answers bus errors, INFO[3] = 0), the hr_*
+  // ports are unused.
+  parameter bit                 HrEn          = 1'b0,
+  parameter int unsigned        HrClkHz       = 100_000_000,
+  parameter int unsigned        HrPsSteps     = 672,
+  parameter int unsigned        HrPhyKind     = 1,
+  parameter bit                 HrHasLs       = 1'b1,
+  parameter int unsigned        HrMemBytes    = 32 << 20,
+  parameter int unsigned        HrEmuBytes    = 0
 ) (
   input  logic clk_i,
   input  logic rst_ni,        // asynchronous board reset, active low
@@ -163,6 +178,25 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
   input  bow_ddr_pkg::ddr_io_in_t  ddr_io_i,       // ddr_rd_clk_i domain
   input  logic [31:0]              ddr_dbg_i,      // board debug word (loopback emulator)
 
+  // HyperRAM clocks and PHY bundle (docs/ip/hyperram.md). hr_clk_i = CK rate
+  // (controller, PHY, PSCLK of both MMCMs); the write clock (DQ / RWDS, fine
+  // phase shift hr_wps_*) only reaches the pad wrapper. Without HyperRAM: HrEn
+  // = 0, clocks and hr_rst_ni 0, hr_ps_done_i / hr_wps_done_i 0, hr_io_i '0,
+  // hr_rwds_pad_i 0, hr_dbg_i '0.
+  input  logic                          hr_clk_i,
+  input  logic                          hr_rst_ni,      // async active low (MMCMs locked)
+  input  logic                          hr_rd_clk_i,    // read capture clock (same frequency, fine PS)
+  output logic                          hr_ps_en_o,     // read-phase MMCM PSEN (PSCLK = hr_clk_i)
+  output logic                          hr_ps_inc_o,
+  input  logic                          hr_ps_done_i,
+  output logic                          hr_wps_en_o,    // write-phase MMCM PSEN (PSCLK = hr_clk_i)
+  output logic                          hr_wps_inc_o,
+  input  logic                          hr_wps_done_i,
+  output bow_hyperram_pkg::hr_io_out_t  hr_io_o,        // hr_clk_i domain
+  input  bow_hyperram_pkg::hr_io_in_t   hr_io_i,        // hr_rd_clk_i domain
+  input  logic                          hr_rwds_pad_i,  // RWDS pad level (asynchronous)
+  input  logic [31:0]                   hr_dbg_i,       // board debug word (loopback emulator)
+
   // Status (for LEDs / debug)
   output logic       sys_rst_no,
   output logic       core_sleep_o
@@ -187,7 +221,7 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
   // Interrupts
   // ---------------------------------------------------------------------------
   logic        uart0_irq, uart1_irq, flash_irq, gpioa_irq, gpiob_irq, isp_irq, i2c0_irq;
-  logic        csi2rx_irq, h264_irq, dma_irq, mkv_irq, ddr_irq;
+  logic        csi2rx_irq, h264_irq, dma_irq, mkv_irq, ddr_irq, hr_irq;
   logic        mkv_alert_fatal;   // MKV locked itself: NMI of the CPU
   logic [14:0] irq_fast;
 
@@ -205,6 +239,7 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
     irq_fast[IrqFastDma]    = dma_irq;
     irq_fast[IrqFastMkv]    = mkv_irq;
     irq_fast[IrqFastDdr]    = ddr_irq;
+    irq_fast[IrqFastHyperram] = hr_irq;
   end
 
   // ---------------------------------------------------------------------------
@@ -403,7 +438,7 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
   assign uart1_rx = gpiob_af_in[1];
 
   logic unused_af;
-  assign unused_af = ^{gpiob_af_in[7:2], gpiob_af_in[0], dma_tready[1]};
+  assign unused_af = ^{gpiob_af_in[7:2], gpiob_af_in[0]};
 
   // ---------------------------------------------------------------------------
   // Camera path: MIPI CSI-2 receiver -> ISP (registers on the peripheral bus,
@@ -524,6 +559,8 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
   );
 
   assign h264_tready = dma_tready[0];
+  logic unused_dma;
+  assign unused_dma = dma_tready[1];   // channel 1 has no stream source
 
   // The DMA must not reach the MKV block cipher (key, encryption on behalf of
   // the CPU): its requests to the MKV window end with a bus error here.
@@ -629,6 +666,66 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
       .ddr_io_o,
       .ddr_io_i,
       .ddr_dbg_i
+    );
+  end
+
+  // ---------------------------------------------------------------------------
+  // HyperRAM: memory window on the main crossbar, registers on the peripheral
+  // bus, PHY bundle to the board pad wrapper
+  // ---------------------------------------------------------------------------
+  if (HrEn) begin : g_hr
+    bow_hyperram #(
+      .ClkHz    (HrClkHz),
+      .PsSteps  (HrPsSteps),
+      .PhyKind  (HrPhyKind),
+      .HasLs    (HrHasLs),
+      .MemBytes (HrMemBytes),
+      .WinBits  ($clog2(HyperramSize)),
+      .EmuBytes (HrEmuBytes)
+    ) u_hr (
+      .clk_i,
+      .rst_ni         (sys_rst_n),
+      .mem_req_i      (main_req[MainDevHyperram]),
+      .mem_rsp_o      (main_rsp[MainDevHyperram]),
+      .reg_req_i      (periph_req[PeriphDevHyperramReg]),
+      .reg_rsp_o      (periph_rsp[PeriphDevHyperramReg]),
+      .irq_o          (hr_irq),
+      .hr_clk_i,
+      .hr_rst_ni,
+      .hr_rd_clk_i,
+      .hr_ps_en_o,
+      .hr_ps_inc_o,
+      .hr_ps_done_i,
+      .hr_wps_en_o,
+      .hr_wps_inc_o,
+      .hr_wps_done_i,
+      .hr_io_o,
+      .hr_io_i,
+      .hr_rwds_pad_i,
+      .hr_dbg_i
+    );
+  end else begin : g_hr_stub
+    bow_hyperram_stub u_hr (
+      .clk_i,
+      .rst_ni         (sys_rst_n),
+      .mem_req_i      (main_req[MainDevHyperram]),
+      .mem_rsp_o      (main_rsp[MainDevHyperram]),
+      .reg_req_i      (periph_req[PeriphDevHyperramReg]),
+      .reg_rsp_o      (periph_rsp[PeriphDevHyperramReg]),
+      .irq_o          (hr_irq),
+      .hr_clk_i,
+      .hr_rst_ni,
+      .hr_rd_clk_i,
+      .hr_ps_en_o,
+      .hr_ps_inc_o,
+      .hr_ps_done_i,
+      .hr_wps_en_o,
+      .hr_wps_inc_o,
+      .hr_wps_done_i,
+      .hr_io_o,
+      .hr_io_i,
+      .hr_rwds_pad_i,
+      .hr_dbg_i
     );
   end
 

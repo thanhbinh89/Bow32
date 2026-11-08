@@ -118,8 +118,10 @@ module bow_ddr import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
   //    the geometry must fit bow_ddr_pkg's pad bundles;
   //  * the core counts its timings in controller cycles (CK / 4). A slower CK
   //    stretches them, which only the refresh interval cannot take: CoreTRefi
-  //    cycles must stay <= 7.8 us (DDR2 core: CK >= 132.8 MHz). A faster CK
-  //    shortens them: at most 1 % above the CK the core was generated for.
+  //    cycles must stay <= 3.9 us, the rate for a case temperature of 85..95
+  //    C (CTRL.REF_NORM doubles the interval: <= 7.8 us; DDR2 core: CK >= 132.31 MHz,
+  //    DDR3 core: CK >= 124.11 MHz). A faster CK shortens them: at most 1 %
+  //    above the CK the core was generated for.
   if (WriteLat != 0 || DqBits != 8 * Lanes || NatBytes != 8 * Lanes ||
       DqBits > MaxDq || AddrPins > MaxAddr || BankPins > MaxBank ||
       MemBytes != (NatBytes << NatAw)) begin : g_bad_core
@@ -128,11 +130,11 @@ module bow_ddr import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
     initial $fatal(1, "bow_ddr: litedram_ddr%0d_pkg does not fit bow_ddr", DdrMem);
 `endif
   end
-  if (64'(CoreTRefi) * 64'd4_000_000_000 > 64'(ClkHz) * 64'd7800) begin : g_bad_refi
-    $fatal(1, "bow_ddr: ClkHz %0d too slow for litedram_ddr%0d (CK %0d Hz): %0d controller cycles between REF > 7.8 us",
+  if (64'(CoreTRefi) * 64'd4_000_000_000 > 64'(ClkHz) * 64'd3900) begin : g_bad_refi
+    $fatal(1, "bow_ddr: ClkHz %0d too slow for litedram_ddr%0d (CK %0d Hz): %0d controller cycles between REF > 3.9 us",
            ClkHz, DdrMem, CoreCkHz, CoreTRefi);
 `ifndef SYNTHESIS
-    initial $fatal(1, "bow_ddr: ClkHz %0d too slow for litedram_ddr%0d (refresh > 7.8 us)", ClkHz, DdrMem);
+    initial $fatal(1, "bow_ddr: ClkHz %0d too slow for litedram_ddr%0d (refresh > 3.9 us)", ClkHz, DdrMem);
 `endif
   end
   if (64'(ClkHz) * 100 > 64'(CoreCkHz) * 101) begin : g_bad_ck
@@ -223,17 +225,18 @@ module bow_ddr import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
   logic [1:0]               wb_bte;
 
   // registers <-> bridges
-  logic        ready, csr_avail, abort, clk_lost, masked, win_dead, csr_dead;
-  logic        win_nrdy, win_range, win_tmo, csr_err, csr_tmo, st_rd, st_wr, st_rmw;
+  logic        ready, csr_avail, abort, clk_lost, masked, win_dead, csr_dead, wlock;
+  logic        win_nrdy, win_range, win_tmo, csr_err, csr_tmo, csr_lock_err, st_rd, st_wr, st_rmw;
   logic [31:0] err_addr;
 
-  // registers <-> command executor (command channel)
+  // registers <-> command executor (command channel), refresh controls
   logic             cmd_req, cmd_ack, res_err;
   logic [2:0]       cmd_kind;
   cfg_t             cmd_cfg;
   logic [15:0]      cmd_target, ps_now, wps_now;
-  logic [1:0][31:0] res_st;
+  logic [2:0][31:0] res_st;
   logic             ddr_up, ddr_div, rfifo_err_tgl, cap_done_tgl, rd_late_tgl, rd_extra_tgl;
+  logic             ref_norm, ref_mon, ref_starve_tgl;
 
   // adapter -> PHY
   cfg_t        phy_cfg;
@@ -250,10 +253,23 @@ module bow_ddr import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
   // ---------------------------------------------------- LiteDRAM core
   assign core_rst_sys = !bri_dsys_n;
 
+  // CTRL.REF_NORM: the refresh timer of the core runs at 2 x CoreTRefi
+  // (7.8 us, Tc <= 85 C) instead of CoreTRefi (3.9 us); a level of the clk_i
+  // domain, taken by the timer at its next reload
+  logic ref_norm_sys;
+
+  bow_sync u_sync_norm (
+    .clk_i  (ddr_sys_clk_i),
+    .rst_ni (lnk_dsys_n),
+    .d_i    (ref_norm),
+    .q_o    (ref_norm_sys)
+  );
+
   if (Ddr3) begin : g_ddr3
     litedram_ddr3 u_core (
       .clk                            (ddr_sys_clk_i),
       .rst                            (core_rst_sys),
+      .ref_norm                       (ref_norm_sys),
       .dfi_p0_address                 (dfi_address[0]),
       .dfi_p0_bank                    (dfi_bank[0]),
       .dfi_p0_cas_n                   (dfi_cas_n[0]),
@@ -345,6 +361,7 @@ module bow_ddr import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
     litedram_ddr2 u_core (
       .clk                            (ddr_sys_clk_i),
       .rst                            (core_rst_sys),
+      .ref_norm                       (ref_norm_sys),
       .dfi_p0_address                 (dfi_address[0]),
       .dfi_p0_bank                    (dfi_bank[0]),
       .dfi_p0_cas_n                   (dfi_cas_n[0]),
@@ -480,6 +497,9 @@ module bow_ddr import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
     .abort_o         (abort),
     .clk_lost_o      (clk_lost),
     .core_rst_o      (core_rst),
+    .ref_norm_o      (ref_norm),
+    .ref_mon_o       (ref_mon),
+    .wlock_o         (wlock),
     .masked_o        (masked),
     .win_dead_i      (win_dead),
     .csr_dead_i      (csr_dead),
@@ -488,6 +508,7 @@ module bow_ddr import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
     .win_timeout_i   (win_tmo),
     .csr_err_i       (csr_err),
     .csr_timeout_i   (csr_tmo),
+    .csr_lock_err_i  (csr_lock_err),
     .win_err_addr_i  (err_addr),
     .win_st_rd_i     (st_rd),
     .win_st_wr_i     (st_wr),
@@ -511,6 +532,7 @@ module bow_ddr import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
     .cap_done_i      (cap_done_tgl),
     .rd_late_i       (rd_late_tgl),
     .rd_extra_i      (rd_extra_tgl),
+    .ref_starve_i    (ref_starve_tgl),
     .cap_dq_i        (cap_dq),
     .cap_dqs_i       (cap_dqs),
     .dbg_i           (ddr_dbg_i)
@@ -564,9 +586,11 @@ module bow_ddr import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
     .avail_i    (csr_avail),
     .abort_i    (abort),
     .clk_lost_i (clk_lost),
+    .wlock_i    (wlock),
     .dead_o     (csr_dead),
     .csr_err_o  (csr_err),
     .timeout_o  (csr_tmo),
+    .lock_err_o (csr_lock_err),
     .sys_clk_i  (ddr_sys_clk_i),
     .sys_rst_ni (bri_dsys_n),
     .wb_adr_o   (wb_adr),
@@ -586,7 +610,8 @@ module bow_ddr import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
   bow_ddr_dfi #(
     .DqBits      (DqBits),
     .PsSteps     (PsSteps),
-    .ReadLatency (ReadLatency)
+    .ReadLatency (ReadLatency),
+    .CoreTRefi   (CoreTRefi)
   ) u_dfi (
     .sys_clk_i          (ddr_sys_clk_i),
     .sys_rst_ni         (lnk_dsys_n),
@@ -605,12 +630,15 @@ module bow_ddr import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
     .res_ps_now_o       (ps_now),
     .res_wps_now_o      (wps_now),
     .res_st_o           (res_st),
+    .ref_norm_i         (ref_norm),
+    .ref_mon_i          (ref_mon),
     .ddr_up_o           (ddr_up),
     .ddr_div_o          (ddr_div),
     .rfifo_err_o        (rfifo_err_tgl),
     .cap_done_o         (cap_done_tgl),
     .rd_late_o          (rd_late_tgl),
     .rd_extra_o         (rd_extra_tgl),
+    .ref_starve_o       (ref_starve_tgl),
     .phy_cfg_o          (phy_cfg),
     .phy_cmd_v_o        (phy_cmd_v),
     .phy_cmd_code_o     (phy_cmd_code),

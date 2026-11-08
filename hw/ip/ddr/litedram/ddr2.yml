@@ -13,5 +13,6 @@ rdphase: 2                     # DFI phase of READ / WRITE commands
 wrphase: 2
 read_latency: 12               # controller cycles DFI rddata_en -> rddata (bow_ddr_dfi)
 write_latency: 0               # write data on DFI with the WRITE command
+trefi_ns: 3900                 # tREFI for Tc 85..95 C; CTRL.REF_NORM: 7.8 us (bow_ddr_dfi)
 with_dm: false                 # card rev A has no DM: bow_ddr writes whole bursts
 cmd_buffer_depth: 8

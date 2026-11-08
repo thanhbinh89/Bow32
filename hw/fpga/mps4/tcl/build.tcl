@@ -4,10 +4,13 @@
 # Vivado build of Bow32 for the Arm MPS4 (project mode, batch, no block
 # design).
 #
-#   vivado -mode batch -source build.tcl -tclargs <out_dir> <rom_vmem> [flash_vmem] [jobs] [ddr_loopback]
+#   vivado -mode batch -source build.tcl -tclargs <out_dir> <rom_vmem> [flash_vmem] [jobs] [ddr_loopback] [hr_loopback]
 #
 # ddr_loopback: 1 (default) = DDR pads on unconnected balls + on-chip DRAM
 # emulator (constr/ddr_loopback.xdc), 0 = FMC+ DDR2 card (constr/ddr_card.xdc).
+# hr_loopback: the same for the HyperRAM (constr/hyperram_loopback.xdc, on-chip
+# HyperRAM emulator / constr/hyperram_card.xdc, the card's S80KS2562); default:
+# ddr_loopback.
 # Normally called from hw/fpga/mps4/Makefile (`make fpga BOARD=mps4` at the top).
 # The project is kept in <out_dir>/vivado and can be opened in the GUI.
 # Outputs in <out_dir>: bow32_mps4.bit and the reports below.
@@ -17,28 +20,33 @@ set board_dir  [file normalize [file join $script_dir ..]]
 set repo_root  [file normalize [file join $board_dir .. .. ..]]
 
 if {[llength $argv] < 2} {
-  error "usage: build.tcl <out_dir> <rom_vmem> \[flash_vmem\] \[jobs\] \[ddr_loopback\]"
+  error "usage: build.tcl <out_dir> <rom_vmem> \[flash_vmem\] \[jobs\] \[ddr_loopback\] \[hr_loopback\]"
 }
 set out_dir      [file normalize [lindex $argv 0]]
 set rom_vmem     [file normalize [lindex $argv 1]]
 set flash_vmem   [lindex $argv 2]
 set jobs         [expr {[llength $argv] > 3 && [lindex $argv 3] ne "" ? [lindex $argv 3] : 4}]
 set ddr_loopback [expr {[llength $argv] > 4 && [lindex $argv 4] ne "" ? [lindex $argv 4] : 1}]
+set hr_loopback  [expr {[llength $argv] > 5 && [lindex $argv 5] ne "" ? [lindex $argv 5] : $ddr_loopback}]
 
 set part xcvu13p-fhga2104-1-e
 set top  bow32_mps4_top
 
 # set_bus_skew constraints expected in the XDC files (each one is reported as
 # one "Slack (MET)" line by report_bus_skew): the gray pointers of the DDR
-# read FIFO (constr/mps4.xdc). The other DDR crossings (clk_sys <-> ddr_sys,
-# ddr_clk) are handshakes without gray coded buses.
-set bus_skew_count 2
+# read FIFO and of the three HyperRAM FIFOs (read FIFO, command and response
+# FIFOs of the window; constr/mps4.xdc). The other DDR crossings (clk_sys <->
+# ddr_sys, ddr_clk) are handshakes without gray coded buses.
+set bus_skew_count 8
 
 if {![file exists $rom_vmem]} {
   error "boot ROM image $rom_vmem not found (run `make sw` first)"
 }
 if {$ddr_loopback ne "0" && $ddr_loopback ne "1"} {
   error "ddr_loopback must be 0 or 1, not '$ddr_loopback'"
+}
+if {$hr_loopback ne "0" && $hr_loopback ne "1"} {
+  error "hr_loopback must be 0 or 1, not '$hr_loopback'"
 }
 
 source [file join $repo_root hw fpga common tcl filelist.tcl]
@@ -66,9 +74,14 @@ if {$ddr_loopback} {
 } else {
   add_files -fileset constrs_1 -norecurse [file join $board_dir constr ddr_card.xdc]
 }
+if {$hr_loopback} {
+  add_files -fileset constrs_1 -norecurse [file join $board_dir constr hyperram_loopback.xdc]
+} else {
+  add_files -fileset constrs_1 -norecurse [file join $board_dir constr hyperram_card.xdc]
+}
 
 # Memory images and the DDR variant are parameters of the top level.
-set generics "RomInitFile=\"$rom_vmem\" DdrLoopback=1'b$ddr_loopback"
+set generics "RomInitFile=\"$rom_vmem\" DdrLoopback=1'b$ddr_loopback HrLoopback=1'b$hr_loopback"
 if {$flash_vmem ne ""} {
   append generics " FlashInitFile=\"[file normalize $flash_vmem]\""
 }
@@ -102,9 +115,11 @@ check_timing -verbose    -file [file join $out_dir check_timing.rpt]
 report_methodology       -file [file join $out_dir methodology.rpt]
 report_drc               -file [file join $out_dir drc.rpt]
 report_io                -file [file join $out_dir io.rpt]
-# The DDR paths that the write phase knob depends on (PHY -> ODDRE1).
+# The DDR / HyperRAM paths that the write phase knobs depend on (PHY -> ODDRE1).
 report_timing -from [get_clocks ddr_clk] -to [get_clocks {ddr_wclk ddr_wclk90}] \
   -delay_type min_max -max_paths 4 -file [file join $out_dir ddr_write_paths.rpt]
+report_timing -from [get_clocks hr_clk] -to [get_clocks hr_wclk] \
+  -delay_type min_max -max_paths 4 -file [file join $out_dir hr_write_paths.rpt]
 # Clock periods, the constraint of every clock pair (the DFI ddr_sys <->
 # ddr_clk timed, the asynchronous pairs under max delay), check_timing;
 # reports ddr_dfi_paths.rpt, ddr_cdc_paths.rpt, cdc.rpt (tcl/timing_checks.tcl).
@@ -145,6 +160,7 @@ file copy -force [file join [get_property DIRECTORY [get_runs impl_1]] $top.bit]
                  [file join $out_dir bow32_mps4.bit]
 
 set variant [expr {$ddr_loopback ? "DDR loopback" : "DDR card"}]
+append variant [expr {$hr_loopback ? ", HyperRAM loopback" : ", HyperRAM card"}]
 puts "INFO: bitstream [file join $out_dir bow32_mps4.bit] ($variant, setup WNS = $wns ns, hold WHS = $whs ns)"
 if {!$timing_met} {
   puts "CRITICAL WARNING: timing constraints are not met (setup, hold or pulse width), see timing_summary.rpt"

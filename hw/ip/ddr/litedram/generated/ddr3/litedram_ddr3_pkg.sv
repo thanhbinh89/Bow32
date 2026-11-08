@@ -18,5 +18,5 @@ package litedram_ddr3_pkg;
   localparam int unsigned Cl           = 6;
   localparam int unsigned Cwl          = 6;
   localparam int unsigned CkHz         = 125000000;
-  localparam int unsigned TRefi        = 243;
+  localparam int unsigned TRefi        = 121;
 endpackage

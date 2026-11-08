@@ -109,6 +109,35 @@ bool mt_addr(uint32_t off, uint32_t len, mt_res_t *r) {
   return result(r);
 }
 
+/* March C- (van de Goor), 10 accesses per word: up/down(w0); up(r0, w1);
+ * up(r1, w0); down(r0, w1); down(r1, w0); up/down(r0), with 0 and ~0 as the
+ * two values of a whole word. Finds stuck-at, transition and address
+ * decoder faults and coupling faults between words (the March test that
+ * IEC 61508 lists for RAM). */
+bool mt_march(uint32_t off, uint32_t len, mt_res_t *r) {
+  const uint32_t z = 0u, f = 0xFFFFFFFFu;
+  uint32_t n = len / 4u;
+  for (uint32_t i = 0; i < n; i++) {
+    if (!wr(r, off + 4u * i, z)) return false;
+  }
+  for (uint32_t i = 0; i < n; i++) {
+    if (!expect(r, off + 4u * i, z) || !wr(r, off + 4u * i, f)) return false;
+  }
+  for (uint32_t i = 0; i < n; i++) {
+    if (!expect(r, off + 4u * i, f) || !wr(r, off + 4u * i, z)) return false;
+  }
+  for (uint32_t i = n; i-- > 0u;) {
+    if (!expect(r, off + 4u * i, z) || !wr(r, off + 4u * i, f)) return false;
+  }
+  for (uint32_t i = n; i-- > 0u;) {
+    if (!expect(r, off + 4u * i, f) || !wr(r, off + 4u * i, z)) return false;
+  }
+  for (uint32_t i = 0; i < n; i++) {
+    if (!expect(r, off + 4u * i, z)) return false;
+  }
+  return result(r);
+}
+
 /* Byte and halfword stores into an xorshift background: word j gets byte
  * j % 4 replaced, every third word one of its halfwords as well; then word
  * loads and byte loads compare with the expected merge. */

@@ -32,6 +32,10 @@
 // Pins: cke = EN & cke of phase 0, rst_n = EN & reset_n of phase 0, odt = EN
 // & ODT_EN & odt of phase 0 (the PHY's cfg_i.cke / rst_n / odt), updated in
 // step with the phase 0 commands.
+// Refresh rate: the core issues a REF every CoreTRefi controller cycles
+// (trefi_ns 3900: the JEDEC rate for a case temperature of 85..95 C), every
+// 2 x CoreTRefi with CTRL.REF_NORM (its refresh timer, bow_ddr.sv); here
+// REF_NORM (ref_norm_i, synchronised) only sets the monitor's limit.
 //
 // Read return: LiteDRAM takes the DFI rddata of all phases exactly
 // ReadLatency controller cycles after the cycle with the RD (it does not look
@@ -71,8 +75,9 @@
 //   4 RFIFO_SYNC  one-cycle rfifo_sync_o to the PHY (flush + restart), the
 //               read phase is recorded as the reference of PS_GO, ack after
 //               32 cycles (the restart of the FIFO is done by then).
-//   5 SNAP      copy the ACT / REF counters into res_st_o.
-//   6 CLR_STATS zero the counters and res_st_o.
+//   5 SNAP      copy the ACT / REF counters and the longest REF interval
+//               into res_st_o.
+//   6 CLR_STATS zero them and res_st_o.
 //   7 WPS_GO    write-phase stepper (ddr_wps_*); refused (err) when
 //               |target| > PsSteps / 4.
 // The two steppers (and so the phase counters) are reset by ps_rst_ni only,
@@ -82,16 +87,27 @@
 // restarts the read FIFO there (an internal RFIFO_SYNC: the PHY's FIFO
 // restarted at the reset release, while the move was still running) and
 // takes that read phase as the PS_GO reference.
-// Statistics (32-bit saturating): ACT and REF commands passed to the PHY.
+// Statistics (32-bit saturating): ACT and REF commands passed to the PHY;
+// the longest REF interval (below).
+// Refresh monitor (CTRL.REF_MON, ref_mon_i synchronised): while it is 1, a
+// 16-bit counter (saturating) counts the ddr cycles since the last REF that
+// reached the PHY (or since REF_MON rose). When it reaches RefLim = 8 x the
+// expected interval (4 * CoreTRefi ddr cycles, twice that with REF_NORM),
+// ref_starve_o toggles once (STATUS.REF_STARVE): eight REFs missed, one
+// before the JEDEC limit (8 postponed). The largest count seen while REF_MON
+// = 1 is the third statistic (ST_RGAP: the longest REF interval minus one, in
+// ddr cycles), zeroed by CLR_STATS. REF_MON = 0 stops and clears the counter:
+// the firmware clears it around DFII software sections (no refresh there).
 // Status to the clk_i side: ddr_up_o (1 once this domain is out of reset),
 // ddr_div_o (ddr_clk / 8 square wave, CLK_OK monitor), toggles per event:
-// rfifo_err_o, cap_done_o, rd_late_o, rd_extra_o.
+// rfifo_err_o, cap_done_o, rd_late_o, rd_extra_o, ref_starve_o.
 
 module bow_ddr_dfi import bow_ddr_pkg::*; #(
   parameter int unsigned DqBits      = 8,
   parameter int unsigned PsSteps     = 504,
   parameter int unsigned ReadLatency = 12,     // LiteDRAM PhySettings.read_latency
-  parameter int unsigned ApplyWait   = 4096    // ddr_clk cycles
+  parameter int unsigned ApplyWait   = 4096,   // ddr_clk cycles
+  parameter int unsigned CoreTRefi   = 129     // controller cycles between REFs of the core
 ) (
   // ---- ddr_sys_clk domain (LiteDRAM controller)
   input  logic                    sys_clk_i,
@@ -114,7 +130,12 @@ module bow_ddr_dfi import bow_ddr_pkg::*; #(
   output logic                    res_err_o,
   output logic [15:0]             res_ps_now_o,
   output logic [15:0]             res_wps_now_o,
-  output logic [1:0][31:0]        res_st_o,            // SNAP copies: [0] ST_ACT, [1] ST_REF
+  output logic [2:0][31:0]        res_st_o,            // SNAP copies: [0] ST_ACT, [1] ST_REF,
+                                                       // [2] ST_RGAP
+
+  // refresh controls (CTRL bits, clk_i domain of bow_ddr_regs: synchronised here)
+  input  logic                    ref_norm_i,          // REF_NORM: the core refreshes at 2 x CoreTRefi
+  input  logic                    ref_mon_i,           // REF_MON: refresh monitor on
 
   // status to the clk_i side
   output logic                    ddr_up_o,
@@ -123,6 +144,7 @@ module bow_ddr_dfi import bow_ddr_pkg::*; #(
   output logic                    cap_done_o,          // toggle per finished raw capture
   output logic                    rd_late_o,           // toggle per RD_LATE event
   output logic                    rd_extra_o,          // toggle per RD_EXTRA event
+  output logic                    ref_starve_o,        // toggle per refresh starvation event
 
   // PHY (bow_ddr_phy)
   output cfg_t                    phy_cfg_o,
@@ -229,6 +251,24 @@ module bow_ddr_dfi import bow_ddr_pkg::*; #(
   assign is_cmd = lock_q && !slot.cs_n && (code != CmdNop);
   assign is_rd  = is_cmd && (code == CmdRd);
   assign is_wr  = is_cmd && (code == CmdWr);
+
+  // refresh controls (CTRL, clk_i domain of bow_ddr_regs)
+  logic ref_norm, ref_mon;
+
+  bow_sync u_sync_norm (
+    .clk_i,
+    .rst_ni,
+    .d_i    (ref_norm_i),
+    .q_o    (ref_norm)
+  );
+
+  bow_sync u_sync_mon (
+    .clk_i,
+    .rst_ni,
+    .d_i    (ref_mon_i),
+    .q_o    (ref_mon)
+  );
+
 
   // the burst of the controller cycle in address order (write_latency 0)
   always_comb begin
@@ -414,7 +454,7 @@ module bow_ddr_dfi import bow_ddr_pkg::*; #(
   logic        ps_go_q, wps_go_q, ps_busy, wps_busy, ps_done, wps_done, ps_err, wps_err;
   logic [15:0] sync_ref_q, ps_now, wps_now;
 
-  bow_ddr_ps #(
+  bow_mmcm_ps #(
     .Limit   (2 * PsSteps),
     .Timeout (64)
   ) u_ps_rd (
@@ -432,7 +472,7 @@ module bow_ddr_dfi import bow_ddr_pkg::*; #(
     .ps_done_i (ps_done_i)
   );
 
-  bow_ddr_ps #(
+  bow_mmcm_ps #(
     .Limit   (PsSteps / 4),
     .Timeout (64)
   ) u_ps_wr (
@@ -455,7 +495,9 @@ module bow_ddr_dfi import bow_ddr_pkg::*; #(
   logic            res_err_q, sync_q, wps_q, ref_ok_q;
   logic [4:0]      ref_wait_q;
   logic [AW-1:0]   tmr_q;
-  logic [1:0][31:0] st_q, snap_q;
+  logic [1:0][31:0] st_q;
+  logic [2:0][31:0] snap_q;
+  logic [15:0]      gap_max_q;     // longest REF interval while REF_MON (statistics)
 
   // The steppers keep running through a link reset (SoC reset, MMCMs still
   // locked): after it, a command waits until both are idle and the read FIFO
@@ -520,7 +562,7 @@ module bow_ddr_dfi import bow_ddr_pkg::*; #(
                 state_q    <= EWait;
               end
               KSnap: begin
-                snap_q  <= st_q;
+                snap_q  <= {32'(gap_max_q), st_q};
                 state_q <= EAck;
               end
               KClr: begin
@@ -575,13 +617,24 @@ module bow_ddr_dfi import bow_ddr_pkg::*; #(
   logic [2:0] div_q;
   assign clr = new_cmd && (cmd_kind_i == KClr);
 
+  // refresh monitor: ddr cycles since the last REF at the PHY (REF_MON)
+  localparam int unsigned RefLim = 32 * CoreTRefi;   // 8 x 4 ddr cycles x CoreTRefi
+
+  logic        ref_sent, starve_tgl_q;
+  logic [15:0] gap_q, gap_lim;
+  assign ref_sent = cmd_v_q && (code_q == CmdRef);
+  assign gap_lim  = ref_norm ? 16'(2 * RefLim) : 16'(RefLim);
+
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      st_q   <= '0;
-      up_q   <= 1'b0;
-      div_q  <= '0;
-      rfe_q  <= 1'b0;
-      capd_q <= 1'b0;
+      st_q         <= '0;
+      up_q         <= 1'b0;
+      div_q        <= '0;
+      rfe_q        <= 1'b0;
+      capd_q       <= 1'b0;
+      gap_q        <= '0;
+      gap_max_q    <= '0;
+      starve_tgl_q <= 1'b0;
     end else begin
       up_q  <= 1'b1;
       div_q <= div_q + 3'd1;
@@ -593,6 +646,12 @@ module bow_ddr_dfi import bow_ddr_pkg::*; #(
         st_q[0] <= inc32(st_q[0], cmd_v_q && (code_q == CmdAct));
         st_q[1] <= inc32(st_q[1], cmd_v_q && (code_q == CmdRef));
       end
+
+      if (!ref_mon || ref_sent) gap_q <= '0;
+      else if (gap_q != '1)     gap_q <= gap_q + 16'd1;
+      if (ref_mon && !ref_sent && (gap_q == gap_lim - 16'd1)) starve_tgl_q <= !starve_tgl_q;
+      if (clr)                                   gap_max_q <= '0;
+      else if (ref_mon && (gap_q > gap_max_q))   gap_max_q <= gap_q;
     end
   end
 
@@ -608,6 +667,7 @@ module bow_ddr_dfi import bow_ddr_pkg::*; #(
   assign cap_done_o       = capd_q;
   assign rd_late_o        = late_tgl_q;
   assign rd_extra_o       = extra_tgl_q;
+  assign ref_starve_o     = starve_tgl_q;
   assign phy_rfifo_sync_o = sync_q;
 
   // wrdata_en / rddata_en (every WR / RD command carries / expects a burst),
@@ -624,6 +684,9 @@ module bow_ddr_dfi import bow_ddr_pkg::*; #(
   end
   if (ReadLatency < 4 || ReadLatency > 31) begin : g_bad_rl
     initial $fatal(1, "bow_ddr_dfi: ReadLatency must be 4..31");
+  end
+  if (CoreTRefi < 64 || CoreTRefi > 1023) begin : g_bad_refi
+    initial $fatal(1, "bow_ddr_dfi: CoreTRefi must be 64..1023 (16-bit refresh monitor)");
   end
 
   always @(posedge clk_i) begin

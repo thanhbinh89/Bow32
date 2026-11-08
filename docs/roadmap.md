@@ -74,8 +74,14 @@ theo [adding_an_ip.md](adding_an_ip.md) và kiểm chứng bằng test mô phỏ
       bản ghim) trên PHY riêng (`ODDRE1`/`IDDRE1` + MMCM dịch pha, level shifter), hiệu
       chỉnh bằng phần mềm qua DFII; chạy trên Arm MPS4 với DRAM giả lập
       ([ddr_mps4.md](ddr_mps4.md)).
-- [ ] Chạy với bo RAM mở rộng thật (DDR2 IS43DR86400E qua level shifter) khi đã sản xuất
-      ([ddr_board_review.md](ddr_board_review.md)); điều khiển HyperRAM trên cùng bo.
+- [x] **HyperRAM** ([ip/hyperram.md](ip/hyperram.md)): bộ điều khiển HyperBus tự viết cho
+      S80KS2562 (x8, 32 MiB): read buffer với line fill wrapped, ghi posted gộp khối, BIST,
+      CR0/CR1, deep power down / hybrid sleep, PHY `ODDRE1`/`IDDRE1` + 2 MMCM dịch pha, điều
+      khiển level shifter; chạy trên Arm MPS4 với HyperRAM giả lập ([hyperram_mps4.md](hyperram_mps4.md)).
+- [ ] Chạy với bo RAM mở rộng thật (DDR2 IS43DR86400E và HyperRAM S80KS2562 qua level shifter)
+      khi đã sản xuất ([ddr_board_review.md](ddr_board_review.md)).
+- [ ] HyperRAM: prefetch line kế (burst hybrid), cổng AXI4 cho DMA, deskew từng bit
+      (`IDELAYE3`), HyperRAM 3.0 x16 / HyperFlash.
 - [ ] Cache trước cửa sổ DDR để CPU chạy mã từ DDR; DMA ghi frame H.264 vào DDR.
 - [ ] Bo RAM rev-B DDR3 1,5 V nối thẳng FMC (không level shifter): dùng PHY `USPDDRPHY`
       của LiteDRAM ở DDR3-800 trở lên; deskew từng bit bằng `IDELAYE3`.

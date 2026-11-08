@@ -11,7 +11,8 @@
 // access runs, Grant cycle, rvalid one cycle after gnt).
 //   Idle:  a request while !avail_i (!CLK_OK, CTRL.CORE_RST or its reset
 //          still in progress, the core in reset), in the bridge reset
-//          (!bri_ni) or dead: Grant with err, csr_err_o. Otherwise, once the
+//          (!bri_ni) or dead, and a write while wlock_i (CTRL.LOCK, also
+//          lock_err_o): Grant with err, csr_err_o. Otherwise, once the
 //          previous handshake has returned to zero, {we, be, offset[12:2],
 //          wdata} is staged, req_q rises, timer = Timeout -> Wait.
 //   Wait:  ack seen high -> Grant (rdata, err = Wishbone err -> csr_err_o);
@@ -46,9 +47,11 @@ module bow_ddr_csr import bow_bus_pkg::*; #(
   input  logic        avail_i,          // CLK_OK, !CORE_RST, core out of reset
   input  logic        abort_i,          // !CLK_OK or CTRL.CORE_RST
   input  logic        clk_lost_i,       // !CLK_OK: an abort is a dead clock
+  input  logic        wlock_i,          // CTRL.LOCK: writes refused
   output logic        dead_o,           // level
   output logic        csr_err_o,        // one-cycle pulses
   output logic        timeout_o,
+  output logic        lock_err_o,       // a write refused by wlock_i
 
   // ---- ddr_sys_clk domain: LiteDRAM wb_ctrl (Wishbone slave)
   input  logic        sys_clk_i,
@@ -94,12 +97,14 @@ module bow_ddr_csr import bow_bus_pkg::*; #(
 
   state_e        state_q;
   logic [TW-1:0] timer_q;
-  logic          err_q, rvalid_q, cerr_q, tmo_q;
+  logic          err_q, rvalid_q, cerr_q, tmo_q, lerr_q;
   logic [31:0]   rdata_q;
-  logic          refuse, launch, done, tmo, abort;
+  logic          refuse, launch, done, tmo, abort, locked;
 
-  assign refuse = (state_q == Idle) && csr_req_i.req && (!avail_i || dead_q || !bri_ni);
-  assign launch = (state_q == Idle) && csr_req_i.req && avail_i && !dead_q && bri_ni && !ack_s;
+  assign locked = csr_req_i.we && wlock_i;
+  assign refuse = (state_q == Idle) && csr_req_i.req && (!avail_i || dead_q || !bri_ni || locked);
+  assign launch = (state_q == Idle) && csr_req_i.req && avail_i && !dead_q && bri_ni && !locked &&
+                  !ack_s;
   assign done   = (state_q == Wait) && !abort_i && ack_s;
   assign abort  = (state_q == Wait) && abort_i;
   assign tmo    = (state_q == Wait) && !abort_i && !ack_s && (timer_q == '0);
@@ -134,15 +139,18 @@ module bow_ddr_csr import bow_bus_pkg::*; #(
       rdata_q <= '0;
       cerr_q  <= 1'b0;
       tmo_q   <= 1'b0;
+      lerr_q  <= 1'b0;
     end else begin
       cerr_q <= 1'b0;
       tmo_q  <= 1'b0;
+      lerr_q <= 1'b0;
       unique case (state_q)
         Idle: begin
           if (refuse) begin
             err_q   <= 1'b1;
             rdata_q <= '0;
             cerr_q  <= 1'b1;
+            lerr_q  <= locked;
             state_q <= Grant;
           end else if (launch) begin
             timer_q <= TW'(Timeout);
@@ -185,9 +193,10 @@ module bow_ddr_csr import bow_bus_pkg::*; #(
   assign csr_rsp_o.err    = rvalid_q && err_q;
   assign csr_rsp_o.rdata  = rdata_q;
 
-  assign dead_o    = dead_q;
-  assign csr_err_o = cerr_q;
-  assign timeout_o = tmo_q;
+  assign dead_o     = dead_q;
+  assign csr_err_o  = cerr_q;
+  assign timeout_o  = tmo_q;
+  assign lock_err_o = lerr_q;
 
   // =========================================================================
   // ddr_sys side

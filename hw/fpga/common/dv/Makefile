@@ -10,25 +10,32 @@
 #   tb_bow_ddr_clk_xusp   DDR clocks (bow_ddr_clk_xusp: three MMCME4_ADV, fine
 #                         phase shift, LiteDRAM controller clock CK / 4),
 #                         configurations DDR_CLK_CFGS
+#   tb_bow_hyperram_io_xilinx  HyperRAM pads (bow_hyperram_io_xilinx) on their
+#                         clocks (bow_hyperram_clk_xusp: two MMCME4_ADV, fine
+#                         phase shift of the write and read clocks, lock-loss
+#                         reset), configurations HR_IO_CFGS
 #
-#   make test                 all of them: D-PHY and DDR pads with every seed of
-#                             SEEDS, DDR clocks once per configuration
+#   make test                 all of them: D-PHY, DDR and HyperRAM pads with every
+#                             seed of SEEDS, DDR clocks once per configuration
 #   make test SEEDS="1 2 3 4"
 #   make run SEED=5 WAVES=1   D-PHY, one seed, waveform database in build/fpga_dv/seed5
-#   make test-dphy | test-ddr-io | test-ddr-clk     one testbench
+#   make test-dphy | test-ddr-io | test-ddr-clk | test-hr-io     one testbench
 #   make run-ddr-io IO_CFG=lb SEED=2 WAVES=1        one pad configuration and seed,
 #                                                   files in build/fpga_dv/ddr_io/lb/seed2
 #   make run-ddr-clk CLK_CFG=125 WAVES=1            one clock configuration,
 #                                                   files in build/fpga_dv/ddr_clk/125/run
-#   make mutants              not part of test: broken copies of bow_ddr_io_xilinx /
-#                             bow_ddr_clk_xusp (mutants.py), each one must FAIL
+#   make run-hr-io HR_IO_CFG=lb SEED=2 WAVES=1      one HyperRAM configuration and seed,
+#                                                   files in build/fpga_dv/hr_io/lb/seed2
+#   make mutants              not part of test: broken copies of the DDR and HyperRAM
+#                             pad / clock wrappers (mutants.py), each one must FAIL
 #
 # Needs xvlog/xelab/xsim in PATH: source <Vivado>/settings64.sh first. The
 # exit code of xsim does not reflect the result: pass/fail comes from the
 # "<testbench>: PASS" line of sim.log.
 # Outputs: build/fpga_dv/ (D-PHY), build/fpga_dv/ddr_io/<cfg>/,
-# build/fpga_dv/ddr_clk/<cfg>/, build/fpga_dv/mutants/<name>/: one xsim
-# library and snapshot directory (xsim.dir) each.
+# build/fpga_dv/ddr_clk/<cfg>/, build/fpga_dv/hr_io/<cfg>/,
+# build/fpga_dv/mutants/<name>/: one xsim library and snapshot directory
+# (xsim.dir) each.
 
 REPO   := $(abspath ../../../..)
 BUILD  := $(REPO)/build/fpga_dv
@@ -86,6 +93,27 @@ DDR_CLK_GEN_125 := T=8.0 STEPS=448 VcoMult=10.0 DdrDivide=8 SysDivide=20
 CLK_CFG ?= 133
 ddr_clk_snap = $(DDR_CLK_DIR)/$(1)/xsim.dir/$(DDR_CLK_TOP)_sim/xsimk
 
+# ---------------------------------------------------------- HyperRAM pads
+# Configurations of bow_hyperram_io_xilinx (xelab -generic_top of the
+# testbench), all on bow_hyperram_clk_xusp as the MPS4 sets it up (100 MHz,
+# 672 phase steps):
+#   card    level shifter pins (HasLs 1, Loopback 0): the MPS4 FMC+ card
+#   direct  no level shifter pins (HasLs 0): a board without shifters
+#   lb      loopback (Loopback 1, HasLs 0): the MPS4 loopback build,
+#           bow_hyperram_dev behind the pads
+HR_IO_TOP   := tb_bow_hyperram_io_xilinx
+HR_IO_DIR   ?= $(BUILD)/hr_io
+HR_IO_RTL   ?= $(REPO)/hw/fpga/common/rtl/bow_hyperram_io_xilinx.sv
+HR_CLK_RTL  ?= $(REPO)/hw/fpga/common/rtl/bow_hyperram_clk_xusp.sv
+HR_IO_SRCS   = $(REPO)/hw/ip/hyperram/rtl/bow_hyperram_pkg.sv $(HR_CLK_RTL) $(HR_IO_RTL) \
+               $(CURDIR)/$(HR_IO_TOP).sv
+HR_IO_CFGS  ?= card direct lb
+HR_IO_GEN_card   :=
+HR_IO_GEN_direct := HasLs=0
+HR_IO_GEN_lb     := Loopback=1 HasLs=0
+HR_IO_CFG ?= card
+hr_io_snap = $(HR_IO_DIR)/$(1)/xsim.dir/$(HR_IO_TOP)_sim/xsimk
+
 # a configuration name has to be one of the lists above
 ifneq ($(filter run-ddr-io,$(MAKECMDGOALS)),)
   ifeq ($(origin DDR_IO_GEN_$(IO_CFG)),undefined)
@@ -97,9 +125,15 @@ ifneq ($(filter run-ddr-clk,$(MAKECMDGOALS)),)
     $(error unknown CLK_CFG $(CLK_CFG): 133 or 125)
   endif
 endif
+ifneq ($(filter run-hr-io,$(MAKECMDGOALS)),)
+  ifeq ($(origin HR_IO_GEN_$(HR_IO_CFG)),undefined)
+    $(error unknown HR_IO_CFG $(HR_IO_CFG): card, direct or lb)
+  endif
+endif
 
 build: check-tools $(SNAP) $(foreach c,$(DDR_IO_CFGS),$(call ddr_io_snap,$(c))) \
-       $(foreach c,$(DDR_CLK_CFGS),$(call ddr_clk_snap,$(c)))
+       $(foreach c,$(DDR_CLK_CFGS),$(call ddr_clk_snap,$(c))) \
+       $(foreach c,$(HR_IO_CFGS),$(call hr_io_snap,$(c)))
 
 check-tools:
 	@command -v $(XVLOG) >/dev/null 2>&1 && test -n "$$XILINX_VIVADO" || \
@@ -140,7 +174,7 @@ run: check-tools $(SNAP)
 test-dphy: check-tools $(SNAP)
 	@set -e; for s in $(SEEDS); do $(MAKE) --no-print-directory run SEED=$$s; done
 
-# ------------------------------------------------------- DDR pads, clocks
+# ---------------------------------------------- DDR pads, clocks, HyperRAM
 # One library + snapshot directory per configuration (xelab -generic_top);
 # rebuilt when a source or WAVES changes.
 $(DDR_IO_DIR)/%/xsim.dir/$(DDR_IO_TOP)_sim/xsimk: $(DDR_IO_SRCS) $(DDR_IO_DIR)/%/debug_$(DEBUG)
@@ -159,10 +193,19 @@ $(DDR_CLK_DIR)/%/xsim.dir/$(DDR_CLK_TOP)_sim/xsimk: $(DDR_CLK_SRCS) $(DDR_CLK_DI
 	cd $(DDR_CLK_DIR)/$* && $(XELAB) $(XELAB_OPTS) $(addprefix -generic_top ,$(DDR_CLK_GEN_$*)) \
 	  -s $(DDR_CLK_TOP)_sim work.$(DDR_CLK_TOP) work.glbl > xelab.log 2>&1 || { tail -20 xelab.log; exit 1; }
 
+$(HR_IO_DIR)/%/xsim.dir/$(HR_IO_TOP)_sim/xsimk: $(HR_IO_SRCS) $(HR_IO_DIR)/%/debug_$(DEBUG)
+	cd $(HR_IO_DIR)/$* && $(XVLOG) -sv $(HR_IO_SRCS) > xvlog.log 2>&1 || \
+	  { tail -20 xvlog.log; exit 1; }
+	cd $(HR_IO_DIR)/$* && $(XVLOG) $(GLBL) > xvlog_glbl.log 2>&1 || \
+	  { tail -20 xvlog_glbl.log; exit 1; }
+	cd $(HR_IO_DIR)/$* && $(XELAB) $(XELAB_OPTS) $(addprefix -generic_top ,$(HR_IO_GEN_$*)) \
+	  -s $(HR_IO_TOP)_sim work.$(HR_IO_TOP) work.glbl > xelab.log 2>&1 || { tail -20 xelab.log; exit 1; }
+
 # WAVES stamps, explicit targets (a missing intermediate file would not
 # trigger a rebuild)
 $(foreach c,$(sort $(DDR_IO_CFGS) $(IO_CFG)),$(DDR_IO_DIR)/$(c)/debug_$(DEBUG)) \
-$(foreach c,$(sort $(DDR_CLK_CFGS) $(CLK_CFG)),$(DDR_CLK_DIR)/$(c)/debug_$(DEBUG)):
+$(foreach c,$(sort $(DDR_CLK_CFGS) $(CLK_CFG)),$(DDR_CLK_DIR)/$(c)/debug_$(DEBUG)) \
+$(foreach c,$(sort $(HR_IO_CFGS) $(HR_IO_CFG)),$(HR_IO_DIR)/$(c)/debug_$(DEBUG)):
 	@mkdir -p $(@D)
 	rm -f $(@D)/debug_*
 	touch $@
@@ -193,6 +236,14 @@ run-ddr-clk: check-tools $(call ddr_clk_snap,$(CLK_CFG))
 	    echo "$(DDR_CLK_TOP) $(CLK_CFG): FAIL, see $(CLK_RUN)/sim.log"; exit 1; }
 	@echo "$(DDR_CLK_TOP) $(CLK_CFG): PASS"
 
+HR_RUN = $(HR_IO_DIR)/$(HR_IO_CFG)/seed$(SEED)
+run-hr-io: check-tools $(call hr_io_snap,$(HR_IO_CFG))
+	$(call xsim_run,$(HR_IO_DIR)/$(HR_IO_CFG),$(HR_RUN),$(HR_IO_TOP),$(SEED))
+	@grep -q "^$(HR_IO_TOP): PASS" $(HR_RUN)/sim.log || \
+	  { grep -E "ERROR|FAIL|Error" $(HR_RUN)/sim.log | head -20; \
+	    echo "$(HR_IO_TOP) $(HR_IO_CFG) seed $(SEED): FAIL, see $(HR_RUN)/sim.log"; exit 1; }
+	@echo "$(HR_IO_TOP) $(HR_IO_CFG) seed $(SEED): PASS"
+
 test-ddr-io: check-tools $(foreach c,$(DDR_IO_CFGS),$(call ddr_io_snap,$(c)))
 	@set -e; for c in $(DDR_IO_CFGS); do for s in $(SEEDS); do \
 	  $(MAKE) --no-print-directory run-ddr-io IO_CFG=$$c SEED=$$s; done; done
@@ -200,7 +251,11 @@ test-ddr-io: check-tools $(foreach c,$(DDR_IO_CFGS),$(call ddr_io_snap,$(c)))
 test-ddr-clk: check-tools $(foreach c,$(DDR_CLK_CFGS),$(call ddr_clk_snap,$(c)))
 	@set -e; for c in $(DDR_CLK_CFGS); do $(MAKE) --no-print-directory run-ddr-clk CLK_CFG=$$c; done
 
-test: test-dphy test-ddr-io test-ddr-clk
+test-hr-io: check-tools $(foreach c,$(HR_IO_CFGS),$(call hr_io_snap,$(c)))
+	@set -e; for c in $(HR_IO_CFGS); do for s in $(SEEDS); do \
+	  $(MAKE) --no-print-directory run-hr-io HR_IO_CFG=$$c SEED=$$s; done; done
+
+test: test-dphy test-ddr-io test-ddr-clk test-hr-io
 
 # Each mutant gets its own DDR_IO_DIR / DDR_CLK_DIR and RTL copy, then runs
 # run-ddr-io / run-ddr-clk of this Makefile (MUTANT_JOBS in parallel).
@@ -211,5 +266,5 @@ mutants: check-tools
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: build check-tools run test test-dphy test-ddr-io test-ddr-clk run-ddr-io run-ddr-clk \
-        mutants clean
+.PHONY: build check-tools run test test-dphy test-ddr-io test-ddr-clk test-hr-io run-ddr-io \
+        run-ddr-clk run-hr-io mutants clean

@@ -19,7 +19,8 @@
 //      phase move: the steppers finish the move, WPS_NOW / PS_NOW equal the
 //      phases of the clock model, a read phase command right after the reset
 //      waits for the write phase move, and the +-PsSteps / 4 limit of the
-//      write phase still counts from the real phase 0.
+//      write phase still counts from the real phase 0; CTRL.LOCK set before
+//      the reset is clear after it.
 //   D  init_done cleared over the CSR port (as firmware does before DFII
 //      sections) while a window read or byte store is in flight: the access
 //      is answered (refused before its launch, or completed), never left to
@@ -363,10 +364,16 @@ module tb_bow_ddr_rst import bow_bus_pkg::*; import bow_ddr_pkg::*;;
       error($sformatf("C: write phase %0d at the reset: not in the middle of the move",
                       u_clk.wps_phase));
     end
+    reg_rd(RCtrl, d);                          // CTRL.LOCK: only the SoC reset clears it
+    reg_wr(RCtrl, d | 32'h0000_8000);
+    reg_rd(RCtrl, d);
+    if (!d[15]) error($sformatf("C: CTRL %08h: LOCK not set", d));
     @(posedge clk); #1 rst_n = 1'b0;
     wait_cycles(10);
     #1 rst_n = 1'b1;
     do reg_rd(RStatus, st); while (!st[StClkOk]);
+    reg_rd(RCtrl, d);
+    if (d != 32'h0000_0040) error($sformatf("C: CTRL %08h after the SoC reset (reset value 0x40, LOCK clear)", d));
     phase_cmd(1'b0, 40, "C: PS_GO 40 after the reset");
     reg_rd(RStatus, st);
     if (st[StPsErr]) error($sformatf("C: PS_GO 40 after the reset refused (STATUS %08h)", st));

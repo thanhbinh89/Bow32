@@ -453,8 +453,10 @@ static bool dma_test(void) {
       return false;
     }
   }
-  /* a bus error stops the channel: read from an unmapped address */
-  bow_dma_copy(1, b, (const void *)0x60000000u, 4);
+  /* a bus error stops the channel: read from an unmapped address (0x7000_0000:
+   * between the HyperRAM window at 0x6000_0000 and the DDR window at 0x8000_0000,
+   * the crossbar's own decode error) */
+  bow_dma_copy(1, b, (const void *)0x70000000u, 4);
   if (bow_dma_wait(1, 100) || !(DMA->CH[1].STATUS & DMA_ST_ERR)) {
     bow_printf("error: no DMA bus error from an unmapped address\n");
     return false;
