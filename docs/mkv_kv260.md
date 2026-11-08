@@ -15,18 +15,23 @@ PMOD).
 ```
 
 > **Kết quả trên Arm MPS4 (2026-11-08), bản sau [đánh giá bảo
-> mật](mkv_security_review.md) (mục 8):** bitstream `mps4` (Vivado 2025.2, bản
-> loopback của DDR, ứng dụng `mkv` nạp sẵn trong flash) đạt timing: setup WNS
-> +0,240 ns (ở clock DDR 133 MHz), hold WHS +0,010 ns; ở clock SoC 50 MHz đường
-> xấu nhất là đường bus từ CPU vào MKV, còn +2,625 ns. MKV 13 138 LUT (180 LUTRAM),
-> 2 785 FF (khối thanh ghi 222 LUT / 916 FF, engine 12 916 LUT / 1 869 FF); toàn bản
-> 41 582 LUT. Trên board: tự kiểm tra lúc khởi động của driver PASS, `test`
-> **PASS (19/19)** với seed 1 và 7 (20 khoá ngẫu nhiên mỗi phiên bản; 3 lệnh `TEST`
-> cho `FAULT` mà không bị đếm, `FAULTS` vẫn 0), `kat` 6/6 bản mã trùng Phụ lục A,
-> `verify` **360/360 khối** (seed 2026) và 1 800/1 800 khối (600 khoá, seed 8) trùng
-> mô hình Python. Bitstream KV260 của bản này cũng build đạt timing (`kv260_cam`:
-> WNS +0,155 ns ở clock video 200 MHz, MKV 12 100 LUT, 2 792 FF; `kv260`: WNS
-> +3,750 ns) nhưng chưa chạy trên KV260.
+> mật](mkv_security_review.md) (mục 8), đã gộp `main` (DDR, HyperRAM):** bitstream
+> `mps4` (Vivado 2025.2, bản loopback của DDR và HyperRAM, ứng dụng `mkv` nạp sẵn
+> trong flash) đạt timing: setup WNS +0,169 ns (đường dữ liệu ghi của PHY HyperRAM),
+> hold WHS +0,010 ns; ở clock SoC 50 MHz đường xấu nhất là đường bus vào thanh ghi
+> khoá của MKV, còn +1,418 ns. MKV 13 300 LUT (180 LUTRAM), 2 784 FF (khối thanh ghi
+> 206 LUT / 916 FF, engine 13 094 LUT / 1 868 FF); toàn bản 48 220 LUT. Trên board:
+> tự kiểm tra lúc khởi động của driver PASS, `test` **PASS (19/19)** với seed 1 và 7
+> (20 khoá ngẫu nhiên mỗi phiên bản; 3 lệnh `TEST` cho `FAULT` mà không bị đếm,
+> `FAULTS` vẫn 0), `kat` 6/6 bản mã trùng Phụ lục A, `verify` **360/360 khối** (seed
+> 2026) và 1 800/1 800 khối (600 khoá, seed 7) trùng mô hình Python; trên cùng
+> bitstream, ứng dụng `ddr` 21/21 và `hyperram` 19/19. Trước khi gộp `main` (bản chỉ
+> có DDR: WNS +0,240 ns, MKV 13 138 LUT / 2 785 FF, đường bus vào MKV +2,625 ns) các
+> kết quả MKV cũng như vậy. Bitstream KV260 của bản đã gộp cũng build đạt timing
+> nhưng chưa chạy trên KV260: `kv260_cam` WNS +0,036 ns (vẫn ở H.264, clock video
+> 200 MHz; +0,155 ns trước khi gộp), đường qua MKV ở 50 MHz +2,91 ns; `kv260` WNS
+> +1,730 ns (đường bus vào MKV; +3,750 ns trước khi gộp). MKV trong `kv260_cam`
+> trước khi gộp: 12 100 LUT, 2 792 FF.
 
 > **Bản trước, trên KV260 (2026-11-05), MKV theo TCVN 14263:2024, trước các sửa
 > của [đánh giá bảo mật](mkv_security_review.md):** bitstream
@@ -47,9 +52,10 @@ make fpga BOARD=mps4 FLASH_VMEM=$PWD/build/sw/mkv/mkv.vmem   # Arm MPS4, nạp s
 make fpga BOARD=kv260_cam         # hoặc BOARD=kv260 (không camera)
 ```
 
-MKV nằm trong `bow32_top` nên có trong mọi bitstream; MKV không cần camera hay
-DDR. Bản MPS4 là bản loopback của DDR ([ddr_mps4.md](ddr_mps4.md)): không dùng khe
-FMC, chạy với `config.txt` của thẻ như hiện có. `FLASH_VMEM` nạp sẵn ứng dụng
+MKV nằm trong `bow32_top` nên có trong mọi bitstream; MKV không cần camera, DDR
+hay HyperRAM. Bản MPS4 là bản loopback của DDR và HyperRAM ([ddr_mps4.md](ddr_mps4.md),
+[hyperram_mps4.md](hyperram_mps4.md)): không dùng khe FMC, chạy với `config.txt` của
+thẻ như hiện có. `FLASH_VMEM` nạp sẵn ứng dụng
 `mkv` vào flash của bitstream, bật bo là ứng dụng chạy luôn. Trên máy build hiện
 tại bản MPS4 mất ~11 phút (`JOBS=8`), mỗi bản KV260 ~7 phút. Lưu ý: `make -C sw/apps/mkv`
 chỉ build `.elf`; dùng `make sw` hoặc `make -C sw/apps/mkv all` để có `.bin` và
@@ -73,7 +79,7 @@ python3 tools/bow32_mps4.py restore       # trả APPFILE về thiết kế củ
 ```
 MCC: Reading Board File \MB\HBI0376B\BOW32\bow32.txt
 MCC: Configuring FPGA from file \MB\HBI0376B\BOW32\bow32.bit
-MCC: (127 x 256 KiB programmed)
+MCC: (130 x 256 KiB programmed)
 MCC: FPGA configuration complete.
 ...
 MCC: Releasing CB_nRST
@@ -261,33 +267,37 @@ python3 tools/bow32_mkv.py -p $PORT bench
 ```
 version       key schedule (cycles)    one block (cycles)   ECB, 64 blocks
                    IP         SW         IP         SW     cycles/block    KB/s
-MKV-128/128       390     147416        253      33827              135    5925
-MKV-128/192       482     168383        257      38553              135    5925
-MKV-128/256       568     189366        261      43279              135    5925
-MKV-256/256       506     427520        365     101055              247    6477
-MKV-256/384       656     488931        369     115417              247    6477
-MKV-256/512       800     550062        373     129611              247    6477
+MKV-128/128       390     147416        247      33827              132    6060
+MKV-128/192       482     168383        251      38553              132    6060
+MKV-128/256       568     189366        255      43279              132    6060
+MKV-256/256       506     427520        355     101055              240    6666
+MKV-256/384       656     488931        359     115417              240    6666
+MKV-256/512       800     550062        363     129611              240    6666
 ```
 
-Chu kỳ CPU ở 50 MHz (MPS4, 2026-11-08), gồm cả driver. Lõi IP cần 16R + 2 chu kỳ
-cho lược đồ khoá và 4R + 4 cho một khối (`CYCLES`, đã gồm lượt kiểm tra); phần
-còn lại là CPU ghi `KEY`/`DIN`, đọc `DOUT` qua bus và các kiểm tra của driver. ECB
-không phụ thuộc R (cùng 135 / 247 chu kỳ mỗi khối cho ba độ dài khoá): CPU nạp
-khối sau và đọc khối trước còn lâu hơn lõi (32…40 chu kỳ).
+Chu kỳ CPU ở 50 MHz (MPS4, 2026-11-08, bản đã gộp `main`), gồm cả driver. Lõi IP
+cần 16R + 2 chu kỳ cho lược đồ khoá và 4R + 4 cho một khối (`CYCLES`, đã gồm lượt
+kiểm tra); phần còn lại là CPU ghi `KEY`/`DIN`, đọc `DOUT` qua bus và các kiểm tra
+của driver. ECB không phụ thuộc R (cùng 132 / 240 chu kỳ mỗi khối cho ba độ dài
+khoá): CPU nạp khối sau và đọc khối trước còn lâu hơn lõi (32…40 chu kỳ).
 
-So với bản trước (KV260, 2026-11-05: lược đồ khoá 296…673, một khối 237…357,
-ECB 127 / 239 chu kỳ), lõi và bus không chậm đi: firmware của bản trước chạy trên
-bitstream mới đo đúng các số cũ. Phần thêm nằm ở driver mới: lược đồ khoá +94…127
-chu kỳ (kiểm tự kiểm tra đã qua, đổi phiên bản bằng đọc–sửa–ghi `CTRL`, chờ có
-giới hạn, kiểm `ERR`/`FAULT`/`LOCKED`), một khối +16 chu kỳ (đọc `STATUS` và `CTRL`
-trước lệnh, xoá `DONE`/`ERR`, kiểm `STATUS` sau lệnh), ECB +8 chu kỳ mỗi khối (hai
-lần xét `NOSTALL` trong vòng lặp). Hai hàm đổi byte của driver phải được inline:
-gọi như hàm thường, chúng làm `write_block`/`read_block` lưu thanh ghi mỗi khối,
-ECB mất thêm 17…21 chu kỳ mỗi khối (đo được 156 / 264). Số đo bằng CPU lệch vài chu kỳ
-giữa các bản build của ứng dụng (vị trí code của driver trong flash: bản theo
-dự thảo đo 124 / 228 với cùng vòng lặp đặt ở địa chỉ khác), `CYCLES` của lõi
-thì cố định. MKV phần mềm chậm hơn khi còn theo bản dự thảo 26…40 % mỗi khối
-(thêm một vòng, phép xoay cột tính chỉ số từng byte).
+So với bản trước (KV260, 2026-11-05: lược đồ khoá 296…673, một khối 237…357, ECB 127
+/ 239 chu kỳ), lõi và bus không chậm đi: firmware của bản trước chạy trên bitstream
+mới đo đúng các số cũ. Phần thêm nằm ở driver mới: lược đồ khoá +94…127 chu kỳ (kiểm
+tự kiểm tra đã qua, đổi phiên bản bằng đọc–sửa–ghi `CTRL`, chờ có giới hạn, kiểm
+`ERR`/`FAULT`/`LOCKED`), một khối +6…16 chu kỳ (đọc `STATUS` và `CTRL` trước lệnh,
+xoá `DONE`/`ERR`, kiểm `STATUS` sau lệnh), ECB +1…8 chu kỳ mỗi khối (hai lần xét
+`NOSTALL` trong vòng lặp); khoảng dao động là do vị trí code, xem dưới. Hai hàm đổi
+byte của driver phải được inline: gọi như hàm thường, chúng làm
+`write_block`/`read_block` lưu thanh ghi mỗi khối, ECB mất thêm 17…21 chu kỳ mỗi
+khối (đo được 156 / 264). Số đo bằng CPU lệch vài chu kỳ giữa các bản build của ứng
+dụng vì vị trí code của driver trong flash (CPU lấy lệnh từ flash, nên địa chỉ và
+căn lề của vòng lặp ảnh hưởng tới thời gian lấy lệnh). Cùng mã driver, link trước
+khi gộp `main` (hàm ở địa chỉ khác vì `main` thêm file vào `sw/common`), đo một khối
+253…373 và ECB 135 / 247 trên cùng bitstream; bản theo dự thảo đo 124 / 228 với cùng
+vòng lặp đặt ở địa chỉ khác. `CYCLES` của lõi thì cố định. MKV phần mềm chậm hơn khi
+còn theo bản dự thảo 26…40 % mỗi khối (thêm một vòng, phép xoay cột tính chỉ số từng
+byte).
 
 ### 4.5 Gõ lệnh trực tiếp
 

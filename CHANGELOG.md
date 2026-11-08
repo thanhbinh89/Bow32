@@ -290,7 +290,7 @@
 - Đánh giá IP MKV cho SoC camera AI ([docs/mkv_security_review.md](docs/mkv_security_review.md)):
   mô hình đe doạ, chuẩn tham chiếu (TCVN 14263, QĐ 724/QĐ-BTTTT, ISO/IEC 19790, 17825,
   CRA, CWE), phát hiện về tiêm lỗi, kênh kề, khoá, tích hợp, kiểm chứng, lộ trình P0–P2.
-  `make -C hw/ip/mkv/dv review` (`tb_mkv_review.sv`, không thuộc `make test`) chạy 8 thí
+  `make -C hw/ip/mkv/dv review` (`tb_mkv_review.sv`, nay trong `make test` của IP) chạy 8 thí
   nghiệm: lỗi 2 bit trong một byte khoá vòng và dòng RAM bị tráo cho bản mã sai mà không
   `FAULT`, `dout_q` không được kiểm, `CLEAR` / xoá sau reset cắt ngắn được, FSM, giữ bus
   144 chu kỳ, không giới hạn số lần thử.
@@ -422,11 +422,12 @@
   - Chi phí (`kv260_cam`, cùng flow): MKV 9 526 → 12 100 LUT, 2 278 → 2 792 FF,
     168 → 180 LUTRAM; timing vẫn đạt (MKV +1,44 ns, WNS cả thiết kế +0,155 ns ở H.264).
     `CLEAR` 33 → 65 chu kỳ; `KEY`, `ENC`, `DEC` không đổi. Qua driver: lược đồ khoá
-    +94…127 chu kỳ, một khối +16, ECB +8 chu kỳ mỗi khối (135 / 247) vì các kiểm tra
-    mới; lõi và bus không chậm đi.
-  - Trên board (Arm MPS4, bitstream `mps4`, WNS +0,240 ns, MKV 13 138 LUT): tự kiểm
-    tra lúc khởi động PASS, `test` 19/19, `kat` 6/6, `verify` 360/360 và 1 800/1 800
-    khối ([docs/mkv_kv260.md](docs/mkv_kv260.md)).
+    +94…127 chu kỳ, một khối +6…16, ECB +1…8 chu kỳ mỗi khối (132 / 240; lệch vài chu
+    kỳ theo vị trí code trong flash) vì các kiểm tra mới; lõi và bus không chậm đi.
+  - Trên board (Arm MPS4, bitstream `mps4` có cả DDR và HyperRAM, WNS +0,169 ns, MKV
+    13 300 LUT): tự kiểm tra lúc khởi động PASS, `test` 19/19, `kat` 6/6, `verify`
+    360/360 và 1 800/1 800 khối; `ddr` 21/21, `hyperram` 19/19 trên cùng bitstream
+    ([docs/mkv_kv260.md](docs/mkv_kv260.md)).
 - MKV (`bow_mkv`): khoá và dữ liệu không còn nằm lại sau khi dùng
   ([docs/ip/mkv.md](docs/ip/mkv.md), "Bảo mật"):
   - Lệnh `KEY` xoá thanh ghi `KEY` và chỉ chạy khi đã ghi đủ k/32 từ khoá mới
