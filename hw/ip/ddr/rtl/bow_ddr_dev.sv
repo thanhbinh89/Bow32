@@ -114,7 +114,12 @@
 //   0x2D  TRFC         any command < tRFC after REF
 //   0x2E  TZQ          any command < tZQinit (init ZQCL) / tZQoper / tZQCS
 //   0x2F  TRAS_MAX     a bank open longer than tRAS(max)
-//   0x30  REF_STARVE   no REF for more than 9 * tREFI after init done
+//   0x30  REF_STARVE   after init done (tREFI = TRefi edges; hot_i, case
+//                      temperature 85..95 C: TRefi / 2): no REF for more than
+//                      9 * tREFI, or more than 8 REF owed (a REF is due every
+//                      tREFI, each REF pays one; up to 8 may be postponed and
+//                      up to 8 paid in advance, JESD79-2/-3: the average
+//                      interval is tREFI)
 //   ---- mode register values
 //   0x38  MR_BL        burst length != 8 (DDR2 MR A2:0 != 011, DDR3 MR0
 //                      A1:0 != 00)
@@ -203,6 +208,7 @@ module bow_ddr_dev import bow_ddr_pkg::*; #(
   input  logic                     clk_i,      // one posedge per CK rising edge (ck_en_i)
   input  logic                     rst_ni,     // power-on reset of the model
   input  logic                     ck_en_i,    // 1: this posedge is a CK edge
+  input  logic                     hot_i,      // Tc 85..95 C: tREFI = TRefi / 2 (REF_STARVE)
   input  logic                     cke_i,
   input  logic                     reset_n_i,  // DDR3 RESET# (ignored by DDR2)
   input  logic                     odt_i,
@@ -242,7 +248,12 @@ module bow_ddr_dev import bow_ddr_pkg::*; #(
   localparam int unsigned NBanks     = 1 << BankBits;
   localparam int unsigned SchDepth   = 16;      // read / write schedules (latency <= 18 / 16)
   localparam int unsigned RamLat     = Lookahead ? 3 : 2;   // RAM read: array + register(s)
-  localparam logic [19:0] RefMax     = 20'(9 * TRefi);
+  localparam logic [19:0] RefiCk     = 20'(TRefi);          // tREFI, Tc <= 85 C
+  localparam logic [19:0] RefiHotCk  = 20'(TRefi / 2);      // tREFI, Tc 85..95 C (hot_i)
+  localparam logic [19:0] RefMax     = 20'(9 * TRefi);      // longest REF interval
+  localparam logic [19:0] RefMaxHot  = 20'(9 * (TRefi / 2));
+  localparam logic signed [4:0] DebtMax = 5'sd8;            // REF that may be postponed
+  localparam logic signed [4:0] DebtMin = -5'sd8;           // REF that may be paid in advance
   localparam logic [19:0] RasMax     = 20'(TRasMax);
   // address bits a RD / WR may carry: column[ColBits-1:3], A10 (AP, checked
   // separately), A12 (DDR3 BC#: don't care with BL8 fixed)
@@ -453,7 +464,10 @@ module bow_ddr_dev import bow_ddr_pkg::*; #(
   logic [9:0]                   t_rfc_q, t_zq_q, t_dllk_q;
   logic [3:0][7:0]              t_faw_q;
   logic [1:0]                   faw_ptr_q;
-  logic [19:0]                  ref_gap_q;
+  logic [19:0]                  ref_gap_q;     // edges since the last REF (IDone)
+  logic [19:0]                  refi_q;        // edges to the next tREFI tick (IDone)
+  logic signed [4:0]            debt_q, debt_d;  // REF owed (> 0) or pulled in (< 0)
+  logic                         refi_tick, ref_cmd;
   // bursts
   logic [SchDepth-1:0]             rs_v_q, rs_v_d, ws_v_q, ws_v_d, pt_v_q, pt_v_d;
   logic [SchDepth-1:0][BIdxW-1:0]  rs_a_q, rs_a_d, ws_a_q, ws_a_d;
@@ -521,6 +535,15 @@ module bow_ddr_dev import bow_ddr_pkg::*; #(
   assign cmd_ok  = ck_en_i && is_cmd && cke_i && cke_q && awake && (!Ddr3 || reset_n_i) && !zq2;
   assign rd_now  = cmd_ok && kind == CmdRd;
   assign wr_now  = cmd_ok && kind == CmdWr;
+
+  // refresh debt (REF_STARVE): +1 per tREFI tick, -1 per REF, DebtMin..15
+  assign refi_tick = (TRefi != 0) && ck_en_i && (ist_q == IDone) && (refi_q == 20'd0);
+  assign ref_cmd   = cmd_ok && kind == CmdRef;
+  always_comb begin
+    debt_d = debt_q;
+    if (refi_tick && !ref_cmd && debt_q != 5'sd15)      debt_d = debt_q + 5'sd1;
+    else if (!refi_tick && ref_cmd && debt_q != DebtMin) debt_d = debt_q - 5'sd1;
+  end
   assign cmd_bidx = {row_q[cb], cb[BankBits-1:0], a_i[ColBits-1:3]};
   // lookahead RD (pins of the next edge; an ACT to that bank at this edge gives the row)
   assign la_cb    = la_ba_i & 3'(NBanks - 1);
@@ -778,7 +801,8 @@ module bow_ddr_dev import bow_ddr_pkg::*; #(
         if (open_q[b] && age_q[b] == RasMax) ev[ETrasMax] = 1'b1;
       end
     end
-    if (TRefi != 0 && ist_q == IDone && ref_gap_q == RefMax) ev[ERefStarve] = 1'b1;
+    if (refi_tick && !ref_cmd && debt_q == DebtMax) ev[ERefStarve] = 1'b1;   // 8 -> 9 owed
+    if (TRefi != 0 && ist_q == IDone && ref_gap_q == (hot_i ? RefMaxHot : RefMax)) ev[ERefStarve] = 1'b1;
     if (!ck_en_i) ev = '0;
   end
 
@@ -897,6 +921,8 @@ module bow_ddr_dev import bow_ddr_pkg::*; #(
       t_faw_q     <= '0;
       faw_ptr_q   <= '0;
       ref_gap_q   <= '0;
+      refi_q      <= '0;
+      debt_q      <= '0;
       rs_v_q      <= '0;
       rs_a_q      <= '0;
       pt_v_q      <= '0;
@@ -962,6 +988,15 @@ module bow_ddr_dev import bow_ddr_pkg::*; #(
         t_dllk_q  <= dn10(t_dllk_q);
         if (ist_q == IDone) ref_gap_q <= up20(ref_gap_q);
         if (ist_d == IDone && ist_q != IDone) ref_gap_q <= '0;
+        // refresh debt: from init done, a tREFI tick every RefiCk edges
+        // (RefiHotCk with hot_i), see REF_STARVE
+        if (ist_d == IDone && ist_q != IDone) begin
+          refi_q <= (hot_i ? RefiHotCk : RefiCk) - 20'd1;
+          debt_q <= '0;
+        end else if (ist_q == IDone) begin
+          refi_q <= (refi_q == 20'd0) ? (hot_i ? RefiHotCk : RefiCk) - 20'd1 : refi_q - 20'd1;
+          debt_q <= debt_d;
+        end
 
         // ---------------- commands
         if (dev_clr) begin
@@ -1266,7 +1301,11 @@ module bow_ddr_dev import bow_ddr_pkg::*; #(
       ETrfc:       return $sformatf("tRFC: %s %0d edge(s) early after REF", cmd_name(kind), t_rfc_q);
       ETzq:        return $sformatf("tZQ: %s %0d edge(s) early after ZQ", cmd_name(kind), t_zq_q);
       ETrasMax:    return "tRAS(max): a bank stayed open too long";
-      ERefStarve:  return $sformatf("refresh starvation: no REF for %0d edges (9 * tREFI)", RefMax);
+      ERefStarve:  return (ref_gap_q == (hot_i ? RefMaxHot : RefMax)) ?
+                          $sformatf("refresh starvation: no REF for 9 x tREFI (%0d edges%s)",
+                                    hot_i ? RefMaxHot : RefMax, hot_i ? ", hot" : "") :
+                          $sformatf("refresh starvation: more than 8 REF owed (tREFI %0d edges%s)",
+                                    hot_i ? RefiHotCk : RefiCk, hot_i ? ", hot" : "");
       EMrBl:       return $sformatf("MRS BA %0d A 0x%04h: burst length is not 8", ba_i, a_i);
       EMrCl:       return $sformatf("MRS BA %0d A 0x%04h: CAS latency not supported", ba_i, a_i);
       EMrAl:       return $sformatf("MRS BA %0d A 0x%04h: additive latency != 0", ba_i, a_i);

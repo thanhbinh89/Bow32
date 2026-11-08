@@ -57,7 +57,17 @@
 //      software hand-over again, data kept); window and CSR timeouts by
 //      fault injection (native cmd_ready / Wishbone ack forced low):
 //      BUS_TIMEOUT, CSR_ERR, BROKEN, accesses refused, recovery by CORE_RST
-//  10  end: the emulator / DRAM model reported no JEDEC rule or pin error, no
+//  10  refresh: REF rate from ST_REF with REF_NORM = 0 (every REF of the core,
+//      3.9 us) and 1 (the core's refresh timer at 2 x TRefi, 7.8 us); refresh monitor (REF_MON):
+//      no REF_STARVE with refresh running, ST_RGAP = the REF interval;
+//      REF_STARVE and irq_o after 8 intervals without REF (DFII software
+//      control), refresh back before the DRAM model's limit; pin-level DRAM
+//      model only: hot model (dram_hot, a REF due every 3.9 us) whose REF
+//      debt stays down with REF_NORM = 0 and grows with REF_NORM = 1. LOCK:
+//      CTRL / LAT / PS_TARGET changes, APPLY and LiteDRAM CSR writes refused
+//      with LOCK_ERR (CMD_ERR, CSR_ERR + bus error), REF_NORM may still be
+//      cleared, SNAP / CLR_STATS, CSR reads, the window and IRQ_EN still work
+//  11  end: the emulator / DRAM model reported no JEDEC rule or pin error, no
 //      RD_EXTRA / RFIFO_ERR / BUS_TIMEOUT / BROKEN, no protocol error
 // Any $error of the RTL or of the models stops the simulation (run with
 // +verilator+error+limit+<n> to see more of them).
@@ -102,12 +112,17 @@ module tb_bow_ddr import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
   localparam int unsigned TestBytes = (PhyKind == 2 && EmuBytes != 0 && EmuBytes < MemBytes) ?
                                       EmuBytes : MemBytes;
   localparam int unsigned ReadLat   = 12;
+  // refresh of the core: a REF every CoreTRefi controller cycles (4 CK each)
+  localparam int unsigned CoreTRefi = (DdrMem == 3) ? litedram_ddr3_pkg::TRefi : litedram_ddr2_pkg::TRefi;
+  localparam longint      RefIntPs  = longint'(4 * CoreTRefi) * longint'(TckPs);
+  localparam longint      RefWinPs  = 64'd200_000_000;   // REF rate window: 200 us
 
   // ------------------------------------------------------------- clocks
   logic clk = 1'b0, rst_n = 1'b0;
   always #10_000 clk = ~clk;                       // clk_i 50 MHz
 
   logic ck_on = 1'b0;                              // MMCMs running
+  logic dram_hot = 1'b0;                           // DRAM model: Tc 85..95 C refresh rule
   logic ddr_clk, sys_clk, wclk, wclk90, rd_clk, locked;
   logic ps_en, ps_inc, ps_done, wps_en, wps_inc, wps_done;
 
@@ -244,6 +259,7 @@ module tb_bow_ddr import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
   // ------------------------------------------------------- board side
   int unsigned dram_errs = 0, contention = 0, floats = 0;
   logic        dram_init_done;
+  logic signed [4:0] m_debt;                       // REF owed by the emulator / DRAM model
 
   if (PhyKind == 2) begin : g_lb
     logic                     lb_en, lb_rst_n;
@@ -320,6 +336,7 @@ module tb_bow_ddr import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
       dram_errs      = 32'(dbg[15:0]);
       dram_init_done = dbg[30];
     end
+    assign m_debt = u_lb.u_dev.debt_q;
 
   end else begin : g_pads
     logic                ck_p, ck_n, cke, rst_n_p, odt, cs_n, ras_n, cas_n, we_n;
@@ -472,6 +489,7 @@ module tb_bow_ddr import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
       .dqs_oe_o    (m_dqs_oe),
       .dm_i        (m_dm),
       .wr_relax_i  (1'b0),
+      .hot_i       (dram_hot),
       .dbg_o       (dbg),
       .err_code_o  (),
       .err_count_o (m_err_count),
@@ -484,6 +502,7 @@ module tb_bow_ddr import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
       contention     = u_board.contention;
       floats         = u_board.floats;
     end
+    assign m_debt = u_mem.u_dev.debt_q;
   end
 
   // ============================================================ bus BFMs
@@ -622,7 +641,7 @@ module tb_bow_ddr import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
                           RPsTarget = 12'h030, RPsNow = 12'h034, REmu = 12'h098,
                           RClkHz = 12'h09C, RStRd = 12'h0A0, RStWr = 12'h0A4, RStAct = 12'h0A8,
                           RStRef = 12'h0AC, RStRmw = 12'h0B0, RDbg = 12'h0B4,
-                          RErrAddr = 12'h0B8, RCap = 12'h100;
+                          RErrAddr = 12'h0B8, RStRgap = 12'h0BC, RCap = 12'h100;
   localparam logic [31:0] StBusy = 32'h1, StReady = 32'h2, StClkOk = 32'h4, StApplied = 32'h8,
                           StPsDone = 32'h20, StCapDone = 32'h40, StCmdErr = 32'h200,
                           StRfifoErr = 32'h400, StBusTimeout = 32'h800, StLink = 32'h2000,
@@ -630,13 +649,15 @@ module tb_bow_ddr import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
                           StInitError = 32'h2_0000, StRdLate = 32'h4_0000,
                           StRdExtra = 32'h8_0000, StNotReady = 32'h10_0000,
                           StRange = 32'h20_0000, StCsrErr = 32'h40_0000,
-                          StBroken = 32'h80_0000;
-  localparam logic [31:0] W1cAll = 32'h007C_4E68;
+                          StBroken = 32'h80_0000, StRefStarve = 32'h100_0000,
+                          StLockErr = 32'h200_0000;
+  localparam logic [31:0] W1cAll = 32'h037C_4E68;
   localparam logic [31:0] CmdApply = 32'h1, CmdPsGo = 32'h2, CmdRfifoSync = 32'h10,
                           CmdSnap = 32'h20, CmdClrStats = 32'h40, CmdCapArm = 32'h100;
   localparam logic [31:0] CtrlEn = 32'h1, CtrlDmEn = 32'h10, CtrlDdr3 = 32'h20,
                           CtrlIdleDrive = 32'h40, CtrlLsEn = 32'h80, CtrlCkEn = 32'h800,
-                          CtrlCoreRst = 32'h1000;
+                          CtrlCoreRst = 32'h1000, CtrlRefNorm = 32'h2000, CtrlRefMon = 32'h4000,
+                          CtrlLock = 32'h8000;
   localparam logic [31:0] LatReset = 32'h2224_0083;
 
   // LiteDRAM CSRs (generated/ddr<2|3>/csr.csv)
@@ -1387,7 +1408,179 @@ module tb_bow_ddr import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
       reg_wr(RStatus, W1cAll);
       for (int unsigned w = 0; w < 4096; w += 512) win_check(32'h0010_0000 + 32'(w));
 
-      // ---------------------------------------------------------- 10 end
+      // ------------------------------------------------------- 10 refresh
+      // REF rate: REF_NORM = 0 passes every REF of the core (RefIntPs, 3.9
+      // us), REF_NORM = 1 every 2 x RefIntPs; ST_REF over RefWinPs, +-2
+      for (int norm = 0; norm < 2; norm++) begin
+        logic [31:0] r0, r1;
+        int          nexp;
+        reg_wr(RCtrl, ctrl | ((norm != 0) ? CtrlRefNorm : 32'h0));
+        #(RefWinPs / 8);                         // a REF of the new rate went out
+        cmd_ok(CmdSnap, "SNAP (REF rate)");
+        reg_rd(RStRef, r0);
+        #(RefWinPs);
+        cmd_ok(CmdSnap, "SNAP (REF rate)");
+        reg_rd(RStRef, r1);
+        nexp = int'(RefWinPs / (RefIntPs * longint'(norm + 1)));
+        $display("%0t ps: tb_bow_ddr: REF_NORM = %0d: %0d REF in %0d us (expected %0d)", $time, norm,
+                 r1 - r0, RefWinPs / 1_000_000, nexp);
+        if (int'(r1 - r0) < nexp - 2 || int'(r1 - r0) > nexp + 2) begin
+          error($sformatf("REF_NORM = %0d: %0d REF in %0d us, expected %0d", norm, r1 - r0,
+                          RefWinPs / 1_000_000, nexp));
+        end
+      end
+
+      // refresh monitor at both rates: no REF_STARVE, ST_RGAP = the interval
+      reg_wr(RStatus, StRefStarve | StLockErr);
+      for (int norm = 0; norm < 2; norm++) begin
+        int unsigned iv;
+        reg_wr(RCtrl, ctrl | CtrlRefMon | ((norm != 0) ? CtrlRefNorm : 32'h0));
+        #(3 * RefIntPs);                         // the new period starts at the next REF
+        cmd_ok(CmdClrStats, "CLR_STATS (monitor)");
+        #(RefWinPs / 2);
+        cmd_ok(CmdSnap, "SNAP (monitor)");
+        reg_rd(RStRgap, v);
+        iv = 4 * CoreTRefi * (norm + 1);         // CK cycles from one REF to the next
+        $display("%0t ps: tb_bow_ddr: REF_MON, REF_NORM = %0d: ST_RGAP %0d (interval %0d CK)", $time,
+                 norm, v, iv);
+        if (v + 1 < iv - 8 || v + 1 > iv + 64) begin
+          error($sformatf("REF_NORM = %0d: ST_RGAP %0d, REF interval %0d CK", norm, v, iv));
+        end
+        reg_rd(RStatus, st);
+        if (st & StRefStarve) error($sformatf("REF_NORM = %0d: REF_STARVE with refresh running", norm));
+      end
+
+      // refresh stopped with REF_MON on (DFII software control after the rows
+      // were closed by a refresh): REF_STARVE and irq_o 8 intervals after the
+      // last REF; refresh back long before the DRAM model's limit (8 REF owed
+      // at 7.8 us)
+      begin
+        longint t0, dt;
+        reg_wr(RCtrl, ctrl | CtrlRefMon);
+        reg_wr(RStatus, StRefStarve);
+        reg_wr(RIrqEn, StRefStarve);
+        csr_wr(CInitDone, 32'h0);                // window blocked
+        #(2 * RefIntPs);                         // a refresh closed the rows (PREA)
+        csr_wr(CDfiiCtrl, DfiiCke | DfiiOdt | DfiiResetN);
+        t0 = longint'($time);
+        poll_status(StRefStarve, StRefStarve, 9 * RefIntPs, "REF_STARVE with refresh stopped", st);
+        dt = longint'($time) - t0;
+        if (irq !== 1'b1) error("irq_o not set by REF_STARVE with IRQ_EN");
+        csr_wr(CDfiiCtrl, DfiiSel | DfiiCke | DfiiOdt | DfiiResetN);   // refresh again
+        csr_wr(CInitDone, 32'h1);
+        poll_status(StReady, StReady, 64'd10_000_000, "READY after the refresh stop", st);
+        $display("%0t ps: tb_bow_ddr: REF_STARVE %0d ns after the switch to software control (limit %0d ns after the last REF)",
+                 $time, dt / 1000, 8 * RefIntPs / 1000);
+        if (dt < 7 * RefIntPs - 64'd1_000_000 || dt > 8 * RefIntPs + 64'd1_000_000) begin
+          error($sformatf("REF_STARVE after %0d ns without REF, expected %0d .. %0d ns", dt / 1000,
+                          7 * RefIntPs / 1000, 8 * RefIntPs / 1000));
+        end
+        reg_wr(RStatus, StRefStarve);
+        reg_wr(RIrqEn, 32'h0);
+        if (irq !== 1'b0) error("irq_o still set after clearing REF_STARVE");
+        #(RefWinPs / 4);
+        reg_rd(RStatus, st);
+        if (st & StRefStarve) error("REF_STARVE again with refresh running");
+        for (int unsigned w = 0; w < 4096; w += 512) win_check(32'h0010_0000 + 32'(w));
+      end
+
+      // pin-level DRAM model at a case temperature of 85..95 C (a REF due
+      // every 3.9 us): REF_NORM = 0 keeps the debt down, REF_NORM = 1 owes
+      // about one REF per 7.8 us (stopped at about 4, below the limit of 8)
+      if (PhyKind == 1) begin
+        logic signed [4:0] d0;
+        reg_wr(RCtrl, ctrl);
+        #(RefWinPs / 4);
+        dram_hot = 1'b1;
+        #(RefWinPs / 2);
+        d0 = m_debt;
+        if (d0 > 5'sd1) error($sformatf("hot DRAM model, REF_NORM = 0: %0d REF owed", d0));
+        reg_wr(RCtrl, ctrl | CtrlRefNorm);
+        #(8 * RefIntPs);
+        $display("%0t ps: tb_bow_ddr: hot DRAM model: REF owed %0d with REF_NORM = 0, %0d after %0d ns with REF_NORM = 1",
+                 $time, d0, m_debt, 8 * RefIntPs / 1000);
+        if (m_debt < d0 + 5'sd3) error($sformatf("hot DRAM model, REF_NORM = 1: REF owed %0d -> %0d", d0, m_debt));
+        reg_wr(RCtrl, ctrl);
+        dram_hot = 1'b0;
+        #(RefWinPs / 4);
+      end
+
+      // ------------------------------------------------------------ LOCK
+      reg_wr(RStatus, W1cAll);
+      reg_wr(RCtrl, ctrl | CtrlRefMon | CtrlRefNorm | CtrlLock);
+      reg_rd(RCtrl, v);
+      expect_eq("CTRL with LOCK", v, ctrl | CtrlRefMon | CtrlRefNorm | CtrlLock);
+      // the same value again, then clearing REF_NORM: allowed
+      reg_wr(RCtrl, ctrl | CtrlRefMon | CtrlRefNorm | CtrlLock);
+      reg_wr(RCtrl, ctrl | CtrlRefMon | CtrlLock);
+      reg_rd(RCtrl, v);
+      expect_eq("CTRL after clearing REF_NORM under LOCK", v, ctrl | CtrlRefMon | CtrlLock);
+      reg_rd(RStatus, st);
+      if (st & StLockErr) error($sformatf("LOCK_ERR after allowed CTRL writes (STATUS %08h)", st));
+      // refused: REF_NORM set again, CORE_RST, LOCK / REF_MON dropped, EN cleared
+      begin
+        logic [31:0] bad [4];
+        bad[0] = ctrl | CtrlRefMon | CtrlRefNorm | CtrlLock;
+        bad[1] = ctrl | CtrlRefMon | CtrlLock | CtrlCoreRst;
+        bad[2] = ctrl;
+        bad[3] = (ctrl & ~CtrlEn) | CtrlRefMon | CtrlLock;
+        for (int i = 0; i < 4; i++) begin
+          reg_wr(RCtrl, bad[i]);
+          reg_rd(RCtrl, v);
+          expect_eq($sformatf("CTRL after the refused write %08h", bad[i]), v, ctrl | CtrlRefMon | CtrlLock);
+          reg_rd(RStatus, st);
+          if (!(st & StLockErr)) error($sformatf("CTRL write %08h under LOCK: no LOCK_ERR", bad[i]));
+          reg_wr(RStatus, StLockErr);
+        end
+      end
+      reg_wr(RLat, lat_ok ^ 32'h0000_1000);
+      reg_rd(RLat, v);
+      expect_eq("LAT after a write under LOCK", v, lat_ok);
+      reg_rd(RStatus, st);
+      if (!(st & StLockErr)) error("LAT write under LOCK: no LOCK_ERR");
+      reg_wr(RStatus, StLockErr);
+      begin
+        logic [31:0] t;
+        reg_rd(RPsTarget, t);
+        reg_wr(RPsTarget, t + 32'd1);
+        reg_rd(RPsTarget, v);
+        expect_eq("PS_TARGET after a write under LOCK", v, t);
+        reg_rd(RStatus, st);
+        if (!(st & StLockErr)) error("PS_TARGET write under LOCK: no LOCK_ERR");
+        reg_wr(RStatus, StLockErr);
+      end
+      // commands: APPLY refused (CMD_ERR, LOCK_ERR), SNAP / CLR_STATS run
+      reg_wr(RStatus, StCmdErr);
+      reg_wr(RCmd, CmdApply);
+      reg_rd(RStatus, st);
+      if (!(st & StCmdErr) || !(st & StLockErr) || (st & StBusy)) begin
+        error($sformatf("APPLY under LOCK: STATUS %08h (CMD_ERR, LOCK_ERR, !BUSY)", st));
+      end
+      reg_wr(RStatus, StCmdErr | StLockErr);
+      cmd_ok(CmdSnap, "SNAP under LOCK");
+      cmd_ok(CmdClrStats, "CLR_STATS under LOCK");
+      // LiteDRAM CSRs: a write is refused (bus error, CSR_ERR, LOCK_ERR), reads work
+      bus_xfer(PCsr, 1'b1, CsrBase | 32'(CInitDone), 32'h0, 4'hF, v, e);
+      if (!e) error("CSR write under LOCK: no bus error");
+      reg_rd(RStatus, st);
+      if (!(st & StCsrErr) || !(st & StLockErr)) error($sformatf("CSR write under LOCK: STATUS %08h", st));
+      reg_wr(RStatus, StCsrErr | StLockErr);
+      csr_rd(CInitDone, v);
+      expect_eq("init_done under LOCK", v, 32'h1);
+      // the window, IRQ_EN and the W1C bits still work
+      win_write(32'h0010_0010, 32'hC0DE_1234, 4'hF);
+      win_check(32'h0010_0010);
+      reg_wr(RIrqEn, StLockErr);
+      reg_wr(RLat, lat_ok ^ 32'h0000_1000);
+      if (irq !== 1'b1) error("irq_o not set by LOCK_ERR with IRQ_EN");
+      reg_wr(RStatus, StLockErr);
+      reg_wr(RIrqEn, 32'h0);
+      #(RefWinPs / 4);
+      reg_rd(RStatus, st);
+      if (st & (StRefStarve | StLockErr)) error($sformatf("STATUS %08h under LOCK: REF_STARVE / LOCK_ERR", st));
+      for (int unsigned w = 0; w < 4096; w += 512) win_check(32'h0010_0000 + 32'(w));
+
+      // ---------------------------------------------------------- 11 end
       wait_cycles(500);
       reg_rd(RStatus, st);
       reg_rd(RCtrl, v);

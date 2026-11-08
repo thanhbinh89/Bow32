@@ -133,6 +133,7 @@ module bow_ddr_lb import bow_ddr_pkg::*; #(
     .clk_i       (clk_i),
     .rst_ni      (rst_ni),
     .ck_en_i     (io_i.ck_en),
+    .hot_i       (1'b0),          // REF_STARVE at the Tc <= 85 C rate
     .cke_i       (cke_q),
     .reset_n_i   (rst_n_q),
     .odt_i       (odt_q),

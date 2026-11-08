@@ -13,7 +13,8 @@
 //                           (rounded) [24] DdrEn = 1 [25] RESET# pin [26] DDR3
 //                           core [31:27] DFI read latency
 //   0x008 CTRL        RW    [0] EN [4] DM_EN [5] DDR3 [6] IDLE_DRIVE [7] LS_EN
-//                           [10] ODT_EN [11] CK_EN [12] CORE_RST         (0x40)
+//                           [10] ODT_EN [11] CK_EN [12] CORE_RST [13] REF_NORM
+//                           [14] REF_MON [15] LOCK                        (0x40)
 //   0x00C CMD         W     exactly one bit per write: [0] APPLY [1] PS_GO
 //                           [4] RFIFO_SYNC [5] SNAP [6] CLR_STATS [7] WPS_GO
 //                           [8] CAP_ARM
@@ -23,6 +24,7 @@
 //                           [14] PS_ERR [15] RFIFO_BROKEN (R) [16] INIT_DONE (R)
 //                           [17] INIT_ERROR (R) [18] RD_LATE [19] RD_EXTRA
 //                           [20] NOT_READY [21] RANGE [22] CSR_ERR [23] BROKEN (R)
+//                           [24] REF_STARVE [25] LOCK_ERR
 //   0x014 IRQ_EN      RW    the W1C bits: irq_o = |(STATUS & IRQ_EN)
 //   0x01C LAT         RW    [5:0] RL [11:6] WL [16:12] RD_DLY [17] RD_SLIP
 //                           [19:18] OE_PRE [23:20] RDIR_LEAD [27:24] RDIR_TAIL
@@ -37,6 +39,8 @@
 //   0x0B4 DBG         R     ddr_dbg_i, synchronised per bit (read until stable)
 //   0x0B8 ERR_ADDR    R     bus address of the last window access answered
 //                           with a bus error
+//   0x0BC ST_RGAP     R     longest REF interval while REF_MON = 1, in CK
+//                           cycles minus one (SNAP copy)
 //   0x100..0x17C CAP[0..31]  R  raw DQ capture of stream cycle i: x8 [7:0] rise,
 //                           [15:8] fall; x16 [15:0] rise, [31:16] fall
 //   0x180..0x1FC CAPS[0..31] R  raw DQS capture: [1:0] lane 0 {fall, rise},
@@ -47,7 +51,20 @@
 //
 // CTRL.CORE_RST acts at once (not through APPLY): while 1 the LiteDRAM core
 // and both bridges (window, CSR) are held in reset; it also clears BROKEN.
-// The other CTRL bits and LAT reach the ddr_clk domain with APPLY.
+// REF_NORM and REF_MON act at once too (levels synchronised by bow_ddr):
+// REF_NORM = 1 makes the LiteDRAM core refresh every 7.8 us (case
+// temperature <= 85 C; 0 = every 3.9 us, Tc <= 95 C; from the next reload of
+// its refresh timer); REF_MON = 1
+// runs the refresh monitor (REF_STARVE after 8 x the expected interval
+// without a REF at the PHY, ST_RGAP). The other CTRL bits and LAT reach the
+// ddr_clk domain with APPLY.
+// LOCK (written 1, cleared only by sys_rst_n) freezes the configuration:
+// writes to CTRL (except clearing REF_NORM, the safe direction), LAT,
+// PS_TARGET and WPS_TARGET are ignored, CMD accepts only SNAP and CLR_STATS
+// (the others: CMD_ERR), and bow_ddr_csr refuses every LiteDRAM CSR write
+// (bus error, CSR_ERR; reads still work). Each refused change sets LOCK_ERR
+// (a write of the value a register already has is not one). IRQ_EN, the W1C
+// bits of STATUS and the memory window stay writable.
 // STATUS: READY = CLK_OK, !CORE_RST (and the core seen in and out of reset
 // since the last CORE_RST), LiteDRAM init_done, !init_error and !BROKEN (the
 // window serves accesses only then); BROKEN = a bridge timed out, or lost
@@ -58,11 +75,13 @@
 // BUS_TIMEOUT (window or CSR bridge timeout, or the DDR clock lost during an
 // access), CSR_ERR (CSR access refused, Wishbone err or timeout),
 // RD_LATE / RD_EXTRA (bow_ddr_dfi read return), RFIFO_ERR (PHY read FIFO),
-// CAP_DONE (raw capture finished), DBG_ERR = ddr_dbg_i[31] (emulator error).
+// CAP_DONE (raw capture finished), DBG_ERR = ddr_dbg_i[31] (emulator error),
+// REF_STARVE (refresh monitor), LOCK_ERR (a change refused by LOCK).
 // Statistics: ST_RD / ST_WR = native reads / writes done by the window (an
 // RMW counts in both), ST_RMW = read-modify-writes (window counters, clk_i),
-// ST_ACT / ST_REF = ACT / REF commands sent to the DRAM (bow_ddr_dfi); SNAP
-// copies all five, CLR_STATS zeroes them, all 32-bit saturating.
+// ST_ACT / ST_REF = ACT / REF commands sent to the DRAM (bow_ddr_dfi), ST_RGAP
+// = the longest REF interval of the refresh monitor (bow_ddr_dfi); SNAP
+// copies all six, CLR_STATS zeroes them, the counters are 32-bit saturating.
 //
 // Commands (CMD) cross into the ddr_clk domain through a request / ack copy
 // channel (bow_csi2rx_regs idiom): the clk_i side loads the staging flops
@@ -118,6 +137,9 @@ module bow_ddr_regs import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
   output logic        abort_o,         // !CLK_OK or CORE_RST
   output logic        clk_lost_o,      // !CLK_OK (the abort is a dead clock)
   output logic        core_rst_o,      // CTRL.CORE_RST
+  output logic        ref_norm_o,      // CTRL.REF_NORM (level, synchronised by the users)
+  output logic        ref_mon_o,       // CTRL.REF_MON  (level, synchronised by bow_ddr_dfi)
+  output logic        wlock_o,         // CTRL.LOCK: bow_ddr_csr refuses CSR writes
   output logic        masked_o,        // HasDm and applied DM_EN
   input  logic        win_dead_i,
   input  logic        csr_dead_i,
@@ -126,6 +148,7 @@ module bow_ddr_regs import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
   input  logic        win_timeout_i,
   input  logic        csr_err_i,
   input  logic        csr_timeout_i,
+  input  logic        csr_lock_err_i,  // one-cycle pulse: a CSR write refused by LOCK
   input  logic [31:0] win_err_addr_i,
   input  logic        win_st_rd_i,     // one-cycle pulses
   input  logic        win_st_wr_i,
@@ -147,7 +170,7 @@ module bow_ddr_regs import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
   input  logic        res_err_i,
   input  logic [15:0] res_ps_now_i,
   input  logic [15:0] res_wps_now_i,
-  input  logic [1:0][31:0] res_st_i,   // ST_ACT, ST_REF
+  input  logic [2:0][31:0] res_st_i,   // ST_ACT, ST_REF, ST_RGAP
 
   // ddr_clk domain status, synchronised here
   input  logic        ddr_up_i,
@@ -157,6 +180,7 @@ module bow_ddr_regs import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
   input  logic        cap_done_i,      // toggle per event
   input  logic        rd_late_i,       // toggle per event
   input  logic        rd_extra_i,      // toggle per event
+  input  logic        ref_starve_i,    // toggle per event
 
   // raw capture buffer of the PHY (quasi-static after CAP_DONE)
   input  logic [31:0][2*MaxDq-1:0]    cap_dq_i,    // [i] = CAP[i] (register layout)
@@ -172,7 +196,8 @@ module bow_ddr_regs import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
                           RegCmd = 12'h00C, RegStatus = 12'h010, RegIrqEn = 12'h014,
                           RegLat = 12'h01C, RegPsTarget = 12'h030, RegPsNow = 12'h034,
                           RegWpsTarget = 12'h054, RegWpsNow = 12'h058, RegEmu = 12'h098,
-                          RegClkHz = 12'h09C, RegDbg = 12'h0B4, RegErrAddr = 12'h0B8;
+                          RegClkHz = 12'h09C, RegDbg = 12'h0B4, RegErrAddr = 12'h0B8,
+                          RegRgap = 12'h0BC;
 
   localparam int unsigned Lanes = DqBits / 8;
 
@@ -187,8 +212,14 @@ module bow_ddr_regs import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
                           SCapDone = 6, SCmdErr = 9, SRfifoErr = 10, SBusTimeout = 11,
                           SDbgErr = 12, SLink = 13, SPsErr = 14, SRfifoBroken = 15,
                           SInitDone = 16, SInitError = 17, SRdLate = 18, SRdExtra = 19,
-                          SNotReady = 20, SRange = 21, SCsrErr = 22, SBroken = 23;
-  localparam logic [23:0] W1cMask = 24'h7C_4E68;     // [22:18], [14], [11:9], [6:5], [3]
+                          SNotReady = 20, SRange = 21, SCsrErr = 22, SBroken = 23,
+                          SRefStarve = 24, SLockErr = 25;
+  localparam int unsigned SW = 26;                    // STATUS / IRQ_EN width
+  localparam logic [SW-1:0] W1cMask = 26'h37C_4E68;  // [25:24], [22:18], [14], [11:9], [6:5], [3]
+
+  // CTRL: the defined bits, REF_NORM (may still be cleared under LOCK)
+  localparam logic [15:0] CtrlBits = 16'hFCF1;
+  localparam logic [15:0] CtrlNorm = 16'h2000;
 
   // ------------------------------------------------------------ bus decode
   logic [11:0] a;
@@ -197,7 +228,7 @@ module bow_ddr_regs import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
   logic [31:0] rdata_d;          // current value of the addressed register
   logic [31:0] wm;               // ... merged with the written bytes
   logic [31:0] rd_q;
-  logic [23:0] status;
+  logic [SW-1:0] status;
 
   assign a   = {reg_req_i.addr[11:2], 2'b00};
   assign we  = reg_req_i.req &  reg_req_i.we;
@@ -211,14 +242,18 @@ module bow_ddr_regs import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
   logic [31:0] w_ctrl, w_lat;
   cfg_t        rcfg_q;           // CTRL and LAT as written
   logic        core_rst_q;       // CTRL.CORE_RST
+  logic        ref_norm_q;       // CTRL.REF_NORM
+  logic        ref_mon_q;        // CTRL.REF_MON
+  logic        lock_q;           // CTRL.LOCK
 
-  assign w_ctrl = {19'h0, core_rst_q, rcfg_q.ck_en, rcfg_q.odt_en, 2'b00, rcfg_q.ls_en,
-                   rcfg_q.idle_drive, rcfg_q.ddr3, rcfg_q.dm_en, 3'b000, rcfg_q.en};
+  assign w_ctrl = {16'h0, lock_q, ref_mon_q, ref_norm_q, core_rst_q, rcfg_q.ck_en, rcfg_q.odt_en,
+                   2'b00, rcfg_q.ls_en, rcfg_q.idle_drive, rcfg_q.ddr3, rcfg_q.dm_en, 3'b000,
+                   rcfg_q.en};
   assign w_lat  = {rcfg_q.oe_post, rcfg_q.rdir_tail, rcfg_q.rdir_lead, rcfg_q.oe_pre,
                    rcfg_q.rd_slip, rcfg_q.rd_dly, rcfg_q.wl, rcfg_q.rl};
 
   // ------------------------------------------------------ synchronisers
-  logic        ack_s, up_s, div_s, rfe_s, brk_s, capd_s, late_s, extra_s;
+  logic        ack_s, up_s, div_s, rfe_s, brk_s, capd_s, late_s, extra_s, rstv_s;
   logic        idone_s, ierr_s, cbusy_s;
   logic [31:0] dbg_s;
 
@@ -230,6 +265,7 @@ module bow_ddr_regs import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
   bow_sync u_sync_capd  (.clk_i, .rst_ni(lnk_ni), .d_i(cap_done_i),     .q_o(capd_s));
   bow_sync u_sync_late  (.clk_i, .rst_ni(lnk_ni), .d_i(rd_late_i),      .q_o(late_s));
   bow_sync u_sync_extra (.clk_i, .rst_ni(lnk_ni), .d_i(rd_extra_i),     .q_o(extra_s));
+  bow_sync u_sync_rstv  (.clk_i, .rst_ni(lnk_ni), .d_i(ref_starve_i),   .q_o(rstv_s));
   bow_sync u_sync_idone (.clk_i, .rst_ni(lnk_ni), .d_i(init_done_i),    .q_o(idone_s));
   bow_sync u_sync_ierr  (.clk_i, .rst_ni(lnk_ni), .d_i(init_error_i),   .q_o(ierr_s));
 
@@ -253,14 +289,15 @@ module bow_ddr_regs import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
   end
 
   // ------------------------------------------------- registers (sys_rst_n)
-  logic [23:0]      irq_en_q, w1c_q;
+  logic [SW-1:0]    irq_en_q, w1c_q;
   logic [15:0]      ps_tgt_q, wps_tgt_q;
   logic             inflight_q;
   logic [4:0][31:0] st_q;
+  logic [31:0]      st_rgap_q;
   logic [31:0]      wrd_q, wwr_q, wrmw_q;   // window counters
 
   // ----------------------------------------------- channel (link reset)
-  logic        req_q, pend_q, div_q, rfe_q, capd_q, late_q, extra_q;
+  logic        req_q, pend_q, div_q, rfe_q, capd_q, late_q, extra_q, rstv_q;
   logic [6:0]  wd_q;             // clk_i cycles since the ddr_clk / 8 toggle changed
   logic [2:0]  kind_q;
   cfg_t        stg_cfg_q;
@@ -337,8 +374,33 @@ module bow_ddr_regs import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
     endcase
   end
 
-  assign c_refuse = !c_known || !clk_ok || busy;
+  // LOCK: only SNAP / CLR_STATS (statistics) may still run
+  logic c_locked;
+  assign c_locked = lock_q && (c_kind != KSnap) && (c_kind != KClr);
+
+  assign c_refuse = !c_known || !clk_ok || busy || c_locked;
   assign c_launch = cmd_wr && !c_refuse;
+
+  // LOCK_ERR: a write under LOCK that would change the configuration (or a
+  // refused command); clearing REF_NORM stays allowed
+  logic lock_viol;
+  always_comb begin
+    lock_viol = 1'b0;
+    if (lock_q && we) begin
+      if (a == RegCtrl) begin
+        lock_viol = ((wm[15:0] & CtrlBits & ~CtrlNorm) != (w_ctrl[15:0] & CtrlBits & ~CtrlNorm)) ||
+                    (wm[13] && !ref_norm_q);
+      end else if (a == RegLat) begin
+        lock_viol = (wm != w_lat);
+      end else if (a == RegPsTarget) begin
+        lock_viol = (wm[15:0] != ps_tgt_q);
+      end else if (a == RegWpsTarget) begin
+        lock_viol = (wm[15:0] != wps_tgt_q);
+      end else if (a == RegCmd) begin
+        lock_viol = c_known && c_locked;
+      end
+    end
+  end
 
   // ------------------------------------------------------------ the channel
   always_ff @(posedge clk_i or negedge lnk_ni) begin
@@ -350,6 +412,7 @@ module bow_ddr_regs import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
       capd_q    <= 1'b0;
       late_q    <= 1'b0;
       extra_q   <= 1'b0;
+      rstv_q    <= 1'b0;
       wd_q      <= 7'd64;
       kind_q    <= KApply;
       stg_cfg_q <= CFG_RESET;
@@ -366,6 +429,7 @@ module bow_ddr_regs import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
       capd_q  <= capd_s;
       late_q  <= late_s;
       extra_q <= extra_s;
+      rstv_q  <= rstv_s;
       if (div_s != div_q)     wd_q <= '0;
       else if (wd_q != 7'd64) wd_q <= wd_q + 7'd1;
 
@@ -391,12 +455,12 @@ module bow_ddr_regs import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
   end
 
   // --------------------------------------------------- status and results
-  logic [23:0] st_set, st_clr;
-  logic        abort;
+  logic [SW-1:0] st_set, st_clr;
+  logic          abort;
 
   // a command pending when the link went down is lost
   assign abort  = inflight_q && !pending && !ack_evt;
-  assign st_clr = (we && a == RegStatus) ? wdm[23:0] : 24'h0;
+  assign st_clr = (we && a == RegStatus) ? wdm[SW-1:0] : '0;
 
   always_comb begin
     st_set              = '0;
@@ -409,6 +473,8 @@ module bow_ddr_regs import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
     st_set[SNotReady]   = win_not_ready_i;
     st_set[SRange]      = win_range_i;
     st_set[SCsrErr]     = csr_err_i;
+    st_set[SRefStarve]  = (rstv_s != rstv_q);
+    st_set[SLockErr]    = lock_viol || csr_lock_err_i;
     if (ack_evt) begin
       unique case (kind_q)
         KApply: begin
@@ -435,19 +501,23 @@ module bow_ddr_regs import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
     if (!rst_ni) begin
       rcfg_q     <= CFG_RESET;
       core_rst_q <= 1'b0;
+      ref_norm_q <= 1'b0;
+      ref_mon_q  <= 1'b0;
+      lock_q     <= 1'b0;
       irq_en_q   <= '0;
       w1c_q      <= '0;
       ps_tgt_q   <= '0;
       wps_tgt_q  <= '0;
       inflight_q <= 1'b0;
       st_q       <= '0;
+      st_rgap_q  <= '0;
       wrd_q      <= '0;
       wwr_q      <= '0;
       wrmw_q     <= '0;
     end else begin
       // software writes (wm = the addressed register merged with the written bytes)
       if (we) begin
-        if (a == RegCtrl) begin
+        if (a == RegCtrl && !lock_q) begin
           rcfg_q.en         <= wm[0];
           rcfg_q.dm_en      <= wm[4];
           rcfg_q.ddr3       <= wm[5];
@@ -456,14 +526,19 @@ module bow_ddr_regs import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
           rcfg_q.odt_en     <= wm[10];
           rcfg_q.ck_en      <= wm[11];
           core_rst_q        <= wm[12];
+          ref_norm_q        <= wm[13];
+          ref_mon_q         <= wm[14];
+          lock_q            <= wm[15];
+        end else if (a == RegCtrl) begin
+          ref_norm_q        <= ref_norm_q & wm[13];   // LOCK: only towards 3.9 us
         end
-        if (a == RegLat) begin
+        if (a == RegLat && !lock_q) begin
           {rcfg_q.oe_post, rcfg_q.rdir_tail, rcfg_q.rdir_lead, rcfg_q.oe_pre, rcfg_q.rd_slip,
            rcfg_q.rd_dly, rcfg_q.wl, rcfg_q.rl} <= wm;
         end
-        if (a == RegIrqEn)     irq_en_q  <= wm[23:0] & W1cMask;
-        if (a == RegPsTarget)  ps_tgt_q  <= wm[15:0];
-        if (a == RegWpsTarget) wps_tgt_q <= wm[15:0];
+        if (a == RegIrqEn)                 irq_en_q  <= wm[SW-1:0] & W1cMask;
+        if (a == RegPsTarget  && !lock_q)  ps_tgt_q  <= wm[15:0];
+        if (a == RegWpsTarget && !lock_q)  wps_tgt_q <= wm[15:0];
       end
 
       if (c_launch)                inflight_q <= 1'b1;
@@ -484,8 +559,14 @@ module bow_ddr_regs import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
       end
 
       // statistics snapshot
-      if (ack_evt && kind_q == KSnap) st_q <= {wrmw_q, res_st_i[1], res_st_i[0], wwr_q, wrd_q};
-      if (clr_stats)                  st_q <= '0;
+      if (ack_evt && kind_q == KSnap) begin
+        st_q      <= {wrmw_q, res_st_i[1], res_st_i[0], wwr_q, wrd_q};
+        st_rgap_q <= res_st_i[2];
+      end
+      if (clr_stats) begin
+        st_q      <= '0;
+        st_rgap_q <= '0;
+      end
     end
   end
 
@@ -523,8 +604,8 @@ module bow_ddr_regs import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
         RegId:        rdata_d = IdValue;
         RegInfo:      rdata_d = InfoValue;
         RegCtrl:      rdata_d = w_ctrl;
-        RegStatus:    rdata_d = {8'h0, status};
-        RegIrqEn:     rdata_d = {8'h0, irq_en_q};
+        RegStatus:    rdata_d = {6'h0, status};
+        RegIrqEn:     rdata_d = {6'h0, irq_en_q};
         RegLat:       rdata_d = w_lat;
         RegPsTarget:  rdata_d = {16'h0, ps_tgt_q};
         RegPsNow:     rdata_d = {16'(PsSteps), ps_now_q};
@@ -535,6 +616,7 @@ module bow_ddr_regs import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
         12'h0B0:      rdata_d = st_q[4];
         RegDbg:       rdata_d = dbg_s;
         RegErrAddr:   rdata_d = win_err_addr_i;
+        RegRgap:      rdata_d = st_rgap_q;
         default:      rdata_d = '0;
       endcase
     end
@@ -561,6 +643,9 @@ module bow_ddr_regs import bow_bus_pkg::*; import bow_ddr_pkg::*; #(
   assign abort_o      = !clk_ok || core_rst_q;
   assign clk_lost_o   = !clk_ok;
   assign core_rst_o   = core_rst_q;
+  assign ref_norm_o   = ref_norm_q;
+  assign ref_mon_o    = ref_mon_q;
+  assign wlock_o      = lock_q;
   assign masked_o     = HasDm && app_dm_q;
   assign cmd_req_o    = req_q;
   assign cmd_kind_o   = kind_q;

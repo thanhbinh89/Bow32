@@ -18,5 +18,5 @@ package litedram_ddr2_pkg;
   localparam int unsigned Cl           = 3;
   localparam int unsigned Cwl          = 2;
   localparam int unsigned CkHz         = 133333333;
-  localparam int unsigned TRefi        = 259;
+  localparam int unsigned TRefi        = 129;
 endpackage

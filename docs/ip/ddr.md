@@ -25,7 +25,8 @@ DDR2/DDR3 từ RTL tới FPGA, ưu tiên bo RAM mở rộng
 | `sw/apps/ddr`, `tools/bow32_ddr.py` | ứng dụng thử nghiệm và công cụ trên PC |
 
 Đánh giá bo RAM và lý do chọn kiến trúc: [../ddr_board_review.md](../ddr_board_review.md);
-chạy trên MPS4: [../ddr_mps4.md](../ddr_mps4.md).
+chạy trên MPS4: [../ddr_mps4.md](../ddr_mps4.md); khoảng cách tới mục tiêu công nghiệp và
+SoC camera AI: [../ddr_review_industrial_ai.md](../ddr_review_industrial_ai.md).
 
 | Thông số | Giá trị |
 |----------|---------|
@@ -90,8 +91,9 @@ word native, dung lượng, `read_latency`/`write_latency`, CL/CWL, CK và tREFI
 tổng hợp Vivado dừng; thêm một bản trong `initial` dừng mô phỏng ở thời điểm 0 khi build bỏ qua
 lỗi đó, như `-Wno-fatal` của Verilator) khi lõi không khớp PHY (ví dụ
 `write_latency` ≠ 0) hoặc `ClkHz` không hợp với lõi. Timing của lõi tính theo chu kỳ
-controller: CK chậm hơn chỉ làm dài các khoảng chờ, trừ tREFI (khoảng giữa hai REF phải
-≤ 7,8 µs: lõi DDR2 cần CK ≥ 132,8 MHz); CK nhanh hơn làm ngắn chúng: tối đa +1 %. `make
+controller: CK chậm hơn chỉ làm dài các khoảng chờ, trừ tREFI (khoảng giữa hai REF của lõi
+phải ≤ 3,9 µs, `REF_NORM` nhân đôi thành ≤ 7,8 µs: lõi DDR2 cần CK ≥ 132,31 MHz, lõi DDR3
+CK ≥ 124,11 MHz); CK nhanh hơn làm ngắn chúng: tối đa +1 %. `make
 lint` elaborate cả hai lõi ở đúng CK, và hai cấu hình sai (DDR2 ở 132 MHz, lõi DDR3 ở
 133 MHz) phải bị từ chối.
 
@@ -100,8 +102,14 @@ Ba chỗ bộ sinh khác cấu hình mặc định của LiteDRAM:
 * **Không auto-precharge**: hàng được đóng bằng PRE riêng (A10 = 0 trên RD/WR). Emulator và
   mô hình DRAM của Bow32 không mô phỏng RDA/WRA; chỉ tốn chút băng thông khi truy cập ngẫu
   nhiên.
-* **tREFI làm tròn xuống** (≤ 7,8 µs: DDR2 259 chu kỳ = 7,77 µs, DDR3 243 chu kỳ = 7,78 µs), các thời gian khác
-  làm tròn lên như LiteDRAM: tREFI là giới hạn trên, làm tròn lên sẽ vượt datasheet.
+* **tREFI = `trefi_ns` của cấu hình, làm tròn xuống**: cả `ddr2.yml` và `ddr3.yml` đặt
+  3900 ns, tốc độ refresh JEDEC khi nhiệt độ vỏ DRAM (Tc) 85..95 °C. DDR2 129 chu kỳ =
+  3,87 µs, DDR3 121 chu kỳ = 3,872 µs. Bộ đếm refresh của LiteDRAM được thay bằng một bộ có
+  thêm chu kỳ thứ hai: chân `ref_norm` của lõi (`CTRL.REF_NORM`) cho nó nạp 2 × tREFI, tức
+  7,74 µs khi Tc ≤ 85 °C (mục [Refresh](#refresh-giám-sát-refresh-và-khoá-cấu-hình)). Đây là
+  thay đổi duy nhất trong logic của lõi so với LiteDRAM.
+  Các thời gian khác làm tròn lên như LiteDRAM: tREFI là giới hạn trên, làm tròn lên sẽ vượt
+  datasheet.
 * **Cổng native không bị chặn trong lõi** theo `init_done`/`init_error`: cửa sổ đã từ chối
   truy cập mới khi chưa `READY`; một truy cập đang chạy (kể cả RMW) luôn được làm xong khi
   firmware xoá `init_done` để vào chế độ DFII.
@@ -340,13 +348,51 @@ không, cửa sổ bị chặn tới lần `cal` sau.
 
 Ở chế độ phần mềm (DFII) **không có refresh**: sau khi DRAM đã khởi tạo, firmware chỉ rời
 chế độ phần cứng trong những đoạn ngắn (PREA + REF, vài lệnh, đóng bank, trả lại; khoảng
-11 µs, không in gì bên trong). Emulator và mô hình DRAM báo `REF_STARVE` nếu quá 9 × tREFI
-(70 µs) không có REF. Sau RD bằng DFII phải chờ khoảng 1 µs rồi mới đọc `pi<n>_rddata`.
+11 µs, không in gì bên trong). Trong mỗi đoạn, firmware tắt `REF_MON` rồi bật lại khi xong:
+không có refresh để giám sát.
+Emulator và mô hình DRAM báo `REF_STARVE` khi quá 9 × tREFI (70 µs ở 7,8 µs) không có REF,
+hoặc khi nợ quá 8 REF so với lịch tREFI. Sau RD bằng DFII phải chờ khoảng 1 µs rồi mới đọc `pi<n>_rddata`.
 
 `CORE_RST` (khi cầu chết): lõi trở lại chế độ phần cứng với `init_done = 0`, DRAM vẫn giữ
 khởi tạo. Bàn giao lại: `dfii_control = CKE | ODT | RESET_N` (không bao giờ ghi 0 sau khi đã
 khởi tạo: CKE thấp nghĩa là phải khởi tạo DDR2 lại), PREA, `SEL | CKE | ODT | RESET_N`,
-`init_done = 1`. Giữ `CORE_RST` ngắn vì trong lúc đó không có refresh.
+`init_done = 1`. Giữ `CORE_RST` ngắn vì trong lúc đó không có refresh (`bow_ddr_core_reset`
+tắt `REF_MON` cùng lúc).
+
+## Refresh, giám sát refresh và khoá cấu hình
+
+Ba tính năng cho mục tiêu công nghiệp (giai đoạn P0 của
+[../ddr_review_industrial_ai.md](../ddr_review_industrial_ai.md)). Cả ba bit `CTRL` dưới
+đây tác dụng ngay, không qua `APPLY`.
+
+* **Tốc độ refresh theo nhiệt độ (`CTRL.REF_NORM`).** Mặc định `REF_NORM = 0`: lõi LiteDRAM
+  refresh mỗi 3,87 µs, tốc độ JEDEC khi Tc 85..95 °C. `REF_NORM = 1`: bộ đếm refresh của lõi
+  nạp 2 × tREFI, refresh mỗi 7,74 µs, chỉ dùng khi Tc ≤ 85 °C. Bit đi qua bộ đồng bộ vào miền
+  `ddr_sys_clk` và có hiệu lực từ lần nạp lại kế tiếp (chậm nhất sau một khoảng refresh). Mỗi
+  lần refresh, LiteDRAM phải xả hàng đợi, PREA, chờ tRFC rồi mở lại hàng (khoảng 20 chu kỳ
+  controller), nên mặc định an toàn tốn băng thông: xem [Giới hạn](#giới-hạn). Firmware:
+  `bow_ld_set_refresh_norm()` (chính sách, mặc định 3,9 µs), `bow_ddr_set_refresh()`; ứng dụng
+  `ddr`: `refresh 3.9|7.8`.
+* **Giám sát refresh (`CTRL.REF_MON`).** Khi bật, `bow_ddr_dfi` đếm chu kỳ CK từ REF cuối cùng
+  tới PHY. Quá 8 lần khoảng cách mong đợi (8 × 4 × `TRefi` CK, gấp đôi khi `REF_NORM`; 31 µs
+  hoặc 62 µs): `STATUS.REF_STARVE` (W1C, ngắt qua `IRQ_EN`), tức đã lỡ 8 REF, trước giới hạn
+  JEDEC một REF. Khoảng cách dài nhất khi bật nằm ở `ST_RGAP` (chụp bằng `SNAP`, xoá bằng
+  `CLR_STATS`). Tắt bit thì bộ đếm dừng và về 0. `bow_ld_handover` bật nó; firmware tắt nó
+  trong các đoạn DFII, khi dừng DRAM và khi `CORE_RST`. Giới hạn theo `REF_NORM` hiện tại:
+  ngay sau khi xoá `REF_NORM`, khoảng 7,74 µs đang dở vẫn được đo với giới hạn 31 µs. Nó bắt được: firmware để quên DFII ở
+  chế độ phần mềm, `CORE_RST` kéo dài, refresher của lõi hỏng.
+* **Khoá cấu hình (`CTRL.LOCK`).** Ghi 1 sau khi bàn giao; chỉ reset SoC mới xoá. Khi khoá:
+  ghi `CTRL` bị bỏ qua (trừ xoá `REF_NORM`, về phía an toàn), `LAT`, `PS_TARGET`,
+  `WPS_TARGET` bị bỏ qua; `CMD` chỉ còn nhận `SNAP` và `CLR_STATS` (lệnh khác: `CMD_ERR`);
+  mọi lần ghi CSR của LiteDRAM bị từ chối (lỗi bus, `CSR_ERR`), đọc vẫn được. Mỗi thay đổi
+  bị từ chối đặt `STATUS.LOCK_ERR` (ghi lại đúng giá trị đang có thì không). Cửa sổ bộ nhớ,
+  `IRQ_EN` và các bit W1C vẫn dùng được. Sau khi khoá không còn hiệu chỉnh lại, BIST hay
+  `CORE_RST` được: một cầu `BROKEN` chỉ hồi phục bằng reset SoC. Firmware: `bow_ddr_lock()`;
+  ứng dụng `ddr`: `lock`.
+
+Telemetry: sau `cal`/`calw`, firmware in `ddr: telemetry: read eye | write range W of S steps
+(P % of CK)`, kèm `WARNING` khi dưới 25 % chu kỳ (`BOW_LD_EYE_WARN_PCT`, tiêu chí biên của
+bản review); `info` in thêm độ rộng mắt đọc theo % CK.
 
 ## Bản đồ thanh ghi PHY/cầu (`0x4000_E000`)
 
@@ -356,9 +402,9 @@ Offset của v1 được giữ khi ý nghĩa không đổi.
 |-------:|-----|:--:|-------|
 | 0x000 | `ID` | R | `0x44445202` ("DDR", phiên bản 2: controller LiteDRAM) |
 | 0x004 | `INFO` | R | [4:0] độ rộng DQ, [6:5] số lane − 1, [10:7] số chân địa chỉ − 1, [12:11] số chân bank − 1, [13] có DM, [15:14] loại PHY (1 chân thật, 2 emulator loopback), [23:16] MHz, [24] DdrEn, [25] có RESET#, [26] lõi DDR3, [31:27] read latency của DFI (12) |
-| 0x008 | `CTRL` | RW | [0] EN, [4] DM_EN, [5] DDR3, [6] IDLE_DRIVE, [7] LS_EN, [10] ODT_EN, [11] CK_EN, [12] CORE_RST. Reset `0x40`. CORE_RST tác dụng ngay; các bit khác qua APPLY |
+| 0x008 | `CTRL` | RW | [0] EN, [4] DM_EN, [5] DDR3, [6] IDLE_DRIVE, [7] LS_EN, [10] ODT_EN, [11] CK_EN, [12] CORE_RST, [13] REF_NORM, [14] REF_MON, [15] LOCK. Reset `0x40`. CORE_RST, REF_NORM, REF_MON, LOCK tác dụng ngay; các bit khác qua APPLY |
 | 0x00C | `CMD` | W | đúng một bit mỗi lần ghi: [0] APPLY, [1] PS_GO, [4] RFIFO_SYNC, [5] SNAP, [6] CLR_STATS, [7] WPS_GO, [8] CAP_ARM |
-| 0x010 | `STATUS` | R/W1C | [0] BUSY, [1] READY, [2] CLK_OK, [3] APPLIED, [5] PS_DONE, [6] CAP_DONE, [9] CMD_ERR, [10] RFIFO_ERR, [11] BUS_TIMEOUT, [12] DBG_ERR, [13] LINK, [14] PS_ERR, [15] RFIFO_BROKEN, [16] INIT_DONE, [17] INIT_ERROR, [18] RD_LATE, [19] RD_EXTRA, [20] NOT_READY, [21] RANGE, [22] CSR_ERR, [23] BROKEN. Bit chỉ đọc: 0, 1, 2, 12, 13, 15, 16, 17, 23 |
+| 0x010 | `STATUS` | R/W1C | [0] BUSY, [1] READY, [2] CLK_OK, [3] APPLIED, [5] PS_DONE, [6] CAP_DONE, [9] CMD_ERR, [10] RFIFO_ERR, [11] BUS_TIMEOUT, [12] DBG_ERR, [13] LINK, [14] PS_ERR, [15] RFIFO_BROKEN, [16] INIT_DONE, [17] INIT_ERROR, [18] RD_LATE, [19] RD_EXTRA, [20] NOT_READY, [21] RANGE, [22] CSR_ERR, [23] BROKEN, [24] REF_STARVE, [25] LOCK_ERR. Bit chỉ đọc: 0, 1, 2, 12, 13, 15, 16, 17, 23 |
 | 0x014 | `IRQ_EN` | RW | các bit W1C của `STATUS`: `irq = \|(STATUS & IRQ_EN)` |
 | 0x01C | `LAT` | RW | [5:0] RL, [11:6] WL, [16:12] RD_DLY, [17] RD_SLIP, [19:18] OE_PRE, [23:20] RDIR_LEAD, [27:24] RDIR_TAIL, [31:28] OE_POST. Reset `0x22240083` (bo RAM) |
 | 0x030 | `PS_TARGET` | RW | pha đọc mong muốn (có dấu, bước MMCM) |
@@ -370,6 +416,7 @@ Offset của v1 được giữ khi ý nghĩa không đổi.
 | 0x0A0..0x0B0 | `ST_RD`, `ST_WR`, `ST_ACT`, `ST_REF`, `ST_RMW` | R | thống kê (chụp bằng `SNAP`): đọc/ghi native của cửa sổ, ACT/REF ra DRAM, số lần RMW |
 | 0x0B4 | `DBG` | R | trạng thái của board (emulator: {lỗi, init xong, mã lỗi, số lỗi}), từng bit qua bộ đồng bộ: đọc hai lần nếu cần số lỗi chính xác |
 | 0x0B8 | `ERR_ADDR` | R | địa chỉ bus của truy cập cửa sổ lỗi gần nhất |
+| 0x0BC | `ST_RGAP` | R | khoảng cách REF dài nhất khi `REF_MON` = 1, tính bằng chu kỳ CK − 1 (chụp bằng `SNAP`) |
 | 0x100..0x17C | `CAP[0..31]` | R | chụp thô DQ: x8 [7:0] cạnh lên, [15:8] cạnh xuống |
 | 0x180..0x1FC | `CAPS[0..31]` | R | chụp thô DQS |
 
@@ -387,6 +434,8 @@ Offset của v1 được giữ khi ý nghĩa không đổi.
 * `APPLY` chờ PHY rảnh (tối đa 4096 CK) rồi chép `CTRL`/`LAT`; không rảnh → `CMD_ERR`. Dùng
   khi đang ở chế độ phần mềm hoặc không có truy cập.
 * `CAP_ARM`: RD kế tiếp tới PHY sẽ chụp thô 32 chu kỳ, xong thì `CAP_DONE`.
+* `REF_STARVE` (bộ giám sát refresh) và `LOCK_ERR` (thay đổi bị `LOCK` từ chối): xem mục
+  [Refresh](#refresh-giám-sát-refresh-và-khoá-cấu-hình).
 
 ## Lập trình
 
@@ -399,6 +448,9 @@ if (!bow_ddr_probe(&info)) return;    // không có IP, hoặc stub (DdrEn = 0)
 bow_ddr_config_for(&info, &cfg);      // bo RAM DDR2 / DDR3 DLL-off
 if (!bow_ld_init(&cfg, true)) return; // bật nguồn, JEDEC init, refresh
 if (!bow_ld_calibrate(4, true, &cal)) return;   // mắt đọc, RD_DLY, bàn giao, BIST
+// bàn giao xong: refresh 3,9 µs, bộ giám sát refresh bật
+bow_ld_set_refresh_norm(true);        // 7,8 µs, chỉ khi Tc ≤ 85 °C
+bow_ddr_lock();                       // tuỳ chọn: khoá cấu hình tới lần reset sau
 volatile uint32_t *ddr = (volatile uint32_t *)BOW32_DDR_BASE;
 ddr[0] = 0x12345678u;                 // CPU truy cập trực tiếp qua cửa sổ
 ```
@@ -407,7 +459,11 @@ ddr[0] = 0x12345678u;                 // CPU truy cập trực tiếp qua cửa 
 
 `bow_ddr_dev` là thiết bị DDR2/DDR3 theo chu kỳ, tổng hợp được: giải mã MRS (CL/AL/CWL/BL/DLL),
 theo dõi bank, kiểm tra trình tự khởi tạo (chấp nhận EMRS2/EMRS3 theo cả hai thứ tự vì
-LiteDRAM gửi EMRS3 trước), mọi timer JEDEC, refresh quá hạn. Trong mô phỏng nó nằm trong
+LiteDRAM gửi EMRS3 trước), mọi timer JEDEC, và refresh quá hạn (`REF_STARVE`): quá 9 × tREFI
+không có REF, hoặc nợ quá 8 REF (mỗi tREFI một REF đến hạn, mỗi REF trả một, được trả trước
+tối đa 8: tREFI là khoảng trung bình). Đầu vào `hot_i`
+chọn tREFI / 2 (Tc 85..95 °C): bản loopback buộc 0, testbench dùng nó để kiểm tra chế độ
+nóng. Trong mô phỏng nó nằm trong
 `ddr_mem_model` (chân, level shifter, tDQSS, preamble/postamble, setup/hold). Trên FPGA,
 `bow_ddr_lb` nối nó ngay sau PHY (bản loopback, 4 MiB UltraRAM); lỗi đọc được ở `DBG`.
 
@@ -423,8 +479,14 @@ LiteDRAM gửi EMRS3 trước), mọi timer JEDEC, refresh quá hạn. Trong mô
   DFI báo lỗi mọi RD/WR có A10 = 1 (auto-precharge). Thêm `rst` (`tb_bow_ddr_rst.sv`): xung
   `CORE_RST` ngắn (cả khi đọc CSR ngay trong chu kỳ nhả), `CORE_RST` giữa lúc ghi byte, reset
   SoC giữa lúc bước pha, xoá `init_done` khi đang có truy cập cửa sổ, clock DDR ngừng (MMCM
-  vẫn lock) khi đang truy cập → `BUS_TIMEOUT` + `BROKEN`.
-* `make run TEST=ddr` (trong `make test`): ứng dụng `ddr` chạy `test quick` (18 mục) trên CPU
+  vẫn lock) khi đang truy cập → `BUS_TIMEOUT` + `BROKEN`, `LOCK` được reset SoC xoá.
+  Bước 10 của testbench: tần suất REF đo bằng `ST_REF` với `REF_NORM` 0 / 1, `ST_RGAP`,
+  `REF_STARVE` và ngắt khi tắt refresh bằng DFII, mô hình DRAM ở chế độ nóng (nợ REF tăng
+  khi `REF_NORM` = 1), toàn bộ hành vi `LOCK`.
+* `make -C hw/ip/ddr/dv regress NSEEDS=100`: mọi cấu hình với seed 1..100 (độ trễ bo, mô
+  hình DRAM, truy cập ngẫu nhiên rút theo seed) và `rst`; GitHub Actions chạy 25 seed mỗi
+  đêm (`.github/workflows/ddr-nightly.yml`).
+* `make run TEST=ddr` (trong `make test`): ứng dụng `ddr` chạy `test quick` (21 mục) trên CPU
   với emulator loopback.
 * `make test-fpga-dv`: xsim với UNISIM cho chân và clock (cả `ddr_sys_clk`).
 * `make litedram-check`: lõi trong repo đúng là lõi sinh từ cấu hình.
@@ -439,6 +501,11 @@ LiteDRAM gửi EMRS3 trước), mọi timer JEDEC, refresh quá hạn. Trong mô
 * Hiệu chỉnh đọc dùng một pha chung cho mọi bit DQ.
 * Lõi LiteDRAM làm tròn lên mọi thời gian theo chu kỳ controller (30 ns ở DDR2), trừ tREFI
   (làm tròn xuống).
+* Refresh mặc định 3,9 µs (an toàn tới Tc 95 °C) tốn băng thông: trên MPS4 BIST ghi / đọc
+  213,7 / 213,7 MB/s, so với 233,5 / 226,4 MB/s ở 7,8 µs (`REF_NORM`), tức chậm 8,5 % /
+  5,6 %, vì mỗi lần refresh LiteDRAM mất khoảng 20 chu kỳ controller. Chọn `REF_NORM` theo
+  nhiệt độ của sản phẩm (FPGA chưa đọc nhiệt độ DRAM).
+* Đoạn DFII (hiệu chỉnh, quét mắt) dài tới 50 µs: ở Tc > 85 °C nên giữ dưới 31 µs (8 × 3,9 µs).
 
 ## Bài tập mở rộng
 

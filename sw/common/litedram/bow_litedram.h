@@ -24,10 +24,13 @@
  * the four pi<n>_wrdata / pi<n>_rddata registers (phase n carries bytes
  * n * W / 4 .. (n + 1) * W / 4 - 1 of the native word of W bytes, little
  * endian), and nothing refreshes the DRAM: the DRAM emulator and the DV
- * model flag REF_STARVE after 9 x tREFI (70 us). So once the DRAM is
+ * model flag REF_STARVE after 9 x tREFI without a REF (70 us at 7.8 us) or
+ * with more than 8 REF owed on average. So once the DRAM is
  * initialised the glue works in short software sections (PREA + REF, a few
  * commands with the bank closed again at the end, back to hardware control;
- * no print inside); bow_ld_sw_max_us() reports the longest one. After the
+ * no print inside); bow_ld_sw_max_us() reports the longest one. A section
+ * turns CTRL.REF_MON (refresh monitor) off and back on at its end: no
+ * refresh to watch. After the
  * hand-over the controller's bank machines may hold rows open: a section
  * then needs bow_ld_quiesce() first (init_done = 0, wait until a refresh
  * closed them), bow_ld_release() afterwards.
@@ -169,6 +172,22 @@ bool bow_ld_handover(bool ok);
 void bow_ld_quiesce(bool *was_ready);
 bool bow_ld_release(bool was_ready);
 
+/* -------------------------------------------------------------- refresh */
+/* Refresh rate after the hand-over: false (default) = 3.9 us (DRAM case
+ * temperature up to 95 C); true = CTRL.REF_NORM, 7.8 us (Tc <= 85 C only,
+ * and only half the refresh time of the controller). bow_ld_handover turns
+ * the refresh monitor (REF_MON) on with this rate; applied at once when the
+ * memory is READY. */
+void bow_ld_set_refresh_norm(bool norm);
+bool bow_ld_refresh_norm(void);
+/* Test of the refresh monitor: the window blocked and the rows closed
+ * (bow_ld_quiesce), DFII software control with REF_MON left as it is, so no
+ * refresh until STATUS.REF_STARVE or max_us; then hardware control again
+ * (and the hand-over when the memory was READY). starve_us: the time
+ * without refresh from the switch. True when REF_STARVE came. Keep max_us
+ * below 62 us (8 REF at 7.8 us, the most a DRAM at Tc <= 85 C may miss). */
+bool bow_ld_refresh_pause(uint32_t max_us, uint32_t *starve_us);
+
 /* ---------------------------------------------------------- calibration */
 typedef struct {
   uint32_t step, npts, good;   /* sweep step, points, points with the pattern */
@@ -211,6 +230,14 @@ bool bow_ld_eye(uint32_t step, bool verbose, bow_ld_cal_t *res);
  * failed bow_ld_calibrate; res->wphase = the write phase left). Not for the
  * loopback emulator (the write phase moves its read eye too). */
 bool bow_ld_cal_write(uint32_t step, bool verbose, bow_ld_cal_t *res);
+
+/* Telemetry: an eye width (fine steps, steps per CK) in percent of a CK
+ * period. With verbose, bow_ld_calibrate / bow_ld_cal_write print "ddr:
+ * telemetry: read eye | write range W of S steps (P % of CK)", with ",
+ * WARNING: below 25 %" under BOW_LD_EYE_WARN_PCT (the margin of the
+ * industrial target, docs/ddr_review_industrial_ai.md). */
+#define BOW_LD_EYE_WARN_PCT 25u
+uint32_t bow_ld_pct_of_ck(uint32_t width, uint32_t steps);
 
 /* Eye of a sweep: map[i] = beat offset of the pattern at phase i * step
  * (-1: absent), n points, steps per CK. Sets width, and with an eye of at

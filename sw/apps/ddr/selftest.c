@@ -12,24 +12,27 @@
  * Window regions: the test region C (the DRAM, cut to the emulator storage)
  * is cut in 16 parts, part n at n * C / 16 (1 walk + bytes, 2 address, 3
  * random, 4 data kept over an eye sweep, 5 BIST, 6 BIST data / errors, 7
- * unused, 8 retention).
+ * March C- and the data kept over a refresh pause, 8 retention).
  */
 #include "ddr_app.h"
 
-#define NUM_CHECKS 18u
+#define NUM_CHECKS 21u
 #define SW_MAX_US  50u   /* longest DFII software section (the DRAM models flag 70 us) */
+#define PAUSE_US   50u   /* refresh pause of the monitor check (REF_STARVE at 8 x 3.9 us) */
 
 typedef struct {
   uint32_t cal_step, eye_step, bytes, addr, rand, bist, twin, eye_data, ret, ret_ms, samples;
+  uint32_t march, ref_us;
 } plan_t;
 
 static const plan_t plan_quick = {
     .cal_step = 8, .eye_step = 24, .bytes = 256, .addr = 1024, .rand = 1024, .bist = 512,
-    .twin = 512, .eye_data = 256, .ret = 1024, .ret_ms = 2, .samples = 4};
+    .twin = 512, .eye_data = 256, .ret = 1024, .ret_ms = 2, .samples = 4, .march = 1024,
+    .ref_us = 200};
 static const plan_t plan_full = {
     .cal_step = 2, .eye_step = 6, .bytes = 4096, .addr = 256u << 10, .rand = 1u << 20,
     .bist = 0 /* whole test region */, .twin = 8192, .eye_data = 4096, .ret = 64u << 10,
-    .ret_ms = 1000, .samples = 28};
+    .ret_ms = 1000, .samples = 28, .march = 64u << 10, .ref_us = 2000};
 
 static unsigned checks, failures;
 static uint32_t rng_state, seed0;
@@ -385,7 +388,8 @@ static bool t_bist_err(void) {
 }
 
 /* REF interval of a core in ns: its TRefi controller cycles of CK / 4
- * (DDR2 259 x 30 ns = 7770 ns, DDR3 243 x 32 ns = 7776 ns) */
+ * (DDR2 129 x 30 ns = 3870 ns, DDR3 121 x 32 ns = 3872 ns); CTRL.REF_NORM
+ * doubles the interval at the DRAM */
 static uint32_t trefi_ns(const bow_ld_core_t *k) {
   uint64_t hz = app.info.clk_hz ? app.info.clk_hz : 1u;
   uint64_t ns = ((uint64_t)k->trefi_cycles * 4000000000u + hz / 2u) / hz;
@@ -406,12 +410,99 @@ static bool t_retention(void) {
   ok = bow_ddr_stats(&s, false) && ok;
   ok = mt_ok(mt_check(region(8), len, seed0 + 6u, &r), &r) && ok;
   const bow_ld_core_t *k = bow_ld_core(&app.info);
-  uint32_t trefi = trefi_ns(k), want = (uint32_t)((uint64_t)us * 1000u / trefi);
+  uint32_t trefi = trefi_ns(k) * ((BOW_DDR_RD(CTRL) & DDR_CTRL_REF_NORM) ? 2u : 1u);
+  uint32_t want = (uint32_t)((uint64_t)us * 1000u / trefi);
   if (s.ref < want - want / 4u || s.ref > want + want / 4u + 9u) {
     ok = detail("%u REF in %u us, expected about %u (tREFI %u ns = %u cycles of the %s core)", s.ref,
                 us, want, trefi, k->trefi_cycles, k->name);
   }
   return ok;
+}
+
+/* REF rate at the DRAM with REF_NORM = 0 (every REF of the core, 3.9 us)
+ * and 1 (every second one, 7.8 us), and the longest REF interval of the
+ * refresh monitor (on since the hand-over); the policy is restored. */
+static bool t_refresh(void) {
+  bool ok = true;
+  bow_ddr_stats_t s;
+  if (!ready()) return false;
+  const bow_ld_core_t *k = bow_ld_core(&app.info);
+  bool norm0 = bow_ld_refresh_norm();
+  if (!(BOW_DDR_RD(CTRL) & DDR_CTRL_REF_MON)) {
+    ok = detail("refresh monitor off after the hand-over (CTRL %08x)", BOW_DDR_RD(CTRL));
+  }
+  for (uint32_t norm = 0; norm < 2u; norm++) {
+    uint32_t iv = trefi_ns(k) * (norm + 1u);
+    bow_ld_set_refresh_norm(norm != 0u);
+    bow_delay_us(4u * trefi_ns(k) / 1000u + 1u); /* the new period starts at the next REF */
+    /* the REFs between CLR_STATS and SNAP: at least those of the inner
+     * window [t0, t1], at most those of the outer one (the commands take
+     * their time, more so when the code runs from flash) */
+    uint32_t a = bow_cycles();
+    ok = bow_ddr_cmd(DDR_CMD_CLR_STATS) && ok;
+    uint32_t t0 = bow_cycles();
+    bow_delay_us(pl.ref_us);
+    uint32_t t1 = bow_cycles();
+    ok = bow_ddr_stats(&s, false) && ok;
+    uint32_t b = bow_cycles(), mhz = bow_clk_hz() / 1000000u;
+    uint32_t in_us = (t1 - t0) / mhz, out_us = (b - a) / mhz + 1u;
+    uint32_t lo = in_us * 1000u / iv, hi = out_us * 1000u / iv + 1u;
+    uint32_t ck = 4u * k->trefi_cycles * (norm + 1u);
+    if (s.ref + 1u < lo || s.ref > hi) {
+      ok = detail("REF_NORM %u: %u REF in %u .. %u us, expected %u .. %u (one per %u ns)", norm,
+                  s.ref, in_us, out_us, lo - 1u, hi, iv);
+    }
+    if (s.rgap + 1u + 8u < ck || s.rgap + 1u > ck + 64u) {
+      ok = detail("REF_NORM %u: longest REF interval %u CK, expected %u", norm, s.rgap + 1u, ck);
+    }
+  }
+  bow_ld_set_refresh_norm(norm0);
+  if (BOW_DDR_RD(STATUS) & DDR_ST_REF_STARVE) ok = detail("REF_STARVE with the refresh running");
+  return ok;
+}
+
+/* Refresh monitor: the refresh stopped (DFII software control, REF_MON on,
+ * 3.9 us) ends in REF_STARVE and an interrupt 8 intervals after the last
+ * REF; the data are kept, READY comes back. */
+static bool t_refmon(void) {
+  const uint32_t bit = MIE_FAST(BOW32_IRQ_FAST_DDR);
+  bool ok = true;
+  mt_res_t r;
+  uint32_t us;
+  mt_clear(&r);
+  if (!ready()) return false;
+  const bow_ld_core_t *k = bow_ld_core(&app.info);
+  bool norm0 = bow_ld_refresh_norm();
+  uint32_t lim = 8u * trefi_ns(k) / 1000u; /* REF_STARVE this long after the last REF */
+  ok = mt_fill(region(7), 256, seed0 + 10u, &r) && ok;
+  bow_ld_set_refresh_norm(false);
+  BOW_DDR_WR(STATUS, DDR_ST_REF_STARVE);
+  BOW_DDR_WR(IRQ_EN, DDR_ST_REF_STARVE);
+  if (!bow_ld_refresh_pause(PAUSE_US, &us)) {
+    ok = detail("refresh pause: no REF_STARVE within %u us (STATUS %08x)", PAUSE_US, BOW_DDR_RD(STATUS));
+  } else {
+    if (us + lim / 8u + 2u < lim || us > lim + 4u) {
+      ok = detail("REF_STARVE %u us after the refresh stopped, expected %u .. %u us", us,
+                  lim - lim / 8u - 2u, lim + 4u);
+    }
+    if (!(CSR_READ(mip) & bit)) ok = detail("no irq on REF_STARVE");
+  }
+  BOW_DDR_WR(STATUS, DDR_ST_REF_STARVE);
+  if (CSR_READ(mip) & bit) ok = detail("irq after REF_STARVE was cleared");
+  BOW_DDR_WR(IRQ_EN, 0);
+  bow_ld_set_refresh_norm(norm0);
+  if (!ready()) ok = false;
+  ok = mt_ok(mt_check(region(7), 256, seed0 + 10u, &r), &r) && ok;
+  return ok;
+}
+
+/* March C- on whole words (stuck-at, transition, address decoder and
+ * coupling faults). */
+static bool t_march(void) {
+  mt_res_t r;
+  mt_clear(&r);
+  if (!ready()) return false;
+  return mt_ok(mt_march(region(7), clamp(pl.march), &r), &r);
 }
 
 /* An eye sweep after the hand-over (DFII sections while the controller
@@ -544,11 +635,14 @@ bool self_test(bool quick, uint32_t seed) {
   check(mem && t_addr(), "window: address in address, inverted");
   check(mem && t_bytes(), "window: byte / halfword stores (read-modify-write), ST_RMW");
   check(mem && t_rand(), "window: xorshift fill / check");
+  check(mem && t_march(), "window: March C- (address decoder, coupling faults)");
   check(mem && t_range(), "window: beyond the DRAM size: bus error, RANGE, ERR_ADDR");
   check(mem && t_bist(), "BIST: LiteDRAM generator + checker, PRBS and counter data");
   check(mem && t_twin(), "BIST data read through the window = C twin, neighbours kept");
   check(mem && t_bist_err(), "BIST errors: PRBS check of counter data, one window store");
   check(mem && t_retention(), "refresh: data kept while idle, ST_REF counts the REF commands");
+  check(mem && t_refresh(), "refresh: 3.9 us / 7.8 us (REF_NORM), ST_RGAP of the monitor");
+  check(mem && t_refmon(), "refresh monitor: REF_STARVE + irq when the refresh stops");
   check(mem && t_eye(), "eye sweep after the hand-over: phase, READY, data kept");
   check(mem && t_limits(), "limits: PS_GO / WPS_GO beyond the limits refused");
   check(mem && t_irq(), "interrupt: APPLIED on irq_fast[11]");

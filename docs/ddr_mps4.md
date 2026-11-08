@@ -47,6 +47,9 @@ có 5 CDC-10 ở chân CLR của các bộ đồng bộ reset, như dự kiến)
 `ddr_dfi_paths.rpt`, `ddr_cdc_paths.rpt`, `cdc.rpt`, `ddr_write_paths.rpt`. Toàn bộ thiết kế:
 39 712 LUT (2,3 %), 28 571 FF, 71 BRAM, 167 URAM (128 cho DRAM giả lập).
 
+Bản 2026-11-08 (refresh theo nhiệt độ, giám sát refresh, `LOCK`): đạt mọi ràng buộc, setup WNS
++0,222 ns, hold WHS +0,011 ns, `tcl/timing_checks.tcl` vẫn chỉ báo 5 CDC-10 dự kiến, 40 209 LUT.
+
 Bản cho bo RAM thật: `make fpga BOARD=mps4 DDR_LOOPBACK=0 FLASH_VMEM=...` (chân trên khe
 FMC+, LVCMOS15, xem mục 6).
 
@@ -208,7 +211,7 @@ Các lệnh dưới đây dùng `PORT=/dev/serial/by-id/...-if01-port0`.
 python3 tools/bow32_ddr.py -p $PORT test            # --quick: bản rút gọn (mô phỏng chạy bản này)
 ```
 
-Kết quả trên bo (2026-11-05, bản cuối):
+Kết quả trên bo (2026-11-08, bản P0 của review công nghiệp: 21 mục):
 
 ```
 ddr: self-test (full, seed 1)
@@ -219,27 +222,31 @@ ddr: init sequence: {CKE ODT RESET_N} PREA MR3=0000 MR2=0000 MR1=0000 MR0=0333 P
 ddr:   MR0=0233 MR1=0380 MR1=0000
 ddr: init done, LiteDRAM refresh on (DFII hardware control), not handed over
   [ 3] init: LiteDRAM JEDEC sequence over DFII, controller refresh    ok
-ddr: eye |rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr.....qqqqqqqqq
-          qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
-          qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq.....ppppppppppp
-          pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp| phase 230 width 242 p 26
-ddr: read phase 230 width 242 p 26 RD_DLY 9 SLIP 0, BIST 0 errors
+ddr: eye |sssssssssssssssssssssssss.....rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr
+          rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr
+          rrrrrrrrrrrrrrrrrrrrrrrr.....qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+          qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq| phase 181 width 244 p 27
+ddr: read phase 181 width 244 p 27 RD_DLY 9 SLIP 1, BIST 0 errors
+ddr: telemetry: read eye 244 of 504 steps (48 % of CK)
   [ 4] read calibration: eye, RD_DLY / RD_SLIP, verify, hand-over     ok
   [ 5] window: walking ones / zeros on the data bits                  ok
   [ 6] window: address lines (unique word at 0 and every 2^k)         ok
   [ 7] window: address in address, inverted                           ok
   [ 8] window: byte / halfword stores (read-modify-write), ST_RMW     ok
   [ 9] window: xorshift fill / check                                  ok
-  [10] window: beyond the DRAM size: bus error, RANGE, ERR_ADDR       ok
-  [11] BIST: LiteDRAM generator + checker, PRBS and counter data      ok
-  [12] BIST data read through the window = C twin, neighbours kept    ok
-  [13] BIST errors: PRBS check of counter data, one window store      ok
-  [14] refresh: data kept while idle, ST_REF counts the REF commands  ok
-  [15] eye sweep after the hand-over: phase, READY, data kept         ok
-  [16] limits: PS_GO / WPS_GO beyond the limits refused               ok
-  [17] interrupt: APPLIED on irq_fast[11]                             ok
-  [18] no RFIFO / bus / PS / RD_LATE / CSR error, DBG model ok        ok
-ddr: PASS (18/18)
+  [10] window: March C- (address decoder, coupling faults)            ok
+  [11] window: beyond the DRAM size: bus error, RANGE, ERR_ADDR       ok
+  [12] BIST: LiteDRAM generator + checker, PRBS and counter data      ok
+  [13] BIST data read through the window = C twin, neighbours kept    ok
+  [14] BIST errors: PRBS check of counter data, one window store      ok
+  [15] refresh: data kept while idle, ST_REF counts the REF commands  ok
+  [16] refresh: 3.9 us / 7.8 us (REF_NORM), ST_RGAP of the monitor    ok
+  [17] refresh monitor: REF_STARVE + irq when the refresh stops       ok
+  [18] eye sweep after the hand-over: phase, READY, data kept         ok
+  [19] limits: PS_GO / WPS_GO beyond the limits refused               ok
+  [20] interrupt: APPLIED on irq_fast[11]                             ok
+  [21] no RFIFO / bus / PS / RD_LATE / CSR error, DBG model ok        ok
+ddr: PASS (21/21)
 ```
 
 ### 4.2 Hiệu chỉnh và mắt đọc
@@ -274,7 +281,8 @@ python3 tools/bow32_ddr.py -p $PORT bench
 
 BIST đo băng thông của controller (đỉnh x8 ở CK 133,33 MHz: 266,7 MB/s); CPU đọc/ghi qua cửa
 sổ chậm hơn nhiều vì mỗi truy cập là một giao dịch 32 bit qua hai miền clock và độ trễ đọc cố
-định của LiteDRAM (12 chu kỳ controller = 360 ns).
+định của LiteDRAM (12 chu kỳ controller = 360 ns). BIST phụ thuộc tốc độ refresh: mặc định
+3,9 µs cho 213,7 / 213,7 MB/s (ghi / đọc), `refresh 7.8` cho 233,5 / 226,4 MB/s.
 
 ### 4.5 Gõ lệnh trực tiếp
 
@@ -288,6 +296,8 @@ sổ chậm hơn nhiều vì mỗi truy cập là một giao dịch 32 bit qua h
 > rd 80001234
 > cap                         một RD bằng DFII + chụp thô 32 chu kỳ
 > stat
+> refresh 7.8                 refresh 7,8 µs (chỉ khi DRAM ≤ 85 °C); refresh 3.9 trả lại
+> lock                        khoá cấu hình tới lần reset (RESET của MCC)
 ```
 
 `h` in danh sách lệnh đầy đủ; mọi định dạng đầu ra nằm ở đầu `sw/apps/ddr/main.c`.
@@ -316,6 +326,22 @@ Hai kiểm tra thêm của bản cuối:
 Hai bản dùng chung PHY, chân, clock và DRAM giả lập: mắt và `RD_DLY` như nhau. CPU qua cửa sổ
 chậm hơn ở bản LiteDRAM vì controller chạy ở CK/4 với độ trễ đọc cố định và cầu bắt tay qua
 miền clock của nó.
+
+### 4.7 Kết quả trên bo (2026-11-08): refresh, giám sát refresh, `LOCK`
+
+Bitstream loopback của nhánh `feature/ddr-p0` (P0 của
+[ddr_review_industrial_ai.md](ddr_review_industrial_ai.md)):
+
+| Mục | Kết quả |
+|-----|---------|
+| Self-test | 21/21 (`test`), lại 21/21 (`test --quick`) sau `RESET` của MCC |
+| Mắt đọc | 244 / 504 bước, telemetry 48 % chu kỳ CK |
+| Refresh 3,9 µs (mặc định) | BIST ghi / đọc 213,7 / 213,7 MB/s, 0 lỗi |
+| Refresh 7,8 µs (`refresh 7.8`) | BIST ghi / đọc 233,5 / 226,4 MB/s, 0 lỗi (bằng bản 2026-11-05) |
+| Giám sát refresh | check 17: `REF_STARVE` + ngắt khi dừng refresh; `ST_RGAP` 515 / 1031 CK ở 3,9 / 7,8 µs (mô phỏng) |
+| CPU đọc / ghi word qua cửa sổ | 4,95 / 3,61 MB/s |
+| `verify` | 30/30 |
+| `LOCK` | `refresh 7.8`, `phase`, BIST (ghi CSR) bị từ chối, `STATUS` có `CSR_ERR` + `LOCK_ERR`; cửa sổ vẫn chạy (`memtest` 0 lỗi); `RESET` của MCC trả `CTRL` về `0x40` |
 
 ## 5. Mô phỏng trước khi lên bo
 

@@ -1,0 +1,44 @@
+# Copyright Bow32 contributors.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Multi-seed regression of the DDR2/DDR3 IP (hw/ip/ddr/dv, docs/ip/ddr.md):
+# every configuration with seeds 1 .. nseeds (board delays, DRAM model and
+# random traffic are drawn per seed) and the reset tests. The push / pull
+# request CI runs seed 1 only. Every night at 19:00 UTC (02:00 in Vietnam) on
+# main, or by hand.
+
+name: DDR nightly
+
+on:
+  schedule:
+    - cron: "0 19 * * *"
+  workflow_dispatch:
+    inputs:
+      nseeds:
+        description: "seeds per configuration"
+        default: "25"
+
+jobs:
+  ddr-regress:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends verilator
+          verilator --version
+
+      - name: DDR2/DDR3 regression
+        run: make -C hw/ip/ddr/dv regress NSEEDS=${{ github.event.inputs.nseeds || '25' }} JOBS=4
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ddr-nightly
+          path: |
+            build/ddr_dv/*/sim.log
+            build/ddr_dv/build_*.log

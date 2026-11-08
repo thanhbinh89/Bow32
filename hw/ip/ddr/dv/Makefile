@@ -12,6 +12,8 @@
 #   make test-ci     the same (CI)
 #   make seeds CFG=card SEEDS="1 2 3"   one configuration, several seeds (board delays
 #                    and random traffic are drawn per seed)
+#   make regress NSEEDS=100   every configuration with seeds 1 .. NSEEDS (25), and rst:
+#                    the multi-seed regression (.github/workflows/ddr-nightly.yml)
 #   make run CFG=lb SEED=3          one run: build/ddr_dv/<cfg>_s<seed>/sim.log
 #   make run CFG=lb WAVES=1         with a waveform (DIR/waves.fst)
 #   make rst         reset / clock-domain crossing corner cases (tb_bow_ddr_rst.sv:
@@ -41,6 +43,7 @@ ARGS  ?=
 
 CONFIGS ?= lb stub card ddr3
 SEEDS   ?= 1 2 3 4
+NSEEDS  ?= 25
 
 # --------------------------------------------------------- configurations
 # Verilator -G parameters of tb_bow_ddr (bit parameters as -GName=1'b1) and
@@ -107,6 +110,11 @@ test-ci: test
 seeds: $(call sim_bin,$(CFG))
 	@$(MAKE) --no-print-directory -j$(JOBS) $(foreach s,$(SEEDS),c/$(CFG).$(s))
 
+regress: build-all
+	@$(MAKE) --no-print-directory -j$(JOBS) \
+	  $(foreach c,$(CONFIGS),$(foreach s,$(shell seq 1 $(NSEEDS)),c/$(c).$(s))) rst
+	@echo "ddr_dv: $(words $(CONFIGS)) configurations x $(NSEEDS) seeds and the reset tests pass"
+
 # ------------------------------------------- reset / CDC corner cases
 RST_BIN := $(BUILD)/obj_rst/Vtb_bow_ddr_rst
 RST_DIR := $(BUILD)/rst
@@ -129,5 +137,5 @@ rst: $(RST_BIN)
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: build build-all run case test test-ci seeds rst clean
+.PHONY: build build-all run case test test-ci seeds regress rst clean
 SHELL := /bin/bash

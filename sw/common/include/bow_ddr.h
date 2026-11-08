@@ -28,7 +28,8 @@
  *            done it; a refused command sets STATUS.CMD_ERR (two bits,
  *            BUSY, no DDR clock). APPLY copies CTRL and LAT into the ddr
  *            domain once the PHY is idle: their bits act from then on,
- *            except CTRL.CORE_RST, which acts at once.
+ *            except CTRL.CORE_RST, REF_NORM, REF_MON and LOCK, which act
+ *            at once.
  *   window   CPU loads / stores, one native word of the controller (one BL8
  *            burst: 8 bytes x8, 16 bytes x16) per access. Without DM pins
  *            every store is a read-modify-write of that word (ST_RMW).
@@ -49,7 +50,7 @@
 typedef struct {
   volatile uint32_t ID;         /* 0x000 R   0x44445202 ("DDR" v2: LiteDRAM controller) */
   volatile uint32_t INFO;       /* 0x004 R   DDR_INFO_* */
-  volatile uint32_t CTRL;       /* 0x008 RW  DDR_CTRL_* (acts after APPLY, CORE_RST at once) */
+  volatile uint32_t CTRL;       /* 0x008 RW  DDR_CTRL_* (acts after APPLY; CORE_RST, REF_*, LOCK at once) */
   volatile uint32_t CMD;        /* 0x00C W   one DDR_CMD_* per write */
   volatile uint32_t STATUS;     /* 0x010 R/W1C DDR_ST_* */
   volatile uint32_t IRQ_EN;     /* 0x014 RW  DDR_ST_W1C bits */
@@ -71,7 +72,8 @@ typedef struct {
   volatile uint32_t ST_RMW;     /* 0x0B0 R   window read-modify-write sequences */
   volatile uint32_t DBG;        /* 0x0B4 R   board debug word (asynchronous) */
   volatile uint32_t ERR_ADDR;   /* 0x0B8 R   bus address of the last failed window access */
-  uint32_t reserved4[17];       /* 0x0BC */
+  volatile uint32_t ST_RGAP;    /* 0x0BC R   longest REF interval with REF_MON (CK cycles - 1), SNAP copy */
+  uint32_t reserved4[16];       /* 0x0C0 */
   volatile uint32_t CAP[32];    /* 0x100 R   raw DQ capture: DQ bits rise, next DQ bits fall */
   volatile uint32_t CAPS[32];   /* 0x180 R   raw DQS capture: [1:0] lane 0 {fall, rise} [3:2] lane 1 */
 } bow_ddr_regs_t;
@@ -93,6 +95,7 @@ _Static_assert(__builtin_offsetof(bow_ddr_regs_t, ST_RD) == 0x0A0, "DDR ST_RD of
 _Static_assert(__builtin_offsetof(bow_ddr_regs_t, ST_RMW) == 0x0B0, "DDR ST_RMW offset");
 _Static_assert(__builtin_offsetof(bow_ddr_regs_t, DBG) == 0x0B4, "DDR DBG offset");
 _Static_assert(__builtin_offsetof(bow_ddr_regs_t, ERR_ADDR) == 0x0B8, "DDR ERR_ADDR offset");
+_Static_assert(__builtin_offsetof(bow_ddr_regs_t, ST_RGAP) == 0x0BC, "DDR ST_RGAP offset");
 _Static_assert(__builtin_offsetof(bow_ddr_regs_t, CAP) == 0x100, "DDR CAP offset");
 _Static_assert(__builtin_offsetof(bow_ddr_regs_t, CAPS) == 0x180, "DDR CAPS offset");
 _Static_assert(sizeof(bow_ddr_regs_t) == 0x200, "DDR register block size");
@@ -130,7 +133,7 @@ _Static_assert(sizeof(bow_ddr_regs_t) == 0x200, "DDR register block size");
 /* Column bits of both LiteDRAM cores (the DRAM size follows from INFO) */
 #define DDR_COL_BITS 10u
 
-/* CTRL: the bits act after an APPLY, CORE_RST at once */
+/* CTRL: the bits act after an APPLY; CORE_RST, REF_NORM, REF_MON and LOCK at once */
 #define DDR_CTRL_EN         (1u << 0)  /* PHY passes the DFI commands; CKE / ODT / RESET# follow DFI */
 #define DDR_CTRL_DM_EN      (1u << 4)  /* DM pins (only with INFO.HAS_DM): masked window stores */
 #define DDR_CTRL_DDR3       (1u << 5)  /* PHY in DDR3 mode (= INFO.DDR3) */
@@ -139,6 +142,9 @@ _Static_assert(sizeof(bow_ddr_regs_t) == 0x200, "DDR register block size");
 #define DDR_CTRL_ODT_EN     (1u << 10) /* ODT pin = DFI odt (else held low) */
 #define DDR_CTRL_CK_EN      (1u << 11) /* CK toggles */
 #define DDR_CTRL_CORE_RST   (1u << 12) /* LiteDRAM core + window / CSR bridges in reset, clears BROKEN */
+#define DDR_CTRL_REF_NORM   (1u << 13) /* the core refreshes every 7.8 us, Tc <= 85 C (0: 3.9 us) */
+#define DDR_CTRL_REF_MON    (1u << 14) /* refresh monitor: REF_STARVE after 8 intervals without REF */
+#define DDR_CTRL_LOCK       (1u << 15) /* configuration frozen until the SoC reset (bow_ddr_lock) */
 #define DDR_CTRL_RESET      0x00000040u
 
 /* CMD: exactly one bit per write */
@@ -172,9 +178,12 @@ _Static_assert(sizeof(bow_ddr_regs_t) == 0x200, "DDR register block size");
 #define DDR_ST_RANGE        (1u << 21) /* window access beyond the DRAM size */
 #define DDR_ST_CSR_ERR      (1u << 22) /* LiteDRAM CSR access failed */
 #define DDR_ST_BROKEN       (1u << 23) /* R: a bridge timed out (until CORE_RST / link reset) */
-#define DDR_ST_W1C          0x007C4E68u
+#define DDR_ST_REF_STARVE   (1u << 24) /* refresh monitor: 8 REF intervals without a REF */
+#define DDR_ST_LOCK_ERR     (1u << 25) /* a change refused by CTRL.LOCK */
+#define DDR_ST_W1C          0x037C4E68u
 #define DDR_ST_ERRORS       (DDR_ST_CMD_ERR | DDR_ST_RFIFO_ERR | DDR_ST_BUS_TIMEOUT | DDR_ST_PS_ERR | \
-                             DDR_ST_RD_LATE | DDR_ST_RD_EXTRA | DDR_ST_CSR_ERR)
+                             DDR_ST_RD_LATE | DDR_ST_RD_EXTRA | DDR_ST_CSR_ERR | DDR_ST_REF_STARVE | \
+                             DDR_ST_LOCK_ERR)
 
 /* LAT */
 #define DDR_LAT_RL(n)        ((uint32_t)(n) & 0x3Fu)          /* AL + CL */
@@ -256,9 +265,26 @@ bool bow_ddr_rfifo_sync(void);
 /* CTRL (or LAT) and APPLY */
 bool bow_ddr_set_ctrl(uint32_t ctrl);
 bool bow_ddr_set_lat(uint32_t lat);
-/* CTRL.CORE_RST on / off (APPLY). Off: waits up to 1 ms for the LiteDRAM
- * CSRs to answer again. */
+/* CTRL.CORE_RST on / off (APPLY). On also turns the refresh monitor off
+ * (REF_MON: the core no longer refreshes). Off: waits up to 1 ms for the
+ * LiteDRAM CSRs to answer again. */
 bool bow_ddr_core_reset(bool on);
+
+/* Refresh (CTRL.REF_NORM, REF_MON; they act at once, no APPLY, the other
+ * CTRL bits are kept). The LiteDRAM core refreshes every 3.9 us (the JEDEC
+ * rate for a DRAM case temperature of 85..95 C); norm = true doubles its
+ * refresh period (7.8 us: Tc <= 85 C only; from the next REF). mon = true runs
+ * the refresh monitor: STATUS.REF_STARVE after 8 expected REF intervals
+ * without a REF at the PHY (eight missed, one before the JEDEC limit), the
+ * longest interval in ST_RGAP. False when CTRL does not read the bits back
+ * (LOCK: only norm = false is still taken). */
+bool bow_ddr_set_refresh(bool norm, bool mon);
+/* CTRL.LOCK: from now on CTRL (except clearing REF_NORM), LAT, the phase
+ * targets, every command but SNAP / CLR_STATS and every LiteDRAM CSR write
+ * are refused (STATUS.LOCK_ERR) until the next SoC reset; the window,
+ * IRQ_EN and the STATUS flags still work. True when CTRL reads LOCK. */
+bool bow_ddr_lock(void);
+bool bow_ddr_locked(void);
 
 /* Read phase (PS_GO) and write phase (WPS_GO): step to target, wait for
  * PS_DONE. False on PS_ERR (beyond the limits: read phase 2 CK periods from
@@ -280,6 +306,7 @@ bool bow_ddr_cap_wait(uint32_t timeout_us);
 /* --------------------------------------------------------------- status */
 typedef struct {
   uint32_t rd, wr, act, ref, rmw;
+  uint32_t rgap;   /* ST_RGAP: longest REF interval with REF_MON, CK cycles - 1 */
 } bow_ddr_stats_t;
 
 /* SNAP, then the counters (clear: CLR_STATS afterwards). */

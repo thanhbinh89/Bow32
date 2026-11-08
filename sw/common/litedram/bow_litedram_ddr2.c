@@ -34,8 +34,9 @@ const bow_ld_core_t bow_ld_core_ddr2 = {
     .wrphase = SDRAM_PHY_WRPHASE,
     .mem_bytes = (uint32_t)SDRAM_PHY_SUPPORTED_MEMORY,
     .ctrl_hz = CONFIG_CLOCK_FREQUENCY,
-    /* TRefi of generated/ddr2/litedram_ddr2_pkg.sv: 7.8 us rounded down to
-     * whole 30 ns cycles = 7.77 us (tools/tests/test_bow32_ddr.py compares) */
-    .trefi_cycles = 259,
+    /* TRefi of generated/ddr2/litedram_ddr2_pkg.sv: trefi_ns 3900 rounded
+     * down to whole 30 ns cycles = 3.87 us (CTRL.REF_NORM: 7.74 us), compared
+     * by tools/tests/test_bow32_ddr.py */
+    .trefi_cycles = 129,
     .init_sequence = ddr2_init_sequence,
 };

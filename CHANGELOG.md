@@ -6,6 +6,23 @@
 ## [Unreleased]
 
 ### Added
+- **DDR: độ tin cậy cho mục tiêu công nghiệp** (P0 của
+  [docs/ddr_review_industrial_ai.md](docs/ddr_review_industrial_ai.md)):
+  - Refresh theo nhiệt độ: lõi LiteDRAM refresh mỗi 3,87 µs (Tc 85..95 °C); `CTRL.REF_NORM`
+    cho bộ đếm refresh của lõi chạy chu kỳ gấp đôi (7,74 µs, Tc ≤ 85 °C), có hiệu lực từ lần
+    refresh kế tiếp.
+  - Giám sát refresh: `CTRL.REF_MON`, `STATUS.REF_STARVE` + ngắt sau 8 khoảng không có REF,
+    khoảng REF dài nhất ở `ST_RGAP` (`0x0BC`).
+  - Khoá cấu hình `CTRL.LOCK` (chỉ reset SoC xoá): `CTRL`/`LAT`/pha, lệnh (trừ `SNAP`,
+    `CLR_STATS`) và ghi CSR LiteDRAM bị từ chối, `STATUS.LOCK_ERR`.
+  - Firmware: chính sách refresh (`bow_ld_set_refresh_norm`), bật giám sát sau bàn giao, tắt
+    trong đoạn DFII; telemetry độ rộng mắt (% chu kỳ CK, cảnh báo dưới 25 %); lệnh
+    `refresh`, `lock`; March C- trong `memtest`; self-test 21 mục (thêm tốc độ refresh, giám
+    sát refresh, March C-).
+  - Kiểm chứng: bước refresh / giám sát / `LOCK` trong `tb_bow_ddr`, `LOCK` qua reset SoC
+    trong `tb_bow_ddr_rst`, mô hình DRAM kiểm thêm nợ REF trung bình theo JEDEC (hoãn tối đa
+    8, trả trước tối đa 8) với chế độ nóng `hot_i`; `make -C hw/ip/ddr/dv regress NSEEDS=n` và workflow hằng đêm
+    `ddr-nightly.yml` (25 seed).
 - **HyperRAM** `bow_hyperram` (`hw/ip/hyperram`): bộ điều khiển HyperBus tự viết cho
   HyperRAM 2.0 x8 (Infineon S80KS2562, 32 MiB) của bo RAM mở rộng. Cửa sổ 256 MiB ở
   `0x6000_0000` (device thứ 9 của main crossbar, 32 MiB có thiết bị, ngoài vùng → lỗi bus),
@@ -138,6 +155,10 @@
 - Đánh giá khả năng làm DDR trên Bow32 và bo RAM mở rộng `FMC_DDR2_HyperRam`: chỉ hợp
   với Arm MPS4 (VEK280 chỉ nối chân LA của FMC+, KV260 không có FMC), góp ý schematic và
   đề xuất sơ đồ chân chỉ dùng LA ([docs/ddr_board_review.md](docs/ddr_board_review.md)).
+- Review IP DDR theo mục tiêu công nghiệp và SoC camera AI: băng thông (cửa sổ 32 bit
+  5 / 3,6 MB/s, DRAM 267 MB/s, cần ≈ 1–2 GB/s), refresh 3,9 µs khi Tc > 85 °C, ECC, bám pha
+  theo nhiệt, QoS, DFI chuẩn cho PHY ASIC; lộ trình P0–P3
+  ([docs/ddr_review_industrial_ai.md](docs/ddr_review_industrial_ai.md)).
 - **Mã khối MKV** `bow_mkv` (`hw/ip/mkv`) theo TCVN 14263:2024 "Thuật toán mã khối
   MKV" (lúc đầu theo bản dự thảo, xem Changed): MKV-128 (khoá 128 / 192 / 256 bit)
   và MKV-256 (khoá 256 / 384 / 512 bit), R = 7 / 8 / 9. Lược đồ khoá trong phần cứng (8R + 1 chu kỳ, khoá nửa vòng trong
@@ -265,6 +286,12 @@
   gửi được BREAK.
 
 ### Changed
+- DDR: lõi LiteDRAM sinh với `trefi_ns: 3900` (`ddr2.yml`, `ddr3.yml`; DDR2 129 chu kỳ,
+  DDR3 121), bộ đếm refresh của lõi có thêm chu kỳ 2 × tREFI (chân `ref_norm`, đi theo
+  `CTRL.REF_NORM`); kiểm tra lúc elaboration theo 3,9 µs. Mặc định 3,9 µs chậm hơn: BIST trên
+  MPS4 ghi / đọc 213,7 / 213,7 MB/s, so với 233,5 / 226,4 MB/s ở 7,8 µs. `REF_STARVE` của
+  emulator / mô hình DRAM kiểm thêm nợ REF trung bình (hoãn tối đa 8, trả trước tối đa 8)
+  bên cạnh 9 × tREFI không có REF.
 - `bow_ddr_ps` chuyển sang `hw/ip/common` thành `bow_mmcm_ps` (dùng chung cho DDR và HyperRAM).
 - `bow_ddr_clk_xusp` xuất thêm đầu ra IBUF của oscillator (`clk_ibuf_o`) cho các cây clock
   khác; cây clock DDR giữ nguyên.

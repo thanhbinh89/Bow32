@@ -160,6 +160,7 @@ module ddr_mem_model #(
   output logic [Lanes-1:0]    dqs_oe_o,
   input  logic [Lanes-1:0]    dm_i,
   input  logic                wr_relax_i,     // write timing outside JEDEC on purpose (see above)
+  input  logic                hot_i,          // Tc 85..95 C: REF_STARVE at tREFI / 2 (3.9 us)
   output logic [31:0]         dbg_o,
   output logic [7:0]          err_code_o,
   output logic [15:0]         err_count_o,
@@ -227,7 +228,7 @@ module ddr_mem_model #(
     .TXpr(CXpr), .TInit(CInit), .TInitNop(CInitNop), .TReset(CReset), .TCkeLow(CCkeLow),
     .TCkeRst(CCkeRst), .TCkRun(CCkRun), .TRasMax(CRasMax)
   ) u_dev (
-    .clk_i(core_clk), .rst_ni(core_rst_n), .ck_en_i(1'b1),
+    .clk_i(core_clk), .rst_ni(core_rst_n), .ck_en_i(1'b1), .hot_i(hot_i),
     .cke_i(c_cke), .reset_n_i(c_rst_n), .odt_i(c_odt), .cs_n_i(c_cs_n), .ras_n_i(c_ras_n),
     .cas_n_i(c_cas_n), .we_n_i(c_we_n), .ba_i(c_ba), .a_i(c_a),
     .la_cs_n_i(1'b1), .la_ras_n_i(1'b1), .la_cas_n_i(1'b1), .la_we_n_i(1'b1), .la_ba_i(3'd0),
