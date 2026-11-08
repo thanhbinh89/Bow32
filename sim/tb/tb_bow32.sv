@@ -24,8 +24,16 @@
 // the DDR side sees no clock (CLK_OK = 0, the window and the LiteDRAM CSRs
 // answer bus errors).
 //
+// The SoC also has its HyperRAM (HrEn = 1) wired like the MPS4 loopback
+// build: clock model (hw/ip/hyperram/dv/hyperram_clk_model.sv: CK, the write
+// clock and the read capture clock with MMCM fine phase shift), pad model
+// (hw/ip/hyperram/dv/bow_hyperram_io_sim.sv, Loopback) and the HyperRAM
+// emulator bow_hyperram_dev (1 MiB of the 32 MiB S80KS2562). Its clocks run
+// only in the hyperram test, from the application start.
+//
 // Plusargs:
-//   +TEST=<name>      boot | load | break | flash | irq | gpio | camera | csi2 | h264 | mkv | ddr
+//   +TEST=<name>      boot | load | break | flash | irq | gpio | camera | csi2 | h264 | mkv | ddr |
+//                     hyperram
 //                     (see run_test below)
 //   +ROM=<vmem>       boot ROM image (required)
 //   +FLASH=<vmem>     image preloaded into the flash (backdoor)
@@ -75,6 +83,14 @@ module tb_bow32;
   localparam int unsigned DdrEmuBytes = 4 << 20;
   logic ddr_en = 1'b0;   // DDR clocks on (ddr test, from the application start)
 
+  // HyperRAM (S80KS2562 through the loopback emulator) at 100 MHz, 672 fine
+  // phase steps per CK (MPS4 loopback build), 1 MiB of emulator storage
+  localparam int unsigned HrTckPs    = 10000;
+  localparam int unsigned HrClkHz    = 100_000_000;
+  localparam int unsigned HrPsSteps  = 672;
+  localparam int unsigned HrEmuBytes = 1 << 20;
+  logic hr_en = 1'b0;    // HyperRAM clocks on (hyperram test, from the application start)
+
   // ------------------------------------------------------------------- DUT
   logic       uart0_rx = 1'b1, uart0_tx;
   logic       uart1_rx = 1'b1;  // UART1 is the alternate function of PB0 (TX) / PB1 (RX)
@@ -115,6 +131,14 @@ module tb_bow32;
   bow_ddr_pkg::ddr_io_in_t  ddr_io_i;
   logic [31:0] ddr_dbg;
 
+  // HyperRAM <-> clock model, pad model and emulator
+  logic hr_clk, hr_wclk, hr_rd_clk, hr_locked;
+  logic hr_ps_en, hr_ps_inc, hr_ps_done, hr_wps_en, hr_wps_inc, hr_wps_done;
+  bow_hyperram_pkg::hr_io_out_t hr_io_o;
+  bow_hyperram_pkg::hr_io_in_t  hr_io_i;
+  logic        hr_rwds_pad;
+  logic [31:0] hr_dbg;
+
   bow32_top #(
     .ClkFreqHz   (ClkFreqHz),
     .BootBaud    (Baud),
@@ -128,7 +152,14 @@ module tb_bow32;
     .DdrClkHz    (DdrClkHz),
     .DdrPsSteps  (DdrPsSteps),
     .DdrPhyKind  (2),
-    .DdrEmuBytes (DdrEmuBytes)
+    .DdrEmuBytes (DdrEmuBytes),
+    .HrEn        (1'b1),
+    .HrClkHz     (HrClkHz),
+    .HrPsSteps   (HrPsSteps),
+    .HrPhyKind   (2),
+    .HrHasLs     (1'b0),
+    .HrMemBytes  (32 << 20),
+    .HrEmuBytes  (HrEmuBytes)
   ) dut (
     .clk_i        (clk),
     .rst_ni       (rst_n),
@@ -194,6 +225,19 @@ module tb_bow32;
     .ddr_io_o       (ddr_io_o),
     .ddr_io_i       (ddr_io_i),
     .ddr_dbg_i      (ddr_dbg),
+    .hr_clk_i       (hr_clk),
+    .hr_rst_ni      (hr_locked),
+    .hr_rd_clk_i    (hr_rd_clk),
+    .hr_ps_en_o     (hr_ps_en),
+    .hr_ps_inc_o    (hr_ps_inc),
+    .hr_ps_done_i   (hr_ps_done),
+    .hr_wps_en_o    (hr_wps_en),
+    .hr_wps_inc_o   (hr_wps_inc),
+    .hr_wps_done_i  (hr_wps_done),
+    .hr_io_o        (hr_io_o),
+    .hr_io_i        (hr_io_i),
+    .hr_rwds_pad_i  (hr_rwds_pad),
+    .hr_dbg_i       (hr_dbg),
     .sys_rst_no   (sys_rst_n),
     .core_sleep_o (core_sleep)
   );
@@ -295,6 +339,81 @@ module tb_bow32;
     .dbg_o    (ddr_dbg)
   );
 
+  // -------------------------------------------------------------- HyperRAM
+  // MPS4 loopback build: MMCMs (hr_clk, write clock, read capture clock with
+  // fine phase shift), pads driven by the ODDRs and read back through the
+  // IDDRs, the HyperRAM emulator answering on the pad wrapper's loopback
+  // inputs (bow_hyperram_dev checks every transaction: DBG).
+  hyperram_clk_model #(
+    .TckPs   (HrTckPs),
+    .PsSteps (HrPsSteps)
+  ) u_hr_clk (
+    .en_i       (hr_en),
+    .hr_clk_o   (hr_clk),
+    .wclk_o     (hr_wclk),
+    .rd_clk_o   (hr_rd_clk),
+    .locked_o   (hr_locked),
+    .ps_en_i    (hr_ps_en),
+    .ps_inc_i   (hr_ps_inc),
+    .ps_done_o  (hr_ps_done),
+    .wps_en_i   (hr_wps_en),
+    .wps_inc_i  (hr_wps_inc),
+    .wps_done_o (hr_wps_done)
+  );
+
+  logic                                  hr_lb_dq_en, hr_lb_rwds_en, hr_lb_rst_n;
+  logic [1:0][7:0]                       hr_lb_dq;
+  logic [1:0]                            hr_lb_rwds;
+
+  bow_hyperram_io_sim #(
+    .Loopback (1'b1),
+    .HasLs    (1'b0)
+  ) u_hr_io (
+    .clk_i         (hr_clk),
+    .wclk_i        (hr_wclk),
+    .rd_clk_i      (hr_rd_clk),
+    .io_o_i        (hr_io_o),
+    .io_i_o        (hr_io_i),
+    .rwds_pad_o    (hr_rwds_pad),
+    .lb_dq_en_i    (hr_lb_dq_en),
+    .lb_dq_i       (hr_lb_dq),
+    .lb_rwds_en_i  (hr_lb_rwds_en),
+    .lb_rwds_i     (hr_lb_rwds),
+    .ck_p_o        (),
+    .ck_n_o        (),
+    .cs_n_o        (),
+    .rst_n_o       (),
+    .dq_o          (),
+    .dq_oe_o       (),
+    .dq_i          ('0),
+    .rwds_o        (),
+    .rwds_oe_o     (),
+    .rwds_i        (1'b0),
+    .ls_oe_n_o     (),
+    .ls_dir_dq_o   (),
+    .ls_dir_rwds_o ()
+  );
+
+  bow_rst_sync u_hr_lb_rst (
+    .clk_i  (hr_clk),
+    .rst_ni (hr_locked),
+    .rst_no (hr_lb_rst_n)
+  );
+
+  bow_hyperram_dev #(
+    .MemBytes (HrEmuBytes),
+    .UseUram  (1'b0)
+  ) u_hr_dev (
+    .clk_i        (hr_clk),
+    .rst_ni       (hr_lb_rst_n),
+    .io_i         (hr_io_o),
+    .lb_dq_en_o   (hr_lb_dq_en),
+    .lb_dq_o      (hr_lb_dq),
+    .lb_rwds_en_o (hr_lb_rwds_en),
+    .lb_rwds_o    (hr_lb_rwds),
+    .dbg_o        (hr_dbg)
+  );
+
   // ------------------------------------------------------------- GPIO pads
   // Every pad has a pull-up, like the PMOD pins on the KV260. A pad is driven
   // by the chip when *_oe = 1, else by the "external circuit" of a test
@@ -345,6 +464,11 @@ module tb_bow32;
                           contains(line, "[trap]") ||
                           (line.len() >= 5 && line.substr(0, 4) == "error"))) begin
       $fatal(1, "the ddr app reported a failure: %s", line);
+    end
+    if (test == "hyperram" && (contains(line, " FAIL") || contains(line, "hyperram: FAIL") ||
+                               contains(line, "[trap]") || contains(line, "failed") ||
+                               (line.len() >= 5 && line.substr(0, 4) == "error"))) begin
+      $fatal(1, "the hyperram app reported a failure: %s", line);
     end
   endfunction
 
@@ -1501,6 +1625,37 @@ module tb_bow32;
         video_cmd("rd 803ffffc", "803ffffc: 12345678\nok\n> ");
         if (ddr_dbg[31] || !ddr_dbg[30]) begin
           $fatal(1, "DRAM emulator: DBG %08x (JEDEC rule errors or init not done)", ddr_dbg);
+        end
+      end
+      // HyperRAM (bow_hyperram) with sw/apps/hyperram on the loopback
+      // emulator: probe, enable, RESET#, read calibration (ID0 eye, then the
+      // memory pattern eye over the MMCM model), device configuration, window
+      // loads / stores (byte masks, read buffer, posted writes), BIST,
+      // variable latency, hybrid sleep, deep power down, limits and the
+      // interrupt line ("test quick", every item must pass); then the window
+      // from the shell at both ends of the emulator's 1 MiB. The emulator
+      // checks every transaction against the HyperBus rules (DBG).
+      "hyperram": begin
+        string hr_pass;
+        int    hr_ok, hr_all;
+        expect_text(0, "boot: starting image");
+        hr_en = 1'b1;
+        expect_text(0, {"hyperram: Bow32 HyperRAM 32 MiB x8, PHY loopback, 100 MHz (100000000 Hz), ",
+                        "672 phase steps, emulator 1024 KiB"});
+        expect_text(0, "> ");
+        mark = log0.len();
+        video_cmd("test quick", "hyperram: PASS (");
+        expect_text(0, "\nok\n> ", mark);
+        hr_pass = log0_line("hyperram: PASS (", mark);
+        if ($sscanf(hr_pass, "%d/%d)", hr_ok, hr_all) != 2 || hr_ok != hr_all || hr_all == 0) begin
+          $fatal(1, "hyperram self-test result 'hyperram: PASS (%s', expected (n/n)", hr_pass);
+        end
+        video_cmd("wr 60001234 cafef00d", "ok\n> ");
+        video_cmd("wr 600ffffc 12345678", "ok\n> ");
+        video_cmd("rd 60001234", "60001234: cafef00d\nok\n> ");
+        video_cmd("rd 600ffffc", "600ffffc: 12345678\nok\n> ");
+        if (hr_dbg[31]) begin
+          $fatal(1, "HyperRAM emulator: DBG %08x (HyperBus rule errors)", hr_dbg);
         end
       end
       default: $fatal(1, "unknown +TEST=%s", test);

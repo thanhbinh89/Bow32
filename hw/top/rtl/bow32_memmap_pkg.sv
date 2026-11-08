@@ -9,7 +9,7 @@ package bow32_memmap_pkg;
   localparam logic [31:0] BootAddr = 32'h00000000;
 
   // main_bus
-  localparam int unsigned MainNumDevices = 8;
+  localparam int unsigned MainNumDevices = 9;
   localparam int unsigned MainDevRom = 0;
   localparam int unsigned MainDevFlash = 1;
   localparam int unsigned MainDevSram = 2;
@@ -18,6 +18,7 @@ package bow32_memmap_pkg;
   localparam int unsigned MainDevAxil = 5;
   localparam int unsigned MainDevVram = 6;
   localparam int unsigned MainDevDdr = 7;
+  localparam int unsigned MainDevHyperram = 8;
   localparam logic [31:0] RomBase = 32'h00000000;
   localparam logic [31:0] RomSize = 32'h00002000;
   localparam logic [31:0] FlashBase = 32'h08000000;
@@ -34,11 +35,13 @@ package bow32_memmap_pkg;
   localparam logic [31:0] VramSize = 32'h00100000;
   localparam logic [31:0] DdrBase = 32'h80000000;
   localparam logic [31:0] DdrSize = 32'h20000000;
-  localparam logic [MainNumDevices-1:0][31:0] MainDevBase = {DdrBase, VramBase, AxilBase, IspBufBase, PeriphBase, SramBase, FlashBase, RomBase};
-  localparam logic [MainNumDevices-1:0][31:0] MainDevMask = {~(DdrSize - 32'd1), ~(VramSize - 32'd1), ~(AxilSize - 32'd1), ~(IspBufSize - 32'd1), ~(PeriphSize - 32'd1), ~(SramSize - 32'd1), ~(FlashSize - 32'd1), ~(RomSize - 32'd1)};
+  localparam logic [31:0] HyperramBase = 32'h60000000;
+  localparam logic [31:0] HyperramSize = 32'h10000000;
+  localparam logic [MainNumDevices-1:0][31:0] MainDevBase = {HyperramBase, DdrBase, VramBase, AxilBase, IspBufBase, PeriphBase, SramBase, FlashBase, RomBase};
+  localparam logic [MainNumDevices-1:0][31:0] MainDevMask = {~(HyperramSize - 32'd1), ~(DdrSize - 32'd1), ~(VramSize - 32'd1), ~(AxilSize - 32'd1), ~(IspBufSize - 32'd1), ~(PeriphSize - 32'd1), ~(SramSize - 32'd1), ~(FlashSize - 32'd1), ~(RomSize - 32'd1)};
 
   // periph_bus
-  localparam int unsigned PeriphNumDevices = 14;
+  localparam int unsigned PeriphNumDevices = 15;
   localparam int unsigned PeriphDevSysctrl = 0;
   localparam int unsigned PeriphDevFlashCtrl = 1;
   localparam int unsigned PeriphDevUart0 = 2;
@@ -53,6 +56,7 @@ package bow32_memmap_pkg;
   localparam int unsigned PeriphDevMkv = 11;
   localparam int unsigned PeriphDevDdrCtrl = 12;
   localparam int unsigned PeriphDevDdrPhy = 13;
+  localparam int unsigned PeriphDevHyperramReg = 14;
   localparam logic [31:0] SysctrlBase = 32'h40000000;
   localparam logic [31:0] SysctrlSize = 32'h00001000;
   localparam logic [31:0] FlashCtrlBase = 32'h40001000;
@@ -81,8 +85,10 @@ package bow32_memmap_pkg;
   localparam logic [31:0] DdrCtrlSize = 32'h00002000;
   localparam logic [31:0] DdrPhyBase = 32'h4000E000;
   localparam logic [31:0] DdrPhySize = 32'h00001000;
-  localparam logic [PeriphNumDevices-1:0][31:0] PeriphDevBase = {DdrPhyBase, DdrCtrlBase, MkvBase, DmaBase, H264Base, Csi2rxBase, I2c0Base, IspBase, GpiobBase, GpioaBase, Uart1Base, Uart0Base, FlashCtrlBase, SysctrlBase};
-  localparam logic [PeriphNumDevices-1:0][31:0] PeriphDevMask = {~(DdrPhySize - 32'd1), ~(DdrCtrlSize - 32'd1), ~(MkvSize - 32'd1), ~(DmaSize - 32'd1), ~(H264Size - 32'd1), ~(Csi2rxSize - 32'd1), ~(I2c0Size - 32'd1), ~(IspSize - 32'd1), ~(GpiobSize - 32'd1), ~(GpioaSize - 32'd1), ~(Uart1Size - 32'd1), ~(Uart0Size - 32'd1), ~(FlashCtrlSize - 32'd1), ~(SysctrlSize - 32'd1)};
+  localparam logic [31:0] HyperramRegBase = 32'h4000F000;
+  localparam logic [31:0] HyperramRegSize = 32'h00001000;
+  localparam logic [PeriphNumDevices-1:0][31:0] PeriphDevBase = {HyperramRegBase, DdrPhyBase, DdrCtrlBase, MkvBase, DmaBase, H264Base, Csi2rxBase, I2c0Base, IspBase, GpiobBase, GpioaBase, Uart1Base, Uart0Base, FlashCtrlBase, SysctrlBase};
+  localparam logic [PeriphNumDevices-1:0][31:0] PeriphDevMask = {~(HyperramRegSize - 32'd1), ~(DdrPhySize - 32'd1), ~(DdrCtrlSize - 32'd1), ~(MkvSize - 32'd1), ~(DmaSize - 32'd1), ~(H264Size - 32'd1), ~(Csi2rxSize - 32'd1), ~(I2c0Size - 32'd1), ~(IspSize - 32'd1), ~(GpiobSize - 32'd1), ~(GpioaSize - 32'd1), ~(Uart1Size - 32'd1), ~(Uart0Size - 32'd1), ~(FlashCtrlSize - 32'd1), ~(SysctrlSize - 32'd1)};
 
   // Ibex fast interrupt lines
   localparam int unsigned IrqFastUart0 = 0;
@@ -97,5 +103,6 @@ package bow32_memmap_pkg;
   localparam int unsigned IrqFastDma = 9;
   localparam int unsigned IrqFastMkv = 10;
   localparam int unsigned IrqFastDdr = 11;
+  localparam int unsigned IrqFastHyperram = 12;
 
 endpackage

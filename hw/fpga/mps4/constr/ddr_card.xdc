@@ -78,3 +78,11 @@ set_false_path -from [get_cells -hierarchical -filter {NAME =~ u_ddr_io/* && REF
 set_max_delay -datapath_only 6.500 \
   -from [get_cells -hierarchical -filter {NAME =~ u_ddr_io/g_t_phy.*_t_q_reg*}] \
   -to [get_ports {ddr_dq_io[*] ddr_dqs_p_io ddr_dqs_n_io}]
+# DQS: the PHY flop (ddr_clk, falling edge) -> DQS ODDRE1 (ddr_wclk) has half a
+# period minus the T/4 write phase uncertainty. The card's data pins are in
+# bank 71 (clock region X4Y11), six regions above the DDR MMCMs, and with the
+# clock roots Vivado picks (ddr_wclk at X4Y8) the clock skew left -0.07 ns
+# (2026-11-07, with the HyperRAM in bank 71 too). Rooting ddr_wclk (two loads,
+# the DQS ODDRs) at its MMCM's region delays it at the pads: +0.10 ns; roots
+# nearer the pads (X4Y10, X4Y11) or a ddr_clk root move made it worse.
+set_property USER_CLOCK_ROOT X4Y6 [get_nets -of_objects [get_pins u_clk/u_ddr_wclk_bufg/O]]

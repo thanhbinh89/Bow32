@@ -55,6 +55,9 @@ jobs:
       - name: DDR2/DDR3 unit test (LiteDRAM core + Bow32 PHY, pin models, JEDEC checks)
         run: make -C hw/ip/ddr/dv test-ci JOBS=4
 
+      - name: HyperRAM unit test (S80KS2562 pin model, TXV0108 card, loopback emulator)
+        run: make -C hw/ip/hyperram/dv test-ci JOBS=4
+
       - name: Upload logs and firmware
         if: always()
         uses: actions/upload-artifact@v4
@@ -67,6 +70,7 @@ jobs:
             build/h264_dv/*/sim.log
             build/mkv_dv/*/sim.log
             build/ddr_dv/*/sim.log
+            build/hyperram_dv/*/sim.log
             build/sim/h264.hex
             build/sw/*/*.bin
             build/sw/*/*.vmem

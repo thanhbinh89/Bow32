@@ -10,15 +10,20 @@ board; clock video riêng ~107,5 MHz, không đồng bộ với CPU) và một t
 cổng AXI4-Lite. DDR được bật (`DdrEn = 1`, lõi LiteDRAM DDR2) và nối như bản loopback
 của Arm MPS4: mô hình clock (`hw/ip/ddr/dv/ddr_clk_model.sv`: CK, CK/4 cho LiteDRAM, clock
 đọc và hai clock ghi, hai cổng dịch pha như 3 MMCM của board), mô hình chân (`bow_ddr_io_sim.sv`, loopback) và DRAM giả lập `bow_ddr_lb`
-4 MiB; clock DDR chỉ chạy trong test `ddr`, từ lúc boot ROM khởi động ứng dụng.
+4 MiB; clock DDR chỉ chạy trong test `ddr`, từ lúc boot ROM khởi động ứng dụng. HyperRAM
+cũng được bật (`HrEn = 1`) như bản loopback của MPS4: mô hình clock
+(`hw/ip/hyperram/dv/hyperram_clk_model.sv`: CK 100 MHz, clock ghi CK + T/4 và clock đọc,
+hai cổng dịch pha như 2 MMCM, 672 bước mỗi CK), mô hình chân (`bow_hyperram_io_sim.sv`,
+loopback) và HyperRAM giả lập `bow_hyperram_dev` 1 MiB; clock HyperRAM chỉ chạy trong test
+`hyperram`.
 
 ```bash
 make sw            # firmware: build/sw/
 make test          # build mô hình + chạy mọi test
 make run TEST=load # chạy một test, log ở build/sim/load.log
 make run TEST=load WAVES=1   # + build/sim/waves.fst  (gtkwave build/sim/waves.fst)
-make test-ip       # test riêng của ISP, bộ thu CSI-2, H.264, MKV, DDR (bên dưới)
-make test-tools    # unit test của công cụ Python (gồm mô hình CSI-2, MKV, tool DDR)
+make test-ip       # test riêng của ISP, bộ thu CSI-2, H.264, MKV, DDR, HyperRAM (bên dưới)
+make test-tools    # unit test của công cụ Python (gồm mô hình CSI-2, MKV, tool DDR, HyperRAM)
 ```
 
 Để mô phỏng nhanh, testbench đặt `BootBaud = 1 Mbaud`, `BootWaitMs = 1` và
@@ -39,6 +44,7 @@ make test-tools    # unit test của công cụ Python (gồm mô hình CSI-2, M
 | `h264` | ROM + `video` | `dmatest` (DMA kênh 1: SRAM → VRAM → SRAM, lỗi bus ở địa chỉ không ánh xạ); mode 64×48, TPG sọc màu → ISP (YUV) → bộ mã hoá H.264 → DMA kênh 0 → VRAM; `rec 3` rồi `send`: stream qua UART (CRC), lưu `build/sim/h264.hex`; sau mô phỏng `h264_model.py decode --bars` giải mã ra 3 frame 64×48 có đủ 8 sọc màu |
 | `mkv` | ROM + `mkv` | `test quick` → `mkv: PASS (13/13)`: MKV phần mềm và IP (mỗi lệnh làm hai lần và đối chiếu) khớp 6 véc tơ của Phụ lục A (cả khoá vòng), IP ↔ phần mềm trên khoá/khối ngẫu nhiên, ECB (ghi `DIN` khi IP đang chạy), lệnh lỗi, `KEY_VALID`, `CLEAR`, ngắt `irq_fast[10]` (`mip`), stall bus, xoá khoá / `DIN` / `DOUT`, không `FAULT` nào; rồi `key`/`enc`/`dec` qua shell phải ra đúng giá trị của `mkv_model.py`; một dòng `FAIL`/`error` dừng mô phỏng ngay (~9,3 M chu kỳ) |
 | `ddr` | ROM + `ddr` | `test quick` → `ddr: PASS (18/18)`: khởi tạo JEDEC DDR2 bằng chuỗi sinh từ LiteDRAM (qua DFII), hiệu chỉnh đọc (quét pha của mô hình MMCM, chụp thô, mắt, `RD_DLY`/`RD_SLIP`), bàn giao cho controller, cửa sổ CPU (walking 1/0, đường địa chỉ, đọc-sửa-ghi byte/halfword, xorshift), BIST của LiteDRAM và dữ liệu đọc qua cửa sổ = bản C của bộ sinh dữ liệu, refresh, giới hạn pha, ngắt `irq_fast[11]`; rồi `wr`/`rd` qua shell ở đầu và cuối 4 MiB; cuối cùng DRAM giả lập không được thấy vi phạm JEDEC nào (`DBG`). Một dòng `FAIL`/`error`/`[trap]` dừng mô phỏng ngay (~4,9 M chu kỳ, ~1 phút) |
+| `hyperram` | ROM + `hyperram` | `test quick` → `hyperram: PASS (19/19)`: IP có mặt, lệnh bị từ chối đúng luật, khởi tạo (RESET#, quét pha đọc của mô hình MMCM với chụp thô ID0, `RD_DLY`, CR0/CR1, mắt của mẫu, mở cửa sổ), thanh ghi thiết bị, cửa sổ CPU (walking 1/0, đường địa chỉ, ghi byte/halfword bằng mặt nạ RWDS, xorshift với ghi posted và không posted), read buffer (word cần trước, trúng, ghi xuyên), `RANGE`, BIST PRBS/đếm và dữ liệu đọc qua cửa sổ = bản C, latency biến đổi (trùng refresh 2×), hybrid sleep, deep power down, giới hạn pha, ngắt `irq_fast[12]`; rồi `wr`/`rd` qua shell ở đầu và cuối 1 MiB; cuối cùng HyperRAM giả lập không được thấy vi phạm giao thức nào (`DBG`) (~7,4 M chu kỳ) |
 | `csi2` | ROM + `csi2_test` | `test quick` → `csi2_test: PASS (11/11)` (eye mô hình: lane 0 tap 100…300, lane 1 180…400, tap reset 0 xấu; hiệu chỉnh phải ra ~208/288); rồi cài lỗi vào một frame đang chạy (lật 1 bit header → ECC sửa, lật 1 bit payload → CRC, byte sync sai trên lane 1 → SOT + skew) và `stat` phải in đúng `ecc 1/0 crc 1 trunc 0 sot 0/1 ovf 0`, `misc ≥ 1`; một dòng `[FAIL]` dừng mô phỏng ngay |
 
 Một test PASS khi in `TEST PASSED`; lỗi dùng `$fatal` (mã thoát ≠ 0). Có
@@ -171,6 +177,59 @@ make -C hw/ip/ddr/dv run CFG=lb SEED=3 WAVES=1
 | `ddr3` | DDR3 x16 DLL-off nối thẳng (lõi `litedram_ddr3`, DM, RESET#), 125 MHz |
 | `stub` | `bow_ddr_stub` (`DdrEn = 0`) |
 
+### HyperRAM
+
+`hw/ip/hyperram/dv/` mô phỏng toàn bộ `bow_hyperram` (cửa sổ, thanh ghi, controller, BIST, PHY)
+với các mô hình **độc lập với RTL**: `hyperram_model.sv` (S80KS2562 mức chân viết từ datasheet:
+CA, latency 1×/2×, mọi kiểu burst của bảng 11, mặt nạ RWDS, thanh ghi, DPD / hybrid sleep /
+RESET#, thời gian đầu ra tCKD/tDSV/tOZ… rút theo seed và tự kiểm tra từng cạnh, 21 bộ đếm vi
+phạm: tCSM, preamble, tranh chấp, tCSS, tIS/tIH, tRWR…), `hyperram_board_model.sv` (nối thẳng
+hoặc bo RAM với ba TXV0108: trễ, lệch kênh, bật/tắt theo seed; đếm tranh chấp và đầu vào thả
+nổi), `hyperram_clk_model.sv` và `bow_hyperram_io_sim.sv`. `tb_bow_hyperram.sv` lái IP qua cổng
+thanh ghi và cửa sổ đúng như `bow_hyperram.c` (bật, RESET#, hiệu chỉnh đọc bằng chụp thô, CR0 /
+CR1, mắt của mẫu, quét pha ghi trên bo RAM), rồi: truy cập cửa sổ ngẫu nhiên byte / halfword /
+word với read buffer, line fill wrapped, ghi posted bật / tắt, so với mô hình byte **và** với bộ
+nhớ của mô hình chip (byte 2n = byte A); BIST PRBS / đếm so với bản SV của bộ sinh; thanh ghi
+thiết bị và bản sao CR0/CR1; hybrid sleep, deep power down; `RANGE`, `NOT_READY`, BIST bị từ chối
+vì tCSM, lệnh hai bit; `FLUSH` rồi `WIN_IDLE` phải nghĩa là dữ liệu đã ở trong chip (24 lần thử
+mỗi lượt). Cuối cùng mô hình chip không được thấy vi phạm nào, bo không có tranh chấp, `STATUS`
+không có cờ lỗi.
+
+```bash
+make -C hw/ip/hyperram/dv test                    # lb card direct stub ozf, ~1,5 phút
+make -C hw/ip/hyperram/dv seeds CFG=card SEEDS="1 2 3"
+make -C hw/ip/hyperram/dv run CFG=card SEED=3 WAVES=1
+make -C hw/ip/hyperram/dv rdhold SEEDS="1 8 13"   # RD_HOLD 1 / 0 cạnh nhau
+make -C hw/ip/hyperram/dv model                   # tự kiểm tra các mô hình (không có RTL)
+```
+
+| Cấu hình | Nội dung |
+|----------|----------|
+| `lb` | bản loopback của MPS4: pad twin ở chế độ loopback + `bow_hyperram_dev` 1 MiB, 100 MHz, 672 bước pha; cả latency biến đổi (emulator cho 2× ở 3 trong mỗi 15 giao dịch) |
+| `card` | bo RAM (TXV0108) + mô hình S80KS2562, 100 MHz, latency cố định 4, quét pha ghi |
+| `direct` | nối thẳng + mô hình chip, 166,67 MHz, latency 6, cả latency biến đổi (trùng refresh) |
+| `stub` | `bow_hyperram_stub` (`HrEn = 0`) |
+| `ozf` | như `direct` nhưng chip có thể tắt DQ trước khi byte cuối ra (tOZ không có min): `RD_HOLD` = 1 phải giữ đọc đúng; `make rdhold` cho thấy với `RD_HOLD` = 0 hai seed (8, 13) mất hẳn mắt ID0, nên `make test` chạy `ozf` với seed 8 (`SEED_ozf`) bất kể `SEED`: `RD_HOLD` hỏng là ca này hỏng |
+
+Testbench này đã tìm ra ba lỗi RTL (đã sửa): một burst BIST bị từ chối làm lượt chạy treo
+`BIST_BUSY`; `WIN_IDLE` lên 1 khi khối ghi posted còn trong FIFO lệnh (nay controller trả lời
+mọi khối và cửa sổ đếm chúng); `unique case` của thanh ghi lệnh vi phạm với mọi lần ghi nhiều
+bit (chặn mô phỏng có assertion, `make run ... ASSERT=1`). Chạy được với Verilator 5.020 (bản
+của CI) và xsim (`make xsim CFG=card`).
+
+Mục 9b của testbench là các kiểm tra hồi quy cho từng bản sửa của hai vòng review PR #6: khối
+ghi posted đang staged khi một REG_RD chờ sau nó (56 lần, ba cách khối rời bộ đệm), INVAL sau
+BIST khi một line đang nạp, khối posted bị controller từ chối (`WR_ERR`, line bị bỏ), `CORE_RST`
+khi một lần đọc đang chờ (`NOT_READY`), CMD trong reset kênh và ở chu kỳ đầu sau khi nhả (đúng
+một trong `CMD_DONE` / `CMD_ERR`, `ERR_CODE` 5 giữ qua reset), `CORE_RST` giữa lúc hồi phục WAKE
+(POWER vẫn về hoạt động, chip dùng được), `CMD_DONE` của WAKE chỉ sau hồi phục, `BIST_FADDR`,
+`ERR_CODE` 7 của bước pha và `BIST_GO`, bản sao CR1 sau HW_RESET / DPD, và (chân) `CORE_RST` ở 40
+điểm của một line fill không gây chồng lái DQ/RWDS. Mô hình chip đếm các pha CA bị cắt có chủ
+đích ở đây (`ca_abort_ok`) thay vì báo lỗi; emulator không có móc đó nên lỗi 0E của nó chỉ được
+miễn đúng số lần cắt trong các kiểm tra này. `make -C hw/ip/hyperram/dv mutants` (không nằm
+trong `make test`, 18 bản dựng) gỡ từng bản sửa trong một bản sao RTL và chạy cấu hình liên
+quan: cả 18 phải FAIL.
+
 ### Bộ thu CSI-2
 
 `hw/ip/csi2rx/dv/` so bộ thu với mô hình Python `tools/csi2/csi2_model.py`, được
@@ -220,6 +279,29 @@ CNTVALUEOUT ở burst sau, pixel và thanh ghi của bộ thu. Cần Vivado nên
 chạy trong CI; pass/fail lấy từ dòng `tb_bow_dphy_io_xusp: PASS` (mã thoát của
 xsim không phản ánh kết quả). Eye không mô phỏng được: unisim không có lệch
 clock/data.
+
+### Chân và clock HyperRAM trên FPGA (xsim)
+
+`tb_bow_hyperram_io_xilinx.sv` (cũng trong `hw/fpga/common/dv/`, nằm trong `make test`)
+chạy `bow_hyperram_clk_xusp` (hai MMCME4_ADV với dịch pha tinh) và `bow_hyperram_io_xilinx`
+(`ODDRE1`, `IDDRE1`, `IOBUF`, flop T) bằng model unisim, T = 10 ns, cấu hình `card` (chân
+level shifter), `direct` và `lb` (loopback của bản MPS4), mỗi cấu hình seed 1 2 3. Thanh ghi
+PHY ngẫu nhiên mỗi chu kỳ (trễ tới ODDR rút trong [T/4, T/2]); kiểm tra: mọi chân ra ở đầu,
+giữa, cuối cửa sổ của hợp đồng chân (`bow_hyperram_pkg`) và pha của mọi cạnh (CK_N luôn là bù
+của CK_P; CS#, RESET#, OE#/DIR = giá trị của chu kỳ PHY j trong chu kỳ chân j + 1; byte A/B
+của DQ/RWDS và trạng thái lái), mức nghỉ trước clock, trong GSR và trước lock (SRVAL), bắt
+mẫu đọc khi testbench lái DQ/RWDS và pha đọc đang dịch, dữ liệu tự lái đọc lại qua IOBUF/IDDR,
+pha ghi +T/4, −T/4, +17 bước rồi về 0 (DQ/RWDS dịch, CK/CS# không), `hr_wclk` = `hr_clk` +
+T/4 lúc lock, PSDONE, độ rộng xung khi dịch pha, reset và mất lock của từng MMCM đưa cả hai
+pha về 0. `make -C hw/fpga/common/dv mutants` chạy thêm 42 bản hỏng có chủ đích của hai wrapper (đảo ODDR, đổi
+byte, cực tính T, SRVAL, thứ tự chân level shifter, mux loopback, chế độ IDDR, pha 270°, cổng
+PS, logic mất lock…): cả 42 phải FAIL (mỗi bản dựng trong thư mục sạch; một bản không dựng được
+tính là lỗi của chính `mutants.py`, không phải "bị bắt").
+
+```bash
+make -C hw/fpga/common/dv test-hr-io                        # 3 cấu hình x seed 1 2 3, ~1 phút
+make -C hw/fpga/common/dv run-hr-io HR_IO_CFG=lb SEED=2 WAVES=1
+```
 
 ## Thêm test
 
