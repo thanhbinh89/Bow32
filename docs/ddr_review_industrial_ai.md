@@ -195,6 +195,26 @@ năng chính; **trung bình** = chạy được nhưng biên thấp / mất hi�
 | **P2** (công nghiệp) | ECC (side-band hoặc inline) + scrub + đếm lỗi + chèn lỗi; bám pha nền (B3, D1); March test; đặc tính hoá trong buồng nhiệt (B4); FMEDA | 0 lỗi không sửa được trong soak 72 h ở −40 / 85 (95) °C; mọi lỗi 1 bit chèn vào được sửa và đếm; biên ≥ 25 % chu kỳ ở mọi góc |
 | **P3** (ASIC SoC) | Chọn PHY cứng (và controller), lớp DFI 3.1/4.0, X-prop, DFT; cân nhắc LPDDR4/4X | lõi qua lint reset và X-prop; mô phỏng với mô hình PHY của nhà cung cấp |
 
+### Trạng thái P0 (2026-11-08)
+
+| Mục | Trạng thái | Ở đâu |
+|-----|------------|-------|
+| B1 refresh theo nhiệt độ | xong: `trefi_ns` trong `ddr2.yml`/`ddr3.yml` (3900), lõi sinh lại (129 / 121 chu kỳ) với bộ đếm refresh hai chu kỳ: `CTRL.REF_NORM` cho lõi refresh mỗi 7,74 µs (mặc định 3,87 µs), nên ở nhiệt độ thường controller cũng chỉ tốn nửa thời gian refresh; kiểm tra lúc elaboration theo 3,9 µs; mô hình DRAM kiểm khoảng 9 × tREFI và nợ REF trung bình ±8 với đầu vào `hot_i` | `bow_ddr_litedram_gen.py`, `bow_ddr.sv`, `bow_ddr_dev.sv` |
+| B6 giám sát refresh | xong: `CTRL.REF_MON`, `STATUS.REF_STARVE` + ngắt sau 8 khoảng không có REF, `ST_RGAP`; firmware bật sau bàn giao, tắt trong đoạn DFII / `CORE_RST`; chưa làm watchdog tự hồi phục (tuỳ chọn) | `bow_ddr_dfi.sv`, `bow_ddr_regs.sv`, `bow_litedram.c` |
+| B7 khoá cấu hình | xong: `CTRL.LOCK` (chỉ reset SoC xoá), `STATUS.LOCK_ERR`, ghi CSR LiteDRAM bị từ chối; chưa làm PMP và CRC cấu hình | `bow_ddr_regs.sv`, `bow_ddr_csr.sv` |
+| B9 March C- | xong: `memtest` và mục 10 của `test` | `sw/apps/ddr/memtest.c` |
+| D2 hồi quy nhiều seed | xong: `make -C hw/ip/ddr/dv regress NSEEDS=n`, chạy hằng đêm (25 seed); 100 seed × 4 cấu hình PASS | `hw/ip/ddr/dv/Makefile`, `.github/workflows/ddr-nightly.yml` |
+| Telemetry độ rộng mắt | xong: `ddr: telemetry: ... (P % of CK)` sau `cal`/`calw`, cảnh báo dưới 25 % | `bow_litedram.c` |
+| A7 DMA ghi bitstream H.264 vào DDR | chưa: cần một nền tảng có cả camera lẫn DDR của IP (KV260 không có DDR của IP, MPS4 không có camera) | — |
+
+Tiêu chí P0: test IP PASS với cả 7,8 và 3,9 µs (bước 10 của `tb_bow_ddr`: 52 / 25 REF trong
+200 µs, `ST_RGAP` 515 / 1031 CK); `REF_STARVE` bắt được trong test chèn lỗi (30,5 µs sau
+khi dừng refresh, giới hạn 30,96 µs); 100 seed × 4 cấu hình PASS. Self-test của ứng dụng
+`ddr`: 21 mục (thêm tốc độ refresh, giám sát refresh, March C-). Trên MPS4 (bản loopback):
+21/21, `verify` 30/30; BIST ghi / đọc 213,7 / 213,7 MB/s ở 3,9 µs và 233,5 / 226,4 MB/s ở
+7,8 µs: refresh 3,9 µs tốn 8,5 % / 5,6 % băng thông của controller, nhiều hơn ước lượng ở
+mục 7 vì mỗi lần refresh LiteDRAM mất khoảng 20 chu kỳ (xả hàng đợi, PREA, tRFC, mở lại hàng).
+
 ## 7. Ghi chú về số liệu
 
 * Băng thông hiện tại lấy từ [ddr_mps4.md](ddr_mps4.md) mục 4.6 (MPS4, 2026-11-05).

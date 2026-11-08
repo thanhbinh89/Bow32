@@ -56,6 +56,7 @@ void mt_clear(mt_res_t *r);
 bool mt_walk(uint32_t off, mt_res_t *r);                 /* walking 1 / 0, two native words */
 bool mt_addr_lines(uint32_t cap_log2, mt_res_t *r);      /* offsets 0 and 2^k */
 bool mt_addr(uint32_t off, uint32_t len, mt_res_t *r);   /* address in address, inverted */
+bool mt_march(uint32_t off, uint32_t len, mt_res_t *r);  /* March C-: 10 accesses per word */
 bool mt_bytes(uint32_t off, uint32_t len, uint32_t seed, mt_res_t *r); /* byte / halfword stores */
 bool mt_fill(uint32_t off, uint32_t len, uint32_t seed, mt_res_t *r);
 bool mt_check(uint32_t off, uint32_t len, uint32_t seed, mt_res_t *r);

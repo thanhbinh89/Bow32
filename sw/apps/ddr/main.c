@@ -11,6 +11,7 @@
  *                              errors: "ddr: PASS (n/n)" / "ddr: FAIL (k/n)"
  *   init, cal, calw, eye       bring-up steps by hand
  *   verify, bist, memtest, dump   data checks (the host compares the dumps)
+ *   refresh, lock              refresh rate / monitor, configuration lock
  *
  * Every command ends with a line "ok" or "error", then the prompt "> ".
  * Output (printf notation):
@@ -47,7 +48,13 @@
  *             rticks %u (write %s, read %s)" (ticks of the controller clock CK / 4,
  *             %s = "%u.%02u MB/s")
  *   memtest   "memtest: %08x + %u bytes seed %u: %u words, errors %u[, bus error]",
- *             "memtest: first error at %08x: expected %08x read %08x"
+ *             "memtest: first error at %08x: expected %08x read %08x" (address in
+ *             address, March C-, xorshift fill / check)
+ *   cal/calw  after the result line: "ddr: telemetry: read eye | write range %u of %u
+ *             steps (%u %% of CK)[, WARNING: below 25 %%]"
+ *   refresh   "refresh: REF every 3.9|7.8 us at the DRAM, monitor on|off, longest REF
+ *             interval %u CK[, REF_STARVE][, LOCKED]"
+ *   lock      "lock: configuration locked until the next reset" | "lock: refused"
  *   verify    "verify: %u cases, seed %u", per failed case "verify: case %u: <case>:
  *             <reason>", last "verify: PASS (%u/%u cases)" | "verify: FAIL (%u/%u cases)"
  *   dump      "%08x: xx xx ..." (16 bytes per line) | "error: bus error at %08x"
@@ -61,7 +68,7 @@
  *             latency %u, controller %u Hz", "  memory: %u MiB at 80000000, test region
  *             %u KiB", "  state: ready | initialised, not handed over | not
  *             initialised (init, cal)", "  calibration: phase %d width %u RD_DLY %u SLIP
- *             %u, write phase %d" (once calibrated)
+ *             %u, write phase %d, read eye %u %% of CK" (once calibrated)
  *   stat      bow_ddr_print_status() and bow_ld_print_status() (free form)
  *   baud      "ok, switching to %u baud" (the rest at the new rate)
  *   other     "error: <reason>" lines; "unknown command, h for help"
@@ -83,11 +90,15 @@ static const char help[] =
     "                             path verifies again, else the window is blocked (cal again)\n"
     "  verify [N] [SEED]          N random BIST / CPU cases checked against C models (20)\n"
     "  bist ADDR LEN [prbs|count] LiteDRAM BIST: write + check LEN bytes at ADDR\n"
-    "  memtest ADDR LEN [SEED]    CPU test of LEN bytes, leaves the xorshift fill of SEED\n"
+    "  memtest ADDR LEN [SEED]    CPU test of LEN bytes (incl. March C-), leaves the xorshift\n"
+    "                             fill of SEED\n"
     "  bench                      CPU (window) and BIST bandwidth\n"
     "  phase N | wphase N         read / write phase (fine steps, signed)\n"
     "  cap [BA ROW COL]           one DFII read with raw capture (after init)\n"
     "  rd ADDR | wr ADDR VAL | dump ADDR LEN   bus access (ADDR, VAL hex; LEN bytes)\n"
+    "  refresh [3.9|7.8]          REF interval at the DRAM (7.8: case temperature <= 85 C only),\n"
+    "                             monitor state and the longest REF interval\n"
+    "  lock                       freeze the configuration until the next reset (CTRL.LOCK)\n"
     "  baud RATE\n";
 
 /* ------------------------------------------------------------------ helpers */
@@ -245,12 +256,30 @@ static void info(void) {
                               : bow_ld_inited() ? "initialised, not handed over"
                                                 : "not initialised (init, cal)");
   if (app.calibrated) {
-    bow_printf("  calibration: phase %d width %u RD_DLY %u SLIP %u, write phase %d\n",
-               app.cal.phase, app.cal.width, app.cal.rd_dly, app.cal.rd_slip, bow_ddr_wps_now());
+    bow_printf("  calibration: phase %d width %u RD_DLY %u SLIP %u, write phase %d, read eye %u %% of CK\n",
+               app.cal.phase, app.cal.width, app.cal.rd_dly, app.cal.rd_slip, bow_ddr_wps_now(),
+               bow_ld_pct_of_ck(app.cal.width, i->ps_steps));
   }
 }
 
 /* ------------------------------------------------------------------ commands */
+static bool cmd_refresh(const char *a) {
+  if (!need_present()) return false;
+  if (word_is(a, "3.9") || word_is(a, "7.8")) {
+    bow_ld_set_refresh_norm(skip_spaces(a)[0] == '7');
+  } else if (!at_end(a)) {
+    return false;
+  }
+  bow_ddr_stats_t s;
+  uint32_t ctrl = BOW_DDR_RD(CTRL), st = BOW_DDR_RD(STATUS);
+  bool snap = (st & DDR_ST_CLK_OK) && !(st & DDR_ST_BUSY) && bow_ddr_stats(&s, false);
+  bow_printf("refresh: REF every %s us at the DRAM, monitor %s, longest REF interval %u CK%s%s\n",
+             (ctrl & DDR_CTRL_REF_NORM) ? "7.8" : "3.9", (ctrl & DDR_CTRL_REF_MON) ? "on" : "off",
+             snap && s.rgap ? s.rgap + 1u : 0u, (st & DDR_ST_REF_STARVE) ? ", REF_STARVE" : "",
+             (ctrl & DDR_CTRL_LOCK) ? ", LOCKED" : "");
+  return true;
+}
+
 static bool cmd_bist(const char *a) {
   uint32_t addr, len;
   bool random = true;
@@ -293,7 +322,8 @@ static bool cmd_memtest(const char *a) {
     return false;
   }
   mt_clear(&r);
-  bool ok = mt_addr(off, len, &r) && mt_fill(off, len, seed, &r) && mt_check(off, len, seed, &r);
+  bool ok = mt_addr(off, len, &r) && mt_march(off, len, &r) && mt_fill(off, len, seed, &r) &&
+            mt_check(off, len, seed, &r);
   bow_printf("memtest: %08x + %u bytes seed %u: %u words, errors %u%s\n", BOW32_DDR_BASE + off, len,
              seed, r.words, r.errors, r.bus_error ? ", bus error" : "");
   if (r.errors) {
@@ -424,6 +454,13 @@ static bool execute(const char *line) {
     return need_ready() && verify(n, seed);
   }
   if ((a = match(line, "bist"))) return cmd_bist(a);
+  if ((a = match(line, "refresh"))) return cmd_refresh(a);
+  if ((a = match(line, "lock"))) {
+    if (!at_end(a) || !need_present()) return false;
+    bool ok = bow_ddr_lock();
+    bow_puts(ok ? "lock: configuration locked until the next reset\n" : "lock: refused\n");
+    return ok;
+  }
   if ((a = match(line, "memtest"))) return cmd_memtest(a);
   if ((a = match(line, "bench"))) {
     if (!need_ready()) return false;

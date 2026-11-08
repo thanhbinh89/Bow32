@@ -82,6 +82,7 @@ module litedram_ddr2 (
     output wire    [1:0] dfi_p3_wrdata_mask,
     output wire          init_done,
     output wire          init_error,
+    input  wire          ref_norm,
     input  wire          rst,
     output wire          user_clk,
     input  wire   [22:0] user_port_native_0_cmd_addr,
@@ -136,7 +137,7 @@ BowLiteDRAMCore
 │    │    └── pi3 (PhaseInjector)
 │    ├── controller (LiteDRAMController)
 │    │    ├── refresher (Refresher)
-│    │    │    ├── timer (RefreshTimer)
+│    │    │    ├── timer (BowRefreshTimer)
 │    │    │    ├── postponer (RefreshPostponer)
 │    │    │    ├── sequencer (RefreshSequencer)
 │    │    │    │    └── refreshexecuter_0 (RefreshExecuter) [Gen]
@@ -1506,9 +1507,8 @@ wire          bowlitedramcore_tfawcon_valid;
 reg     [5:0] bowlitedramcore_time0 = 6'd0;
 reg     [4:0] bowlitedramcore_time1 = 5'd0;
 wire    [8:0] bowlitedramcore_timer_count0;
-reg     [8:0] bowlitedramcore_timer_count1 = 9'd258;
-wire          bowlitedramcore_timer_done0;
-wire          bowlitedramcore_timer_done1;
+reg     [8:0] bowlitedramcore_timer_count1 = 9'd128;
+wire          bowlitedramcore_timer_done;
 wire          bowlitedramcore_timer_wait;
 reg           bowlitedramcore_trrdcon_count = 1'd0;
 (* dont_touch = "true" *)
@@ -2699,11 +2699,10 @@ assign bowlitedramcore_bankmachine3_req_addr = bowlitedramcore_interface_bank3_a
 assign bowlitedramcore_interface_bank3_lock = bowlitedramcore_bankmachine3_req_lock;
 assign bowlitedramcore_interface_bank3_wdata_ready = bowlitedramcore_bankmachine3_req_wdata_ready;
 assign bowlitedramcore_interface_bank3_rdata_valid = bowlitedramcore_bankmachine3_req_rdata_valid;
-assign bowlitedramcore_timer_wait = (~bowlitedramcore_timer_done0);
-assign bowlitedramcore_postponer_req_i = bowlitedramcore_timer_done0;
+assign bowlitedramcore_timer_wait = (~bowlitedramcore_timer_done);
+assign bowlitedramcore_postponer_req_i = bowlitedramcore_timer_done;
 assign bowlitedramcore_wants_refresh = bowlitedramcore_postponer_req_o;
-assign bowlitedramcore_timer_done1 = (bowlitedramcore_timer_count1 == 1'd0);
-assign bowlitedramcore_timer_done0 = bowlitedramcore_timer_done1;
+assign bowlitedramcore_timer_done = (bowlitedramcore_timer_count1 == 1'd0);
 assign bowlitedramcore_timer_count0 = bowlitedramcore_timer_count1;
 assign bowlitedramcore_sequencer_start1 = (bowlitedramcore_sequencer_start0 | (bowlitedramcore_sequencer_count != 1'd0));
 assign bowlitedramcore_sequencer_done0 = (bowlitedramcore_sequencer_done1 & (bowlitedramcore_sequencer_count == 1'd0));
@@ -5685,10 +5684,10 @@ always @(posedge sys_clk) begin
     if (bowlitedramcore_csr_dfi_p3_rddata_valid) begin
         bowlitedramcore_phaseinjector3_rddata <= bowlitedramcore_csr_dfi_p3_rddata;
     end
-    if ((bowlitedramcore_timer_wait & (~bowlitedramcore_timer_done0))) begin
+    if ((bowlitedramcore_timer_wait & (~bowlitedramcore_timer_done))) begin
         bowlitedramcore_timer_count1 <= (bowlitedramcore_timer_count1 - 1'd1);
     end else begin
-        bowlitedramcore_timer_count1 <= 9'd258;
+        bowlitedramcore_timer_count1 <= (ref_norm ? 9'd257 : 8'd128);
     end
     bowlitedramcore_postponer_req_o <= 1'd0;
     if (bowlitedramcore_postponer_req_i) begin
@@ -6922,7 +6921,7 @@ always @(posedge sys_clk) begin
         bowlitedramcore_dfi_p3_we_n <= 1'd1;
         bowlitedramcore_dfi_p3_wrdata_en <= 1'd0;
         bowlitedramcore_dfi_p3_rddata_en <= 1'd0;
-        bowlitedramcore_timer_count1 <= 9'd258;
+        bowlitedramcore_timer_count1 <= 9'd128;
         bowlitedramcore_postponer_req_o <= 1'd0;
         bowlitedramcore_postponer_count <= 1'd0;
         bowlitedramcore_sequencer_done1 <= 1'd0;

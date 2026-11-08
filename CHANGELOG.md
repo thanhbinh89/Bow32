@@ -6,6 +6,23 @@
 ## [Unreleased]
 
 ### Added
+- **DDR: độ tin cậy cho mục tiêu công nghiệp** (P0 của
+  [docs/ddr_review_industrial_ai.md](docs/ddr_review_industrial_ai.md)):
+  - Refresh theo nhiệt độ: lõi LiteDRAM refresh mỗi 3,87 µs (Tc 85..95 °C); `CTRL.REF_NORM`
+    cho bộ đếm refresh của lõi chạy chu kỳ gấp đôi (7,74 µs, Tc ≤ 85 °C), có hiệu lực từ lần
+    refresh kế tiếp.
+  - Giám sát refresh: `CTRL.REF_MON`, `STATUS.REF_STARVE` + ngắt sau 8 khoảng không có REF,
+    khoảng REF dài nhất ở `ST_RGAP` (`0x0BC`).
+  - Khoá cấu hình `CTRL.LOCK` (chỉ reset SoC xoá): `CTRL`/`LAT`/pha, lệnh (trừ `SNAP`,
+    `CLR_STATS`) và ghi CSR LiteDRAM bị từ chối, `STATUS.LOCK_ERR`.
+  - Firmware: chính sách refresh (`bow_ld_set_refresh_norm`), bật giám sát sau bàn giao, tắt
+    trong đoạn DFII; telemetry độ rộng mắt (% chu kỳ CK, cảnh báo dưới 25 %); lệnh
+    `refresh`, `lock`; March C- trong `memtest`; self-test 21 mục (thêm tốc độ refresh, giám
+    sát refresh, March C-).
+  - Kiểm chứng: bước refresh / giám sát / `LOCK` trong `tb_bow_ddr`, `LOCK` qua reset SoC
+    trong `tb_bow_ddr_rst`, mô hình DRAM kiểm thêm nợ REF trung bình theo JEDEC (hoãn tối đa
+    8, trả trước tối đa 8) với chế độ nóng `hot_i`; `make -C hw/ip/ddr/dv regress NSEEDS=n` và workflow hằng đêm
+    `ddr-nightly.yml` (25 seed).
 - **SDRAM DDR2/DDR3** `bow_ddr` (`hw/ip/ddr`): controller **LiteDRAM** trên PHY riêng
   của Bow32. Cửa sổ bộ nhớ 512 MiB ở `0x8000_0000` trên main crossbar (3 × 8), CSR của
   LiteDRAM ở `0x4000_C000` (8 KiB), thanh ghi PHY/cầu ở `0x4000_E000`, ngắt
@@ -220,6 +237,12 @@
   gửi được BREAK.
 
 ### Changed
+- DDR: lõi LiteDRAM sinh với `trefi_ns: 3900` (`ddr2.yml`, `ddr3.yml`; DDR2 129 chu kỳ,
+  DDR3 121), bộ đếm refresh của lõi có thêm chu kỳ 2 × tREFI (chân `ref_norm`, đi theo
+  `CTRL.REF_NORM`); kiểm tra lúc elaboration theo 3,9 µs. Mặc định 3,9 µs chậm hơn: BIST trên
+  MPS4 ghi / đọc 213,7 / 213,7 MB/s, so với 233,5 / 226,4 MB/s ở 7,8 µs. `REF_STARVE` của
+  emulator / mô hình DRAM kiểm thêm nợ REF trung bình (hoãn tối đa 8, trả trước tối đa 8)
+  bên cạnh 9 × tREFI không có REF.
 - **MKV theo TCVN 14263:2024** thay cho bản dự thảo. Bản chuẩn khác bản dự thảo ở
   ba điểm của thuật toán, nên là một mã khác (dữ liệu mã bằng IP cũ không giải mã
   được bằng IP mới) ([docs/ip/mkv.md](docs/ip/mkv.md), "So với bản dự thảo"):

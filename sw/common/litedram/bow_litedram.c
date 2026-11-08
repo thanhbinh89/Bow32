@@ -68,6 +68,8 @@ static const bow_ld_core_t *core = &bow_ld_core_ddr2; /* of the last init */
 static uint32_t wbytes = 8u;                          /* native word */
 static uint32_t mem_bytes;                            /* DRAM size */
 static bool inited;                                   /* JEDEC init done, DFII sections allowed */
+static bool ref_norm;                                 /* refresh after the hand-over: 7.8 us */
+static bool sw_mon;                                   /* REF_MON before a software section */
 
 /* ------------------------------------------------------------------- CSRs */
 uint32_t bow_ld_csr_faults;
@@ -180,8 +182,12 @@ void bow_ld_dfii_rddata(uint8_t *b) {
 
 /* Software section: the controller's refresher no longer reaches the DRAM.
  * refresh: PREA + REF first (the DRAM was refreshed just now, whatever the
- * refresher was doing). Keep it short, no print until bow_ld_sw_end. */
+ * refresher was doing). Keep it short, no print until bow_ld_sw_end. The
+ * refresh monitor (REF_MON) is off for the section: no refresh to watch. */
 void bow_ld_sw_begin(bool refresh) {
+  uint32_t ctrl = RD(CTRL);
+  sw_mon = (ctrl & DDR_CTRL_REF_MON) != 0u;
+  if (sw_mon) bow_ddr_set_refresh((ctrl & DDR_CTRL_REF_NORM) != 0u, false);
   csr_write_simple(DFII_SW, CSR_SDRAM_DFII_CONTROL_ADDR);
   sw_t0 = bow_cycles();
   bow_delay_us(1); /* tRFC / tZQCS of a command the controller just issued */
@@ -196,6 +202,8 @@ void bow_ld_sw_end(void) {
   csr_write_simple(DFII_HW, CSR_SDRAM_DFII_CONTROL_ADDR);
   uint32_t d = bow_cycles() - sw_t0;
   if (d > sw_max) sw_max = d;
+  if (sw_mon) bow_ddr_set_refresh((RD(CTRL) & DDR_CTRL_REF_NORM) != 0u, true);
+  sw_mon = false;
 }
 
 uint32_t bow_ld_sw_max_us(void) {
@@ -233,6 +241,7 @@ bool bow_ld_burst_read(uint32_t ba, uint32_t row, uint32_t col, uint8_t *burst, 
 
 /* --------------------------------------------------------------- bring-up */
 bool bow_ld_stop(void) {
+  bow_ddr_set_refresh(false, false); /* the DRAM stops: no refresh (and the core's default rate) */
   uint32_t ctrl = RD(CTRL);
   inited = false;
   if (bow_ld_csr_ok()) {
@@ -429,7 +438,47 @@ bool bow_ld_handover(bool ok) {
   while (!(RD(STATUS) & DDR_ST_READY)) {
     if ((uint32_t)(bow_cycles() - start) > limit) return false;
   }
-  return true;
+  return bow_ddr_set_refresh(ref_norm, true); /* the refresh rate of the policy, monitor on */
+}
+
+/* ---------------------------------------------------------------- refresh */
+void bow_ld_set_refresh_norm(bool norm) {
+  ref_norm = norm;
+  if (RD(STATUS) & DDR_ST_READY) bow_ddr_set_refresh(norm, (RD(CTRL) & DDR_CTRL_REF_MON) != 0u);
+}
+
+bool bow_ld_refresh_norm(void) { return ref_norm; }
+
+bool bow_ld_refresh_pause(uint32_t max_us, uint32_t *starve_us) {
+  bool was_ready, hit = false;
+  if (starve_us) *starve_us = 0;
+  if (!inited) return false;
+  bow_ld_quiesce(&was_ready); /* window blocked, rows closed by a refresh */
+  WR(STATUS, DDR_ST_REF_STARVE);
+  uint32_t mhz = bow_clk_hz() / 1000000u, limit = max_us * mhz;
+  csr_write_simple(DFII_SW, CSR_SDRAM_DFII_CONTROL_ADDR); /* the refresher no longer reaches the DRAM */
+  uint32_t t0 = bow_cycles(), d;
+  do {
+    d = bow_cycles() - t0;
+    if (RD(STATUS) & DDR_ST_REF_STARVE) {
+      hit = true;
+      break;
+    }
+  } while (d < limit);
+  csr_write_simple(DFII_HW, CSR_SDRAM_DFII_CONTROL_ADDR);
+  if (starve_us) *starve_us = d / (mhz ? mhz : 1u);
+  return bow_ld_release(was_ready) && hit;
+}
+
+uint32_t bow_ld_pct_of_ck(uint32_t width, uint32_t steps) {
+  return steps ? (uint32_t)((uint64_t)width * 100u / steps) : 0u;
+}
+
+static void telemetry(const char *what, uint32_t width) {
+  uint32_t steps = bow_ddr_ps_steps(), pct = bow_ld_pct_of_ck(width, steps);
+  bow_printf("ddr: telemetry: %s %u of %u steps (%u %% of CK)", what, width, steps, pct);
+  if (pct < BOW_LD_EYE_WARN_PCT) bow_printf(", WARNING: below %u %%", BOW_LD_EYE_WARN_PCT);
+  bow_puts("\n");
 }
 
 void bow_ld_quiesce(bool *was_ready) {
@@ -725,6 +774,7 @@ bool bow_ld_calibrate(uint32_t step, bool verbose, bow_ld_cal_t *res) {
   if (verbose) {
     bow_printf("ddr: read phase %d width %u p %d RD_DLY %u SLIP %u, BIST %u errors\n", res->phase,
                res->width, res->p, res->rd_dly, res->rd_slip, br.errors);
+    telemetry("read eye", res->width);
   }
   if (!bist) return cal_abort(res, verbose, "BIST check after the calibration");
   return true;
@@ -805,6 +855,7 @@ bool bow_ld_cal_write(uint32_t step, bool verbose, bow_ld_cal_t *res) {
   if (!(bow_ddr_wps_set(res->wphase) && wps_bist(&b))) {
     return cal_write_fail(res, verbose, old, &b, CAL_WRITE_FAIL("BIST at the chosen phase"));
   }
+  if (verbose) telemetry("write range", res->wwidth);
   return true;
 }
 
@@ -931,4 +982,8 @@ void bow_ld_print_status(void) {
              ct, ce);
   bow_printf("  CSR faults %u, longest DFII software section %u us\n", bow_ld_csr_faults,
              bow_ld_sw_max_us());
+  uint32_t ctrl = RD(CTRL);
+  bow_printf("  refresh: REF every %s us (policy %s), monitor %s%s\n",
+             (ctrl & DDR_CTRL_REF_NORM) ? "7.8" : "3.9", ref_norm ? "7.8" : "3.9",
+             (ctrl & DDR_CTRL_REF_MON) ? "on" : "off", (ctrl & DDR_CTRL_LOCK) ? ", LOCKED" : "");
 }

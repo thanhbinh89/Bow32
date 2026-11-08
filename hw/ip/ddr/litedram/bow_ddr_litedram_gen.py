@@ -15,6 +15,8 @@ clock, no DDR2 on UltraScale+), so the PHY is Bow32's own SystemVerilog PHY
 "PHY" that only exports LiteDRAM's DFI as ports:
 
     clk, rst                 controller clock (CK / 4) and active high reset
+    ref_norm                 refresh period 2 x tREFI instead of tREFI (CTRL.REF_NORM,
+                             synchronised to clk by bow_ddr)
     init_done, init_error    ddrctrl CSRs, set by the firmware after training
     user_clk, user_rst       = clk, controller reset
     user_port_native_0_*     native port: one BL8 burst per word (8 x DQ bits), not
@@ -32,8 +34,13 @@ register of the generated init sequence. DDR3 runs in DLL-off mode
 (dll_off: true, CK <= 125 MHz, CL = CWL = 6), supported by LiteDRAM.
 
 Controller settings: no auto-precharge (rows are closed with explicit PRE; the
-Bow32 DRAM emulator and models do not support RDA / WRA), and tREFI rounded
-DOWN to whole controller cycles (LiteDRAM rounds up: 7.83 us > 7.8 us).
+Bow32 DRAM emulator and models do not support RDA / WRA), and tREFI = trefi_ns
+of the config rounded DOWN to whole controller cycles (LiteDRAM rounds up).
+Both configs use 3900 ns, the JEDEC average refresh interval for a case
+temperature Tc of 85..95 C. The refresh timer of LiteDRAM's Refresher is
+replaced by one with a second period: the port ref_norm = 1 reloads it with
+2 x tREFI (7.8 us, Tc <= 85 C; CTRL.REF_NORM, docs/ip/ddr.md), so at normal
+temperature the controller also spends only half the time refreshing.
 
 No vendor primitive is used: the same core is simulated by Verilator and
 synthesized by Vivado.
@@ -63,7 +70,7 @@ import yaml
 
 HEADERS = ["csr.h", "soc.h", "mem.h", "sdram_phy.h"]
 NPHASES = 4
-TREFI_NS = 7800.0   # JEDEC maximum average refresh interval (Tc <= 85 C)
+TREFI_NS = 7800.0   # default trefi_ns: JEDEC average refresh interval for Tc <= 85 C
 
 # DFII bits (litedram/init.py), for init.csv
 DFII_BITS = {
@@ -91,6 +98,44 @@ def sdram_modules():
             tRP=15, tRCD=15, tWR=15, tRFC=(None, 105), tFAW=(None, 37.5), tRAS=45)}
 
     return {"IS43DR86400E": IS43DR86400E}
+
+
+def patch_refresh_timer(trefi, ref_norm):
+    """Replace LiteDRAM's RefreshTimer for the refresh period trefi (controller
+    cycles) by one that reloads 2 * trefi - 1 instead of trefi - 1 while the
+    signal ref_norm is 1 (the period in effect from the next reload). Other
+    RefreshTimers (the DDR3 ZQCS timer: another period) stay LiteDRAM's.
+    Returns a function that undoes the patch."""
+    from migen import If, Module, Mux, Signal
+    from migen.fhdl.bitcontainer import bits_for
+    import litedram.core.refresher as refresher
+
+    original = refresher.RefreshTimer
+
+    class BowRefreshTimer(Module):
+        def __init__(self, t):
+            self.wait  = Signal()
+            self.done  = Signal()
+            self.count = Signal(bits_for(2*t))
+            count = Signal(bits_for(2*t), reset=t-1)
+            self.sync += If(self.wait & ~self.done,
+                count.eq(count - 1)
+            ).Else(
+                count.eq(Mux(ref_norm, 2*t - 1, t - 1))
+            )
+            self.comb += [
+                self.done.eq(count == 0),
+                self.count.eq(count),
+            ]
+
+    def make(t):
+        return BowRefreshTimer(t) if t == trefi else original(t)
+
+    refresher.RefreshTimer = make
+
+    def undo():
+        refresher.RefreshTimer = original
+    return undo
 
 
 def patch_ddr2_bl8():
@@ -178,9 +223,14 @@ def build_core(cfg, name, build_dir):
 
             module_cls = sdram_modules().get(cfg["module"]) or getattr(litedram_modules, cfg["module"])
             module = module_cls(sys_clk_freq, "1:{}".format(NPHASES))
-            # JEDEC: average refresh interval <= 7.8 us (Tc <= 85 C); LiteDRAM rounds up
-            module.timing_settings.tREFI = math.floor(TREFI_NS * sys_clk_freq / 1e9)
+            # JEDEC average refresh interval (7.8 us for Tc <= 85 C, 3.9 us for Tc
+            # 85..95 C), rounded down (LiteDRAM rounds up)
+            trefi_ns = float(cfg.get("trefi_ns", TREFI_NS))
+            module.timing_settings.tREFI = math.floor(trefi_ns * sys_clk_freq / 1e9)
             self.ddrphy = BowDDRPHY(platform, module)
+            # refresh timer with the second period (ref_norm: 2 x tREFI)
+            platform.add_extension([("ref_norm", 0, Pins(1))])
+            undo = patch_refresh_timer(module.timing_settings.tREFI, platform.request("ref_norm"))
             self.add_sdram("sdram",
                 phy                   = self.ddrphy,
                 module                = module,
@@ -189,6 +239,7 @@ def build_core(cfg, name, build_dir):
                 controller_settings   = ControllerSettings(
                     cmd_buffer_depth    = cfg["cmd_buffer_depth"],
                     with_auto_precharge = False))
+            undo()
             self.init_sequence = (self.ddrphy.settings, module.timing_settings)
 
             # Training status, written by the firmware (the native port is blocked until done).
