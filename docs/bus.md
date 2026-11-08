@@ -60,6 +60,13 @@ bow_bus_xbar #(
 * Không trúng device nào → được `gnt` ngay, chu kỳ sau trả `err = 1`.
 * `NumHosts = 1` → crossbar thành bộ giải mã địa chỉ (dùng cho peripheral bus).
 
+## Tường lửa `bow_bus_deny`
+
+Đặt giữa một host và crossbar: yêu cầu tới cửa sổ `(addr & DenyMask) == DenyBase`
+không đi tiếp, được `gnt` ngay và trả `err = 1`, `rdata = 0` ở chu kỳ sau (như địa
+chỉ không có device); mọi yêu cầu khác đi qua nguyên vẹn. `bow32_top` đặt một cái
+trước DMA để nó không tới được thanh ghi MKV ([ip/mkv.md](ip/mkv.md)).
+
 ## Viết một device
 
 Mẫu tối thiểu cho một khối thanh ghi luôn sẵn sàng (xem `bow_uart.sv`,

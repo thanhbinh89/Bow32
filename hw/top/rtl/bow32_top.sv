@@ -5,7 +5,7 @@
 //
 //   Ibex (instr) --+                          +--> ROM    8 KiB
 //   Ibex (data) ---+--> main xbar (3 x 9) ----+--> FLASH  128 KiB (memory window)
-//   DMA ----------+                           +--> SRAM   16 KiB
+//   DMA --(no MKV)-+                          +--> SRAM   16 KiB
 //                                             +--> VRAM   1 MiB (DMA buffers)
 //                                             +--> ISP capture buffer -------------+
 //                                             +--> AXI4-Lite bridge --> m_axil_*   |
@@ -23,7 +23,7 @@
 //                                                    +--> CSI2RX registers -+ |    |
 //                                                    +--> H264 registers    | |    |
 //                                                    +--> DMA registers     | |    |
-//                                                    +--> MKV block cipher  | |    |
+//                                                    +--> MKV block cipher (fatal alert -> Ibex NMI)
 //                                                    +--> DDR controller CSRs (LiteDRAM)
 //                                                    +--> DDR PHY registers         |
 //                                                    +--> HyperRAM registers        |
@@ -222,6 +222,7 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
   // ---------------------------------------------------------------------------
   logic        uart0_irq, uart1_irq, flash_irq, gpioa_irq, gpiob_irq, isp_irq, i2c0_irq;
   logic        csi2rx_irq, h264_irq, dma_irq, mkv_irq, ddr_irq, hr_irq;
+  logic        mkv_alert_fatal;   // MKV locked itself: NMI of the CPU
   logic [14:0] irq_fast;
 
   always_comb begin
@@ -266,6 +267,7 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
     .irq_timer_i    (1'b0),
     .irq_external_i (1'b0),
     .irq_fast_i     (irq_fast),
+    .irq_nm_i       (mkv_alert_fatal),
     .core_sleep_o
   );
 
@@ -537,6 +539,8 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
   );
 
   logic [1:0] dma_tready;
+  bus_req_t   dma_host_req;
+  bus_rsp_t   dma_host_rsp;
 
   bow_dma #(
     .NumCh (2)
@@ -545,8 +549,8 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
     .rst_ni     (sys_rst_n),
     .reg_req_i  (periph_req[PeriphDevDma]),
     .reg_rsp_o  (periph_rsp[PeriphDevDma]),
-    .host_req_o (host_req[HostDma]),
-    .host_rsp_i (host_rsp[HostDma]),
+    .host_req_o (dma_host_req),
+    .host_rsp_i (dma_host_rsp),
     .s_tvalid_i ({1'b0, h264_tvalid}),
     .s_tready_o (dma_tready),
     .s_tdata_i  ({32'h0, h264_tdata}),
@@ -558,15 +562,36 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
   logic unused_dma;
   assign unused_dma = dma_tready[1];   // channel 1 has no stream source
 
+  // The DMA must not reach the MKV block cipher (key, encryption on behalf of
+  // the CPU): its requests to the MKV window end with a bus error here.
+  bow_bus_deny #(
+    .DenyBase (MkvBase),
+    .DenyMask (~(MkvSize - 32'd1))
+  ) u_dma_deny_mkv (
+    .clk_i,
+    .rst_ni     (sys_rst_n),
+    .host_req_i (dma_host_req),
+    .host_rsp_o (dma_host_rsp),
+    .dev_req_o  (host_req[HostDma]),
+    .dev_rsp_i  (host_rsp[HostDma])
+  );
+
   // ---------------------------------------------------------------------------
   // MKV block cipher (TCVN 14263:2024), registers only
   // ---------------------------------------------------------------------------
+  // Its fault counter and LOCKED live in the power-on reset domain: a system
+  // reset (software, UART break) does not give an attacker new tries. Bow32
+  // has no alert handler: the fatal alert is the NMI, the recoverable one
+  // (each fault) is only the FAULT interrupt.
   bow_mkv u_mkv (
     .clk_i,
-    .rst_ni    (sys_rst_n),
-    .bus_req_i (periph_req[PeriphDevMkv]),
-    .bus_rsp_o (periph_rsp[PeriphDevMkv]),
-    .irq_o     (mkv_irq)
+    .rst_ni        (sys_rst_n),
+    .por_rst_ni    (por_rst_n),
+    .bus_req_i     (periph_req[PeriphDevMkv]),
+    .bus_rsp_o     (periph_rsp[PeriphDevMkv]),
+    .irq_o         (mkv_irq),
+    .alert_fault_o (),
+    .alert_fatal_o (mkv_alert_fatal)
   );
 
   bow_i2c u_i2c0 (

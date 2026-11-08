@@ -6,6 +6,9 @@
 ## [Unreleased]
 
 ### Added
+- `bow_bus_deny` (`hw/ip/bus`): tường lửa trước một host, yêu cầu tới một cửa sổ địa chỉ
+  trả lỗi bus; `bow32_top` dùng nó để chặn DMA khỏi thanh ghi MKV. NMI của Ibex nối vào
+  alert nghiêm trọng của MKV.
 - **DDR: độ tin cậy cho mục tiêu công nghiệp** (P0 của
   [docs/ddr_review_industrial_ai.md](docs/ddr_review_industrial_ai.md)):
   - Refresh theo nhiệt độ: lõi LiteDRAM refresh mỗi 3,87 µs (Tc 85..95 °C); `CTRL.REF_NORM`
@@ -284,6 +287,13 @@
   PS-PL, nhả `pl_resetn0`).
 - `bow32_flash.py monitor` là terminal tương tác; báo lỗi rõ khi adapter không
   gửi được BREAK.
+- Đánh giá IP MKV cho SoC camera AI ([docs/mkv_security_review.md](docs/mkv_security_review.md)):
+  mô hình đe doạ, chuẩn tham chiếu (TCVN 14263, QĐ 724/QĐ-BTTTT, ISO/IEC 19790, 17825,
+  CRA, CWE), phát hiện về tiêm lỗi, kênh kề, khoá, tích hợp, kiểm chứng, lộ trình P0–P2.
+  `make -C hw/ip/mkv/dv review` (`tb_mkv_review.sv`, nay trong `make test` của IP) chạy 8 thí
+  nghiệm: lỗi 2 bit trong một byte khoá vòng và dòng RAM bị tráo cho bản mã sai mà không
+  `FAULT`, `dout_q` không được kiểm, `CLEAR` / xoá sau reset cắt ngắn được, FSM, giữ bus
+  144 chu kỳ, không giới hạn số lần thử.
 
 ### Changed
 - DDR: lõi LiteDRAM sinh với `trefi_ns: 3900` (`ddr2.yml`, `ddr3.yml`; DDR2 129 chu kỳ,
@@ -373,6 +383,51 @@
   đồng bộ, prompt thừa không còn làm lệnh kế tiếp báo lỗi.
 
 ### Security
+- MKV (`bow_mkv`): sửa các phát hiện của bản đánh giá bảo mật
+  ([docs/mkv_security_review.md](docs/mkv_security_review.md), mục 8; mô tả ở
+  [docs/ip/mkv.md](docs/ip/mkv.md)). Cả 8 thí nghiệm của bản đánh giá giờ là test đạt.
+  - RAM khoá vòng: 8 từ mã Hsiao (39,32) xen kẽ mỗi dòng, gắn địa chỉ dòng, thay cho
+    parity byte (32 × 312 bit). Lỗi 2 bit trong một byte, chùm tới 24 bit, dòng bị chép
+    sang dòng khác trước đây cho bản mã sai với `DONE`; giờ là `FAULT`.
+  - `DOUT` có bản bù, kiểm ở `Check` và suốt lúc còn đọc được. Mỗi quyết định của
+    `Check` qua hai bộ so sánh khác cấu trúc, cờ cho ra kết quả là mubi4 ghép từ cả hai;
+    FSM mã thưa 6 bit (khoảng cách 3); `STATUS.KEY_VALID` = AND với engine, lệch là lỗi.
+  - Xoá có kiểm tra: `CLEAR` / sau reset / sau lỗi ghi 0 rồi đọc lại 32 dòng, bộ đếm
+    chu kỳ kiểm ở mọi chu kỳ, phát hiện lỗi chạy cả khi xoá (cắt ngắn → xoá lại,
+    `FAULT`, không `DONE`). `CLEAR` 33 → 65 chu kỳ, xoá sau reset 32 → 64. `KEY` đọc lại
+    các dòng phía trên `h[2R]` nó đã xoá.
+  - Bộ đếm lỗi và `LOCKED` trong miền power-on reset (cổng mới `por_rst_ni`): 4 lỗi
+    (`FaultLimit`) → IP tự khoá tới lần bật nguồn sau, alert nghiêm trọng nối vào NMI
+    của Ibex (`irq_nm_i`, handler mặc định `bow_nmi_handler` in và dừng);
+    `STATUS[6]` `LOCKED`, `[7]` `ALERT`, `[15:12]` `FAULTS`.
+  - Lệnh `TEST` (`CMD[4]` kèm `KEY`/`ENC`/`DEC`): làm lệch lượt hai, phải ra `FAULT`
+    (không đếm); `TEST` không bị phát hiện thì IP tự khoá.
+  - `CTRL[3]` `NOSTALL` (không truy cập nào bị giữ, thay cho chờ tới 144 chu kỳ),
+    `CTRL[4]` `KEY_LOCK`, `CTRL[5]` `NO_DEC`, `CTRL[6]` `NO_ENC`. `DIN` chỉ ghi; đọc
+    `CMD`/`KEY`/`DIN`, ghi `ID`/`INFO`/`CYCLES`/`DOUT` và offset trống trả lỗi bus.
+    Mất `KEY_VALID` (ghi `KEY`, đổi phiên bản) thì engine xoá lược đồ khoá và `DOUT`
+    ngay; `KEY` bị từ chối xoá các từ khoá. `INFO` = `0x000404FF`.
+  - DMA không tới được thanh ghi MKV: tường lửa `bow_bus_deny` (`hw/ip/bus`) trước
+    cổng DMA của main crossbar.
+  - Driver: `bow_mkv_selftest()` (KAT 6 phiên bản + 3 `TEST`, sinh từ mô hình vào
+    `sw/common/src/bow_mkv_kat.h`; chưa qua thì không nạp được khoá), `bow_mkv_error()`,
+    `bow_mkv_wipe()`, `bow_mkv_set_nostall()`, `bow_mkv_lock_key()`; ECB kiểm `ERR` /
+    `FAULT` của cả lần gọi. App `mkv` chạy tự kiểm tra lúc khởi động, `test` có 19
+    nhóm (thêm lỗi bus, `NOSTALL`, chính sách, `TEST`, DMA bị chặn, tự kiểm tra), lệnh
+    `post`.
+  - Kiểm chứng: assertion SVA (`--assert`), tiêm lỗi 48 điểm mỗi seed (thêm mã RAM,
+    `DOUT`, xoá, FSM từng bit, cờ mubi4, bộ so sánh kẹt, `TEST`, lockout),
+    `tb_mkv_review.sv` trong `make test`, `make mutants` (33 bản RTL bỏ từng biện pháp,
+    đều làm test hỏng).
+  - Chi phí (`kv260_cam`, cùng flow): MKV 9 526 → 12 100 LUT, 2 278 → 2 792 FF,
+    168 → 180 LUTRAM; timing vẫn đạt (MKV +1,44 ns, WNS cả thiết kế +0,155 ns ở H.264).
+    `CLEAR` 33 → 65 chu kỳ; `KEY`, `ENC`, `DEC` không đổi. Qua driver: lược đồ khoá
+    +94…127 chu kỳ, một khối +6…16, ECB +1…8 chu kỳ mỗi khối (132 / 240; lệch vài chu
+    kỳ theo vị trí code trong flash) vì các kiểm tra mới; lõi và bus không chậm đi.
+  - Trên board (Arm MPS4, bitstream `mps4` có cả DDR và HyperRAM, WNS +0,169 ns, MKV
+    13 300 LUT): tự kiểm tra lúc khởi động PASS, `test` 19/19, `kat` 6/6, `verify`
+    360/360 và 1 800/1 800 khối; `ddr` 21/21, `hyperram` 19/19 trên cùng bitstream
+    ([docs/mkv_kv260.md](docs/mkv_kv260.md)).
 - MKV (`bow_mkv`): khoá và dữ liệu không còn nằm lại sau khi dùng
   ([docs/ip/mkv.md](docs/ip/mkv.md), "Bảo mật"):
   - Lệnh `KEY` xoá thanh ghi `KEY` và chỉ chạy khi đã ghi đủ k/32 từ khoá mới

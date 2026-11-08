@@ -64,7 +64,7 @@ theo [adding_an_ip.md](adding_an_ip.md) và kiểm chứng bằng test mô phỏ
 
 - [x] **Mã khối MKV** (TCVN 14263:2024, [ip/mkv.md](ip/mkv.md)):
       MKV-128 / MKV-256, 6 phiên bản khoá, lược đồ khoá trong phần cứng, một nửa
-      vòng mỗi chu kỳ; kiểm chứng với Phụ lục A và trên KV260 ([mkv_kv260.md](mkv_kv260.md)).
+      vòng mỗi chu kỳ; kiểm chứng với Phụ lục A và trên KV260, MPS4 ([mkv_kv260.md](mkv_kv260.md)).
 - [ ] Chế độ hoạt động trong phần cứng (CTR / CBC / GCM) và nạp dữ liệu bằng DMA.
 - [ ] Hàm băm (SHA-2 / SHA-3) và TRNG (ring oscillator) để có khoá sinh ngay trên chip.
 

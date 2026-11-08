@@ -134,4 +134,54 @@ package bow_mkv_pkg;
     return {128'h0, left ? Const0L128 : Const1L128};
   endfunction
 
+  // ------------------------------------------------ fault detection helpers
+
+  // Multi-bit booleans (as mubi4 of OpenTitan) for the flags that decide
+  // whether a result or a key schedule may be used: True and False differ in
+  // all four bits, any other value is a fault.
+  typedef logic [3:0] mubi4_t;
+  localparam mubi4_t MuBi4True  = 4'b0110;
+  localparam mubi4_t MuBi4False = 4'b1001;
+
+  function automatic logic mubi4_invalid(mubi4_t x);
+    return (x != MuBi4True) && (x != MuBi4False);
+  endfunction
+
+  // Two independent decisions a, b as one flag: True only when both are 1,
+  // False only when both are 0, invalid when they disagree. A comparator stuck
+  // at "equal" therefore never makes a flag True on its own.
+  function automatic mubi4_t mubi4_and2(logic a, logic b);
+    return {~a, a, b, ~b};
+  endfunction
+
+  // Error detection code of the round key RAM (docs/ip/mkv.md). A row holds
+  // eight interleaved Hsiao (39,32) code words: word j is bit j of the 32
+  // bytes of the half-round key, its 7 check bits are bits 8*i + j of the
+  // check field. Adjacent bits of a row (the same LUTRAM) belong to different
+  // words, and a word sees every error of 1 to 3 bits, so every burst of up to
+  // 24 adjacent bits is seen. The row address is added to check bits 0..4 of
+  // every word: a row read at another address (address decoder or word line
+  // fault, a row copied over another) does not check either.
+  localparam int unsigned RkEdcBits = 56;
+
+  // Column of data bit b of a word: RkEdcCols[7*b +: 7], 32 distinct 7 bit
+  // vectors of weight 3 (row weights 14 / 13); check bit i has column 1 << i.
+  localparam logic [223:0] RkEdcCols =
+      224'hd193161b152951952634586e1a3262b15294c94e1a3258a931c34587;
+
+  function automatic logic [RkEdcBits-1:0] rk_edc(state_t d, logic [4:0] addr);
+    logic [RkEdcBits-1:0] c;
+    for (int unsigned j = 0; j < 8; j++) begin
+      for (int unsigned i = 0; i < 7; i++) begin
+        logic p;
+        p = (i < 5) ? addr[i] : 1'b0;
+        for (int unsigned b = 0; b < 32; b++) begin
+          if (RkEdcCols[7*b + i]) p = p ^ d[8*b + j];
+        end
+        c[8*i + j] = p;
+      end
+    end
+    return c;
+  endfunction
+
 endpackage

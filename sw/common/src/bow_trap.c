@@ -10,6 +10,11 @@
  *
  * bow_probe_read32/write32 (bow_probe.h) arm a flag; a load/store access
  * fault while it is armed skips the faulting instruction instead of stopping.
+ *
+ * The NMI (mcause 31) is the fatal alert of the SoC: the MKV block cipher
+ * locked itself after too many detected faults. The weak default
+ * bow_nmi_handler() reports it and stops; an application that overrides it
+ * and returns must first clear MKV STATUS.ALERT.
  */
 #include "bow32.h"
 
@@ -53,11 +58,19 @@ __attribute__((weak)) void bow_exception_handler(uint32_t mcause, uint32_t mepc,
   for (;;) bow_wfi();
 }
 
+__attribute__((weak)) void bow_nmi_handler(void) {
+  bow_printf("\n[nmi] fatal alert: MKV locked itself after %u faults (STATUS %08x), "
+             "power-on reset needed\n", MKV_ST_FAULTS(MKV->STATUS), MKV->STATUS);
+  for (;;) bow_wfi();
+}
+
 uint32_t bow_trap_handler(uint32_t mcause, uint32_t mepc, uint32_t mtval) {
   if (mcause & MCAUSE_IRQ_FLAG) {
     uint32_t code = MCAUSE_CODE(mcause);
     if (code >= 16 && code < 31) {
       bow_irq_fast_handler(code - 16);
+    } else if (code == 31) {
+      bow_nmi_handler();
     } else {
       bow_printf("\n[trap] unexpected interrupt %u\n", code);
     }
