@@ -293,14 +293,30 @@ của DQ/RWDS và trạng thái lái), mức nghỉ trước clock, trong GSR v�
 mẫu đọc khi testbench lái DQ/RWDS và pha đọc đang dịch, dữ liệu tự lái đọc lại qua IOBUF/IDDR,
 pha ghi +T/4, −T/4, +17 bước rồi về 0 (DQ/RWDS dịch, CK/CS# không), `hr_wclk` = `hr_clk` +
 T/4 lúc lock, PSDONE, độ rộng xung khi dịch pha, reset và mất lock của từng MMCM đưa cả hai
-pha về 0. `make -C hw/fpga/common/dv mutants` chạy thêm 42 bản hỏng có chủ đích của hai wrapper (đảo ODDR, đổi
-byte, cực tính T, SRVAL, thứ tự chân level shifter, mux loopback, chế độ IDDR, pha 270°, cổng
-PS, logic mất lock…): cả 42 phải FAIL (mỗi bản dựng trong thư mục sạch; một bản không dựng được
-tính là lỗi của chính `mutants.py`, không phải "bị bắt").
+pha về 0. `make -C hw/fpga/common/dv mutants` chạy thêm các bản hỏng có chủ đích của các wrapper
+chân và clock DDR / HyperRAM (đảo ODDR, đổi byte, cực tính T, SRVAL, thứ tự chân level shifter,
+mux loopback, chế độ IDDR, pha 270°, cổng PS, logic mất lock, ODDR lái T của Versal…): cả 117
+(27 của DDR, 47 của HyperRAM, 43 của hai wrapper clock Versal) phải FAIL (mỗi bản dựng trong
+thư mục sạch; một bản không dựng được tính là lỗi của chính `mutants.py`, không phải "bị bắt").
+
+Versal (bo Huins VP1902, `TFromOddr = 1`: T của chân hai chiều lấy từ một ODDRE1 trong site của
+chân, model unisim `SIM_DEVICE "VERSAL_PREMIUM"`): cấu hình `vcard`, `vx16`, `vlb` của
+`tb_bow_ddr_io_xilinx` và `vcard`, `vdirect`, `vlb` của `tb_bow_hyperram_io_xilinx` kiểm trạng
+thái lái của DQ / DM / RWDS ở [(j+1,25)T, (j+2,25)T) + pha ghi, của DQS P và N (từng lane) ở
+[(j+1)T, (j+2)T) + pha ghi, và pha của mọi cạnh bật/tắt driver; ở mọi cấu hình DQS_N được lái
+đúng khi DQS_P được lái. `test-vclk` (trong `make test`) chạy `tb_bow_ddr_clk_versal` và
+`tb_bow_hyperram_clk_versal` với model MMCME5, cấu hình `ddr200`, `ddr100`, `ddr200se`, `hr200`,
+`hr100`: tần số và pha của mọi đầu ra (`wclk90` = `wclk` + T/4, `hr_wclk` = `hr_clk` + T/4, cạnh
+lên của `ddr_sys_clk` trùng cạnh lên của `ddr_clk`), 768 / 1024 bước mỗi chu kỳ và quay vòng,
+PSDONE 12–13 chu kỳ sau PSEN và xung PSDONE lặp lại mỗi 32 chu kỳ của model, `bow_mmcm_ps` bắt
+đầu ở cả 32 độ lệch so với xung lặp, PSEN trước lock bị bỏ qua, reset và mất lock của từng MMCM
+đưa hai pha về 0. Model MMCME5 bỏ một chu kỳ của clock bị dịch khi bộ đếm pha đi từ 0 xuống −1
+(chỉ trong mô phỏng); testbench chấp nhận đúng xung đó.
 
 ```bash
-make -C hw/fpga/common/dv test-hr-io                        # 3 cấu hình x seed 1 2 3, ~1 phút
+make -C hw/fpga/common/dv test-hr-io                        # 6 cấu hình x seed 1 2 3
 make -C hw/fpga/common/dv run-hr-io HR_IO_CFG=lb SEED=2 WAVES=1
+make -C hw/fpga/common/dv run-ddr-io IO_CFG=vcard SEED=1    # bản Huins của chân DDR
 ```
 
 ## Thêm test

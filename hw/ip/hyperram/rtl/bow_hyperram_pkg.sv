@@ -20,7 +20,9 @@
 //     pin cycle j+1; dq[1] (byte B) during [(j+1.25)T, (j+1.75)T), centred on
 //     its falling edge. A write phase of w fine steps delays DQ and RWDS by
 //     w * T / PsSteps (|w| <= 3 * PsSteps / 16, bow_hyperram_ctrl).
-//   * dq_oe / rwds_oe: 1 = the FPGA drives the pads, from (j+1)T.
+//   * dq_oe / rwds_oe: 1 = the FPGA drives the pads, from (j+1)T (Versal XPIO,
+//     bow_hyperram_io_xilinx TFromOddr = 1: during [(j+1.25)T, (j+2.25)T) +
+//     write phase, T from an ODDR in the pad site).
 // hr_io_in_t is in the read capture clock domain (hr_rd_clk, same frequency,
 // calibrated phase): dq[0] / rwds[0] = sample at hr_rd_clk rising edge k,
 // dq[1] / rwds[1] = sample at the following falling edge, both presented

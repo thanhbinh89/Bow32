@@ -57,7 +57,12 @@
 //    and of both (oscillator stopped for 5 us);
 //  * Loopback = 1: DQ / RWDS always driven, lb_dq / lb_rwds on the pads while
 //    lb_dq_en / lb_rwds_en (independent), read back through the IOBs and
-//    IDDRs at every read phase of the sweep.
+//    IDDRs at every read phase of the sweep;
+//  * TFromOddr = 1 (Versal XPIO: T from an ODDRE1 in the pad site on ~wclk,
+//    unisim SIM_DEVICE "VERSAL_PREMIUM"): the DQ / RWDS drive state of PHY
+//    cycle j on [(j+1.25)T, (j+2.25)T) + write phase and the driver edges at
+//    T/4 + write phase (instead of pin cycle j+1 and the hr_clk edge); before
+//    lock the drivers may turn on whenever the write clock runs.
 // The PHY register -> ODDR path delay LAUNCH is drawn every cycle in
 // [T/4 + 0.1, T/2 - 0.1] ns: the DQ / RWDS ODDRs then take the value of their
 // cycle over the whole write phase range of the bow_hyperram_pkg contract
@@ -70,8 +75,9 @@
 `timescale 1ns/1ps
 
 module tb_bow_hyperram_io_xilinx import bow_hyperram_pkg::*; #(
-  parameter bit Loopback = 1'b0,
-  parameter bit HasLs    = 1'b1
+  parameter bit Loopback  = 1'b0,
+  parameter bit HasLs     = 1'b1,
+  parameter bit TFromOddr = 1'b0
 );
   localparam real T   = 10.0;
   localparam int  PS  = 672;      // fine phase steps per CK (56 * HrDivide)
@@ -136,8 +142,10 @@ module tb_bow_hyperram_io_xilinx import bow_hyperram_pkg::*; #(
   initial io_o = HR_IO_OUT_IDLE;
 
   bow_hyperram_io_xilinx #(
-    .Loopback (Loopback),
-    .HasLs    (HasLs)
+    .Loopback  (Loopback),
+    .HasLs     (HasLs),
+    .TFromOddr (TFromOddr),
+    .SimDevice (TFromOddr ? "VERSAL_PREMIUM" : "ULTRASCALE_PLUS")
   ) dut (
     .clk_i         (hr_clk),
     .wclk_i        (wclk),
@@ -276,12 +284,15 @@ module tb_bow_hyperram_io_xilinx import bow_hyperram_pkg::*; #(
   // PHY cycle s whose drive state (T flops) is on the pads at time t: the pin
   // cycle that starts at hr_clk edge q shows cycle q-1. 0 when t is within G
   // of a pin cycle boundary or the history is missing.
+  // (TFromOddr: the T ODDRs switch T/4 + write phase + C -> Q after the edge)
   function automatic bit shown(realtime t, output int s);
-    int q;
+    int  q;
+    real off;
+    off = (TFromOddr && !Loopback) ? 0.25 * T + phw + D : 0.0;
     q = ne;
-    while (q > 1 && tcyc[q] > t) q--;
+    while (q > 1 && tcyc[q] + off > t) q--;
     s = q - 1;
-    return (t - tcyc[q] >= G) && (tcyc[q] + T - t >= G) && hist.exists(s);
+    return (t - tcyc[q] - off >= G) && (tcyc[q] + off + T - t >= G) && hist.exists(s);
   endfunction
 
   function automatic int nz8(logic [7:0] v);   // bits not at z (driven)
@@ -353,10 +364,17 @@ module tb_bow_hyperram_io_xilinx import bow_hyperram_pkg::*; #(
         wait_until(tj + 1.5 * T + D);      chk_ctl(j, "middle");
         wait_until(tj + 2.0 * T + D - E);  chk_ctl(j, "end");
       end
-      begin   // drive state of DQ / RWDS: pin cycle j+1 (T flops, no ODDR delay)
-        wait_until(tj + T + E);            chk_drv(j, "start");
-        wait_until(tj + 1.5 * T);          chk_drv(j, "middle");
-        wait_until(tj + 2.0 * T - E);      chk_drv(j, "end");
+      begin   // drive state of DQ / RWDS: pin cycle j+1 (T flops, no ODDR delay);
+              // TFromOddr: [(j+1.25)T, (j+2.25)T) + write phase (T ODDRs on ~wclk)
+        if (TFromOddr && !Loopback) begin
+          wait_until(tj + 1.25 * T + pw + D + E);  chk_drv(j, "start");
+          wait_until(tj + 1.75 * T + pw + D);      chk_drv(j, "middle");
+          wait_until(tj + 2.25 * T + pw + D - E);  chk_drv(j, "end");
+        end else begin
+          wait_until(tj + T + E);            chk_drv(j, "start");
+          wait_until(tj + 1.5 * T);          chk_drv(j, "middle");
+          wait_until(tj + 2.0 * T - E);      chk_drv(j, "end");
+        end
       end
       begin   // DQ / RWDS bytes, delayed by the write phase
         wait_until(tj + 0.75 * T + pw + D + E);  chk_byte(j, 0, "byte A start");
@@ -412,6 +430,11 @@ module tb_bow_hyperram_io_xilinx import bow_hyperram_pkg::*; #(
   function automatic bit pad_mine();
     return !tb_drv && ($realtime - t_tbdrv > 0.0005);
   endfunction
+  // phase of a DQ / RWDS driver switch after the hr_clk edge: T flops at the
+  // edge, TFromOddr the T ODDRs on ~wclk
+  function automatic real drv_ph();
+    return TFromOddr ? 0.25 * T + phw + D : 0.0;
+  endfunction
   logic [7:0] dq_last = 8'hzz;
   always @(dq) begin
     if (pad_mine()) begin
@@ -420,7 +443,7 @@ module tb_bow_hyperram_io_xilinx import bow_hyperram_pkg::*; #(
           if (dq[i] !== 1'bz && dq_last[i] !== 1'bz)
             edge_chk($sformatf("DQ%0d", i), 0.25 * T + phw + D, 0.75 * T + phw + D);
           else
-            edge_chk($sformatf("DQ%0d driver", i), 0.0, 0.0);
+            edge_chk($sformatf("DQ%0d driver", i), drv_ph(), drv_ph());
         end
       end
     end
@@ -430,7 +453,7 @@ module tb_bow_hyperram_io_xilinx import bow_hyperram_pkg::*; #(
   always @(rwds) begin
     if (pad_mine() && rwds !== rw_last) begin
       if (rwds !== 1'bz && rw_last !== 1'bz) edge_chk("RWDS", 0.25 * T + phw + D, 0.75 * T + phw + D);
-      else edge_chk("RWDS driver", 0.0, 0.0);
+      else edge_chk("RWDS driver", drv_ph(), drv_ph());
     end
     rw_last = rwds;
   end
@@ -458,7 +481,8 @@ module tb_bow_hyperram_io_xilinx import bow_hyperram_pkg::*; #(
     tc = $realtime;
     #0.001;   // settled value of the time step
     if (idle_mon && tc > 1.0) begin
-      if (Loopback || tc != t_hr || dq !== 8'h00 || rwds !== 1'b0)
+      // (TFromOddr: the T ODDRs on ~wclk turn the drivers on at a wclk edge)
+      if (Loopback || (!TFromOddr && tc != t_hr) || dq !== 8'h00 || rwds !== 1'b0)
         fail($sformatf("DQ %b / RWDS %b changed before lock other than the drivers turning on at hr_clk",
                        dq, rwds));
     end
@@ -473,7 +497,9 @@ module tb_bow_hyperram_io_xilinx import bow_hyperram_pkg::*; #(
                      {ls_oe_n, ls_dir_dq, ls_dir_rwds}));
     if (Loopback || n_hr_pre > 0) begin
       // loopback: T = 0 from the start; else the T flops took the idle bundle
-      if (dq !== 8'h00 || rwds !== 1'b0 || rwds_pad !== 1'b0)
+      // (TFromOddr: released until the first wclk edge of the T ODDRs)
+      if (!((dq === 8'h00 && rwds === 1'b0 && rwds_pad === 1'b0) ||
+            (TFromOddr && !Loopback && dq === 8'hzz && rwds === 1'bz)))
         fail($sformatf("%s: DQ %b RWDS %b rwds_pad_o %b, expected driven at 0", when, dq, rwds, rwds_pad));
     end else begin
       if (dq !== 8'hzz || rwds !== 1'bz)

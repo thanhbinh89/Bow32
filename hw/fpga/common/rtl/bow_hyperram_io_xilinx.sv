@@ -26,15 +26,29 @@
 //     limit +-3T/16) moves the sample point within 9T/16 .. 15T/16: the board
 //     XDC adds 3T/16 of uncertainty on the clk_i -> wclk_i paths (at +-T/4 the
 //     hold margin at the ODDRE1 would be zero).
-//   * Output enables: an ODDRE1 on IOBUF.T is not placed at the pin on
-//     UltraScale+, so T comes from fabric flops on clk_i (KEEP, one per pad):
-//     the driver switches at (j+1)T plus the flop -> pad delay.
+//   * Output enables (TFromOddr = 0, UltraScale+): an ODDRE1 on IOBUF.T is not
+//     placed at the pin on UltraScale+, so T comes from fabric flops on clk_i
+//     (KEEP, one per pad): the driver switches at (j+1)T plus the flop -> pad
+//     delay.
+//   * Output enables (TFromOddr = 1, Versal XPIO): T must come from a TDDR in
+//     the site of the pad (DRC PDCN-2749), which shares the clock of the data
+//     ODDR: one more ODDRE1 per pad (u_toddr) on ~wclk_i, D1 = ~oe of cycle
+//     j-1 (one flop per signal on clk_i), D2 = ~oe of cycle j, SRVAL 1. The
+//     driver switches at (j+1.25)T + write phase instead of (j+1)T (dq_oe
+//     rises in t = 0, one cycle before CA: the driver is on 0.5T before CA
+//     byte 0; RWDS turns on at (RW_OE + 1.25)T, before the mask beats of
+//     t_D). Against the shifter windows
+//     (DIR moves at (j+1)T + pad delay) the drive returns (OE_POST + 0.25)T
+//     + phase after DIR turns back (RWDS: (RW_OE - RW_DIR + 0.25)T + phase),
+//     the release comes (OE_PRE - 0.25)T - phase before DIR turns to read:
+//     >= 10.6 / 5.6 ns with the defaults (OE_PRE 1, OE_POST 1, RW_OE -
+//     RW_DIR 1) and the write phase limit +-3T/16.
 //   * Read capture: IDDRE1 SAME_EDGE_PIPELINED on rd_clk_i (CB = rd_clk_i with
 //     IS_CB_INVERTED): io_i_o.*[0] = sample at rd_clk rising edge k, *[1] =
 //     sample at the following falling edge, both after rising edge k+1.
 // Idle levels: every ODDRE1 has SR = 0 and SRVAL = the idle level, kept after
 // configuration until the clock runs: CS#, CK_N, RESET#, OE# 1; CK_P, DQ, RWDS,
-// DIR 0. The T flops start at 1 (not driving).
+// DIR 0. The T flops (T ODDRs) start at 1 (not driving).
 //
 // Loopback = 1 (on-chip HyperRAM emulator bow_hyperram_dev behind the pads):
 // DQ / RWDS always driven (T = 0); the DQ ODDR data come from lb_dq_i while
@@ -43,12 +57,15 @@
 // at 1, DIR at 0.
 // HasLs = 0 (direct board): the level shifter outputs are constants (OE# 1,
 // DIR 0); leave them unconnected in the board top.
-// IO standards and pins are set in the board XDC (MPS4: constr/hyperram_*.xdc).
-// Vivado implements ODDRE1 as OSERDESE3 (XDC filters: REF_NAME == OSERDESE3).
+// IO standards and pins are set in the board XDC (MPS4: constr/hyperram_*.xdc,
+// Huins VP1902: hw/fpga/huins_vp1902/constr/hyperram_card.xdc).
+// UltraScale+: Vivado implements ODDRE1 as OSERDESE3 (XDC filters: REF_NAME ==
+// OSERDESE3); Versal keeps ODDRE1 / IDDRE1 (XPIOLOGIC sites).
 
 module bow_hyperram_io_xilinx import bow_hyperram_pkg::*; #(
   parameter bit Loopback  = 1'b0,
   parameter bit HasLs     = 1'b1,
+  parameter bit TFromOddr = 1'b0,   // 1: T from an ODDRE1 in the pad site (Versal)
   parameter     SimDevice = "ULTRASCALE_PLUS"
 ) (
   input  logic            clk_i,       // hr_clk
@@ -146,14 +163,31 @@ module bow_hyperram_io_xilinx import bow_hyperram_pkg::*; #(
   assign dq_d  = lb_dq ? lb_dq_i : io_o_i.dq;
   assign rw_d  = lb_rw ? lb_rwds_i : io_o_i.rwds;
 
-  // T = 1 releases the pad; one flop per pad (each next to its I/O), 1 after
-  // configuration
+  // T = 1 releases the pad. UltraScale+ (g_t_phy): one flop per pad (each
+  // next to its I/O), 1 after configuration. Versal (g_t_oddr): the T ODDRs of
+  // g_dq / g_rwds, fed by the oe of the previous cycle (*_oe_prev) and io_o_i.
   logic [7:0] dq_t;
   logic       rw_t;
+  logic       dq_oe_prev, rw_oe_prev;
 
   if (Loopback) begin : g_t_lb
-    assign dq_t = '0;
-    assign rw_t = 1'b0;
+    assign dq_t       = '0;
+    assign rw_t       = 1'b0;
+    assign dq_oe_prev = 1'b0;
+    assign rw_oe_prev = 1'b0;
+  end else if (TFromOddr) begin : g_t_oddr
+    logic dq_oe_prev_q = 1'b0;
+    logic rw_oe_prev_q = 1'b0;
+
+    always_ff @(posedge clk_i) begin
+      dq_oe_prev_q <= io_o_i.dq_oe;
+      rw_oe_prev_q <= io_o_i.rwds_oe;
+    end
+
+    assign dq_oe_prev = dq_oe_prev_q;
+    assign rw_oe_prev = rw_oe_prev_q;
+    assign dq_t       = '1;   // not used: the T ODDRs drive the pads
+    assign rw_t       = 1'b1;
   end else begin : g_t_phy
     (* keep = "true" *) logic [7:0] dq_t_q = '1;
     (* keep = "true" *) logic       rw_t_q = 1'b1;
@@ -163,12 +197,14 @@ module bow_hyperram_io_xilinx import bow_hyperram_pkg::*; #(
       rw_t_q <= ~io_o_i.rwds_oe;
     end
 
-    assign dq_t = dq_t_q;
-    assign rw_t = rw_t_q;
+    assign dq_t       = dq_t_q;
+    assign rw_t       = rw_t_q;
+    assign dq_oe_prev = 1'b0;
+    assign rw_oe_prev = 1'b0;
   end
 
   for (genvar i = 0; i < 8; i++) begin : g_dq
-    logic q, din;
+    logic q, din, t;
 
     ODDRE1 #(
       .IS_C_INVERTED (1'b1),
@@ -182,9 +218,26 @@ module bow_hyperram_io_xilinx import bow_hyperram_pkg::*; #(
       .Q  (q)
     );
 
+    if (TFromOddr && !Loopback) begin : g_toddr
+      // TDDR of the pad site: clocked like the data ODDR, D1 = previous oe
+      ODDRE1 #(
+        .IS_C_INVERTED (1'b1),
+        .SIM_DEVICE    (SimDevice),
+        .SRVAL         (1'b1)
+      ) u_toddr (
+        .C  (wclk_i),
+        .D1 (~dq_oe_prev),
+        .D2 (~io_o_i.dq_oe),
+        .SR (1'b0),
+        .Q  (t)
+      );
+    end else begin : g_tfab
+      assign t = dq_t[i];
+    end
+
     IOBUF u_iobuf (
       .I  (q),
-      .T  (dq_t[i]),
+      .T  (t),
       .O  (din),
       .IO (dq_io[i])
     );
@@ -204,7 +257,7 @@ module bow_hyperram_io_xilinx import bow_hyperram_pkg::*; #(
   end
 
   if (1) begin : g_rwds      // (a named generate block: xvlog wants it conditional)
-    logic q, din;
+    logic q, din, t;
 
     ODDRE1 #(
       .IS_C_INVERTED (1'b1),
@@ -218,9 +271,26 @@ module bow_hyperram_io_xilinx import bow_hyperram_pkg::*; #(
       .Q  (q)
     );
 
+    if (TFromOddr && !Loopback) begin : g_toddr
+      // TDDR of the pad site, like DQ
+      ODDRE1 #(
+        .IS_C_INVERTED (1'b1),
+        .SIM_DEVICE    (SimDevice),
+        .SRVAL         (1'b1)
+      ) u_toddr (
+        .C  (wclk_i),
+        .D1 (~rw_oe_prev),
+        .D2 (~io_o_i.rwds_oe),
+        .SR (1'b0),
+        .Q  (t)
+      );
+    end else begin : g_tfab
+      assign t = rw_t;
+    end
+
     IOBUF u_iobuf (
       .I  (q),
-      .T  (rw_t),
+      .T  (t),
       .O  (din),
       .IO (rwds_io)
     );
@@ -281,6 +351,7 @@ module bow_hyperram_io_xilinx import bow_hyperram_pkg::*; #(
 
   logic unused;
   assign unused = ^{io_o_i.ls_oe_n, io_o_i.ls_dir_dq, io_o_i.ls_dir_rwds, io_o_i.dq_oe,
-                    io_o_i.rwds_oe, lb_dq_en_i, lb_dq_i, lb_rwds_en_i, lb_rwds_i};
+                    io_o_i.rwds_oe, lb_dq_en_i, lb_dq_i, lb_rwds_en_i, lb_rwds_i,
+                    dq_t, rw_t, dq_oe_prev, rw_oe_prev};
 
 endmodule

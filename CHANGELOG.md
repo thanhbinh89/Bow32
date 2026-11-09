@@ -6,6 +6,26 @@
 ## [Unreleased]
 
 ### Added
+- **Bo Huins MFP-VP1902** (`hw/fpga/huins_vp1902`, AMD Versal Premium xcvp1902): Bow32 với DDR2
+  và HyperRAM của bo RAM mở rộng FMC+_DDR2_HyperRam ở khe FMC+ (mặc định FMC+10), image PDI nạp
+  qua USB JTAG (`make fpga BOARD=huins_vp1902`, `make fpga-jtag BOARD=huins_vp1902`,
+  [docs/ddr_huins.md](docs/ddr_huins.md)).
+  - Clock trên Versal: `bow_ddr_clk_versal` (2 MMCME5: pha ghi `wclk` / `wclk90` là hai đầu
+    ra dịch pha động của cùng một MMCM, không còn tầng MMCM_W) và `bow_hyperram_clk_versal`;
+    768 / 1024 bước dịch pha mỗi CK; clock vào là dao động 200 MHz cố định của bo
+    (`CLK_SRC=ref200`; clock PL của khe, `CLK_SRC=site`, chưa dùng được: chưa có bias đầu vào
+    đã kiểm, clock module đang ở 16 MHz).
+  - `bow_ddr_io_xilinx` / `bow_hyperram_io_xilinx`: tham số `TFromOddr` (mặc định 0, MPS4
+    không đổi): trên XPIO của Versal, T của mỗi chân hai chiều lấy từ một ODDRE1 trong site
+    của chân (DRC PDCN-2749).
+  - Không có số chân FPGA của Huins trong repo (tài liệu của Huins là tài liệu mật):
+    `constr/pins.txt` ghi cổng → net của bo, `tools/huins_pins.py` sinh XDC chân từ netlist
+    trong bản sao cục bộ lúc build.
+  - Chạy trên bo (2026-11-09, bo RAM ở FMC+10): DDR2 self-test 21/21, `verify` 40/40, BIST
+    214 MB/s; HyperRAM self-test 19/19, `verify` 40/40, BIST 188 / 180 MB/s: lần đầu cả hai IP
+    chạy với bộ nhớ thật.
+  - Kiểm chứng: cấu hình `vcard`/`vx16`/`vlb` (DDR) và `vcard`/`vdirect`/`vlb` (HyperRAM) của
+    testbench chân trong xsim, `test-vclk` (hai wrapper clock MMCME5), `make mutants` 117 bản.
 - `bow_bus_deny` (`hw/ip/bus`): tường lửa trước một host, yêu cầu tới một cửa sổ địa chỉ
   trả lỗi bus; `bow32_top` dùng nó để chặn DMA khỏi thanh ghi MKV. NMI của Ibex nối vào
   alert nghiêm trọng của MKV.
