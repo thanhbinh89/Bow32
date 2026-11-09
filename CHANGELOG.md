@@ -79,6 +79,9 @@
   chân `bow_hyperram_io_xilinx`, XDC loopback (bank 65) và bo RAM (khe FMC+), ràng buộc CDC
   và bus skew, kiểm tra trong `tcl/timing_checks.tcl`; hướng dẫn chạy
   [docs/hyperram_mps4.md](docs/hyperram_mps4.md).
+- Hướng dẫn đưa HyperRAM lên ASIC ([docs/ip/hyperram.md](docs/ip/hyperram.md) mục 9): IP
+  không có phần analog; phần giữ / phần thay (pad, flop DDR, PLL, DLL), hai kiến trúc đường
+  đọc, SDC, DFT, kiểm chứng.
 
 - **SDRAM DDR2/DDR3** `bow_ddr` (`hw/ip/ddr`): controller **LiteDRAM** trên PHY riêng
   của Bow32. Cửa sổ bộ nhớ 512 MiB ở `0x8000_0000` trên main crossbar (3 × 8), CSR của
