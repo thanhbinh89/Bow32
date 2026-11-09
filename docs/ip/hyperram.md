@@ -400,3 +400,100 @@ latency dành riêng, 0D xung WAKE sai độ dài, 0E CS# lên khi CA chưa xong
 * Hiệu chỉnh đọc dùng một pha chung cho mọi bit DQ và RWDS; chưa deskew từng bit (`IDELAYE3`).
 * Bài tập: prefetch line kế (burst hybrid: wrap rồi tuyến tính), giao diện AXI4 cho DMA, thực thi
   mã từ HyperRAM (đã chạy được nhờ read buffer), active clock stop.
+
+## 9. Lên ASIC
+
+IP không có phần analog. Lõi IP (`hw/ip/hyperram/rtl` trừ emulator: controller, thanh ghi, cửa
+sổ, BIST, phần số của PHY; khoảng 3 800 dòng, 85 % mã của IP) là logic số đồng bộ, không dùng
+primitive hay thuộc tính nào của FPGA. Mọi đường CDC đi qua ba module chung trong
+`hw/ip/common/rtl`: `bow_sync`, `bow_rst_sync`, `bow_fifo_async` (`report_cdc` của build MPS4 chỉ
+báo các đường dự kiến). Phần phụ thuộc FPGA nằm ngoài IP (khoảng 650 dòng): wrapper chân, wrapper
+clock, bộ bước pha MMCM và XDC. Đó là những việc FPGA làm bằng khối cứng có mạch analog (PLL, dịch
+pha mịn, buffer I/O) cùng flop DDR ở pad; trên ASIC chúng gom lại thành một PHY cứng.
+
+### 9.1 Phần giữ, phần thay
+
+| Phần | FPGA (MPS4) | ASIC |
+|------|-------------|------|
+| Lõi IP | `hw/ip/hyperram/rtl` | giữ nguyên: `HrPhyKind = 1` (chân), `HrHasLs = 0`, `HrEmuBytes = 0`, `HrClkHz` và `HrPsSteps` theo PHY mới (như cấu hình `direct` của testbench IP) |
+| Đồng bộ CDC | `bow_sync`, `bow_rst_sync` (flop thường), `bow_fifo_async`; ràng buộc trong XDC | `bow_sync` / `bow_rst_sync` bọc cell synchronizer của thư viện (sửa ở một chỗ); ràng buộc sang SDC (9.4) |
+| Chân | `bow_hyperram_io_xilinx.sv`: 16 `ODDRE1`, 9 `IDDRE1`, 9 `IOBUF`, 7 `OBUF`; IOSTANDARD, pull-down trong XDC | 13 pad GPIO 1,8 V (CK, CK#, CS#, RESET#, DQ[7:0], RWDS) có chỉnh drive / slew, pull-down, ESD; flop DDR vào / ra bằng standard cell đặt sát pad |
+| Clock | `bow_hyperram_clk_xusp.sv`: hai `MMCME4_ADV`, `BUFGCE` / `BUFG` | PLL (IP analog của foundry) cho `hr_clk` và `hr_wclk` = `hr_clk` + T/4; cell ICG thay `BUFGCE` |
+| Dịch pha mịn | MMCM (672 bước mỗi CK, 14,9 ps) qua `bow_mmcm_ps.sv` (PSEN / PSINCDEC / PSDONE) | DLL, delay line hay phase interpolator: phần mixed-signal duy nhất bắt buộc; một adapter từ bắt tay `go` / `done` của `bow_mmcm_ps` sang mã điều khiển của nó |
+| Level shifter | DIR / OE# cho TXV0108 của bo RAM | không cần: chip 1,8 V nối thẳng |
+| HyperRAM giả lập | `bow_hyperram_dev` (UltraRAM) | bỏ: chỉ để chạy bản loopback trên FPGA |
+
+### 9.2 Đường đọc
+
+Trên FPGA, DQ và RWDS được lấy mẫu ở hai cạnh của `hr_rd_clk` (cùng tần số với CK, pha chỉnh
+mịn), luồng mẫu qua FIFO bất đồng bộ chạy liên tục sang `hr_clk`, bộ căn theo RWDS tìm byte A
+(mục 2.4), driver quét pha và đặt giữa mắt lúc `init` (mục 4). Cách này dựa vào việc trễ từ CK
+tới dữ liệu không trôi nhiều sau khi hiệu chỉnh. Ở 200 MHz, S80KS2562 cho tCKD / tCKDS (CK tới DQ /
+RWDS) từ 1 tới 5 ns, gần trọn một chu kỳ, trong khi DQ chỉ lệch RWDS ±0,4 ns (tDSS / tDSH). Trên
+ASIC có hai cách:
+
+* **Giữ kiến trúc** (sửa ít nhất): clock lấy mẫu có pha chỉnh được trên ít nhất nửa chu kỳ (bản
+  đồ mắt gập theo T/2), bằng phase interpolator của PLL hoặc delay line. Driver tự theo số bước
+  mới (`PS_NOW[31:16]`). Hiệu chỉnh chỉ chạy lúc `init`, nên với dải nhiệt độ / điện áp rộng phải
+  hiệu chỉnh lại định kỳ lúc kênh rảnh; tần số càng cao biên càng hẹp.
+* **Cách chuẩn của PHY HyperBus trên ASIC** (nên chọn cho 166–200 MHz): DLL master khoá theo chu
+  kỳ CK, DLL slave trễ RWDS một phần tư chu kỳ; RWDS đã trễ làm clock chốt DQ (cạnh lên byte A,
+  cạnh xuống byte B) vào một FIFO nhỏ sang `hr_clk`. DLL tự bám nhiệt độ / điện áp, không cần
+  quét pha đọc. RWDS phải được cổng như DQS gating của DDR, chỉ mở khi dữ liệu sắp tới (đúng chỗ
+  arm hiện có, `ARM_LEAD` / `RD_DLY`), vì ngoài lúc đó RWDS là chỉ báo latency của pha CA hoặc
+  đang thả nổi. Phải viết lại nửa đọc của `bow_hyperram_phy` (phía ghi của FIFO đọc, bộ căn) và
+  chụp thô `CAP`. Controller, cửa sổ, BIST, thanh ghi giữ nguyên; mức RWDS của pha CA vẫn qua
+  `bow_sync` như bây giờ.
+
+### 9.3 Đường ghi và CK
+
+* CK: `ODDRE1` (D1 = `ck_en`, D2 = 0) trên `hr_clk`, CK# là bù. Trên ASIC: cell ICG hay flop DDR
+  trên `hr_clk` rồi tới pad, CK# qua một đường đối xứng; duty cycle phải nằm trong tCKHP.
+* DQ / RWDS ra: phóng bằng `hr_wclk` = `hr_clk` + T/4 để dữ liệu nằm giữa hai cạnh CK (hợp đồng ở
+  mục 2.4), theo tIS / tIH của thiết bị. Trên ASIC: đầu ra lệch 90° của PLL hoặc một DLL. Dải chỉnh
+  ±3T/16 (`WPS_GO`) có thể thu hẹp: trên bo RAM thật (MPS4, 2026-11-09) mắt ghi tốt ở mọi điểm
+  quét.
+* Pha 270° của `hr_clk` và `set_multicycle_path -setup 2` chỉ để né DRC và cách Vivado tính pha
+  MMCM (mục 2.4). Trong SDC, T/4 của `hr_wclk` là dạng sóng của clock, không cần multicycle.
+
+### 9.4 Ràng buộc (SDC)
+
+* Clock: `clk_i` (SoC), `hr_clk`, `hr_wclk` (dạng sóng lệch T/4), clock đọc (`hr_rd_clk` hay RWDS
+  đã trễ), generated clock ở pad CK.
+* Ra: DQ / RWDS / CS# so với CK ở pad theo tIS / tIH / tCSS / tCSH.
+* Vào: cách giữ kiến trúc không có `set_input_delay` (pha được hiệu chỉnh, như XDC hiện tại); cách
+  DLL thì DQ so với RWDS đã trễ, theo tDSS / tDSH và sai số của DLL.
+* CDC: con trỏ gray của FIFO bất đồng bộ cần giới hạn trễ và lệch (XDC dùng
+  `set_max_delay -datapath_only` và `set_bus_skew`); trong SDC là `set_max_delay` bỏ qua trễ clock
+  hay lệnh tương đương của công cụ, cộng ký duyệt bằng công cụ CDC / RDC. Các kiểm tra của
+  `tcl/timing_checks.tcl` (mỗi cặp clock đúng loại ràng buộc) nên làm lại trong flow ASIC.
+
+### 9.5 DFT
+
+* Scan: bốn miền clock (`clk_i`, `hr_clk`, `hr_wclk`, `hr_rd_clk`) cần OCC; PLL / DLL có chế độ
+  bypass; flop DDR ở pad có chế độ test.
+* Giữ một chế độ loopback ở pad để ATE kiểm đường I/O DDR ở tốc độ thật mà không cần chip RAM
+  (bản loopback trên MPS4 đã làm đúng việc đó với emulator, mục 6).
+* BIST của IP kiểm RAM ngoài (test bo, chẩn đoán tại chỗ), không thay được scan.
+
+### 9.6 Kiểm chứng và phần mềm
+
+* Testbench IP dùng lại được: mô hình S80KS2562 mức chân độc lập với RTL, cấu hình `direct`
+  (166 MHz, không level shifter) gần với ASIC nhất; `make mutants` vẫn áp cho lõi. Thêm mô hình
+  hành vi của PHY mới (như `bow_hyperram_io_sim.sv` cho wrapper FPGA), mô phỏng gate-level có SDF,
+  STA mọi corner, mô phỏng 4 trạng thái cho reset.
+* Driver: thông số thời gian tính từ `CLK_HZ`, bảng latency của CR0 đã tới 200 MHz, số bước pha
+  đọc từ `PS_NOW[31:16]`. Cách DLL thì đổi bước 3 và 5 của mục 4 (quét pha đọc).
+
+### 9.7 Chân, tần số, bo
+
+* 13 chân 1,8 V, vòng I/O 1,8 V; DIR / OE# không còn. IP lái DQ / RWDS thấp giữa các giao dịch
+  (`IDLE_DRIVE`) nhưng thả chúng trong reset kênh và lúc bật nguồn, nên pad cần pull-down yếu (như
+  XDC của bo RAM) hoặc bus hold.
+* S80KS2562 chạy tới 200 MHz (đỉnh 400 MB/s): RTL không phải sửa, chỉ cần đóng timing miền
+  `hr_clk` ở tần số đó.
+* Mô hình IBIS cho thiết kế PCB; đi dây DQ / RWDS / CK cân chiều dài.
+
+Tóm lại: lõi số dùng lại; việc mới là PHY cứng (pad, flop DDR, PLL, DLL: thường mua của foundry
+hay hãng IP có PHY HyperBus / xSPI / OctaRAM, hoặc nhóm analog làm), adapter pha, nửa đọc của PHY
+nếu chọn cách DLL, SDC, DFT và mô hình PHY cho kiểm chứng.
