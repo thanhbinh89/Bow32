@@ -178,8 +178,9 @@ hơn và pha ghi (`cal --write`) có ý nghĩa thật (lệch DQ/DQS giữa U5 v
 ## 6. Kết quả trên bo
 
 **2026-11-09, hw-station-1, bo RAM ở FMC+10, `CLK_SRC=ref200`** (build: WNS +0,579 ns, WHS
-+0,021 ns; mọi kiểm tra clock / CDC / bus skew / vị trí XPIO đạt). Lần đầu IP DDR2 và
-HyperRAM chạy với bộ nhớ thật (trên MPS4 chỉ có bản loopback với bộ giả lập).
++0,021 ns; mọi kiểm tra clock / CDC / bus skew / vị trí XPIO đạt). Lần đầu IP DDR2 chạy với
+chip DDR2 thật (trên MPS4 chỉ có bản loopback với bộ giả lập); HyperRAM đã chạy trên chip thật
+ở khe FMC+ của MPS4 cùng ngày ([hyperram_mps4.md](hyperram_mps4.md) mục 5).
 
 | | Kết quả |
 |---|---|

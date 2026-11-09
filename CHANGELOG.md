@@ -22,8 +22,8 @@
     `constr/pins.txt` ghi cổng → net của bo, `tools/huins_pins.py` sinh XDC chân từ netlist
     trong bản sao cục bộ lúc build.
   - Chạy trên bo (2026-11-09, bo RAM ở FMC+10): DDR2 self-test 21/21, `verify` 40/40, BIST
-    214 MB/s; HyperRAM self-test 19/19, `verify` 40/40, BIST 188 / 180 MB/s: lần đầu cả hai IP
-    chạy với bộ nhớ thật.
+    214 MB/s, lần đầu IP DDR2 chạy với chip DDR2 thật; HyperRAM self-test 19/19, `verify`
+    40/40, BIST 188 / 180 MB/s (sau lần chạy chip thật trên MPS4).
   - Kiểm chứng: cấu hình `vcard`/`vx16`/`vlb` (DDR) và `vcard`/`vdirect`/`vlb` (HyperRAM) của
     testbench chân trong xsim, `test-vclk` (hai wrapper clock MMCME5), `make mutants` 117 bản.
 - `bow_bus_deny` (`hw/ip/bus`): tường lửa trước một host, yêu cầu tới một cửa sổ địa chỉ
