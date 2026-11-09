@@ -6,6 +6,13 @@
 ## [Unreleased]
 
 ### Added
+- Review bo RAM mở rộng `FMC_DDR2_HyperRam` (cả DDR2 và HyperRAM, cơ khí, BOM) và khả năng lắp
+  trên Arm MPS4 và Huins MFP-VP1902 ([docs/fmc_ram_card_review.md](docs/fmc_ram_card_review.md)):
+  53 chân của bo đối chiếu với XDC của MPS4 và netlist của cả 8 khe FMC+ của Huins; chỉ cấp
+  nguồn khi VADJ ≥ 1,5 V; DQ và DQS của DDR2 ở hai level shifter khác nhau (lệch không hiệu
+  chỉnh được); bo dài ~84 mm (chuẩn 76,5 mm); MPS4 test được ngay với bản build bo RAM, Huins
+  cần port (Vivado trên xcvp1902: T của chân hai chiều phải lấy từ TDDR cùng site, DRC
+  PDCN-2749); bảng chức năng IP test được trên mỗi board; đề xuất rev-B.
 - `bow_bus_deny` (`hw/ip/bus`): tường lửa trước một host, yêu cầu tới một cửa sổ địa chỉ
   trả lỗi bus; `bow32_top` dùng nó để chặn DMA khỏi thanh ghi MKV. NMI của Ibex nối vào
   alert nghiêm trọng của MKV.

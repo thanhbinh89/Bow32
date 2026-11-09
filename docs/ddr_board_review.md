@@ -10,6 +10,9 @@ Tài liệu này trả lời bốn câu hỏi:
 4. Dùng controller mã nguồn mở [LiteDRAM](https://github.com/enjoy-digital/litedram) được
    tới đâu với bo RAM này (mục 7)?
 
+Review đầy đủ của cả bo (thêm phần HyperRAM, cơ khí, BOM) và đánh giá thêm board Huins
+MFP-VP1902 (2026-11-09) ở [fmc_ram_card_review.md](fmc_ram_card_review.md).
+
 Thiết kế IP nằm ở [ip/ddr.md](ip/ddr.md), cách chạy trên board ở
 [ddr_mps4.md](ddr_mps4.md). Theo yêu cầu, chỉ build FPGA cho **MPS4**; VEK280 và KV260 chỉ
 được đánh giá (mục 3), không có bitstream. Bản hiện tại (v2) dùng controller LiteDRAM trên
@@ -22,7 +25,7 @@ PHY riêng của Bow32; bản đầu tiên (v1) có controller tự viết, cùn
 | Bow32 làm được IP DDR2/3? | **Được**, không phải đổi CPU hay giao thức bus, và đã chạy trên MPS4 (bản loopback, 2026-11-05: self-test 18/18, BIST 234/227 MB/s). Thêm một cửa sổ bộ nhớ 512 MiB ở `0x8000_0000` trên main crossbar, thanh ghi ở `0x4000_C000`/`0x4000_E000`, miền clock DDR riêng (CK 125–133 MHz), controller LiteDRAM và một PHY tự viết chỉ dùng `ODDRE1`/`IDDRE1` + MMCM dịch pha động (không dùng MIG, không dùng NoC/DDRMC của Versal). |
 | Phải "đổi kiến trúc" ở đâu? | Ở **board**, không ở SoC: KV260 không có FMC và không có DRAM nối vào PL, nên Bow32 có thêm target **MPS4** (Virtex UltraScale+ XCVU13P, không có PS, nạp bitstream qua thẻ SD của MCC). PHY chỉ dùng `ODDRE1`/`IDDRE1` + MMCM (không ISERDES/OSERDES/IDELAY) nên cũng mang sang được Versal. Vì bo RAM chưa có, bản chạy trên MPS4 dùng **loopback**: PHY lái 30 chân I/O 1.8 V **không nối gì** của bank 64 (không đụng khe FMC), dữ liệu đọc quay về qua pad/IOB/IDDR thật, còn DRAM được giả lập bởi một model DDR2/DDR3 tổng hợp được (cùng mã với mô hình mô phỏng) đặt trong FPGA. Bản "card" dùng đúng pinout bo RAM hiện tại, build sẵn để nạp khi có bo. |
 | DDR2 hay DDR3? | DDR2 chạy được trên phần cứng (bo RAM có IS43DR86400E). DDR3 không có phần cứng nào: kiểm chứng bằng mô phỏng, ở chế độ **DLL-off** (JESD79-3 cho phép tCK ≥ 8 ns, CL = CWL = 6) vì PHY dùng ODDR/IDDR chỉ đạt CK ≈ 125–133 MHz. |
-| Bo RAM hợp board nào? | **Chỉ MPS4** (bản hiện tại). VEK280 **không** dùng được vì khe FMC+ của nó chỉ nối LA00–LA33, trong khi DQ0–7/DQS của DDR2 (và toàn bộ HyperRAM) nằm trên chân **HB**. KV260 không có khe FMC. Chuyển toàn bộ tín hiệu sang LA (đề xuất ở mục 5) thì bo dùng được trên cả VEK280, MPS4 và mọi carrier FMC LPC. |
+| Bo RAM hợp board nào? | **Chỉ MPS4** trong ba board ở đây (bản hiện tại); board Huins MFP-VP1902 (xét sau, 2026-11-09) cũng nối đủ LA/HB ([fmc_ram_card_review.md](fmc_ram_card_review.md)). VEK280 **không** dùng được vì khe FMC+ của nó chỉ nối LA00–LA33, trong khi DQ0–7/DQS của DDR2 (và toàn bộ HyperRAM) nằm trên chân **HB**. KV260 không có khe FMC. Chuyển toàn bộ tín hiệu sang LA (đề xuất ở mục 5) thì bo dùng được trên cả VEK280, MPS4 và mọi carrier FMC LPC. |
 | Có lỗi schematic cần sửa trước khi sản xuất? | Có: ngoài việc chuyển sang LA, nên đổi chiều level shifter (phía A về FPGA) để chân DIR/OE được tham chiếu đúng mức 1.5 V, và đưa DM qua level shifter để controller không phải đọc-sửa-ghi. Chi tiết ở mục 4. |
 
 ## 2. IP DDR2/3 trên Bow32: khả thi tới đâu
@@ -51,6 +54,7 @@ PHY riêng của Bow32; bản đầu tiên (v1) có controller tự viết, cùn
 | KV260 | Zynq UltraScale+ K26 | không có | — | **không dùng được** | PL không có DRAM ngoài; chỉ PS có DDR4 |
 | VEK280 | Versal AI Edge XCVE2802 | FMC+ J51, **chỉ LA00–LA33** (+CLK0/1) | cố định 1.5 V | **không dùng được** | HA/HB của J51 để trống (UG1612: "FMCP1 HSPC full LA[00:33] bus", schematic trang 31). DQ/DQS của DDR2 ở HB07/09/11/13/17 nên không tới FPGA. VADJ 1.5 V khớp với thiết kế của bo RAM. |
 | MPS4 | Virtex UltraScale+ XCVU13P | FMC+ HPC J11, LA/HA/HB đủ | 1.2/1.5/1.8 V (`FMC_FORCE`) | **dùng được** | LA ở bank 69/70, HB ở bank 71, đều cấp từ `VCCO_FMC`. Bo RAM không có EEPROM nên phải đặt `FMC_FORCE: 1V5` trong `config.txt` (hiện thẻ SD đang để `1V2` cho thiết kế FU3 của nhóm khác). |
+| Huins MFP-VP1902 | Versal Premium XCVP1902 | 8 × FMC+, LA/HA/HB đủ | 1.0/1.2/1.5 V từng khe (slide switch, mặc định 1.5 V) | **dùng được** (cần port Bow32 sang Versal) | xét ngày 2026-11-09: [fmc_ram_card_review.md](fmc_ram_card_review.md) mục 4. |
 
 Chân FPGA của các tín hiệu bo RAM trên MPS4 (theo `docs/fpga/MPS4/hpi0376b_FPGA_ALL_PINS.xlsx`):
 DQ0/1 = HB07 P/N (D25/D26), DQ2/3 = HB09 (H28/G28), DQ4/5 = HB11 (L24/L25),
