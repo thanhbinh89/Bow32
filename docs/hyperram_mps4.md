@@ -20,12 +20,15 @@ có cả DDR và HyperRAM: đổi ứng dụng bằng `bow32_flash.py flash`, kh
 **Đã chạy trên bo ngày 2026-11-07** (bản loopback): `test` 19/19 (ba lần: sau khi nạp, sau
 `RESET` của MCC, sau khi nạp lại firmware), `verify` 40/40 và 200/200, BIST trên toàn 1 MiB 0
 lỗi ở 184,4 MB/s (đỉnh 200 MB/s), DDR 18/18 trên cùng bitstream (chi tiết ở mục 3.6).
+**Trên chip thật ngày 2026-11-09** (bo RAM ở khe FMC+ J11, qua level shifter TXV0108): `test`
+19/19, `verify` 40/40, BIST (PRBS hai seed và dữ liệu đếm) và `memtest` của CPU trên toàn
+32 MiB đều 0 lỗi, BIST 184,1 MB/s (chi tiết ở mục 5.3).
 
-Chip HyperRAM (S80KS2562) nằm trên bo RAM mở rộng (`docs/fpga/ram_extension`), chưa gắn,
-nên bản build mặc định là **loopback**: PHY lái chân thật của FPGA (ODDR, IOB, IDDR,
+Chip HyperRAM (S80KS2562) nằm trên bo RAM mở rộng (`docs/fpga/ram_extension`). Bản build
+mặc định là **loopback**, không cần bo RAM: PHY lái chân thật của FPGA (ODDR, IOB, IDDR,
 hai MMCM dịch pha chạy như với chip thật), còn một HyperRAM giả lập trong FPGA
 (`bow_hyperram_dev`) trả lời qua đường loopback của wrapper chân. Bản này không dùng khe FMC
-nên không cần đổi `FMC_FORCE`.
+nên không cần đổi `FMC_FORCE`. Bản bo RAM (chip thật) ở mục 5.
 
 ## 1. Build
 
@@ -167,6 +170,11 @@ giao dịch 32 bit qua hai miền clock, nhưng đọc trúng read buffer nhanh 
 
 `h` in danh sách lệnh đầy đủ; mọi định dạng đầu ra nằm ở đầu `sw/apps/hyperram/main.c`.
 
+Số trong lệnh: địa chỉ (`ADDR` của `bist` / `memtest` / `fill`, địa chỉ của `rd` / `wr` /
+`dump`) là hex, có hay không có `0x`; còn `LEN`, `BURST`, `SEED` là **thập phân** nếu không viết
+`0x`. `bist 60000000 2000000` chỉ thử 2 000 000 byte (~1,9 MiB); toàn bộ 32 MiB là
+`bist 0x60000000 0x2000000` (dòng kết quả in `words 16777216`).
+
 ### 3.6 Kết quả trên bo (2026-11-07, bản loopback)
 
 | | Kết quả |
@@ -210,22 +218,27 @@ make -C hw/ip/hyperram/dv test    # testbench IP: mô hình S80KS2562, bo RAM (T
 `make run TEST=hyperram` dựng đúng cấu hình của bản loopback (100 MHz, 672 bước pha) với
 HyperRAM giả lập 1 MiB, chạy `test quick` và kiểm tra `DBG` của emulator.
 
-## 5. Bo RAM thật (khi đã sản xuất)
+## 5. Bo RAM thật (chip S80KS2562 qua TXV0108)
+
+### 5.1 Build và chuẩn bị
 
 * Build: `make fpga BOARD=mps4 DDR_LOOPBACK=0 FLASH_VMEM=...` (cả DDR2 và HyperRAM trên khe
   FMC+, LVCMOS15; chân HyperRAM ở `constr/hyperram_card.xdc`; `HR_LOOPBACK=1` giữ HyperRAM ở
   loopback).
-* `config.txt`: `FMC_FORCE: 1V5` (VADJ của khe FMC+ = 1,5 V cho TXV0108). Thẻ đang để `1V2`
-  cho thiết kế của nhóm khác: hỏi trước khi đổi.
+* `config.txt`: `FMC_FORCE: 1V5` (VADJ của khe FMC+ = 1,5 V cho TXV0108). Thẻ để `1V2` cho
+  thiết kế của nhóm khác: hỏi trước khi đổi, giữ một bản `config.txt` trước khi sửa (sửa tay:
+  `bow32_mps4.py` chỉ đổi dòng `APPFILE`). Bo RAM chỉ cắm / rút khi đã rút jack 12 V (J71);
+  các luật khi bo RAM đang cắm ở mục 5.4.
 * Đọc [ip/hyperram.md](ip/hyperram.md) mục 2.5 (level shifter) và
   [ddr_board_review.md](ddr_board_review.md) trước khi đặt mạch: ngưỡng DIR/OE của TXV0108
   (lái 1,5 V, tham chiếu 1,8 V), méo duty của CK qua level shifter.
 * Hiệu chỉnh cả pha ghi: `bow32_hyperram.py cal --write`.
 
-Kết quả build bản bo RAM (2026-11-08, sau hai vòng sửa của review; chưa chạy trên bo vì bo RAM
-chưa gắn): đạt mọi ràng buộc, setup WNS +0,098 ns, hold WHS +0,001 ns, 8/8 bus skew; `hr_clk` →
-`hr_wclk` hold +0,714 ns (bản 2026-11-07: WNS +0,103 ns, `hr_clk` → `hr_wclk` +3,357 / +0,428 ns).
-Ba điểm riêng của bản này:
+Kết quả build bản bo RAM (2026-11-08, sau hai vòng sửa của review): đạt mọi ràng buộc, setup
+WNS +0,098 ns, hold WHS +0,001 ns, 8/8 bus skew; `hr_clk` → `hr_wclk` hold +0,714 ns (bản
+2026-11-07: WNS +0,103 ns, `hr_clk` → `hr_wclk` +3,357 / +0,428 ns). Bản chạy trên bo ngày
+2026-11-09 dựng lại từ main `ed949e1` (thêm các bản sửa của DDR và MKV): WNS +0,102 ns, WHS
++0,012 ns. Ba điểm riêng của bản này:
 
 * DQ/RWDS có pull-down yếu của chân FPGA (`PULLTYPE PULLDOWN` trong `constr/hyperram_card.xdc`):
   mạch vào của TXV0108 luôn hoạt động, kể cả khi OE# = 1, mà FPGA thả các chân này trong reset kênh
@@ -238,8 +251,10 @@ Ba điểm riêng của bản này:
   báo CDC-13 cho mỗi đường chân → D của IDDRE1 (9 của DDR, 9 của HyperRAM); `timing_checks.tcl`
   coi đúng các đường này là dự kiến, mọi CDC-13 khác vẫn là lỗi.
 
-Chạy bo RAM (khi đã gắn và `FMC_FORCE: 1V5` đã được nhóm dùng chung đồng ý; build bản bo RAM ở
-trên, `PORT` như mục 2):
+### 5.2 Chạy
+
+Bo RAM đã cắm (lúc rút 12 V), `FMC_FORCE: 1V5` đã được nhóm dùng chung đồng ý; build bản bo
+RAM ở trên, `PORT` như mục 2:
 
 ```bash
 python3 tools/bow32_mps4.py show            # dừng nếu config.txt chưa có FMC_FORCE: 1V5
@@ -251,15 +266,64 @@ $H eye --step 2                             # mắt đọc qua level shifter
 $H cal --write --step 2                     # pha ghi
 $H test
 $H verify -n 40 --seed 2026
+$H cmd "bist 0x60000000 0x2000000" "bist 0x60000000 0x2000000 count" stat   # BIST toàn 32 MiB
+$H cmd "memtest 0x60000000 0x2000000 7"     # CPU qua cửa sổ, toàn 32 MiB (~1 phút)
 $H bench
-$H cmd sleep "rd 60000000" wake "rd 60000000" stat   # hybrid sleep: lỗi bus rồi đọc được
+$H cmd sleep "rd 60000000" wake "rd 60000000" stat   # hybrid sleep: lỗi bus (mã thoát 1) rồi đọc được
 python3 tools/bow32_flash.py -p $PORT flash build/sw/ddr/ddr.bin       # DDR2 trên cùng bo
 python3 tools/bow32_ddr.py -p $PORT test
 python3 tools/bow32_ddr.py -p $PORT cal --write --step 2
-python3 tools/bow32_mps4.py restore
 ```
 
-Sau khi thử: `restore`, và trả `FMC_FORCE` về `1V2` nếu nhóm kia cần.
+`LEN` của `bist` / `memtest` phải có `0x` (mục 3.5). Sau khi thử, trả bo đúng thứ tự ở mục
+5.4: **không** `restore` hay đổi `FMC_FORCE` trước khi bo RAM đã được tháo ra.
+
+### 5.3 Kết quả trên bo (2026-11-09)
+
+Bo RAM ở khe FMC+ J11, `FMC_FORCE: 1V5`, bitstream bản bo RAM từ main `ed949e1`. Console của MCC
+khi bật: `FMC board detected`, `FMC VADG: 1500mV` và `WARNING: PSU VIO_HB  : 1.49V` (đó là
+VIO_B_M2C do bo RAM cấp từ +1V5 của nó, đúng như thiết kế).
+
+| | Kết quả |
+|---|---|
+| Thiết bị | ID0 `0e86`, ID1 `0001`; CR0 `8fff` (latency 4 cố định: level shifter không cho latency biến đổi, self-test [14] kiểm việc từ chối), CR1 `ffc1`, TCSM 395 chu kỳ |
+| Mắt đọc (`eye --step 2`, 336 điểm mỗi CK) | ID0 310 / 336 điểm tốt, mẫu 287 / 336; pha 154–156, `RD_DLY` 13, byte A đầu tiên ở nửa chu kỳ 48 (bản loopback: 46, `RD_DLY` 12) |
+| Mắt ghi (`cal --write --step 2`) | tốt ở mọi điểm quét (32 / 32, độ rộng 256 bước), pha ghi 2 |
+| Self-test | 19/19 (firmware của main), 19/19 (firmware có bản sửa `(null)` của self-test) |
+| `verify` | 40/40 (seed 2026) |
+| BIST toàn 32 MiB (16 777 216 word, burst 255, ghi rồi đọc) | PRBS seed `c0ffee`, PRBS seed `5a5a1234`, dữ liệu đếm: 0 lỗi, 184,11 MB/s (36 449 375 chu kỳ CK cho 2 × 32 MiB) |
+| `memtest` toàn 32 MiB (CPU qua cửa sổ, seed 7) | địa chỉ trong địa chỉ, đảo, rồi xorshift: 25 165 824 word đã kiểm, 0 lỗi |
+| `bench` | CPU ghi 7,99, ghi posted 28,22, đọc read buffer 20,77, đọc không buffer 7,14 MB/s; BIST 64 KiB ghi 188,11 / đọc 180,10 MB/s |
+| Nguồn | hybrid sleep: cửa sổ trả lỗi bus, WAKE, đọc được; deep power down, WAKE, `init` lại, đọc được |
+
+BIST là máy phần cứng trong controller: burst 255 word liền nhau, mỗi burst chỉ tốn CA, latency
+và CS# cao, nên đạt ~92 % đỉnh 200 MB/s. CPU mỗi lần chỉ có một truy cập 32 bit qua hai miền
+clock, nên chậm hơn nhiều (mục 3.4); muốn nhanh hơn cần burst dài (DMA).
+
+### 5.4 Bo dùng chung khi bo RAM đang cắm
+
+MPS4 dùng chung với các nhóm khác (thiết kế của họ trên cùng thẻ microSD). Khi bo RAM nằm ở
+J11:
+
+* **Không bật bo với `FMC_FORCE` dưới `1V5`.** DIR / OE# của TXV0108 tham chiếu VCCA = 1,8 V
+  (ngưỡng mức 1 ~1,26 V): FPGA lái 1,2 V thì hướng của level shifter không xác định, hai phía có
+  thể cùng lái ([ip/hyperram.md](ip/hyperram.md) mục 2.5).
+* **Không nạp thiết kế của nhóm khác** khi chưa chắc thiết kế đó không đặt chân nào ở bank 69 /
+  70 / 71 (53 chân nối với bo RAM): xem XDC hay `report_io` của họ. Thiết kế không có chân nào ở
+  các bank này (nhóm FU3 cho biết không dùng FMC) thì `FMC_FORCE: 1V5` không ảnh hưởng tới nó.
+* **Tắt nguồn** là rút jack 12 V (J71), không phải `SHUTDOWN` của MCC, trước khi cắm hay rút
+  bất kỳ card nào.
+
+Trả bo cho nhóm khác theo đúng thứ tự này. `restore` chỉ sửa thẻ, không tự khởi động lại; nhưng
+nếu `APPFILE` / `FMC_FORCE` đã đổi khi bo RAM còn cắm thì lần bật hay `REBOOT` kế tiếp nạp thiết
+kế khác, hay cấp 1,2 V, trong lúc bo RAM vẫn trên khe:
+
+1. Rút 12 V (J71), tháo bo RAM khỏi J11.
+2. Cắm lại 12 V: bo lên với J11 trống (`FMC_FORCE: 1V5` và Bow32 không hại gì khi khe trống).
+3. `python3 tools/bow32_mps4.py restore` (dòng `APPFILE`); trả `config.txt` về bản đã giữ
+   (`FMC_FORCE: 1V2`); so từng byte `config.txt` và `board.txt` với bản giữ.
+4. `python3 tools/bow32_mps4.py reboot` và xem console của MCC. Card của nhóm khác cũng chỉ cắm
+   khi đã rút 12 V.
 
 ## 6. Sự cố
 
@@ -271,4 +335,5 @@ Sau khi thử: `restore`, và trả `FMC_FORCE` về `1V2` nếu nhóm kia cần
 | cửa sổ trả lỗi bus | chưa `init` (`STATUS.READY` = 0), thiết bị đang ngủ, hoặc cửa sổ đã chết (`BROKEN`): `CORE_RST` rồi `init` lại |
 | `RWDS` / `RD_TMO` trong `ERR_CODE` | pha đọc hoặc `RD_DLY` lệch sau khi đổi điều kiện: `cal` lại |
 | `TCSM_ERR` | burst dài hơn `TIM0.TCSM` cho phép: giảm `BURST` của BIST |
+| `bist` / `memtest` thử ít hơn mong đợi (`words` nhỏ) | `LEN` không có `0x` là số thập phân (mục 3.5) |
 | `DBG` báo lỗi | HyperRAM giả lập thấy vi phạm giao thức: mã lỗi trong [ip/hyperram.md](ip/hyperram.md) mục 6 |
