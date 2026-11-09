@@ -17,6 +17,10 @@
 //     the pins during pin cycle j+1. dqs[l] = {second half, first half} of
 //     DQS_P (DQS_N is the complement). dq[0] is centred on the DQS rising edge
 //     of pin cycle j+1 (time (j+1)T), dq[1] on its falling edge ((j+1.5)T).
+//     Output enables on Versal XPIO (bow_ddr_io_xilinx TFromOddr = 1: T from
+//     an ODDR in the pad site): dq_oe / dm drive during [(j+1.25)T,
+//     (j+2.25)T), dqs_oe during [(j+1)T, (j+2)T), both moved by the write
+//     phase (the wrapper header has the margins against the shifter windows).
 //   * cke, rst_n, odt, cs_n, ras_n, cas_n, we_n, ba, a: the value of PHY cycle
 //     j is on the pins from (j+1.5)T to (j+2.5)T, i.e. centred on CK rising
 //     edge j+2: a command presented in PHY cycle j is latched by the DRAM at

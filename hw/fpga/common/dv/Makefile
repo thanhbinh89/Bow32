@@ -14,6 +14,10 @@
 #                         clocks (bow_hyperram_clk_xusp: two MMCME4_ADV, fine
 #                         phase shift of the write and read clocks, lock-loss
 #                         reset), configurations HR_IO_CFGS
+#   tb_bow_ddr_clk_versal, tb_bow_hyperram_clk_versal  Versal DDR / HyperRAM
+#                         clocks (bow_ddr_clk_versal, bow_hyperram_clk_versal:
+#                         two MMCME5 each, fine phase shift driven through
+#                         bow_mmcm_ps, lock-loss reset), configurations VCLK_CFGS
 #
 #   make test                 all of them: D-PHY, DDR and HyperRAM pads with every
 #                             seed of SEEDS, DDR clocks once per configuration
@@ -26,6 +30,9 @@
 #                                                   files in build/fpga_dv/ddr_clk/125/run
 #   make run-hr-io HR_IO_CFG=lb SEED=2 WAVES=1      one HyperRAM configuration and seed,
 #                                                   files in build/fpga_dv/hr_io/lb/seed2
+#   make test-vclk                                  Versal clocks, every VCLK_CFGS (in make test)
+#   make run-vclk VCLK_CFG=hr100 WAVES=1            one Versal clock configuration,
+#                                                   files in build/fpga_dv/vclk/hr100/run
 #   make mutants              not part of test: broken copies of the DDR and HyperRAM
 #                             pad / clock wrappers (mutants.py), each one must FAIL
 #
@@ -66,18 +73,23 @@ SRCS    = $(filter %.sv %.v,$(shell cat $(BUILD)/files.txt 2>/dev/null)) $(CURDI
 #         read level 0
 #   lb    x8 loopback (the MPS4 loopback build: bow_ddr_lb behind the pads)
 #   lb16  x16 loopback with DM, no level shifter pins
+#   vcard, vx16, vlb  the same with TFromOddr = 1 (Versal XPIO: T from an
+#         ODDRE1 in the pad site; vcard = the Huins VP1902 card build)
 DDR_IO_TOP   := tb_bow_ddr_io_xilinx
 DDR_IO_DIR   ?= $(BUILD)/ddr_io
 DDR_IO_RTL   ?= $(REPO)/hw/fpga/common/rtl/bow_ddr_io_xilinx.sv
 DDR_CLK_RTL  ?= $(REPO)/hw/fpga/common/rtl/bow_ddr_clk_xusp.sv
 DDR_IO_SRCS   = $(REPO)/hw/ip/ddr/rtl/bow_ddr_pkg.sv $(DDR_CLK_RTL) $(DDR_IO_RTL) \
                 $(CURDIR)/$(DDR_IO_TOP).sv
-DDR_IO_CFGS  ?= card x16 lb lb16
+DDR_IO_CFGS  ?= card x16 lb lb16 vcard vx16 vlb
 DDR_IO_GEN_card :=
 DDR_IO_GEN_x16  := DqBits=16 AddrPins=16 BankPins=3 HasDm=1 HasResetN=1 CkSingleEnded=0 \
                    LsDirReadLevel=0
 DDR_IO_GEN_lb   := Loopback=1
 DDR_IO_GEN_lb16 := DqBits=16 HasDm=1 HasLs=0 Loopback=1
+DDR_IO_GEN_vcard := TFromOddr=1
+DDR_IO_GEN_vx16  := $(DDR_IO_GEN_x16) TFromOddr=1
+DDR_IO_GEN_vlb   := Loopback=1 TFromOddr=1
 IO_CFG ?= card
 ddr_io_snap = $(DDR_IO_DIR)/$(1)/xsim.dir/$(DDR_IO_TOP)_sim/xsimk
 
@@ -101,23 +113,28 @@ ddr_clk_snap = $(DDR_CLK_DIR)/$(1)/xsim.dir/$(DDR_CLK_TOP)_sim/xsimk
 #   direct  no level shifter pins (HasLs 0): a board without shifters
 #   lb      loopback (Loopback 1, HasLs 0): the MPS4 loopback build,
 #           bow_hyperram_dev behind the pads
+#   vcard, vdirect, vlb  the same with TFromOddr = 1 (Versal XPIO: T from an
+#           ODDRE1 in the pad site; vcard = the Huins VP1902 card build)
 HR_IO_TOP   := tb_bow_hyperram_io_xilinx
 HR_IO_DIR   ?= $(BUILD)/hr_io
 HR_IO_RTL   ?= $(REPO)/hw/fpga/common/rtl/bow_hyperram_io_xilinx.sv
 HR_CLK_RTL  ?= $(REPO)/hw/fpga/common/rtl/bow_hyperram_clk_xusp.sv
 HR_IO_SRCS   = $(REPO)/hw/ip/hyperram/rtl/bow_hyperram_pkg.sv $(HR_CLK_RTL) $(HR_IO_RTL) \
                $(CURDIR)/$(HR_IO_TOP).sv
-HR_IO_CFGS  ?= card direct lb
+HR_IO_CFGS  ?= card direct lb vcard vdirect vlb
 HR_IO_GEN_card   :=
 HR_IO_GEN_direct := HasLs=0
 HR_IO_GEN_lb     := Loopback=1 HasLs=0
+HR_IO_GEN_vcard   := TFromOddr=1
+HR_IO_GEN_vdirect := HasLs=0 TFromOddr=1
+HR_IO_GEN_vlb     := Loopback=1 HasLs=0 TFromOddr=1
 HR_IO_CFG ?= card
 hr_io_snap = $(HR_IO_DIR)/$(1)/xsim.dir/$(HR_IO_TOP)_sim/xsimk
 
 # a configuration name has to be one of the lists above
 ifneq ($(filter run-ddr-io,$(MAKECMDGOALS)),)
   ifeq ($(origin DDR_IO_GEN_$(IO_CFG)),undefined)
-    $(error unknown IO_CFG $(IO_CFG): card, x16, lb or lb16)
+    $(error unknown IO_CFG $(IO_CFG): card, x16, lb, lb16, vcard, vx16 or vlb)
   endif
 endif
 ifneq ($(filter run-ddr-clk,$(MAKECMDGOALS)),)
@@ -127,7 +144,7 @@ ifneq ($(filter run-ddr-clk,$(MAKECMDGOALS)),)
 endif
 ifneq ($(filter run-hr-io,$(MAKECMDGOALS)),)
   ifeq ($(origin HR_IO_GEN_$(HR_IO_CFG)),undefined)
-    $(error unknown HR_IO_CFG $(HR_IO_CFG): card, direct or lb)
+    $(error unknown HR_IO_CFG $(HR_IO_CFG): card, direct, lb, vcard, vdirect or vlb)
   endif
 endif
 
@@ -255,7 +272,81 @@ test-hr-io: check-tools $(foreach c,$(HR_IO_CFGS),$(call hr_io_snap,$(c)))
 	@set -e; for c in $(HR_IO_CFGS); do for s in $(SEEDS); do \
 	  $(MAKE) --no-print-directory run-hr-io HR_IO_CFG=$$c SEED=$$s; done; done
 
-test: test-dphy test-ddr-io test-ddr-clk test-hr-io
+# ------------------------------------------------- Versal clock wrappers
+# bow_ddr_clk_versal (tb_bow_ddr_clk_versal) and bow_hyperram_clk_versal
+# (tb_bow_hyperram_clk_versal), two MMCME5 each, their phase ports driven
+# directly and through bow_mmcm_ps. Configurations VCLK_CFGS (xelab
+# -generic_top of the testbench; the name prefix ddr / hr selects it):
+#   ddr200    DDR clocks from the Huins VP1902 200 MHz reference (differential,
+#             VCO 200 * 16): 133.333 MHz, 768 fine phase steps per CK
+#   ddr100    the same from a 100 MHz differential input (VCO 100 * 32)
+#   ddr200se  200 MHz single ended input (DiffIn 0: IBUF)
+#   hr200     HyperRAM clocks from 200 MHz (VCO 200 * 16): 100 MHz, 1024 steps
+#   hr100     the same from 100 MHz (VCO 100 * 32)
+# One xsim library + snapshot directory per configuration in
+# $(VCLK_DIR)/<cfg>/, the run in $(VCLK_DIR)/<cfg>/run; rebuilt when a source
+# or WAVES changes. DDR_VCLK_RTL / HR_VCLK_RTL replace the wrapper under test
+# (a broken copy, say), VCLK_DIR the output directory.
+VCLK_DIR      ?= $(BUILD)/vclk
+DDR_VCLK_RTL  ?= $(REPO)/hw/fpga/common/rtl/bow_ddr_clk_versal.sv
+HR_VCLK_RTL   ?= $(REPO)/hw/fpga/common/rtl/bow_hyperram_clk_versal.sv
+DDR_VCLK_TOP  := tb_bow_ddr_clk_versal
+HR_VCLK_TOP   := tb_bow_hyperram_clk_versal
+DDR_VCLK_SRCS  = $(REPO)/hw/ip/common/rtl/bow_mmcm_ps.sv $(DDR_VCLK_RTL) $(CURDIR)/$(DDR_VCLK_TOP).sv
+HR_VCLK_SRCS   = $(REPO)/hw/ip/common/rtl/bow_mmcm_ps.sv $(HR_VCLK_RTL) $(CURDIR)/$(HR_VCLK_TOP).sv
+VCLK_CFGS     ?= ddr200 ddr100 ddr200se hr200 hr100
+VCLK_GEN_ddr200   :=
+VCLK_GEN_ddr100   := TIN=10.0 VcoMult=32
+VCLK_GEN_ddr200se := DiffIn=0
+VCLK_GEN_hr200    :=
+VCLK_GEN_hr100    := TIN=10.0 VcoMult=32
+VCLK_CFG ?= ddr200
+vclk_top  = $(if $(filter ddr%,$(1)),$(DDR_VCLK_TOP),$(HR_VCLK_TOP))
+vclk_snap = $(VCLK_DIR)/$(1)/xsim.dir/$(call vclk_top,$(1))_sim/xsimk
+
+ifneq ($(filter run-vclk,$(MAKECMDGOALS)),)
+  ifeq ($(origin VCLK_GEN_$(VCLK_CFG)),undefined)
+    $(error unknown VCLK_CFG $(VCLK_CFG): ddr200, ddr100, ddr200se, hr200 or hr100)
+  endif
+endif
+
+build: $(foreach c,$(VCLK_CFGS),$(call vclk_snap,$(c)))
+
+$(VCLK_DIR)/ddr%/xsim.dir/$(DDR_VCLK_TOP)_sim/xsimk: $(DDR_VCLK_SRCS) $(VCLK_DIR)/ddr%/debug_$(DEBUG)
+	cd $(VCLK_DIR)/ddr$* && $(XVLOG) -sv $(DDR_VCLK_SRCS) > xvlog.log 2>&1 || \
+	  { tail -20 xvlog.log; exit 1; }
+	cd $(VCLK_DIR)/ddr$* && $(XVLOG) $(GLBL) > xvlog_glbl.log 2>&1 || \
+	  { tail -20 xvlog_glbl.log; exit 1; }
+	cd $(VCLK_DIR)/ddr$* && $(XELAB) $(XELAB_OPTS) $(addprefix -generic_top ,$(VCLK_GEN_ddr$*)) \
+	  -s $(DDR_VCLK_TOP)_sim work.$(DDR_VCLK_TOP) work.glbl > xelab.log 2>&1 || { tail -20 xelab.log; exit 1; }
+
+$(VCLK_DIR)/hr%/xsim.dir/$(HR_VCLK_TOP)_sim/xsimk: $(HR_VCLK_SRCS) $(VCLK_DIR)/hr%/debug_$(DEBUG)
+	cd $(VCLK_DIR)/hr$* && $(XVLOG) -sv $(HR_VCLK_SRCS) > xvlog.log 2>&1 || \
+	  { tail -20 xvlog.log; exit 1; }
+	cd $(VCLK_DIR)/hr$* && $(XVLOG) $(GLBL) > xvlog_glbl.log 2>&1 || \
+	  { tail -20 xvlog_glbl.log; exit 1; }
+	cd $(VCLK_DIR)/hr$* && $(XELAB) $(XELAB_OPTS) $(addprefix -generic_top ,$(VCLK_GEN_hr$*)) \
+	  -s $(HR_VCLK_TOP)_sim work.$(HR_VCLK_TOP) work.glbl > xelab.log 2>&1 || { tail -20 xelab.log; exit 1; }
+
+$(foreach c,$(sort $(VCLK_CFGS) $(VCLK_CFG)),$(VCLK_DIR)/$(c)/debug_$(DEBUG)):
+	@mkdir -p $(@D)
+	rm -f $(@D)/debug_*
+	touch $@
+
+VCLK_RUN = $(VCLK_DIR)/$(VCLK_CFG)/run
+run-vclk: check-tools $(call vclk_snap,$(VCLK_CFG))
+	$(call xsim_run,$(VCLK_DIR)/$(VCLK_CFG),$(VCLK_RUN),$(call vclk_top,$(VCLK_CFG)),$(SEED))
+	@grep -q "^$(call vclk_top,$(VCLK_CFG)): PASS" $(VCLK_RUN)/sim.log || \
+	  { grep -E "ERROR|FAIL|Error" $(VCLK_RUN)/sim.log | head -20; \
+	    echo "$(call vclk_top,$(VCLK_CFG)) $(VCLK_CFG): FAIL, see $(VCLK_RUN)/sim.log"; exit 1; }
+	@echo "$(call vclk_top,$(VCLK_CFG)) $(VCLK_CFG): PASS"
+
+test-vclk: check-tools $(foreach c,$(VCLK_CFGS),$(call vclk_snap,$(c)))
+	@set -e; for c in $(VCLK_CFGS); do $(MAKE) --no-print-directory run-vclk VCLK_CFG=$$c; done
+
+.PHONY: run-vclk test-vclk
+
+test: test-dphy test-ddr-io test-ddr-clk test-hr-io test-vclk
 
 # Each mutant gets its own DDR_IO_DIR / DDR_CLK_DIR and RTL copy, then runs
 # run-ddr-io / run-ddr-clk of this Makefile (MUTANT_JOBS in parallel).

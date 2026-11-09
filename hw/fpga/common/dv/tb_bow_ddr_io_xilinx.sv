@@ -25,7 +25,13 @@
 //    steps (+T/4, -T/4, +17 steps, back to 0: DQ/DQS/DM move by the phase,
 //    CK and commands do not; wclk - ddr_clk measured);
 //  * Loopback = 1: pads always driven, lb_* on the pads during lb_en, the
-//    emulator's DM 0, read back through the IOBs and IDDRs.
+//    emulator's DM 0, read back through the IOBs and IDDRs;
+//  * TFromOddr = 1 (Versal XPIO: T from an ODDRE1 in the pad site, unisim
+//    SIM_DEVICE "VERSAL_PREMIUM"): DQ / DM drive state of PHY cycle j on
+//    [(j+1.25)T, (j+2.25)T) + write phase, DQS P and N per lane on [(j+1)T,
+//    (j+2)T) + write phase, the driver edges at those phases (instead of the
+//    pin cycle j+1 of the fabric T flops).
+// In every configuration DQS_N is driven exactly when DQS_P is.
 // The pad wrapper parameters are parameters of this testbench (xelab
 // -generic_top, see the Makefile configurations); the random traffic comes
 // from $urandom (xsim -sv_seed). The test prints "tb_bow_ddr_io_xilinx: PASS"
@@ -42,7 +48,8 @@ module tb_bow_ddr_io_xilinx import bow_ddr_pkg::*; #(
   parameter bit          HasLs          = 1'b1,
   parameter bit          CkSingleEnded  = 1'b1,
   parameter bit          Loopback       = 1'b0,
-  parameter bit          LsDirReadLevel = 1'b1
+  parameter bit          LsDirReadLevel = 1'b1,
+  parameter bit          TFromOddr      = 1'b0
 );
   localparam int unsigned Lanes = DqBits / 8;
   localparam real T  = 7.5;
@@ -93,6 +100,8 @@ module tb_bow_ddr_io_xilinx import bow_ddr_pkg::*; #(
 
   // testbench side of the bidirectional pads (the "DRAM")
   logic              tb_drv = 1'b0;
+  realtime           t_tbdrv = -10.0;   // last change of tb_drv
+  always @(tb_drv) t_tbdrv = $realtime;
   logic [DqBits-1:0] tb_dq = '0;
   logic [Lanes-1:0]  tb_dqs = '0;
   assign dq    = tb_drv ? tb_dq : 'z;
@@ -111,7 +120,9 @@ module tb_bow_ddr_io_xilinx import bow_ddr_pkg::*; #(
     .HasLs          (HasLs),
     .CkSingleEnded  (CkSingleEnded),
     .Loopback       (Loopback),
-    .LsDirReadLevel (LsDirReadLevel)
+    .LsDirReadLevel (LsDirReadLevel),
+    .TFromOddr      (TFromOddr),
+    .SimDevice      (TFromOddr ? "VERSAL_PREMIUM" : "ULTRASCALE_PLUS")
   ) dut (
     .clk_i        (ddr_clk),
     .wclk_i       (wclk),
@@ -194,8 +205,11 @@ module tb_bow_ddr_io_xilinx import bow_ddr_pkg::*; #(
   // The PHY registers launch at the ddr_clk edge; their path delay to the
   // ODDRs is modelled as LAUNCH: it must lie in [T/4, T/2] for the contract to
   // hold over write phases -T/4..+T/4 (the T/4 clock uncertainty of the board
-  // XDC makes static timing enforce exactly this window).
-  localparam real LAUNCH = T / 3;
+  // XDC makes static timing enforce exactly this window). TFromOddr: the DQS
+  // stage takes the PHY value on the falling edge of wclk ((j+0.5)T + write
+  // phase), so the delay must stay below T/4 (static timing: the same
+  // uncertainty on ddr_clk -> ddr_wclk).
+  localparam real LAUNCH = TFromOddr ? T / 6 : T / 3;
   always @(posedge ddr_clk) begin
     realtime t0;
     t0 = $realtime;
@@ -207,7 +221,9 @@ module tb_bow_ddr_io_xilinx import bow_ddr_pkg::*; #(
     end else begin
       io_o = {r32(), r32(), r32(), r32()};
       io_o.dq_oe  = (mode == 1) ? (r32() % 10 != 0) : 1'b0;
-      io_o.dqs_oe = (mode == 1) ? {2{r32() % 10 != 0}} : 2'b00;
+      // TFromOddr: the lanes have their own T ODDRs, so their enables differ
+      io_o.dqs_oe = (mode != 1) ? 2'b00 :
+                    TFromOddr   ? {r32() % 10 != 0, r32() % 10 != 0} : {2{r32() % 10 != 0}};
       lb_dq  = {r32(), r32()};
       lb_dqs = r32();
       // emulator bursts: lb_en in runs of a few cycles
@@ -252,6 +268,38 @@ module tb_bow_ddr_io_xilinx import bow_ddr_pkg::*; #(
       fail($sformatf("%s of PHY cycle %0d: pin %h, expected %h", what, j, got & m, exp & m));
   endtask
 
+  // TFromOddr drive state checks (every pad of the group; not right after the
+  // testbench stops / starts driving)
+  task automatic chk_dq_drv(int j, string where);
+    if (!chk_en || tb_drv || ($realtime - t_tbdrv) < 1.0) return;
+    for (int i = 0; i < DqBits; i++) begin
+      n_chk++;
+      if (dq_driven(j) != (dq[i] !== 1'bz))
+        fail($sformatf("DQ%0d drive state (%s) of cycle %0d: oe %0d pin %b", i, where, j,
+                       dq_driven(j), dq[i]));
+    end
+    if (HasDm) for (int l = 0; l < Lanes; l++) begin
+      n_chk++;
+      if (dq_driven(j) != (dm[l] !== 1'bz))
+        fail($sformatf("DM%0d drive state (%s) of cycle %0d: oe %0d pin %b", l, where, j,
+                       dq_driven(j), dm[l]));
+    end
+  endtask
+  task automatic chk_dqs_drv(int j, string where);
+    if (!chk_en || tb_drv || ($realtime - t_tbdrv) < 1.0) return;
+    for (int l = 0; l < Lanes; l++) begin
+      bit e;
+      e = Loopback || hist[j].dqs_oe[l];
+      n_chk += 2;
+      if (e != (dqs_p[l] !== 1'bz))
+        fail($sformatf("DQS_P%0d drive state (%s) of cycle %0d: oe %0d pin %b", l, where, j, e,
+                       dqs_p[l]));
+      if (e != (dqs_n[l] !== 1'bz))
+        fail($sformatf("DQS_N%0d drive state (%s) of cycle %0d: oe %0d pin %b", l, where, j, e,
+                       dqs_n[l]));
+    end
+  endtask
+
   task automatic schedule_checks(int j);
     realtime tj;
     real     pw;
@@ -290,7 +338,7 @@ module tb_bow_ddr_io_xilinx import bow_ddr_pkg::*; #(
             check_eq("LS_DIR_DQ (const)", j, ls_dir_dq, ~LsDirReadLevel, 1);
             check_eq("LS_DIR_DQS (const)", j, ls_dir_dqs, ~LsDirReadLevel, 1);
           end
-          if (!tb_drv) begin
+          if (!tb_drv && !TFromOddr) begin   // fabric T flops (TFromOddr: below)
             n_chk++;
             if (dq_driven(j) != (dq[0] !== 1'bz))
               fail($sformatf("DQ drive state of cycle %0d: oe %0d pin %b", j, dq_driven(j), dq[0]));
@@ -301,6 +349,26 @@ module tb_bow_ddr_io_xilinx import bow_ddr_pkg::*; #(
               if (dq_driven(j) != (dm[0] !== 1'bz)) fail($sformatf("DM drive state of cycle %0d", j));
             end
           end
+        end
+      end
+      begin   // TFromOddr: DQ / DM drive state on [(j+1.25)T, (j+2.25)T) + write phase
+        if (TFromOddr) begin
+          #(tj + 1.25 * T + pw + D + 0.03 - $realtime);
+          chk_dq_drv(j, "start");
+          #(0.5 * T - 0.03);
+          chk_dq_drv(j, "middle");
+          #(0.5 * T - 0.03);
+          chk_dq_drv(j, "end");
+        end
+      end
+      begin   // TFromOddr: DQS P / N drive state on [(j+1)T, (j+2)T) + write phase
+        if (TFromOddr) begin
+          #(tj + 1.0 * T + pw + D + 0.03 - $realtime);
+          chk_dqs_drv(j, "start");
+          #(0.5 * T - 0.03);
+          chk_dqs_drv(j, "middle");
+          #(0.5 * T - 0.03);
+          chk_dqs_drv(j, "end");
         end
       end
       begin   // DQS: pin cycle j+1 shifted by the write phase
@@ -365,6 +433,9 @@ module tb_bow_ddr_io_xilinx import bow_ddr_pkg::*; #(
     for (int i = 0; i < DqBits; i++) begin
       if (dq[i] !== 1'bz && dq_last[i] !== 1'bz && dq[i] !== dq_last[i] && !tb_drv)
         edge_chk($sformatf("DQ%0d", i), 0.25 * T + phw + D, 0.75 * T + phw + D);
+      if (TFromOddr && (dq[i] === 1'bz) != (dq_last[i] === 1'bz) && !tb_drv &&
+          ($realtime - t_tbdrv) > 0.0005)
+        edge_chk($sformatf("DQ%0d driver", i), 0.25 * T + phw + D, 0.25 * T + phw + D);
     end
     dq_last = dq;
   end
@@ -373,6 +444,9 @@ module tb_bow_ddr_io_xilinx import bow_ddr_pkg::*; #(
     for (int l = 0; l < Lanes; l++) begin
       if (dqs_p[l] !== 1'bz && dqs_last[l] !== 1'bz && dqs_p[l] !== dqs_last[l] && !tb_drv)
         edge_chk("DQS_P", phw + D, 0.5 * T + phw + D);
+      if (TFromOddr && (dqs_p[l] === 1'bz) != (dqs_last[l] === 1'bz) && !tb_drv &&
+          ($realtime - t_tbdrv) > 0.0005)
+        edge_chk("DQS_P driver", phw + D, phw + D);
     end
     dqs_last = dqs_p;
   end
@@ -382,9 +456,25 @@ module tb_bow_ddr_io_xilinx import bow_ddr_pkg::*; #(
       for (int l = 0; l < Lanes; l++) begin
         if (dm[l] !== 1'bz && dm_last[l] !== 1'bz && dm[l] !== dm_last[l])
           edge_chk("DM", 0.25 * T + phw + D, 0.75 * T + phw + D);
+        if (TFromOddr && (dm[l] === 1'bz) != (dm_last[l] === 1'bz))
+          edge_chk("DM driver", 0.25 * T + phw + D, 0.25 * T + phw + D);
       end
     end
     dm_last = dm;
+  end
+
+  // DQS_N is driven exactly when DQS_P is (one T flop per pair, or one T ODDR
+  // per pad on the same enable)
+  int n_pn = 0;
+  always @(dqs_p or dqs_n) begin
+    #0.001;
+    if (!tb_drv && ($realtime - t_tbdrv) > 0.0005 && $realtime > 1.0) begin
+      for (int l = 0; l < Lanes; l++) begin
+        n_pn++;
+        if ((dqs_p[l] === 1'bz) != (dqs_n[l] === 1'bz))
+          fail($sformatf("DQS_P%0d %b / DQS_N%0d %b drive states differ", l, dqs_p[l], l, dqs_n[l]));
+      end
+    end
   end
 
   // ---------------------------------------------------------- read capture

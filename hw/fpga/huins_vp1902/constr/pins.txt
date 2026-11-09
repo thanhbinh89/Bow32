@@ -1,0 +1,116 @@
+# Copyright Bow32 contributors.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Ports of bow32_huins_vp1902_top -> nets of the Huins MFP-VP1902-S board.
+# tools/huins_pins.py looks every net up in the board netlist (the user's
+# local copy in docs/fpga/Huins_MFP-VP1902/, confidential, gitignored) and
+# writes the PACKAGE_PIN lines into the build directory: no FPGA ball number
+# is in the repo.
+#
+#   <port>   <net>        {site} = the FMC+ site number of the net names
+#                         (FMC_SITE: 1, 10, 2, 20, 3, 30, 4, 40 for the silk
+#                         FMC+01, FMC+10, ...; default 10)
+#   [all]    lines for every build
+#   [clk=x]  lines for CLK_SRC = x only
+# Card ports: FMC signal names (VITA 57.4) of the FMC+_DDR2_HyperRam card
+# (docs/fpga/ram_extension/, the same pins as hw/fpga/mps4/constr/*_card.xdc).
+
+[all]
+# ---- board: reset, UARTs (CP2102N "UART0" / "UART1", bank 408) --------------------------
+rst_n_i              USER_RESET_N
+uart0_tx_o           XIO_RX_OUT0
+uart0_rx_i           XIO_TX_IN0
+uart1_tx_io          XIO_RX_OUT1
+uart1_rx_i           XIO_TX_IN1
+
+# ---- board: user LEDs and push buttons (bank 812), card present ------------------------
+led_o[0]             F_LED1
+led_o[1]             F_LED2
+led_o[2]             F_LED3
+led_o[3]             F_LED4
+led_o[4]             F_LED5
+led_o[5]             F_LED6
+led_o[6]             F_LED7
+led_o[7]             F_LED8
+led_o[8]             F_LED9
+led_o[9]             F_LED10
+led_o[10]            F_LED11
+led_o[11]            F_LED12
+pb_i[0]              F_PB1
+pb_i[1]              F_PB2
+pb_i[2]              F_PB3
+fmc_prsnt_n_i        F_FMC{site}_PRSNT_N
+
+# ---- card: DDR2 CK, DQS, DQ ---------------------------------------------------------------
+ddr_ck_p_o           F_FMC{site}_LA17_P_CC
+ddr_ck_n_o           F_FMC{site}_LA17_N_CC
+ddr_dqs_p_io         F_FMC{site}_HB17_P_CC
+ddr_dqs_n_io         F_FMC{site}_HB17_N_CC
+ddr_dq_io[0]         F_FMC{site}_HB07_P
+ddr_dq_io[1]         F_FMC{site}_HB07_N
+ddr_dq_io[2]         F_FMC{site}_HB09_P
+ddr_dq_io[3]         F_FMC{site}_HB09_N
+ddr_dq_io[4]         F_FMC{site}_HB11_P
+ddr_dq_io[5]         F_FMC{site}_HB11_N
+ddr_dq_io[6]         F_FMC{site}_HB13_P
+ddr_dq_io[7]         F_FMC{site}_HB13_N
+
+# ---- card: DDR2 level shifter control (DIR = H: DRAM -> FPGA) -----------------------------
+ddr_ls_dir_dq_o      F_FMC{site}_LA05_P
+ddr_ls_dir_dqs_o     F_FMC{site}_LA05_N
+ddr_ls_oe_n_o        F_FMC{site}_LA10_P
+
+# ---- card: DDR2 command / address ---------------------------------------------------------
+ddr_cke_o            F_FMC{site}_LA02_P
+ddr_cs_n_o           F_FMC{site}_LA03_P
+ddr_ras_n_o          F_FMC{site}_LA04_P
+ddr_cas_n_o          F_FMC{site}_LA07_P
+ddr_we_n_o           F_FMC{site}_LA09_P
+ddr_odt_o            F_FMC{site}_LA12_P
+ddr_ba_o[0]          F_FMC{site}_LA15_P
+ddr_ba_o[1]          F_FMC{site}_LA19_P
+ddr_a_o[0]           F_FMC{site}_LA20_P
+ddr_a_o[1]           F_FMC{site}_LA21_P
+ddr_a_o[2]           F_FMC{site}_LA22_P
+ddr_a_o[3]           F_FMC{site}_LA24_P
+ddr_a_o[4]           F_FMC{site}_LA25_P
+ddr_a_o[5]           F_FMC{site}_LA26_P
+ddr_a_o[6]           F_FMC{site}_LA27_P
+ddr_a_o[7]           F_FMC{site}_LA28_P
+ddr_a_o[8]           F_FMC{site}_LA29_P
+ddr_a_o[9]           F_FMC{site}_LA30_P
+ddr_a_o[10]          F_FMC{site}_LA31_P
+ddr_a_o[11]          F_FMC{site}_LA32_P
+ddr_a_o[12]          F_FMC{site}_LA33_P
+ddr_a_o[13]          F_FMC{site}_LA13_N
+
+# ---- card: HyperRAM -------------------------------------------------------------------------
+hr_dq_io[0]          F_FMC{site}_HB01_N
+hr_dq_io[1]          F_FMC{site}_HB01_P
+hr_dq_io[2]          F_FMC{site}_HB02_P
+hr_dq_io[3]          F_FMC{site}_HB02_N
+hr_dq_io[4]          F_FMC{site}_HB05_P
+hr_dq_io[5]          F_FMC{site}_HB05_N
+hr_dq_io[6]          F_FMC{site}_HB04_P
+hr_dq_io[7]          F_FMC{site}_HB04_N
+hr_rwds_io           F_FMC{site}_HB10_P
+hr_ck_p_o            F_FMC{site}_HB06_P_CC
+hr_ck_n_o            F_FMC{site}_HB06_N_CC
+hr_cs_n_o            F_FMC{site}_HB21_N
+hr_rst_n_o           F_FMC{site}_HB21_P
+hr_ls_dir_dq_o       F_FMC{site}_LA08_P
+hr_ls_oe_n_o         F_FMC{site}_LA08_N
+hr_ls_dir_rwds_o     F_FMC{site}_LA14_N
+
+# ---- clock input (CLK_SRC) -------------------------------------------------------------------
+[clk=ref200]
+# fixed 200 MHz MEMS oscillator (DSC1123, LVDS) through a CDCLVD1204, AC coupled,
+# terminated and biased on the board (bank 718, VCCO = DDR4 VDDQ)
+clk_p_i              C2_DDR4_SYS_CLK_P
+clk_n_i              C2_DDR4_SYS_CLK_N
+
+[clk=site]
+# PL clock of the FMC+ site: clock module CLK0..3 through a CDCUN1208LP, AC
+# coupled, no termination on the board (FMC+10: CLK0, bank 710)
+clk_p_i              CLK_SI5341_FPGA_{site}_P
+clk_n_i              CLK_SI5341_FPGA_{site}_N
