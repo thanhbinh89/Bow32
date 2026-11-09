@@ -4,7 +4,8 @@ IP HyperBus master của Bow32 cho bộ nhớ **HyperRAM 2.0 x8** (Infineon S80K
 32 MiB, 1,8 V, 200 MHz). Mục tiêu là chip HyperRAM trên bo RAM mở rộng
 `docs/fpga/ram_extension/FMC_DDR2_HyperRam.PDF` (đi qua level shifter TI TXV0108) cắm trên
 Arm MPS4; bản build mặc định của MPS4 chạy với một HyperRAM giả lập trong FPGA, qua chân
-thật của FPGA (loopback).
+thật của FPGA (loopback). Đã chạy trên chip thật qua bo RAM ngày 2026-11-09 (self-test 19/19,
+toàn 32 MiB 0 lỗi, BIST 184 MB/s): [../hyperram_mps4.md](../hyperram_mps4.md) mục 5.
 
 Chuẩn tuân theo:
 
