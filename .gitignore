@@ -27,5 +27,7 @@ docs/fpga/MPS4/
 # AMD VEK280 (UG1612, XTP760 schematic, RDF0675 master XDC), KV260 carrier (XTP682)
 docs/fpga/vek280/
 docs/fpga/xtp682-kria-k26-carrier-card-schematic/
+# Huins MFP-VP1902 (user guide, schematic, netlist): marked confidential by Huins
+docs/fpga/Huins_MFP-VP1902/
 # TCVN 14263:2024 PDFs: draft and licensed official edition
 docs/ref/

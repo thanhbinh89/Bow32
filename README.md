@@ -238,6 +238,7 @@ Bow32/
 | [docs/ip/hyperram.md](docs/ip/hyperram.md) | HyperRAM: giao thức HyperBus, cửa sổ (read / write buffer), controller, PHY, level shifter, thanh ghi, khởi tạo, hiệu chỉnh, BIST, kiểm chứng |
 | [docs/hyperram_mps4.md](docs/hyperram_mps4.md) | Chạy bộ điều khiển HyperRAM trên Arm MPS4: build, clock, `test`, `cal`, `verify`, `bench` |
 | [docs/ddr_board_review.md](docs/ddr_board_review.md) | Khả năng làm DDR trên Bow32, bo RAM mở rộng hợp với bo FPGA nào, góp ý schematic |
+| [docs/fmc_ram_card_review.md](docs/fmc_ram_card_review.md) | Review toàn bộ bo RAM mở rộng (DDR2 + HyperRAM, cơ khí, BOM), lắp trên Arm MPS4 và Huins MFP-VP1902, chức năng IP test được trên mỗi board |
 | [docs/video_kv260.md](docs/video_kv260.md) | Quay video H.264 / MP4 trên KV260: ứng dụng `video`, `bow32_video.py`, kết quả |
 | [docs/boot.md](docs/boot.md) | Quy trình boot, định dạng ảnh, giao thức UART loader |
 | [docs/simulation.md](docs/simulation.md) | Chạy mô phỏng, xem waveform, viết test mới |
