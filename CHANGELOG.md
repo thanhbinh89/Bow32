@@ -89,11 +89,19 @@
   "hoạt động" ngay sau reset kênh giữa lúc hồi phục; reset kênh cắt ngang xung WAKE), đều đã sửa.
   `make -C hw/ip/hyperram/dv mutants`: 18 bản RTL, mỗi bản gỡ một bản sửa, đều bị testbench bắt.
   Bitstream sau vòng hai chạy trên MPS4: self-test 19/19 ba lượt, `verify` 60/60, DDR 18/18.
+  Trên chip thật (bo RAM ở khe FMC+ J11 của MPS4, `FMC_FORCE: 1V5`, bitstream bản bo RAM từ
+  main `ed949e1`, 2026-11-09): self-test 19/19, `verify` 40/40, mắt ghi tốt ở mọi điểm quét,
+  BIST (PRBS hai seed và dữ liệu đếm) và `memtest` của CPU trên toàn 32 MiB 0 lỗi, BIST
+  184,1 MB/s; luật dùng chung bo khi bo RAM đang cắm và thứ tự trả bo ở
+  [docs/hyperram_mps4.md](docs/hyperram_mps4.md) mục 5.4.
 - Arm MPS4: bản build có cả DDR và HyperRAM (`HR_LOOPBACK`, mặc định theo `DDR_LOOPBACK`),
   hai MMCM HyperRAM (`bow_hyperram_clk_xusp`) sau BUFGCE riêng từ cùng oscillator, wrapper
   chân `bow_hyperram_io_xilinx`, XDC loopback (bank 65) và bo RAM (khe FMC+), ràng buộc CDC
   và bus skew, kiểm tra trong `tcl/timing_checks.tcl`; hướng dẫn chạy
   [docs/hyperram_mps4.md](docs/hyperram_mps4.md).
+- Hướng dẫn đưa HyperRAM lên ASIC ([docs/ip/hyperram.md](docs/ip/hyperram.md) mục 9): IP
+  không có phần analog; phần giữ / phần thay (pad, flop DDR, PLL, DLL), hai kiến trúc đường
+  đọc, SDC, DFT, kiểm chứng.
 
 - **SDRAM DDR2/DDR3** `bow_ddr` (`hw/ip/ddr`): controller **LiteDRAM** trên PHY riêng
   của Bow32. Cửa sổ bộ nhớ 512 MiB ở `0x8000_0000` trên main crossbar (3 × 8), CSR của
@@ -385,6 +393,12 @@
   nó (`sw/apps/camera/csi2rx.c/.h`).
 
 ### Fixed
+- Self-test HyperRAM: dòng chi tiết không kèm số in thêm `(null)(null)` (thấy trên bo RAM ở
+  mục [14]: `level shifters: variable latency refused (fixed only)(null)(null)`); `detail()`
+  giờ nhận số đối số tùy ý.
+- `docs/hyperram_mps4.md`: hướng dẫn cũ bảo `restore` và trả `FMC_FORCE` về `1V2` ngay sau
+  khi thử, lúc bo RAM còn cắm (lần bật kế tiếp cấp 1,2 V cho TXV0108 hay nạp thiết kế khác với
+  bo RAM trên khe); giờ tháo bo RAM trước (mục 5.4).
 - CI: test hệ thống `ddr` hỏng với Verilator 5.020 (`init: APPLY refused`).
   Verilator trước 5.022 inline `ddr_clk_model` (1 ps) vào `tb_bow32` (1 ns) và tính
   delay theo đơn vị 1 ns của module cha (verilator/verilator#4806). Kết quả là clock
