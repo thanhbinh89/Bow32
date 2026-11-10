@@ -66,7 +66,7 @@ static const char help_isp[] =
     "CSI-2 receiver:\n"
     "  csi                 link status, counters, timing, PHY state\n"
     "  cal [step]          calibrate the data lane delays while streaming (step 16)\n"
-    "  margin [k] [frames] errors at the calibrated taps +-k (k 0: eye / 4, 60 frames)\n"
+    "  margin [k] [frames] errors at the taps in use +-k (k 0: eye / 4, 60 frames)\n"
     "  csilog [fs|fe]      log of 64 packets: now, from the next FS or up to an FE\n"
     "misc:\n"
     "  info  baud <rate>  rd <addr>  wr <addr> <val>\n";
@@ -84,8 +84,7 @@ static struct {
   /* frame format */
   uint32_t w, h, fps;
   /* hardware found at start-up: sensor, CSI-2 receiver (data lanes), its
-   * D-PHY; the data lane delays were calibrated (Versal XPHY: or the link
-   * was clean with the delays in use at the first start) */
+   * D-PHY; the data lane delays were calibrated (cal holds the result) */
   bool sensor, csi, phy, calibrated;
   uint32_t lanes;
   bow_csi2rx_cal_t cal; /* last calibration (taps, eye widths) */
@@ -201,11 +200,24 @@ static int sensor_apply_ctrl(void) {
  * (a tap may wait for the vertical blanking). */
 static uint32_t tap_ms(void) { return cam_frame_us(sen) * 12u / 10000u + 3u; }
 
-/* Margin around the calibrated taps (k = eye / 4): reported, the taps stay.
- * A passing check does not disturb the stream (taps change at frame ends). */
+/* Margin around the delays in use, which are the calibrated taps after a
+ * calibration (k = eye / 4 of it, at least CSI2RX_MARGIN_MIN): reported, the
+ * taps stay. Without a calibration (the first one failed) the delays the
+ * lanes use, k = CSI2RX_MARGIN_MIN (Versal XPHY: their BISC delays, never a
+ * blind tap 0). A passing check does not disturb the stream (taps change at
+ * frame ends). */
 static bool margin(uint32_t k, uint32_t frames, bool verbose) {
   bow_csi2rx_margin_t m;
-  int r = bow_csi2rx_margin(&cam.cal, k, frames, tap_ms(), &m, verbose);
+  bow_csi2rx_cal_t c = cam.cal; /* eye widths; none: k = CSI2RX_MARGIN_MIN */
+  bow_csi2rx_get_delays(c.tap);
+  c.lanes = bow_csi2rx_lanes();
+  if (!cam.calibrated) {
+    bow_puts("csi2rx: not calibrated: margin around the delays in use ");
+    bow_csi2rx_print_delays();
+    bow_puts((CSI2RX->INFO & CSI2RX_INFO_DLY_VID) ? " (loading them ends the VT tracking)\n"
+                                                    : "\n");
+  }
+  int r = bow_csi2rx_margin(&c, k, frames, tap_ms(), &m, verbose);
   bow_printf("csi2rx: margin %s", r > 0 ? "ok " : r == 0 ? "low " : "");
   bow_csi2rx_print_margin(&m, r);
   bow_puts("\n");
@@ -298,29 +310,20 @@ static bool start_cam(void) {
   cam.cam = true;
   cam.frames = 0;
   cam.ae_locked = cam.awb_locked = false;
-  /* The first start calibrates (the reset tap 0 can sit at the edge of the
-   * eye), except with the Versal XPHY (DLY_VID): the lanes start at the
-   * delays of the PHY's self-calibration (BISC), voltage and temperature
-   * tracked; a loaded tap stops that tracking, so the link check decides
-   * from the first start on. The receiver keeps the taps: calibrate again
+  /* The first start calibrates: the reset tap 0 of the KV260 can sit at the
+   * edge of the eye, and so do the delays of the Versal XPHY's
+   * self-calibration (BISC), which on the Huins board sit at the early edge
+   * of every eye (~11 % CRC errors at 1080p; a 64 packet check can pass by
+   * chance; docs/camera_huins.md 6.4). The tap loads end the XPHY's VT
+   * tracking of those lanes. The receiver keeps the taps: calibrate again
    * only when the link check with them fails with errors a new tap can fix,
    * or without data (need_calibration). */
-  bool bisc = (CSI2RX->INFO & CSI2RX_INFO_DLY_VID) != 0;
-  if (need_calibration(cam.calibrated || bisc)) {
+  if (need_calibration(cam.calibrated)) {
     if (!calibrate(16, false)) return false;
     /* The ISP drops the frames broken by the tap sweep (input error), the
      * last one just ended: after one clean frame, clear its error flags. */
     bow_csi2rx_wait_frame(2u * frame_ms());
     ISP->STATUS = ISP_ST_ERRORS;
-  } else if (!cam.calibrated) {
-    /* link check passed, or failed with errors that are no tap problem */
-    bow_csi2rx_cnt_t c;
-    bow_csi2rx_counters(&c);
-    bow_puts(bow_csi2rx_link_errors(&c) ? "csi2rx: keeping the delays in use "
-                                        : "csi2rx: link ok with the delays in use ");
-    bow_csi2rx_print_delays();
-    bow_puts(" (kept; cal calibrates)\n");
-    cam.calibrated = true;
   }
   static const char *const order[4] = {"RGGB", "GRBG", "GBRG", "BGGR"};
   bow_printf("streaming %ux%u %s\n", cam.w, cam.h, order[sen->bayer(cam.hflip, cam.vflip) & 3u]);
@@ -396,6 +399,10 @@ static void awb_step(const bow_isp_stats_t *s) {
 
 static void frame_done(void) {
   cam.frames++;
+  /* A sensor test pattern follows neither exposure, gain nor white balance:
+   * AE / AWB would run to their limits (e.g. exposure 1, then black frames
+   * after `tp 0`). They wait until it is off. */
+  if (cam.cam && cam.tp != 0) return;
   if (!(cam.ae && cam.cam) && !cam.awb) return;
   if (cam.frames % CTRL_PERIOD) return;
   bow_isp_stats_t s;
@@ -719,7 +726,7 @@ static bool execute(const char *line) {
   }
   if ((a = match(line, "margin"))) {
     uint32_t k = 0, frames = 60;
-    if (!cam.cam || !cam.calibrated) {
+    if (!cam.cam) {
       bow_printf("error: the camera is not streaming (cam)\n");
       return false;
     }
@@ -790,16 +797,7 @@ static void probe_hardware(void) {
   if (cam.sensor) {
     bow_printf("camera: %s found (id %04x)\n", sen->name, d.id);
   } else {
-    if (d.r219 == I2C_OK) {
-      bow_printf("camera: unknown sensor id %04x\n", d.id219);
-    } else {
-      bow_printf("camera: no IMX219 on I2C (error %d)\n", d.r219);
-    }
-    if (d.tried274 && d.r274 == I2C_OK) {
-      bow_printf("camera: unknown sensor at 0x1a (MDSEL %04x, IMX274 not reset?)\n", d.id274);
-    } else if (d.tried274) {
-      bow_printf("camera: no IMX274 on I2C (error %d)\n", d.r274);
-    }
+    cam_print_not_found(&d);
   }
 
   cam.csi = bow_csi2rx_probe(&lanes, &phy);

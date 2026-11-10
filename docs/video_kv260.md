@@ -64,6 +64,11 @@ video.mp4: 45 frames 1280x720 @ 15.00 fps, 979164 bytes (12.4 s transfer), also 
 `13718 us` là thời gian từ start of frame tới khi NAL của frame đó ra hết: 720
 dòng camera mất 13,6 ms, encoder theo kịp từng strip.
 
+Ví dụ trên chạy với rate control cũ (QP đầu 30, mỗi frame ±1). Firmware hiện tại
+chọn QP đầu theo kích thước frame (`QP 33 (auto)` cho 45 frame 720p), mỗi frame
+nhắm phần chỗ trống còn lại chia cho số frame còn lại và in thêm QP của frame
+(`frame <k>: <bytes> bytes, QP <qp>, <us> us`); mục 3.
+
 Ứng dụng in khi khởi động:
 
 ```
@@ -87,8 +92,8 @@ kbytes` của board, `send`, kiểm tra CRC và ghi `video.h264` + `video.mp4`.
 |----------|---------|
 | `-n 45` | số frame được mã hoá |
 | `--skip 1` | bỏ 1 frame camera sau mỗi frame mã hoá: 30 fps → 15 fps (video dài gấp đôi trong cùng bộ nhớ) |
-| `--kbytes 20` | kích thước mong muốn mỗi frame; mặc định = 1 MiB / n |
-| `--qp 30` | QP của frame đầu; rate control tăng / giảm 1 mỗi frame |
+| `--kbytes 20` | kích thước tối đa mỗi frame; mặc định: chỗ trống còn lại chia đều cho các frame còn lại |
+| `--qp 30` | QP của frame đầu; mặc định (0): board tự chọn theo kích thước frame (`qp auto`); rate control đổi QP sau mỗi frame (mục 3) |
 | `--mode 1080p` / `--mode 640 360` | kích thước (rộng bội số 16, cao chẵn) |
 | `--source tpg4` | test pattern chuyển động của ISP thay cho camera |
 | `--no-deblock` | tắt bộ lọc deblocking trong decoder |
@@ -100,7 +105,7 @@ sẵn (không cần board).
 
 ```
 cam | tpg [n] | stop | mode 1080p|720p|<w> <h> [fps] | ae on|off | awb on|off
-qp <10..51> | deblock on|off
+qp <10..51>|auto | deblock on|off
 rec <n> [skip] [kbytes]     quay n frame vào video RAM
 send                        gửi: "H264 <bytes> <crc32> <frames> <w> <h> <fps_num> <fps_den>",
                             dữ liệu, "END"
@@ -109,10 +114,27 @@ stat | dmatest | info | baud | rd | wr
 
 `rec` ghi SPS + PPS vào đầu video RAM, cho DMA kênh 0 ghi stream ngay sau, bật
 encoder (`FRAMES = n`, `SKIP`), rồi theo dõi từng frame (`FRAME_CNT`,
-`FRAME_BYTES`) để chỉnh QP. Khi chỗ trống còn ít hơn 2 lần frame lớn nhất, nó
-ra lệnh STOP; frame đang mã hoá vẫn vừa. Nếu bộ nhớ vẫn đầy, DMA chuyển sang
-DROP để xả encoder và bản quay giữ nguyên các frame đã đủ (`PKT_CNT`,
-`PKT_END`).
+`FRAME_BYTES`, `TOTAL_BYTES`) để chỉnh QP (`bow_h264_rc_*` trong
+`sw/common/src/bow_h264.c`):
+
+- đích của mỗi frame = (chỗ trống còn lại − dự trữ) / số frame còn lại, tối đa
+  `kbytes`; dự trữ = 1/8 frame + 4 KiB cho độ lệch kích thước của các frame cuối;
+- kích thước một frame intra giảm một nửa khi QP tăng ~6, nên QP của frame sau =
+  QP của frame vừa xong + 6 · log2(kích thước / đích), làm tròn, tối đa ±12 mỗi
+  frame, trong 10…51; encoder nhận QP mới ở đầu frame kế tiếp (vertical blanking
+  hoặc các frame bị bỏ bởi `skip` cho đủ thời gian);
+- QP đầu: `qp <n>`, hoặc `qp auto` (mặc định): QP mà một cảnh nhiều chi tiết cho
+  đúng đích đầu, 30 + 6 · log2(W · H / 27 / đích) (cảnh văn phòng của lần chạy bo
+  Huins: 77 KB ở 1080p và QP 30); cảnh ít chi tiết hơn thì frame đầu nhỏ hơn đích
+  và QP giảm ở frame sau;
+- khi frame kế tiếp (ước theo frame vừa xong và QP mới) + 1/8 + 1 KiB không còn
+  vừa, nó ra lệnh STOP (`video RAM full`). Nếu bộ nhớ vẫn đầy (cảnh đổi đột
+  ngột), DMA chuyển sang DROP để xả encoder và bản quay giữ nguyên các frame đã
+  đủ (`PKT_CNT`, `PKT_END`).
+
+Lần chạy bo Huins đầu (2026-11-10, QP đầu 30, mỗi frame ±1) chỉ ghi được 20 trong
+30 frame 1080p; với rate control này 30 frame 1080p vừa 1 MiB (QP 37–39 với kích
+thước frame đo được, kiểm trong `tools/tests/test_h264_model.py`).
 
 ## 4. Giới hạn và lựa chọn
 

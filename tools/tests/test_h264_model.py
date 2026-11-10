@@ -8,6 +8,7 @@ When PyAV is installed (pip install av), the streams are also decoded with
 FFmpeg and must give exactly the reconstruction of the model.
 """
 
+import ctypes
 import random
 import struct
 import subprocess
@@ -167,6 +168,157 @@ class ParameterSetTest(unittest.TestCase):
             for c, o in zip(cases, out):
                 self.assertEqual(o, (m.sps_nal(c[0], c[1], c[2], c[3], bool(c[4])) +
                                      m.pps_nal()).hex(), c)
+
+
+class RcState(ctypes.Structure):
+    """bow_h264_rc_t of sw/common/include/bow_h264.h"""
+    _fields_ = [(n, ctypes.c_uint32) for n in ("space", "reserve", "frames", "cap", "target", "qp")]
+
+
+class RateControlTest(unittest.TestCase):
+    """The rate control of sw/apps/video `rec` (bow_h264_rc_* of
+    sw/common/src/bow_h264.c, built for the host) in closed loop: with the
+    frame sizes the Huins board measured (1080p, 2026-11-10) and with the
+    frame sizes of this encoder model on camera-like frames. The firmware
+    loop: rc_init gives the first QP; after each frame rc_frame with the
+    frame count and the total bytes (FRAME_CNT, TOTAL_BYTES) gives the QP of
+    the next frame (the encoder takes it at its next frame start); false
+    means STOP."""
+
+    VRAM = 1 << 20
+    HDR = 64  # SPS + PPS of the video app (rounded up)
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        d = Path(cls.tmp.name)
+        src = d / "rc.c"
+        src.write_text('#define BOW32_H264_BASE 0u\n#include "bow_h264.h"\n'
+                       '#include "' + str(ROOT.parent / "sw/common/src/bow_h264.c") + '"\n')
+        lib = d / "librc.so"
+        try:
+            subprocess.run(["gcc", "-w", "-O1", "-shared", "-fPIC", "-I",
+                            str(ROOT.parent / "sw/common/include"), "-o", str(lib), str(src)],
+                           check=True, capture_output=True)
+        except (OSError, subprocess.CalledProcessError):
+            raise unittest.SkipTest("no host C compiler")
+        cls.c = ctypes.CDLL(str(lib))
+        u32, p = ctypes.c_uint32, ctypes.POINTER(RcState)
+        cls.c.bow_h264_rc_init.argtypes = [p, u32, u32, u32, u32, u32, u32]
+        cls.c.bow_h264_rc_frame.argtypes = [p, u32, u32, u32]
+        cls.c.bow_h264_rc_frame.restype = ctypes.c_bool
+        cls.c.bow_h264_rc_size.argtypes = [u32, u32, u32]
+        cls.c.bow_h264_rc_size.restype = u32
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def init(self, w, h, frames, space=None, cap=0, qp=0):
+        rc = RcState()
+        self.c.bow_h264_rc_init(ctypes.byref(rc), w, h, space or self.VRAM - self.HDR, frames,
+                                cap, qp)
+        return rc
+
+    def record(self, rc, size_at):
+        """size_at(k, qp): bytes of frame k (0..) coded at qp. Returns the
+        sizes, QPs and targets of the frames recorded, and how it ended:
+        "done", "stop" (rc_frame said no: STOP) or "cut" (a frame did not
+        fit: the DMA would have cut it)."""
+        total, sizes, qps, targets = 0, [], [], []
+        for k in range(rc.frames):
+            used, target = rc.qp, rc.target
+            b = size_at(k, used)
+            if total + b > rc.space:
+                return sizes, qps, targets, "cut"
+            total += b
+            sizes.append(b)
+            qps.append(used)
+            targets.append(target)
+            if not self.c.bow_h264_rc_frame(ctypes.byref(rc), k + 1, b, total):
+                return sizes, qps, targets, "stop"
+        return sizes, qps, targets, "done"
+
+    def test_size_and_steps(self):
+        for b in (1000, 34567, 77112):
+            for e in range(-40, 41):
+                want = b * 2 ** (e / 6)
+                got = self.c.bow_h264_rc_size(b, 30 + e if e > 0 else 30, 30 if e > 0 else 30 - e)
+                self.assertLess(abs(got - want), want * 0.005 + 1, (b, e))
+        cases = [(30, 2000, 1000, 36), (30, 500, 1000, 24), (30, 1000, 1000, 30), (30, 1100, 1000, 31),
+                 (30, 1050, 1000, 30), (30, 940, 1000, 29), (30, 10**6, 1000, 42),
+                 (30, 10, 10**6, 18), (48, 8000, 1000, 51), (14, 100, 8000, 10)]
+        for qp, b, t, want in cases:
+            rc = RcState(space=10**7, reserve=0, frames=10, cap=t, target=t, qp=qp)
+            self.c.bow_h264_rc_frame(ctypes.byref(rc), 1, b, b)
+            self.assertEqual(rc.qp, want, (qp, b, t))
+
+    def test_first_qp(self):
+        rc = self.init(1920, 1080, 30)
+        self.assertEqual((rc.qp, rc.reserve), (37, (self.VRAM - self.HDR) // 30 // 8 + 4096))
+        self.assertEqual(rc.target, (rc.space - rc.reserve) // 30)
+        self.assertEqual(self.init(1280, 720, 45).qp, 33)
+        self.assertEqual(self.init(64, 48, 3).qp, 10)
+        self.assertEqual(self.init(1920, 1080, 30, qp=26).qp, 26)     # `qp 26`
+        rc = self.init(1920, 1080, 30, cap=20 * 1024)                 # `rec 30 0 20`
+        self.assertEqual(rc.target, 20 * 1024)
+
+    def test_board_1080p30(self):
+        """The 1080p office scene of the Huins board: 77112 bytes at QP 30,
+        38344 at QP 37 (QP 30 start, one QP per frame: 20 of 30 frames fit).
+        All 30 frames fit now, with +-10 % scatter from frame to frame."""
+        rnd = random.Random(5)
+        scatter = [1 + rnd.uniform(-0.1, 0.1) for _ in range(30)]
+        slope = 7 / 1.008  # QP per halving between the two measured points
+
+        def size_at(k, qp):
+            return int(77112 * 2 ** ((30 - qp) / slope) * scatter[k]) & ~3
+
+        rc = self.init(1920, 1080, 30)
+        sizes, qps, targets, end = self.record(rc, size_at)
+        self.assertEqual((len(sizes), end), (30, "done"), (sizes, qps))
+        self.assertLessEqual(sum(sizes), self.VRAM - self.HDR)
+        self.assertGreater(sum(sizes), 0.9 * (self.VRAM - self.HDR))   # the space is used
+        for k in range(3, 30):
+            self.assertLess(abs(sizes[k] - targets[k]), 0.3 * targets[k], (k, sizes, targets))
+        # the old start (QP 30) also fits now
+        rc = self.init(1920, 1080, 30, qp=30)
+        self.assertEqual(self.record(rc, size_at)[3], "done")
+
+    def test_stop_when_full(self):
+        """A scene too detailed for the space even at QP 51 (60 KB per 1080p
+        frame): the QP goes to 51, then the rate control stops the recording
+        before a frame would overflow the buffer."""
+        def size_at(k, qp):
+            return int(60000 * 2 ** ((51 - qp) / 6)) & ~3
+
+        rc = self.init(1920, 1080, 30)
+        sizes, qps, _, end = self.record(rc, size_at)
+        self.assertEqual(end, "stop", (sizes, qps))
+        self.assertEqual((len(sizes), qps[-1]), (13, 51), (sizes, qps))
+        self.assertGreater(sum(sizes) + size_at(len(sizes), 51), rc.space)
+
+    def test_model_frames(self):
+        """Camera-like frames of this model (320x176, three scenes in turn,
+        sizes of the real encoder at each QP), 24 frames into a buffer that
+        needs ~QP 36: all fit, the last 12 within 30 % of their target."""
+        rnd = random.Random(11)
+        w, h = 320, 176
+        planes = [m.yuv444_to_420(m.test_frame(rnd, w, h, "scene"), w, h) for _ in range(3)]
+        enc, cache = m.Encoder(w, h), {}
+
+        def size_at(k, qp):
+            key = (k % 3, qp)
+            if key not in cache:
+                cache[key] = len(enc.encode(planes[k % 3], qp)[0])
+            return cache[key]
+
+        rc = self.init(w, h, 24, space=24 * 2600)
+        sizes, qps, targets, end = self.record(rc, size_at)
+        self.assertEqual((len(sizes), end), (24, "done"), (sizes, qps))
+        self.assertLessEqual(sum(sizes), 24 * 2600)
+        for k in range(12, 24):
+            self.assertLess(abs(sizes[k] - targets[k]), 0.3 * targets[k], (k, sizes, qps, targets))
 
 
 class TablesTest(unittest.TestCase):

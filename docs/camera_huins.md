@@ -9,19 +9,29 @@ trên KV260 ([camera_kv260.md](camera_kv260.md), [video_kv260.md](video_kv260.md
 đọc, hãy chạy được Bow32 trên bo này theo [ddr_huins.md](ddr_huins.md) (JTAG, console
 "UART0"). Chi tiết bộ thu: [ip/csi2rx.md](ip/csi2rx.md).
 
-> **Trạng thái (2026-11-10): chưa chạy trên bo.** PDI camera đầy đủ, có mọi sửa sau review (núm
-> của D-PHY trên PA4/PA5 và trạng thái trên PB6/PB7, sơ đồ nibble suy ra lúc build, ràng buộc
-> bus skew thứ 11, kiểm tra VCCIO của khe, danh sách CDC đã duyệt, `pdi_site.txt`), build ngày
-> 2026-11-10 trên hw-station-1 (Vivado 2025.2, `JOBS=8`, 25 phút) bằng lệnh của mục 4: timing
-> đạt, WNS +0,180 ns (`clk_vid`), WHS +0,018 ns (`clk_vid`), byte clock 180 MHz +1,623 ns /
-> +0,026 ns, `clk_sys` +3,484 ns / +0,037 ns; bus skew 11/11 đạt (slack nhỏ nhất +3,781 ns: đọc
-> lại tap `DLYn` từ XPHY); không có `CRITICAL WARNING`; DRC chỉ có warning và advisory;
-> `methodology.rpt` 45 mục, 1 mục có waiver; sơ đồ nibble và kiểm tra `pre_opt_cam` đạt; 16 cổng
-> trên VCCIO của FMC+01; SoC ở SLR0. Firmware: mỗi lần khởi động bộ thu đặt PA5 = 1
-> (`BurstRxRst`) với `SETTLE` 95 ns (mục 6.3). Mô phỏng: D-PHY Versal với model XPHY của AMD, 24/24 cấu hình
-> (`make -C hw/fpga/common/dv test-dphy-versal`, mục 9); hệ thống với firmware thật
-> (`camera274`, `csi2_274`, `video274`, [simulation.md](simulation.md)). Mọi đầu ra ở mục 6
-> là **dự kiến** (theo mã nguồn và mô phỏng), sẽ thay bằng đầu ra thật sau buổi chạy bo.
+> **Trạng thái (2026-11-10): chạy trên bo lần 1 xong**, với commit trước khi gộp main
+> (`aaf7ed4`): camera chạy, 4 lane × 1440 Mbit/s (byte clock 180,078 MHz), `csi2_test` PASS
+> 15/15 sau `cal`, 1080p30 và 720p60 không lỗi (hơn 15 000 frame, ~15 phút), sọc màu đúng thứ
+> tự, cảnh thật màu tự nhiên, video H.264 1080p giải mã không lỗi. Các phát hiện của lần chạy
+> này đã sửa trong firmware (chưa chạy lại trên bo): VMAX sau reset là 0x906 chứ không phải
+> 0x905 (mục 6.2), thứ tự Bayer vẫn RGGB khi lật dọc (mục 6.4), trễ BISC nằm ở mép sớm của eye
+> nên app luôn hiệu chỉnh ở `cam` đầu (mục 6.4, 9), PA5 = 0 không dùng được (mục 6.3), `stat`
+> liệt kê 4 lane cả khi bộ thu tắt, AE/AWB dừng khi test pattern bật, `rec` 1080p ghi đủ 30
+> frame (mục 6.5). Lần chạy bo 2 (bản gộp main PR #17 cùng các sửa này) chưa làm.
+>
+> PDI của lần 1 (trước khi gộp main): có mọi sửa sau review (núm của D-PHY trên PA4/PA5 và
+> trạng thái trên PB6/PB7, sơ đồ nibble suy ra lúc build, ràng buộc bus skew thứ 11, kiểm tra
+> VCCIO của khe, danh sách CDC đã duyệt, `pdi_site.txt`), build ngày 2026-11-10 trên
+> hw-station-1 (Vivado 2025.2, `JOBS=8`, 25 phút) bằng lệnh của mục 4: timing đạt, WNS +0,180 ns
+> (`clk_vid`), WHS +0,018 ns (`clk_vid`), byte clock 180 MHz +1,623 ns / +0,026 ns, `clk_sys`
+> +3,484 ns / +0,037 ns; bus skew 11/11 đạt (slack nhỏ nhất +3,781 ns: đọc lại tap `DLYn` từ
+> XPHY); không có `CRITICAL WARNING`; DRC chỉ có warning và advisory; `methodology.rpt` 45 mục,
+> 1 mục có waiver; sơ đồ nibble và kiểm tra `pre_opt_cam` đạt; 16 cổng trên VCCIO của FMC+01; SoC
+> ở SLR0. RTL đã gộp main chưa build thành PDI. Firmware: mỗi lần khởi động bộ thu đặt PA5 = 1
+> (`BurstRxRst`) với `SETTLE` 95 ns (mục 6.3). Mô phỏng: D-PHY Versal với model XPHY của AMD,
+> 24/24 cấu hình (`make -C hw/fpga/common/dv test-dphy-versal`, mục 9); hệ thống với firmware thật
+> (`camera274`, `csi2_274`, `video274`, [simulation.md](simulation.md)). Đầu ra ở mục 6 lấy từ lần
+> chạy bo 1 khi có số đo, còn lại theo mã nguồn và mô phỏng.
 
 ```
  LI-IMX274MIPI-FMC ─adapter Huins─► FMC+01 ──► bow_dphy_io_versal ──► bow_csi2rx ──RAW10──► ISP Bow32 ──► capture / H.264 ──► CPU ──UART0──► PC
@@ -300,8 +310,9 @@ biến (IMX274 ở địa chỉ 7 bit 0x1A, không có switch I2C; pull-up trong
 
 ## 6. Nạp và chạy ứng dụng
 
-> Đầu ra trong mục này là **dự kiến, chưa chạy trên bo** (theo mã nguồn và mô phỏng `camera274`,
-> `csi2_274`, `video274`). `a/b/c/d` là giá trị đo được của 4 lane.
+> Đầu ra trong mục này: số đo của lần chạy bo 1 (2026-11-10, firmware trước khi gộp main) khi
+> có ghi, còn lại theo mã nguồn và mô phỏng (`camera274`, `csi2_274`, `video274`). `a/b/c/d` là
+> giá trị của 4 lane.
 
 ### 6.1 Nạp và đổi ứng dụng
 
@@ -345,13 +356,15 @@ type h for help
 `camera` in `Bow32 camera demo (ISP + IMX274), type h for help` rồi hai dòng `camera:` /
 `csi2rx:` như trên; `video` in thêm `h264: Bow32 encoder, max width 2048, 4 strips; DMA 2
 channels; video RAM 1024 KiB`. `id 0274` là id giả của driver: IMX274 không có thanh ghi chip
-ID, `imx274_probe()` reset cảm biến (XCLR = PA7) rồi so các giá trị mặc định sau reset.
+ID, `imx274_probe()` reset cảm biến (XCLR = PA7) rồi so các giá trị mặc định sau reset: MDSEL1..4
+`03 31 00 09`, HMAX 0x0104, VMAX 0x000906 (cảm biến trên bo, đo lần 1; datasheet ghi 0x000905:
+driver nhận cả hai), rồi ghi 0x33 vào BLKLEVEL và đọc lại.
 
 | Thông báo | Nghĩa, việc cần làm |
 |-----------|---------------------|
 | `camera: no IMX219 on I2C (error -1)`, `camera: no IMX274 on I2C (error -1)` rồi `camera: FMC+01 PRSNT_M2C_L (PB5) = 1: no module on the site` | không có gì trả lời ở 0x1A, không có bo trên FMC+01 |
 | như trên nhưng `PB5 = 0: a module is plugged in` | có bo nhưng cảm biến không trả lời: SW192 (LED "1.2"), XCLR (LED8 phải sáng sau probe), I2C (mục 8) |
-| `camera: unknown sensor at 0x1a (MDSEL ...., IMX274 not reset?)` | có thiết bị trả lời nhưng không có giá trị mặc định sau reset: XCLR (LA22_N, PA7) không reset được cảm biến |
+| `camera: unknown sensor at 0x1a: MDSEL1..4 .. .. .. .., HMAX ...., VMAX ...... (IMX274 after reset: 03 31 00 09, 0104, 000905 or 000906, BLKLEVEL reads back)` | có thiết bị trả lời ở 0x1A nhưng không có giá trị sau reset của IMX274: dòng in đúng các giá trị đã đọc (thêm `BLKLEVEL 33 read back as ..` khi chỉ phép ghi / đọc lại sai). So với giá trị trong ngoặc: một giá trị lệch ít (như VMAX 0x906 của lần chạy đầu, khi driver chỉ nhận 0x905) là biến thể của cảm biến; mọi giá trị khác hẳn: XCLR (LA22_N, PA7) không reset được cảm biến, hoặc một thiết bị khác ở 0x1A |
 | `error: D-PHY not ready (CSI2RX STATUS.PHY_RDY = 0)` (sau `start` / `cam`, sau 10 ms) | XPLL + BISC chưa xong: LED7 / LED10, `phy` của `csi2_test`, thử lại BISC (mục 6.3) |
 | `csi2rx: Bow32 receiver, no D-PHY in this bitstream - ISP test pattern only` | đang chạy PDI bo RAM → nạp PDI camera |
 
@@ -364,39 +377,46 @@ Trên bản Versal (`INFO.DLY_VID` = 1) có thêm `phy`, `phy reinit`, `phy burs
 ```
 > phy                     # trước khi stream: PHY_RDY, trạng thái thô PB6/PB7, hai núm, trễ BISC
 phy: STATUS.PHY_RDY 1, every nibble PHY_RDY 1 DLY_RDY 1 (PB6 PB7), reinit 0 burstrst 0 (PA4 PA5)
-     delays in use a/b/c/d
-> stat                    # cảm biến ở standby: lane LP-00 (datasheet) hoặc LP-11
+     delays in use a/b/c/d                      (lần 1: 122/75/118/130)
+> stat                    # cảm biến ở standby: LP-00 trước stream đầu, LP-11 sau `stop` (lần 1)
 csi2rx: no data
   ...
   phy: lp clk 00 d0 00 d1 00 d2 00 d3 00, bursts 0/0/0/0 clk 0, delay a/b/c/d
 > start                   # bộ thu (firmware đặt PA5 = 1, SETTLE 95 ns) rồi cảm biến; không hiệu chỉnh
-streaming 1920x1080 RAW10, link check ok
+streaming 1920x1080 RAW10, link check failed (ERR_STATUS 008), try cal
+> cal 8                   # bản đồ eye từng lane, bắt đầu từ trễ BISC; nạp tap
+csi2rx: calibrated taps a/b/c/d eye a/b/c/d     (lần 1: 300/184/264/228 eye 352/360/360/352)
 > stat
 csi2rx: link ok
   frames 31 lines/frame 1080 wc 2400 dt 2b sum ........ frame errors 000
   errors: ecc 0/0 crc 0 trunc 0 sot 0/0/0/0 ovf 0 misc 0 extra 0 (dropped by DT/VC 279)
-  timing: frame 33333 us, line 11111 ns, byte clock 180000 kHz
+  timing: frame 33333 us, line 11120 ns, byte clock 180078 kHz
   phy: lp clk .. d0 .. d1 .. d2 .. d3 .., bursts n/n/n/n clk n, delay a/b/c/d
-> log fs                  # 64 packet từ FS: FS, EMB (dt 12), 8 x OB (dt 37), RAW10 (dt 2b, wc 2400)
+> log fs                  # 64 packet từ FS: FS, EMB (dt 12, wc 175), 8 x OB (dt 37), RAW10 (dt 2b, wc 2400)
 > raw                     # 64 word thô mỗi lane từ burst kế tiếp: b8 sau HS-zero, "sync byte at bit ..."
-> cal 8                   # bản đồ eye từng lane, bắt đầu từ trễ BISC; nạp tap
-csi2rx: calibrated taps ..../..../..../.... eye ..../..../..../....
 > delay 2 150             # đặt tap 0..511 của một lane bằng tay
 lane 2 tap 150: in use
+> margin 0 60             # lề quanh tap đang dùng của cả 4 lane (k = eye / 4 của lần cal cuối)
 > tp 11                   # sọc màu của cảm biến; tp 0: cảnh thật
 > test                    # mọi check: 1080p30 rồi 720p60 (HMAX 300 / VMAX 4000)
 ...
 csi2_test: PASS (17/17)
 ```
 
-`start` in `link check failed (try cal)` khi 64 packet đầu có lỗi ở trễ BISC: `cal 8`, rồi
-`stat`. `drop` tăng 9 mỗi frame ở 1080p (1 dòng embedded + 8 dòng optical black bị bộ lọc DT
-bỏ), 5 ở 720p (1 + 4): bình thường. `test` chạy phy-idle; link-up, calibrate, integrity (555h rồi AAAh),
-packets, timing ở 1080p30 rồi 720p60; isp, filter, restart, irq (15 check: IMX274 không có
-RAW8). `mode 1080p`, `mode 720p`, `mode <w> <h> [fps]` đổi kích thước; `mode 4k` bị từ chối
-(`error: a 3840 pixel line leaves ~630 groups in the receiver FIFO, it has 512 (4K: 1024
-needed)`). Ghi lại: trễ BISC của từng lane, trạng thái lane ở standby, các dòng `[PASS]`
-(tổng và mean của 555h / AAAh, màu của sọc, mức xám), tap và độ rộng eye của `cal 8`.
+Ở trễ BISC, `start` in `link check failed (ERR_STATUS 008), try cal`: trên bo lần 1 lỗi CRC ở
+~11 % số dòng (119–148 dòng mỗi frame 1080p), vì trễ BISC nằm ở mép sớm của eye trên mọi lane
+(mục 9). Luôn `cal 8` sau `start` đầu, rồi `stat` (lần 1: 0 lỗi sau `cal`, hơn 15 000 frame).
+Trong `stat`, số packet `dropped by DT/VC` tăng 9 mỗi frame ở 1080p (1 dòng embedded + 8 dòng
+optical black bị bộ lọc DT bỏ), 5 ở 720p (1 + 4): bình thường. Khi bộ thu tắt (`stop`, `sensor
+on`) `stat` vẫn liệt kê cả 4 lane của bản build. `margin` đo quanh trễ **đang dùng** của mọi
+lane (sau `delay`, hay trễ BISC sau `phy reinit`), k theo eye của lần `cal` cuối. `test` chạy
+phy-idle; link-up, calibrate, margin (AAAh: IMX274 không có PN9), integrity (555h rồi AAAh),
+packets, timing ở 1080p30 rồi 720p60; isp, filter, restart, irq (17 check: IMX274 không có
+RAW8; firmware của lần 1, trước khi gộp main, chưa có `margin`: 15/15). `mode 1080p`, `mode
+720p`, `mode <w> <h> [fps]` đổi kích thước; `mode 4k` bị từ chối (`error: a 3840 pixel line
+leaves ~630 groups in the receiver FIFO, it has 512 (4K: 1024 needed)`). Ghi lại: trễ BISC của
+từng lane, trạng thái lane ở standby, các dòng `[PASS]` (tổng và mean của 555h / AAAh, màu của
+sọc, mức xám), tap và độ rộng eye của `cal 8`.
 
 **Khi BISC không xong** (`start` → `error: D-PHY not ready ...` và gợi ý `phy: nibble status;
 sensor on + phy reinit: BISC with a running clock`; LED7 sáng, LED10 tắt). Lúc PDI nạp, cảm
@@ -422,37 +442,40 @@ build lại. `sensor off` đưa cảm biến về standby. Sau `sensor on` bộ 
 `raw` báo `error: receiver off (sensor on): start`.
 
 **`BurstRxRst` và SETTLE.** Firmware bật PA5 = 1 (FIFO RX của XPHY bắt đầu lại mỗi burst) khi
-khởi động bộ thu và giữ `SETTLE` 95 ns. Lý do (mô phỏng, chưa đo trên bo): với PA5 = 0, word
-glitch lúc lane clock vào HS làm trễ FIFO trôi tới 8 word và cửa sổ `SETTLE` hợp lệ chỉ còn
-~108–116 ns; với PA5 = 1 trễ ở 0–3 word và cửa sổ ~80–116 ns
-([ip/csi2rx.md](ip/csi2rx.md), mục *Bốn lane, PHY Versal và IMX274*). Nếu với PA5 = 1 vẫn mất
-burst (lỗi SOT / ECC / TRUNC ở đầu burst, mất dòng), thử `phy burstrst 0` cùng `SETTLE`
-~115 ns. `SETTLE` là `PHY_CFG[7:0]` (`0x4000_800C`, chu kỳ 5 ns), chỉ đổi được khi `PHY_EN` = 0,
-và `start` / `mode` ghi lại giá trị của driver (cả PA5): làm lại sau mỗi lần đó.
+khởi động bộ thu và giữ `SETTLE` 95 ns. Đo trên bo lần 1 (720p60, tap đã hiệu chỉnh): với PA5 =
+1, `SETTLE` 95 ns chạy 4462 frame (hơn 3,2 triệu burst) không lỗi, và mọi `SETTLE` từ 13 tới 34
+chu kỳ (65–170 ns) đều sạch; 8–12 chu kỳ có lỗi misc (SKEW / FRAME), 35 chu kỳ có lỗi SOT, từ 36
+chu kỳ không còn frame. 95 ns cách mép dưới 30 ns (tâm cửa sổ ~118 ns). Với PA5 = 0 (`phy
+burstrst 0`) link chỉ sạch tới lần bật lại bộ thu đầu tiên trong lúc stream; sau đó lane 0 hỏng
+hẳn (`ERR_STATUS` 14b: SOT, ECC_CORR, CRC, SKEW, FRAME; `misc` 255 mỗi giây, mất frame) ở mọi
+`SETTLE` đã thử (50–150 ns) và chỉ hết khi PA5 = 1 lại. **Không dùng PA5 = 0 trên bo.** Mô phỏng
+trước đó dự đoán cửa sổ ~80–116 ns với PA5 = 1 và cho rằng PA5 = 0 chạy được với `SETTLE`
+~115 ns: silicon khác ([ip/csi2rx.md](ip/csi2rx.md), mục *Bốn lane, PHY Versal và IMX274*).
+`SETTLE` là `PHY_CFG[7:0]` (`0x4000_800C`, chu kỳ 5 ns), chỉ đổi được khi `PHY_EN` = 0, và
+`start` / `mode` ghi lại giá trị của driver: quét lại theo các lệnh dưới đây (giữ PA5 = 1).
 
 ```
 > start
-> phy burstrst 0
+> rd 40008008              # CTRL của driver: 00c02b87 (EXTRA 192, DT 0x2B, 4 lane, PHY_EN, RX_EN)
 > rd 4000800c              # PHY_CFG của driver: 051e0213 (SETTLE 0x13 = 19 chu kỳ = 95 ns)
-> wr 40008008 2b84         # CTRL: tắt PHY_EN, RX_EN (giữ 4 lane, DT 0x2B)
+> wr 40008008 c02b84       # CTRL: tắt PHY_EN, RX_EN, giữ các trường khác
 > wr 4000800c 051e0217     # SETTLE 0x17 = 23 chu kỳ = 115 ns, các trường khác như driver
-> wr 40008008 2b87         # bật lại PHY_EN, RX_EN
+> wr 40008008 c02b87       # bật lại PHY_EN, RX_EN
 > wr 40008020 1            # CNT_CLR
 > stat
 ```
 
-Đổi hẳn: build firmware với `CAM_BURST_RST` = 0 (`sw/common/include/cam_sensor.h`: mọi lần
-khởi động bộ thu đặt PA5 = 0) và `SETTLE_VID_NS` = 115 (`sw/common/src/bow_csi2rx.c`): sửa hai
-hằng đó, hoặc `make -C sw clean` rồi `make sw EXTRA_CFLAGS="-DCAM_BURST_RST=0
--DSETTLE_VID_NS=115"`; nạp lại ứng dụng, không phải build lại PDI. Help của `csi2_test` khi đó
-ghi `start sets 0`. Mô phỏng chạy đúng bản firmware này: `make -C sim run TEST=csi2_274
-FW=brst0` (cũng trong `make -C sim test-extra`).
+Tuỳ chọn build `CAM_BURST_RST=0` cùng `SETTLE_VID_NS=115` (`sw/common/include/cam_sensor.h`,
+`sw/common/src/bow_csi2rx.c`: mọi lần khởi động bộ thu đặt PA5 = 0) chỉ còn cho mô phỏng:
+`make -C sim run TEST=csi2_274 FW=brst0` (cũng trong `make -C sim test-extra`) chạy sạch trên mô
+hình PHY, bo thật thì không.
 
 ### 6.4 Ứng dụng `camera`
 
 ```
-> cam                      # 1080p30 RGGB (HMAX 400 / VMAX 6000): ISP, bộ thu, cảm biến
-csi2rx: link ok with the delays in use a/b/c/d (kept; cal calibrates)
+> cam                      # 1080p30 RGGB (HMAX 400 / VMAX 6000): ISP, bộ thu, cảm biến, hiệu chỉnh
+csi2rx: calibrated taps a/b/c/d eye a/b/c/d     (lần 1: 296/184/264/224 eye 352/352/352/336)
+csi2rx: margin ok +-k/+-k/+-k/+-k taps: 0 errors in 9 x 8 frames, BER < ...
 streaming 1920x1080 RGGB
 ok
 > ae on                    # auto exposure (SHR, rồi gain)
@@ -469,21 +492,29 @@ error: size must be even, 16..2048 x 8..2174
 > tp 11                    # sọc màu của cảm biến (0 tắt, 1..4 màu đơn 000/FFF/555/AAA, 12 sọc ngang)
 > exp 2000                 # exposure theo chu kỳ HMAX (tắt AE)
 > gain 0                   # 0..1957, gain = 2048 / (2048 - code)
-> flip 0 1                 # lật dọc (IMX274 không có lật ngang: flip 1 0 bị từ chối)
+> flip 0 1                 # lật dọc, vẫn RGGB (IMX274 không có lật ngang: flip 1 0 bị từ chối)
 > cal                      # hiệu chỉnh lại eye (bước 16)
+> margin                   # lề quanh tap đang dùng, k = eye / 4, 60 frame mỗi điểm
 ```
 
 `cam`: cấu hình ISP → `bow_csi2rx_start(4, RAW10, 1440 Mbit/s)` khi IMX274 còn ở standby
 (LP-00; hàm chờ `PHY_RDY`) → bước 1 của chuỗi thoát standby qua I2C 100 kHz (~26 ms) → ISP →
-stream (chờ 11 + 8 ms; frame đầu không được xuất) → link check. Trên bản Versal app **giữ trễ
-BISC** khi 64 packet đầu sạch (theo dõi VT của XPHY vẫn chạy) và chỉ hiệu chỉnh khi lỗi là lỗi
-lấy mẫu (`CSI2RX_ERR_TAP`) hay không có dữ liệu (`csi2rx: calibrated taps ...`, rồi kiểm tra lề
-`csi2rx: margin ok +-k/... taps` 8 frame mỗi điểm); lỗi khác (EXTRA, FORMAT, FRAME, OVF) giữ
-trễ (`csi2rx: keeping the delays in use ...` ở `cam` đầu, `taps kept` về sau); KV260 thì luôn
-hiệu chỉnh ở `cam` đầu. `cal` nạp tap: lane đó
-thôi theo dõi VT (mục 9), nên sau khi bo nóng lên hãy xem lại `csi`. `stop`, `mode`, `tpg`:
-IMX274 vào standby là cắt ngang frame, nên app chờ hết frame, tắt bộ thu rồi mới đưa cảm biến
-về standby. AE/AWB ghi cảm biến tối đa một lần mỗi frame.
+stream (chờ 11 + 8 ms; frame đầu không được xuất) → hiệu chỉnh. `cam` **đầu tiên luôn hiệu
+chỉnh**, trên bản Versal cũng vậy (`csi2rx: calibrated taps ...`, rồi kiểm tra lề `csi2rx:
+margin ok +-k/... taps` 8 frame mỗi điểm): trên bo lần 1 trễ BISC nằm ở mép sớm của eye trên mọi
+lane (tâm eye sau hiệu chỉnh cao hơn trễ BISC +98…+178 tap; lane 0 sát mép; ~11 % dòng lỗi CRC
+ở 1080p), và 64 packet sạch của một link check có thể là may (firmware của lần 1 giữ trễ BISC
+khi link check qua). Sau đó app giữ tap và chỉ hiệu chỉnh lại khi link check thấy lỗi lấy mẫu
+(`CSI2RX_ERR_TAP`) hay không có dữ liệu; lỗi khác (EXTRA, FORMAT, FRAME, OVF) giữ tap (`taps
+kept`). Mỗi tap nạp làm lane đó thôi theo dõi VT (mục 9), nên sau khi bo nóng lên hãy xem lại
+`csi` (`cal` hiệu chỉnh lại). `margin [k] [frames]` đo quanh trễ đang dùng của mọi lane: sau
+hiệu chỉnh là tap đã hiệu chỉnh (k = eye / 4); nếu lần hiệu chỉnh đầu thất bại thì quanh trễ
+lane đang giữ, k = 40 (`csi2rx: not calibrated: margin around the delays in use ...`), không bao
+giờ nạp tap 0. `stop`, `mode`, `tpg`: IMX274 vào standby là cắt ngang frame, nên app chờ hết
+frame, tắt bộ thu rồi mới đưa cảm biến về standby. AE/AWB ghi cảm biến tối đa một lần mỗi frame
+và **dừng khi test pattern của cảm biến bật** (`tp` khác 0): test pattern không đổi theo
+exposure / gain / white balance, nên ở lần 1 AE đã đẩy exposure xuống 1 khi `tp 11` và các frame
+đầu sau `tp 0` đen tới khi AE tăng lại (~1 s); nay AE/AWB đứng yên và chạy tiếp từ giá trị cũ.
 
 Ảnh về PC (đóng `monitor` trước):
 
@@ -493,8 +524,10 @@ python3 tools/bow32_cam.py -p $PORT -b 921600 snap -o frame.png                #
 python3 tools/bow32_cam.py -p $PORT -b 921600 snap -o crop.png --center 240 135   # 1:1 giữa ảnh
 ```
 
-Thứ tự Bayer khi lật dọc (`flip 0 1` → GBRG) là phỏng đoán; ma trận màu và cân bằng trắng ban
-đầu lấy của IMX219: kiểm với cảnh thật (mục 7).
+Khi lật dọc (`flip 0 1`) thứ tự Bayer vẫn là RGGB: đo trên bo lần 1 (cảnh thật và sọc màu đúng
+với RGGB; GBRG, phỏng đoán cũ của driver, cho ảnh tím, mean RGB 140/9/149; BGGR đổi R và B), như
+driver Linux; `imx274_bayer()` trả RGGB với cả hai. Ma trận màu và cân bằng trắng ban đầu lấy của
+IMX219; trên cảnh văn phòng của lần 1 màu đã tự nhiên (AWB r 425..437 b 454..463).
 
 ### 6.5 Video H.264 (`video`)
 
@@ -505,12 +538,22 @@ App `video` đặt dòng của IMX274 dài cho bộ mã H.264 (392 chu kỳ mỗ
 ```bash
 python3 tools/bow32_flash.py -p $PORT --no-break flash build/sw/video/video.bin   # sau wr ... RST! (mục 6.1)
 python3 tools/bow32_video.py -p $PORT --fast 921600 rec -n 45 --skip 1 -o video.mp4   # 720p30 (mặc định)
-python3 tools/bow32_video.py -p $PORT -b 921600 rec --mode 1080p -n 20 --skip 1 -o video1080.mp4
+python3 tools/bow32_video.py -p $PORT -b 921600 rec --mode 1080p -n 30 --skip 1 -o video1080.mp4
 ```
 
-(`rec` chỉ gửi `mode` khi có `--mode`: không có thì board giữ mode đang dùng.) `cam` lần đầu in
-`csi2rx: link ok with the delays in use a/b/c/d (kept)` rồi `streaming 1280x720 @30 fps`, và
-`mode 1080p` in `mode 1920x1080 @30 fps (HMAX 672 VMAX 3571)`. Ở 1080p50 / 1080p60
+(`rec` chỉ gửi `mode` khi có `--mode`: không có thì board giữ mode đang dùng.) `cam` lần đầu
+hiệu chỉnh như app `camera` (`csi2rx: calibrated taps ...`, `csi2rx: margin ok ...`) rồi in
+`streaming 1280x720 @30 fps`, và `mode 1080p` in `mode 1920x1080 @30 fps (HMAX 672 VMAX 3571)`.
+
+Rate control của `rec` ([video_kv260.md](video_kv260.md) mục 3): mỗi frame nhắm phần chỗ trống
+còn lại chia cho số frame còn lại, QP của frame sau = QP vừa dùng + 6 · log2(kích thước / đích)
+(tối đa ±12), QP đầu tự chọn theo kích thước frame (`qp auto`, mặc định của app và của
+`bow32_video.py`; `--qp n` để cố định). Lần chạy bo 1 (QP đầu 30, mỗi frame ±1) bắt đầu bằng
+frame 77 KB so với đích 35 KB, tới frame 8 mới lên QP 37 và video RAM đầy sau 20 trong 30 frame
+1080p (`video RAM full`; không lỗi encoder). Với rate control mới, QP đầu ở 1080p, 30 frame là
+37, và 30 frame vừa 1 MiB (mô phỏng với kích thước frame của lần 1: QP 37–39,
+`tools/tests/test_h264_model.py`); `rec` in QP của từng frame (`frame k: n bytes, QP q, t us`).
+Ở 1080p50 / 1080p60
 (`mode 1920 1080 60`) frame rate không còn chỗ cho dòng
 dài: app in `note: H.264 load 97 % (HMAX 542): detailed scenes at a low QP may drop pixels, a
 lower frame rate gives longer lines`. Khi encoder bỏ pixel, `rec` in `warning: the encoder
@@ -546,8 +589,8 @@ Theo thứ tự. Mục nào lệch với "mong đợi" thì dừng và ghi lại
 | 3 | sau `make jtag` | LED12, LED7, LED10, LED11, LED8 | LED12 và LED7 sáng đều (clock 200 MHz qua 3 SLR); LED10 sáng ngay (≤ 1,3 ms); LED11 sáng; LED8 tắt tới khi ứng dụng bật PA7. LED7 sáng, LED10 tắt: BISC (mục 6.3) |
 | 4 | sau `make jtag`, bo RAM ở FMC+10 | OE# của bo RAM (FMC+10 LA10_P, LA08_N) | ≥ 1,26 V (VIH của TXV0108 ở VCCA 1,8 V): level shifter cô lập |
 | 5 | bật nguồn, nạp PDI | cuộn lọc hồng ngoại (LA28 thả nổi), FMC_FLASH (LA16_N = 1) | không nghe / thấy bộ lọc hồng ngoại bật tắt; FMC_FLASH làm sáng gì, dòng tiêu thụ đổi bao nhiêu |
-| 6 | `csi2_test` khởi động | I2C ở 0x1A: ACK, thời gian sườn lên ở 100 kHz | `camera: IMX274 found`; sườn lên ≤ 1 µs (I2C chuẩn); chậm hơn: hạ tốc độ hoặc thêm pull-up về VADJ |
-| 7 | `phy`, `phy reinit` | trễ BISC của 4 lane, PB6 / PB7, thời gian tới `PHY_RDY` | trễ của các lane gần nhau (lane nhận strobe chuyển tiếp có thể lệch hơn); `PHY_RDY` sau ~40 µs (mô phỏng) tới 1,3 ms (AM010) |
+| 6 | `csi2_test` khởi động | I2C ở 0x1A: ACK, thời gian sườn lên ở 100 kHz | `camera: IMX274 found`; sườn lên ≤ 1 µs (I2C chuẩn); chậm hơn: hạ tốc độ hoặc thêm pull-up về VADJ. Lần 1: ACK ở 100 kHz, giá trị sau reset đúng trừ VMAX 0x906 (datasheet 0x905; driver nay nhận cả hai, mục 6.2); sườn lên chưa đo |
+| 7 | `phy`, `phy reinit` | trễ BISC của 4 lane, PB6 / PB7, thời gian tới `PHY_RDY` | trễ của các lane gần nhau (lane nhận strobe chuyển tiếp có thể lệch hơn); `PHY_RDY` sau ~40 µs (mô phỏng) tới 1,3 ms (AM010). Lần 1: 122/75/118/130 (lặp lại sau `phy reinit`, cả khi lane clock chạy), PB6 = PB7 = 1, `PHY_RDY` 75–76 µs sau xung PA4; trễ BISC ở mép sớm của eye (mục 9) |
 | 8 | `stat` trước `start`, sau `stop` | trạng thái LP của lane ở standby | LP-00 (datasheet) hay LP-11; lỗi LP (`misc`) ở mỗi lần dừng / chạy là bình thường với LP-00 |
 | 9 | `raw` sau `start` | byte sync của từng lane | `b8` ngay sau HS-zero, `sync byte at bit ...` trên mọi lane. Thấy `1d` mà không có sync: thứ tự bit ngược (`BitRev` = 1 của `bow_dphy_io_versal`, build lại) |
 | 10 | `raw` lặp lại nhiều phút | vị trí sync của từng lane | không đổi theo thời gian; lệch giữa các lane ≤ 6 byte clock (từ 7 trở lên bộ thu báo SKEW) |
@@ -555,12 +598,12 @@ Theo thứ tự. Mục nào lệch với "mong đợi" thì dừng và ghi lại
 | 12 | `stat` | `clk` (số lần lane clock vào HS) theo số frame; byte clock | 1 mỗi frame: lane clock liên tục trong frame; 1 mỗi burst: tắt sau mỗi dòng (đồng hồ đo byte clock khi đó đọc thấp). 180 MHz = INCK 24 MHz (202,5 MHz: dao động 27 MHz) |
 | 13 | `test`, `stat` | `trunc`, `ovf`, `line`, `frame` | `trunc` 0 và `ovf` 0 ở 1080p và 720p; line = 2 · HMAX / 72 MHz (11111 ns ở HMAX 400), frame = HMAX · VMAX / 72 MHz |
 | 14 | `test` | dòng integrity và isp | tổng và mean của 555h / AAAh (có cộng BLKLEVEL không), `tp 11` ra sọc dọc (không thì thử `tp 12`), màu và thứ tự sọc, mức xám |
-| 15 | ≥ 10⁴ burst mỗi cách | `BurstRxRst`: PA5 = 1 (mặc định) so với `phy burstrst 0` + `SETTLE` 115 ns (mục 6.3) | lỗi SOT / ECC / CRC / TRUNC, `misc` (SKEW) và burst của từng lane, vị trí sync trong `raw` |
-| 16 | cảm biến đang stream | quét `SETTLE` 14…26 chu kỳ (70…130 ns) theo mục 6.3 | lỗi SOT, ECC, CRC mỗi giá trị → cửa sổ thật (dịch theo trễ thật của bộ thu LP) |
-| 17 | `camera`: `flip 0 1` trên cảnh thật | thứ tự Bayer khi lật dọc, frame ngay sau lệnh | màu đúng với GBRG (phỏng đoán); sai thì sửa `imx274_bayer()` trong `sw/common/include/imx274.h` |
+| 15 | ≥ 10⁴ burst mỗi cách | `BurstRxRst`: PA5 = 1 (mặc định) so với `phy burstrst 0` (mục 6.3) | đã đo ở lần 1: PA5 = 1 sạch (hơn 3,2 triệu burst); PA5 = 0 hỏng hẳn sau lần bật lại bộ thu đầu tiên (lane 0 SOT / ECC / CRC, SKEW, FRAME): firmware giữ PA5 = 1, không cần đo lại |
+| 16 | cảm biến đang stream | quét `SETTLE` theo mục 6.3 (giữ PA5 = 1) | đã đo ở lần 1: sạch 13…34 chu kỳ (65…170 ns), 95 ns của driver cách mép dưới 30 ns; lần 2: kiểm lại 95 ns với bản gộp main |
+| 17 | `camera`: `flip 0 1` trên cảnh thật | thứ tự Bayer khi lật dọc, frame ngay sau lệnh | đã đo ở lần 1: RGGB (GBRG cho ảnh tím); lần 2: màu đúng ngay với firmware mới (`imx274_bayer()` trả RGGB) |
 | 18 | `camera`: `cam` đầu tiên | frame đầu sau khi thoát standby | có frame, frame đầu không hỏng; nếu không: thử thêm 10 ms sau các lệnh ghi của bước 1 (firmware) |
 | 19 | sau `cal`, bo nóng / nguội hoặc chạy lâu | lỗi ECC / CRC trong `csi` | lane đã nạp tap thôi theo dõi VT: so với trễ BISC (sau `phy reinit`, VT bật lại) |
-| 20 | `video`: `rec` 1080p30 và 720p30, cảnh nhiều chi tiết, QP 18–23 | `warning: the encoder dropped pixels` | không có (tải 78 %) |
+| 20 | `video`: `rec` 1080p30 và 720p30, cảnh nhiều chi tiết, QP 18–23 | `warning: the encoder dropped pixels` | không có (tải 78 %). Lần 1: 1080p30 ở QP 30–37 không bỏ pixel, nhưng chỉ 20 / 30 frame vừa video RAM; lần 2: `rec --mode 1080p -n 30` phải ghi đủ 30 frame (rate control mới, mục 6.5) |
 
 Nếu bộ thu của Bow32 không nhận gì trong khi cảm biến chắc chắn stream (LED5 sáng), một PDI thử
 với IP MIPI D-PHY của AMD trên cùng các chân (không có trong repo) tách lỗi của bo / cảm biến
@@ -588,8 +631,8 @@ khỏi lỗi của PHY Bow32. KV260 (không phải bo này): build lại `kv260_
 | LED11 tắt | module/bo chuyển chưa cắm vào FMC+01 |
 | I2C không có ACK ở 0x1A | PA7 (XCLR) phải là output 1 (LED8); SW192 = 1,2 V; module cắm chặt trên bo chuyển |
 | LED5 không bao giờ sáng | cảm biến chưa stream (lane clock không vào HS) |
-| lỗi ECC/CRC/SoT | `cal` (bắt đầu từ trễ BISC); `phy burstrst` và `SETTLE` (mục 6.3); SW192; bo chuyển |
-| `csi`: `drop` tăng 9 mỗi frame (720p: 5) | bình thường: dòng embedded và optical black bị bộ lọc DT bỏ |
+| lỗi ECC/CRC/SoT | `cal` (trễ BISC nằm ở mép sớm của eye: `cam` đầu luôn hiệu chỉnh, `csi2_test` cần `cal` sau `start`); PA5 phải là 1 (`phy`: `burstrst 1`), `SETTLE` (mục 6.3); SW192; bo chuyển |
+| `csi`: `dropped by DT/VC` tăng 9 mỗi frame (720p: 5) | bình thường: dòng embedded và optical black bị bộ lọc DT bỏ |
 | `video`: `warning: the encoder dropped pixels (H.264 load ...)` | tăng `qp` hoặc giảm kbytes của `rec`; trên 80 % hạ frame rate (dòng dài hơn) |
 
 ## 9. Bên trong: D-PHY trên Versal
@@ -609,8 +652,16 @@ các cổng LP / HS enable / byte clock với bộ thu:
 - **BISC** của XPHY tự căn strobe và dữ liệu (gồm cả lệch của dây chuyển strobe) sau reset;
   trễ đọc được ngay (`DLYn[24:16]`, `phy` / `stat` in nó). Phần mềm chỉ nạp tap khi ghi `DLYn`:
   lần đầu của mỗi lane tắt theo dõi VT của slice đó (`RX_EN_VTC = 0`) rồi nạp; 512 tap ≥ 625 ps
-  (1 UI = 694 ps, kích thước tap thật chưa đo). App `camera` / `video` giữ trễ BISC khi link
-  sạch; `phy reinit` (PA4) đưa mọi lane về trễ BISC mới và bật lại theo dõi VT.
+  (1 UI = 694 ps, kích thước tap thật chưa đo). Trên bo (lần 1) trễ BISC nằm ở **mép sớm** của
+  eye trên cả 4 lane: 122/75/118/130 so với tâm 300/184/264/228 của `cal 8` (eye rộng 352–360
+  tap), tức sớm hơn tâm 98–178 tap (ước chừng 1/4 UI; kích thước tap thật chưa đo); ở trễ BISC
+  ~11 % dòng có lỗi CRC. Vì vậy app `camera` / `video` luôn hiệu chỉnh ở `cam` đầu, `csi2_test` cần `cal`.
+  `phy reinit` (PA4) đưa mọi lane về trễ BISC mới và bật lại theo dõi VT.
+- **Câu hỏi mở (RTL):** vì sao BISC ở chế độ native strobe đặt điểm lấy mẫu sớm khoảng 1/4 UI.
+  Giả thuyết: BISC căn trễ cho một strobe căn theo mép dữ liệu (edge-aligned, như DQS của bộ
+  nhớ khi đọc), còn lane clock của D-PHY căn giữa dữ liệu (centre-aligned, lệch 90°). Cần kiểm
+  thuộc tính căn strobe / data của XPHY trong `bow_dphy_io_versal`, hoặc cộng một độ lệch cố
+  định sau BISC (khi đó tap được nạp và theo dõi VT dừng, như hiệu chỉnh bằng phần mềm).
 - **Núm lúc chạy** (mức bất đồng bộ, đồng bộ vào `ctrl_clk_i`; 0 = như PHY của AMD):
   `reinit_i` (PA4) giữ PHY ở reset khởi động như khi mất khoá XPLL, nhả ra thì XPLL, BISC, VT
   chạy lại; `burst_rst_en_i` (PA5) = 1: `RX_RST` của các slice dùng khi cổng byte clock đóng,

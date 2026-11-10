@@ -98,11 +98,15 @@ def ctrl_extra(n):
 
 def extra_thr(rx):
     """CTRL.EXTRA the software sets (as bow_csi2rx_start: trail bytes on
-    every lane x the active lanes, + margin): the reset value 64 while the
-    trail (garbage_max) leaves 10 bytes of room below it (1 and 2 lanes at
-    ~1 Gbit/s), else garbage_max + 16 (4 lanes: the trail alone can exceed
-    64 bytes)."""
+    every lane x the active lanes, + margin). 1 and 2 lanes on the
+    UltraScale+ PHY: the reset value 64, exactly as main's stimuli have it
+    (their trail bound is at most 58 bytes). Otherwise (4 lanes, or the
+    Versal PHY, whose FIFO adds 8 bytes per lane to the trail) 64 while the
+    trail (garbage_max) leaves 10 bytes of room below it, else
+    garbage_max + 16 (the trail alone can exceed 64 bytes)."""
     g = rx.garbage_max
+    if rx.cfg["lanes"] <= 2 and not rx.cfg.get("versal", 0):
+        return EXTRA_RESET
     return EXTRA_RESET if g <= EXTRA_RESET - 10 else min(255, g + 16)
 
 

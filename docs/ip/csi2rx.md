@@ -169,16 +169,22 @@ sớm nhất (HS-PREPARE + HS-ZERO ≥ 145 ns + 10 UI). Trễ trôi tới 8 word
 mô phỏng `csi2_274` (corner 1, 20 % lần vào HS có word glitch) mất dòng và hiệu
 chỉnh lệch với `SETTLE` 95 ns, còn chạy sạch với `SETTLE` 115 ns (cả corner 1 và
 2, ~2000 word glitch, ~360 lần quay vòng mỗi lane), với `BurstRxRst` = 1, hoặc khi
-không có glitch. Ước tính: với trễ 0–8 word, `SETTLE` hợp lệ chỉ còn một khoảng
-hẹp (~108–116 ns với độ trễ phát hiện LP-00 của mô hình; bộ thu LP trên chip chậm
-hơn bao nhiêu thì cả khoảng dịch xuống bấy nhiêu), còn với trễ 0–3 word
-(`BurstRxRst` = 1) khoảng đó rộng (~80–116 ns). Vì vậy trên bản Versal firmware
-đặt PA5 = 1 (`BurstRxRst`) mỗi lần khởi động bộ thu và giữ `SETTLE` 95 ns
-(`cam_rx_start()` trong `sw/common/src/cam_sensor.c`); cấu hình kia, `BurstRxRst`
-= 0 với `SETTLE` ~115 ns, là tuỳ chọn build `-DCAM_BURST_RST=0
--DSETTLE_VID_NS=115` (mô phỏng: `make -C sim run TEST=csi2_274 FW=brst0`) hoặc
-làm tay theo [camera_huins.md](../camera_huins.md) mục 6.3 (**UNVERIFIED**: glitch
-và độ trễ thật chỉ board mới biết).
+không có glitch. Ước tính của mô phỏng: với trễ 0–8 word, `SETTLE` hợp lệ chỉ
+còn một khoảng hẹp (~108–116 ns với độ trễ phát hiện LP-00 của mô hình), còn với
+trễ 0–3 word (`BurstRxRst` = 1) khoảng đó rộng (~80–116 ns). Vì vậy trên bản
+Versal firmware đặt PA5 = 1 (`BurstRxRst`) mỗi lần khởi động bộ thu và giữ
+`SETTLE` 95 ns (`cam_rx_start()` trong `sw/common/src/cam_sensor.c`).
+
+Đo trên bo Huins (2026-11-10, IMX274 4 × 1440 Mbit/s, 720p60, tap đã hiệu chỉnh,
+[camera_huins.md](../camera_huins.md) mục 6.3): với `BurstRxRst` = 1 cửa sổ rộng
+hơn mô phỏng: mọi `SETTLE` từ 65 tới 170 ns (13…34 chu kỳ) sạch, 95 ns chạy hơn 3,2
+triệu burst không lỗi; 40–60 ns có lỗi SKEW / FRAME, 175 ns có lỗi SOT, từ 180 ns
+không còn frame. Với `BurstRxRst` = 0 link chỉ sạch tới lần bật lại bộ thu đầu
+tiên trong lúc stream; sau đó lane 0 lỗi SOT / ECC / CRC, SKEW và FRAME liên tục ở
+mọi `SETTLE` 50–150 ns, tới khi `BurstRxRst` = 1 lại. Cấu hình `BurstRxRst` = 0
+với `SETTLE` ~115 ns (tuỳ chọn build `-DCAM_BURST_RST=0 -DSETTLE_VID_NS=115`,
+mô phỏng `make -C sim run TEST=csi2_274 FW=brst0`) vì vậy **chỉ dùng cho mô
+phỏng**: mô hình FIFO của XPHY chưa giải thích được lỗi đó trên silicon.
 
 **Ngân sách IMX274 (clock video 200 MHz, ISP 1 pixel/clock).** Cảm biến gửi
 một dòng CSI-2 mỗi **2 × HMAX** chu kỳ 72 MHz (T_line = 2 · HMAX / 72 MHz). Một
@@ -189,7 +195,7 @@ dòng RAW10 đến trong burst với 576 Mpx/s (4 × 1440 Mbit/s / 10), đầu r
   (1280 px: 231, tối thiểu của cảm biến là 260; 1920 px: 346).
 - FIFO cuối burst chứa ≈ W · (1 − 200/576) pixel: 1280 px → 836 px = 209 nhóm,
   1920 px → 1253 px = 314 nhóm (+ vài nhóm trễ con trỏ). FIFO 256 nhóm không đủ
-  cho 1080p: bản Huins dùng **512** (vẫn một RAMB36, 512 × 44 bit). Đỉnh này là
+  cho 1080p: bản Huins dùng **512** (vẫn một RAMB36, 512 × 45 bit). Đỉnh này là
   của từng dòng, HMAX chỉ quyết định FIFO có xả hết trước dòng sau hay không:
   3840 px → 2507 px = 627 nhóm, quá 512 ở mọi HMAX (mục *Giới hạn*).
 - Điểm làm việc: 1280×720 (mode 5 + cắt) HMAX ≥ 260, 60 fps = HMAX 300 /
@@ -712,7 +718,15 @@ khi `STATUS.PHY_RDY` = 1; mỗi lần ghi `DLYn` nạp tap ngay, không cần bu
 hiệu chỉnh bắt đầu từ tap BISC và quét quanh nó, không bao giờ nạp mù tap 0
 (tap 0 có thể nằm ngoài eye). 512 tap của XPHY phủ ≥ 625 ps theo AM010, cỡ
 một UI ở 1440 Mbit/s (694 ps); độ lớn thật của một tap trên silicon chưa đo
-(UNVERIFIED).
+(UNVERIFIED). Trên bo Huins (2026-11-10) trễ BISC nằm ở **mép sớm** của eye trên
+mọi lane (122/75/118/130 so với tâm 300/184/264/228 sau hiệu chỉnh, eye rộng
+352–360 tap; ~11 % dòng lỗi CRC ở trễ BISC), nên app `camera` và `video` luôn
+hiệu chỉnh ở lần khởi động đầu, như trên KV260 (nạp tap làm các lane đó thôi bù
+VT), và `margin` của chúng đo quanh trễ đang dùng (`bow_csi2rx_get_delays()`),
+không bao giờ quanh tap 0 khi chưa hiệu chỉnh. Vì sao BISC ở chế độ native
+strobe đặt điểm lấy mẫu sớm khoảng 1/4 UI là câu hỏi mở của RTL
+([camera_huins.md](../camera_huins.md) mục 9: giả thuyết strobe căn mép so với lane
+clock căn giữa của D-PHY).
 
 ## Ràng buộc và kiểm tra sau build (`kv260_cam`)
 
@@ -788,7 +802,8 @@ bow_csi2rx_stop(34 + 10);                   /* SAU stream-off: chờ hết frame
 | `bow_csi2rx_log(e, mode, ms)`, `bow_csi2rx_print_log(e, n)` | LOG theo thứ tự thời gian, số entry (0 = hết giờ) |
 | `bow_csi2rx_raw(w, now, ms)` | 64 word thô mỗi lane |
 | `bow_csi2rx_byteclk_hz(ms)` | tần số byte clock (max của `BYTECLK` trong `ms`) |
-| `bow_csi2rx_print_status()` | `csi2rx: link ok` / `link errors` / `no data` / `no lines`, bộ đếm (`frame errors` = `FRAME_ERR` của frame cuối; `errors: …` như `print_errors`, rồi số packet bị bộ lọc DT/VC bỏ), thời gian, PHY; byte clock đo trong 1 frame + 2 ms (clock không liên tục dừng suốt vertical blanking, `BYTECLK` chỉ nhìn 65536 chu kỳ CPU) |
+| `bow_csi2rx_print_status()` | `csi2rx: link ok` / `link errors` / `no data` / `no lines`, bộ đếm (`frame errors` = `FRAME_ERR` của frame cuối; `errors: …` như `print_errors`, rồi số packet bị bộ lọc DT/VC bỏ), thời gian, PHY; byte clock đo trong 1 frame + 2 ms (clock không liên tục dừng suốt vertical blanking, `BYTECLK` chỉ nhìn 65536 chu kỳ CPU). Danh sách theo lane (`sot`, LP, burst, delay) có 4 giá trị khi đang dùng 4 lane, và khi bộ thu tắt (`CTRL.PHY_EN` = 0) theo số lane của bản build (`INFO`: 4 trên Huins), không theo `CTRL` đã xoá |
+| `bow_csi2rx_print_delays()`, `bow_csi2rx_get_delays(taps)` | trễ đang dùng của các lane (`DLY_VID` = 1: `[24:16]`, trễ BISC tới khi nạp tap; 0: tap đã ghi): in như `stat`, hoặc cả 4 lane vào `taps[]` (tâm của kiểm tra lề ở tap đang dùng: `csi2_test` `margin` sau `delay` hay `phy reinit`, `camera` `margin` khi chưa hiệu chỉnh) |
 
 4 lane trên Versal (Huins, IMX274): `bow_csi2rx_start(4, CSI2_DT_RAW10, 1440000000)`
 đặt `LANES4` và `CTRL.EXTRA` 192 (4 × (38 + 8) + 8; PHY UltraScale+ ở cùng tốc độ:
@@ -814,7 +829,7 @@ ngay (`DLY_VID` = 1). Ngắt: `IRQ_EN`,
 | Mô hình Python | `make test-tools` (`tools/tests/test_csi2_model.py`, 36 test) | vector ECC/CRC, mọi lỗi 1 bit và 2 bit của header, RAW10, aligner ở mọi pha bit, burst deskew (`FFFFh`, chỉ nhận ở cuối HS-zero: sync hỏng + `00 FF` trong dữ liệu, `0xFF` + packet, `0xFC`/`0xFE`/`0xFF` + DI `0x2B` vẫn là lỗi sync; burst thô không có packet; 2 và 4 lane: deskew chỉ trên một số lane là SKEW), chia/ghép và lệch 4 lane (cả luật chính xác 6/7 byte clock), luật của bộ thu, dòng lỗi, burst mất → dòng sau lỗi / frame bị bỏ, `FRAME_ERR` từng frame, tràn FIFO (Cut/Lost, đầu ra giữ 3 nhóm khi nhóm đầu có 1 pixel), EXTRA, byte enable, thanh ghi 4 lane, `DLY` miền video và khởi động lại PHY, cấu hình PHY Versal (`BurstRxRst`, trễ chung / riêng từng lane), chế độ LOG; vòng sinh/kiểm tra mọi test (cả 4 lane + PHY Versal); checker bắt được lỗi cài vào |
 | IP (Verilator) | `make -C hw/ip/csi2rx/dv test` (cũng trong `make test-ip` và CI) | 3 model: `Lanes` 1, 2 (như KV260) và 4 (như Huins: `DlyVid` = 1, FIFO 512, byte clock 180 MHz, clock video 200 MHz). 105 case (~24 s): unit test aligner `tb_dphy_align.sv` (301 case: 75 case × 4 lượt, sync, deskew `FFFFh`, 8 và 15 bit 1, sync hỏng `0xFC`/`0xFE`/`0xFF` + DI, `0xB9` + `00 FF FF`, 1–3 word nhiễu HS-PREPARE, cửa sổ ở word 0 cuối hay sau HS-zero, ở mọi pha bit; lượt 2–4 có chu kỳ `rx_valid` = 0 với word rác `00`/`FF`/`B8`/ngẫu nhiên, cả lúc `arm` lên) + 44 random (seed 1–4 × {2 lane, 2 lane + lỗi, 1 lane + lỗi, 1 trên 2 lane, 1 trên 2 lane + lỗi, 4 lane, 4 lane + lỗi, 4 lane + lỗi với `BurstRxRst` = 1, 2 trên 4 (`BurstRxRst` = 1), 2 trên 4 + lỗi, 1 trên 4 + lỗi (`BurstRxRst` = 1)}, xen kẽ RAW8 và clock liên tục) + directed `lp`, `watchdog`, `clk`, `cmd`, `ovf`, `stop`, `byteclk`, `eye`, `skew`, `deskew`, `extra`, `loss`, `ovf2`, `ovf8`, `be` trên 2 lane và trên 4 lane (+ `dly`); `cmd`, `stop`, `deskew`, `extra`, `ovf`, `ovf2`, `loss`, `be`, `eye` thêm với 1 lane, `deskew`, `extra`, `ovf`, `ovf2`, `loss`, `eye` thêm với 1 trên 2 lane, `cmd`, `stop`, `skew`, `dly`, `deskew`, `extra`, `ovf2`, `loss` với 2 trên 4, `be`, `eye`, `loss` thêm với clock liên tục (2 và 4 lane; `DLY` đọc lại khi byte clock chạy). Bản build DV bật `BOW_CDC_JITTER`: mỗi bộ đồng bộ `bow_cdc_pulse` ngẫu nhiên nhận toggle muộn một chu kỳ (như flop metastable), nên hai sự kiện cùng một packet có thể tới thanh ghi lệch một chu kỳ, theo cả hai thứ tự (`+verilator+seed+` = seed của case). Pixel (`tuser[0]`/`tlast`/`tuser[1]`), bộ đếm, FRAME/LINE_INFO, FRAME_SUM, `FRAME_ERR` ở mỗi FE, FRAME/LINE_TIME, LOG, RAW so với mô hình, cả khi FIFO tràn (`ovf`, `ovf2`: dòng Cut, dòng Lost, nhả `tready` giữa frame, nhóm `sof` bị bỏ → frame bị bỏ, đuôi frame mất; `ovf8`: RAW8 với nhóm đầu 1 pixel; dòng Lost ngoài frame không đánh dấu dòng sau; số dòng theo `FifoDepth`); `deskew`: burst skew calibration thật (burst thô `FFFFh` + `0101…`), sync hỏng với `00 FF` trong pixel hay trail, `0xFC`/`0xFE`/`0xFF` trước DI, bit sync ngay trước cuối HS-zero vẫn là SOT; `loss`: header không sửa được, SOT, SKEW giữa frame, ở dòng đầu, ở dòng cuối, giữa hai frame, dòng đầu không có nhóm pixel (WC 3, WC 0: frame bị bỏ), dòng không có nhóm giữa frame và ngoài frame, vào HS bị từ chối ở mức LP (data lane, lane clock; với `CLK_FORCE` thì không mất), packet bị cắt không phải dòng (EMB, VC khác), dòng accepted lỗi FORMAT bị cắt, ECC_CORR của header FE thuộc frame nó kết thúc; `extra`: EMB + dòng, VC khác + dòng, FS + dòng (frame bị bỏ), long packet nhỏ dưới ngưỡng, bão hoà ở 256 (4 lane: ngưỡng 196 trên trail tới 180 byte, packet sau 156 pixel); `be`: byte enable trên mọi thanh ghi RW/W1C/lệnh (cả `DLY3` không có byte 0/1: không đổi, không nạp); bất biến PHY (LP-00 → `hs_en` ≤ 4 + LP_FILTER chu kỳ, CE chỉ đổi khi lane clock tĩnh; với `DlyVid` = 1: số lần nạp tap mỗi lane, xung nạp 1 chu kỳ, tap ổn định quanh lần nạp, không nạp khi lần trước còn chờ). 57 mutant RTL của các thay đổi giai đoạn 0 (aligner: neo deskew, `FFFFh`, tuổi/HS-zero của lần dò; unpack: skip, dòng mất trong frame; `drop_i` gồm TRUNC và mất ở mức LP; FORMAT WC 0; `FRAME_ERR` cả cửa sổ 2 chu kỳ sau FE; byte enable, EXTRA) đều làm DV của PR #17 fail (`ferr_dly` chỉ nhờ jitter CDC); 8/9 mutant của phần gộp `rx_valid` trong aligner làm unit test fail (còn lại: `search &&` của `dpend_q`, tương đương với kích thích này) |
 | FPGA, mức chân (xsim) | `source <Vivado>/settings64.sh; make -C hw/fpga/common/dv test` | `test-dphy` (UltraScale+): unisim `IBUFDS_DPHY`, `IDELAYE3`, `ISERDESE3`, `BUFGCE_DIV`; máy phát D-PHY từng bit ở 912 Mbit/s, clock không liên tục, `PHY_CFG` và `CTRL.EXTRA` của driver: word ISERDES, không có xung runt, CE chỉ đổi ở HS-0, `RST` mỗi burst ≥ 20 byte clock trước sync, `DLY` → CNTVALUEOUT, pixel và thanh ghi (cả `CNT_EXT`, `FRAME_ERR`); burst skew calibration (HS-zero, `FFFFh`, `0101…`) → deskew, không SOT; T_HS-TRAIL = T_EOT max không gây EXTRA; T_HS-PREPARE min và max (nhiễu tới 85 ns + 6 UI, kết thúc bằng `00 B8` giả) với T_HS-PREPARE + T_HS-ZERO đúng tối thiểu 145 ns + 10 UI trên mọi lane (pha bit ngẫu nhiên qua T_CLK-PRE); white box: cửa sổ dò đầu tiên của mỗi lane ở mỗi burst bắt đầu trong HS-zero (word cũ nhất = 0), không chỉ "không khoá vào `00 B8` giả" (vốn chỉ thấy cửa sổ lấn ≥ 16 UI vào nhiễu). Quét `SETTLE` (`+SETTLE=`, 12 seed mỗi giá trị): 20…28 đạt 12/12, 19 đạt 6/12 và ≤ 18 không đạt (cửa sổ bắt đầu trong nhiễu; ≤ 15 còn khoá vào sync giả), ≥ 29 lỡ sync thật. Mô hình không có trễ ~8 ns của bộ thu LP: trên thiết bị cửa sổ muộn hơn ~1,6 chu kỳ, dải ≈ 18…26 và 22 của driver ở giữa. `test-versal`: XPHY của Versal (24 cấu hình, [../simulation.md](../simulation.md)). Cần Vivado, không chạy trong CI; eye không mô phỏng được (unisim không có lệch clock/data) |
-| Hệ thống | `make run TEST=camera`, `make run TEST=csi2`; bản IMX274: `camera274`, `csi2_274`, `video274` | firmware thật với `csi2_tx_model.sv` và mô hình IMX219 hoặc IMX274 + PHY Versal ([../simulation.md](../simulation.md)); `camera`: hiệu chỉnh + margin ở `cam` đầu, `cam` lại với tap giữ nguyên (link tốt; lỗi FRAME không phải lỗi tap: `taps kept`), cảm biến im lặng (không có dữ liệu: `calibration failed`, `error`) rồi khởi động lại; `csi2`: `test quick` 12/12 (có check `margin`), lỗi tiêm vào đúng ở bộ đếm, rồi eye lane 0 bị thu hẹp: `margin` báo đúng điểm lane 0 +48, các điểm khác sạch, tap giữ nguyên; lần nữa với thời gian frame như cảm biến thật (~3 ms so với 4 ms chờ một tap) và điểm lỗi là điểm thứ hai (lane 0 −48): các điểm sau vẫn đo đủ frame dù frame đang chạy mất FS; `csi2_274`: `test quick` 11/11 (có `margin` trên 4 lane, mẫu AAAh của IMX274) |
+| Hệ thống | `make run TEST=camera`, `make run TEST=csi2`; bản IMX274: `camera274`, `csi2_274`, `video274` | firmware thật với `csi2_tx_model.sv` và mô hình IMX219 hoặc IMX274 + PHY Versal ([../simulation.md](../simulation.md)); `camera`: hiệu chỉnh + margin ở `cam` đầu, `cam` lại với tap giữ nguyên (link tốt; lỗi FRAME không phải lỗi tap: `taps kept`), cảm biến im lặng (không có dữ liệu: `calibration failed`, `error`) rồi khởi động lại; `csi2`: `test quick` 12/12 (có check `margin`), lỗi tiêm vào đúng ở bộ đếm, rồi eye lane 0 bị thu hẹp: `margin` báo đúng điểm lane 0 +48, các điểm khác sạch, tap giữ nguyên; lần nữa với thời gian frame như cảm biến thật (~3 ms so với 4 ms chờ một tap) và điểm lỗi là điểm thứ hai (lane 0 −48): các điểm sau vẫn đo đủ frame dù frame đang chạy mất FS; `csi2_274`: `test quick` 11/11 (có `margin` trên 4 lane, mẫu AAAh của IMX274), `margin` quanh tap đang dùng của cả 4 lane sau `delay`, `stat` với bộ thu tắt liệt kê 4 lane; `camera274`: `cam` đầu luôn hiệu chỉnh, khi hiệu chỉnh hỏng `margin` đo quanh trễ đang dùng (không nạp tap 0) |
 | Board | `csi2_test`, lệnh `test` | bên dưới |
 
 Mô hình Python được viết từ đặc tả và quy tắc MIPI, **không** từ RTL, để hai

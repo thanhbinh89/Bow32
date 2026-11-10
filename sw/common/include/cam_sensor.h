@@ -101,6 +101,15 @@ typedef struct {
  * signature); I2C0 stays at 100 kHz when it is found. */
 void cam_sensor_detect(cam_detect_t *d);
 
+/* No sensor found (d->found false): one line per sensor tried, what
+ * answered and what it read:
+ *   "camera: no IMX219 on I2C (error -1)" or "camera: unknown sensor id 0123"
+ *   "camera: no IMX274 on I2C (error -1)" or "camera: unknown sensor at 0x1a:
+ *   MDSEL1..4 03 31 00 09, HMAX 0104, VMAX 000907 (IMX274 after reset: ...)"
+ * (imx274_probe_regs(): the registers the probe compares, and the BLKLEVEL
+ * read back when they matched). */
+void cam_print_not_found(const cam_detect_t *d);
+
 /* No sensor found and a 4 lane receiver (Huins camera build): prints
  * PRSNT_M2C_L of FMC+01, GPIO PB5 (0 = module present), as a hint. */
 void cam_print_prsnt(uint32_t rx_lanes);
@@ -108,11 +117,15 @@ void cam_print_prsnt(uint32_t rx_lanes);
 /* Huins camera build (bow32_huins_vp1902_cam_top): GPIO PA5 (OUT & DIR) is
  * burst_rst_en_i of its Versal XPHY (BurstRxRst: the RX FIFOs restart at every
  * HS burst). CAM_BURST_RST 1 (default): cam_rx_start() sets PA5 = 1, the FIFO
- * latency stays at 0..3 words and the driver's SETTLE of 95 ns has margin at
- * both HS-PREPARE limits. 0: PA5 = 0 (like the PHY of AMD), glitch words can
- * let the latency drift up to 8 words, SETTLE then needs ~115 ns: build with
- * -DCAM_BURST_RST=0 -DSETTLE_VID_NS=115 (bow_csi2rx.c; docs/camera_huins.md
- * 6.3, docs/ip/csi2rx.md; make -C sim test-extra runs csi2_274 so). */
+ * latency stays at 0..3 words; with the driver's SETTLE of 95 ns the board
+ * (2026-11-10, IMX274 at 4 x 1440 Mbit/s) ran clean for more than 3.2 M
+ * bursts, and every SETTLE from 65 to 170 ns was clean. 0: PA5 = 0 (like the
+ * PHY of AMD): on the board the link broke for good at the first receiver
+ * re-enable during a stream (lane 0 SOT / ECC / CRC, SKEW and FRAME errors
+ * until PA5 = 1 again), at every SETTLE: do not use it on silicon. The
+ * option stays for the simulation, whose PHY model runs clean with it at
+ * SETTLE 115 ns (make -C sim run TEST=csi2_274 FW=brst0: model only;
+ * docs/camera_huins.md 6.3, docs/ip/csi2rx.md). */
 #ifndef CAM_BURST_RST
 #define CAM_BURST_RST 1
 #endif

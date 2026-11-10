@@ -277,25 +277,36 @@ int imx274_power(bool on) {
   return I2C_OK;
 }
 
+static imx274_probe_t probe_regs;
+
+const imx274_probe_t *imx274_probe_regs(void) { return &probe_regs; }
+
 int imx274_probe(uint16_t *id) {
   static const uint8_t mdsel[4] = {0x03, 0x31, 0x00, 0x09}; /* MDSEL1..4 */
-  static const uint8_t hvmax[5] = {0x04, 0x01, 0x05, 0x09, 0x00}; /* HMAX 0x104 VMAX 0x905 */
-  uint8_t a[4], b[5], v = 0;
+  imx274_probe_t *p = &probe_regs;
+  uint8_t v = 0;
+  p->blk_read = false;
   imx274_power(true);
-  int r = imx274_read_buf(0x3004, a, sizeof(a));
-  if (r == I2C_OK) r = imx274_read_buf(0x30F6, b, sizeof(b));
+  int r = imx274_read_buf(0x3004, p->mdsel, sizeof(p->mdsel));
+  if (r == I2C_OK) r = imx274_read_buf(0x30F6, p->hvmax, sizeof(p->hvmax));
   if (r != I2C_OK) return r;
-  *id = (uint16_t)(a[0] << 8 | a[1]);
-  for (uint32_t i = 0; i < sizeof(a); i++) {
-    if (a[i] != mdsel[i]) return I2C_OK;
+  *id = (uint16_t)(p->mdsel[0] << 8 | p->mdsel[1]);
+  for (uint32_t i = 0; i < sizeof(mdsel); i++) {
+    if (p->mdsel[i] != mdsel[i]) return I2C_OK;
   }
-  for (uint32_t i = 0; i < sizeof(b); i++) {
-    if (b[i] != hvmax[i]) return I2C_OK;
-  }
+  /* HMAX 0x0104; VMAX 0x000906 on the board (2026-11-10), 0x000905 in the
+   * datasheet */
+  uint32_t hmax = p->hvmax[0] | (uint32_t)p->hvmax[1] << 8;
+  uint32_t vmax = p->hvmax[2] | (uint32_t)p->hvmax[3] << 8 | (uint32_t)p->hvmax[4] << 16;
+  if (hmax != 0x0104u || (vmax != 0x0906u && vmax != 0x0905u)) return I2C_OK;
   /* no id register: a register that can be written and read back */
   r = imx274_write(0x3045, 0x33); /* BLKLEVEL, immediate, harmless in standby */
   if (r == I2C_OK) r = imx274_read(0x3045, &v);
-  if (r == I2C_OK) r = imx274_write(0x3045, (uint8_t)st.black);
+  if (r == I2C_OK) {
+    p->blk_read = true;
+    p->blk = v;
+    r = imx274_write(0x3045, (uint8_t)st.black);
+  }
   if (r == I2C_OK && v == 0x33) *id = IMX274_ID;
   return r;
 }

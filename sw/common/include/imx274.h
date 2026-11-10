@@ -79,12 +79,25 @@ typedef struct {
 } imx274_mode_t;
 
 /* Reset the sensor (XCLR low >= 1 ms, then 20 ms before I2C), then check the
- * reset defaults: MDSEL1..4 (0x3004) = 03 31 00 09, HMAX/VMAX (0x30F6) =
- * 04 01 05 09 00, and a write / read back of BLKLEVEL (0x3045). Returns 0
- * with *id = IMX274_ID, or 0 with *id = MDSEL1 << 8 | MDSEL2 when something
- * answers at 0x1A that does not look like an IMX274, or a negative I2C
- * error (I2C_ENACK: nothing at 0x1A). The sensor stays in standby. */
+ * reset defaults: MDSEL1..4 (0x3004) = 03 31 00 09, HMAX (0x30F6) 0x0104,
+ * VMAX (0x30F8, 3 bytes) 0x000906 or 0x000905, and a write / read back of
+ * BLKLEVEL (0x3045). The sensor of the Huins board reads VMAX 0x906 after
+ * reset, the datasheet says 0x905: both are accepted. Returns 0 with *id =
+ * IMX274_ID, or 0 with *id = MDSEL1 << 8 | MDSEL2 when something answers at
+ * 0x1A that does not look like an IMX274 (imx274_probe_regs() has what it
+ * read), or a negative I2C error (I2C_ENACK: nothing at 0x1A). The sensor
+ * stays in standby. */
 int imx274_probe(uint16_t *id);
+
+/* What the last imx274_probe() read, for the message when the reset values
+ * do not match (cam_print_not_found): valid once it returned 0. */
+typedef struct {
+  uint8_t mdsel[4];  /* 0x3004..0x3007: MDSEL1..4 */
+  uint8_t hvmax[5];  /* 0x30F6..0x30FA: HMAX (2 bytes), VMAX (3 bytes), LSB first */
+  bool blk_read;     /* MDSEL / HMAX / VMAX matched: BLKLEVEL was written (0x33) and read */
+  uint8_t blk;       /* ... the value read back */
+} imx274_probe_t;
+const imx274_probe_t *imx274_probe_regs(void);
 
 /* on: XCLR low >= 1 ms, high, 20 ms (registers at reset defaults, standby).
  * off: XCLR low (reset). */
@@ -139,9 +152,14 @@ int imx274_read(uint16_t reg, uint8_t *val);
 int imx274_write(uint16_t reg, uint8_t val);
 int imx274_read_buf(uint16_t reg, uint8_t *buf, uint32_t n);
 
-/* ISP BAYER code: RGGB; with the vertical flip GBRG (UNVERIFIED on the
- * board, the Linux driver keeps RGGB: check with a real scene). */
-static inline uint32_t imx274_bayer(bool vflip) { return vflip ? 2u : 0u; }
+/* ISP BAYER code of the output: RGGB (ISP_BAYER_RGGB), also with the
+ * vertical flip. Measured on the Huins board (2026-11-10): the flipped
+ * readout keeps the colour phase (the scene and the colour bars are right
+ * with RGGB, GBRG gives a magenta image), as the Linux driver assumes. */
+static inline uint32_t imx274_bayer(bool vflip) {
+  (void)vflip;
+  return 0u;
+}
 
 /* Load of the H.264 encoder in % (392 cycles per macroblock at 200 MHz)
  * with CSI-2 lines of 2 HMAX: a strip of 16 lines must be coded while the

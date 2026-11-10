@@ -239,6 +239,29 @@ void cam_sensor_detect(cam_detect_t *d) {
   }
 }
 
+void cam_print_not_found(const cam_detect_t *d) {
+  if (d->r219 == I2C_OK) {
+    bow_printf("camera: unknown sensor id %04x\n", d->id219);
+  } else {
+    bow_printf("camera: no IMX219 on I2C (error %d)\n", d->r219);
+  }
+  if (!d->tried274) return;
+  if (d->r274 != I2C_OK) {
+    bow_printf("camera: no IMX274 on I2C (error %d)\n", d->r274);
+    return;
+  }
+  /* something answers at 0x1A: the values it read (XCLR worked if they
+   * are the reset values) */
+  const imx274_probe_t *p = imx274_probe_regs();
+  const uint8_t *m = p->mdsel, *v = p->hvmax;
+  uint32_t hmax = v[0] | (uint32_t)v[1] << 8;
+  uint32_t vmax = v[2] | (uint32_t)v[3] << 8 | (uint32_t)v[4] << 16;
+  bow_printf("camera: unknown sensor at 0x1a: MDSEL1..4 %02x %02x %02x %02x, HMAX %04x, "
+             "VMAX %06x", m[0], m[1], m[2], m[3], hmax, vmax);
+  if (p->blk_read) bow_printf(", BLKLEVEL 33 read back as %02x", p->blk);
+  bow_puts(" (IMX274 after reset: 03 31 00 09, 0104, 000905 or 000906, BLKLEVEL reads back)\n");
+}
+
 void cam_print_prsnt(uint32_t rx_lanes) {
   if (rx_lanes < 4u) return;
   uint32_t prsnt = (bow_gpio_read(GPIOB) >> 5) & 1u;

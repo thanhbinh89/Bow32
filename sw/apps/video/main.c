@@ -10,8 +10,10 @@
  *
  *   rec <frames> [skip] [kbytes]  records into the 1 MiB video RAM: SPS + PPS,
  *                                 then one IDR frame per coded frame; a
- *                                 simple rate control keeps every frame
- *                                 close to kbytes (default: what fits)
+ *                                 rate control (bow_h264.h) aims every frame
+ *                                 at the free space over the frames still
+ *                                 to code (at most kbytes), so that all of
+ *                                 them fit (1080p: 30 frames)
  *   send                          sends the recording:
  *     H264 <bytes> <crc32> <frames> <width> <height> <fps_num> <fps_den>\r\n
  *     <bytes raw bytes>\r\nEND
@@ -43,7 +45,8 @@ static const char help_tp274[] =
     "  tp <n>              sensor test pattern (0 off, 11 colour bars)\n";
 static const char help_enc[] =
     "encoder:\n"
-    "  qp <10..51>         first QP of a recording (default 30)\n"
+    "  qp <10..51>|auto    first QP of a recording (default auto: from the size per\n"
+    "                      frame and the frame size)\n"
     "  deblock on|off      deblocking filter in the decoder (default on)\n"
     "  rec <n> [skip] [kbytes]   record n frames, skip frames between two, size per frame\n"
     "  send                send the recording (tools/bow32_video.py)\n"
@@ -75,14 +78,14 @@ static struct {
   bool ae, awb, ae_locked, awb_locked;
   uint32_t ae_target, wb_r, wb_b, frames;
   uint32_t tpg_fps;            /* measured frame rate of the test pattern */
-  uint32_t qp;
+  uint32_t qp;                 /* first QP of a recording, 0: auto (bow_h264_rc_init) */
   bool deblock;
   /* last recording */
   uint32_t rec_bytes, rec_frames, fps_num, fps_den;
 } st = {
     .w = 1280, .h = 720, .fps = 30,
     .exposure = 1000, .ae = true, .awb = true, .ae_target = 180, .wb_r = 256, .wb_b = 256,
-    .qp = 30, .deblock = true,
+    .qp = 0, .deblock = true,
 };
 
 /* ------------------------------------------------------------------ parsing */
@@ -212,9 +215,9 @@ static bool calibrate(void) {
   return true;
 }
 
-/* Calibrate at the first start (calibrated: the taps, or the Versal XPHY's
- * BISC delays, are to be checked first); later, when the link check with
- * the kept taps fails with errors a new tap can fix (ERR_STATUS &
+/* Calibrate at the first start (calibrated: the taps are to be checked
+ * first); later, when the link check with the kept taps fails with errors a
+ * new tap can fix (ERR_STATUS &
  * CSI2RX_ERR_TAP), or with no error at all: fewer than 64 packets in 2 x
  * tap_ms() (2.4 frames + 6 ms: the first frame start is up to a frame away,
  * 64 packets take at most ~1.3 frames; + the frames the sensor does not
@@ -281,22 +284,13 @@ static bool start_cam(void) {
   st.cam = true;
   st.frames = 0;
   st.ae_locked = st.awb_locked = false;
-  /* as sw/apps/camera: the Versal XPHY (DLY_VID) keeps the delays of its
-   * self-calibration (VT tracked) while the link check passes */
-  bool bisc = (CSI2RX->INFO & CSI2RX_INFO_DLY_VID) != 0;
-  if (need_calibration(st.calibrated || bisc)) {
+  /* as sw/apps/camera: the first start calibrates, also with the Versal
+   * XPHY, whose self-calibration (BISC) leaves the lanes at the early edge
+   * of their eyes on the Huins board */
+  if (need_calibration(st.calibrated)) {
     if (!calibrate()) return false;
     bow_csi2rx_wait_frame(2u * frame_ms());
     ISP->STATUS = ISP_ST_ERRORS;
-  } else if (!st.calibrated) {
-    /* link check passed, or failed with errors that are no tap problem */
-    bow_csi2rx_cnt_t c;
-    bow_csi2rx_counters(&c);
-    bow_puts(bow_csi2rx_link_errors(&c) ? "csi2rx: keeping the delays in use "
-                                        : "csi2rx: link ok with the delays in use ");
-    bow_csi2rx_print_delays();
-    bow_puts(" (kept)\n");
-    st.calibrated = true;
   }
   bow_printf("streaming %ux%u @%u fps\n", st.w, st.h, cam_fps(sen));
   return true;
@@ -357,6 +351,9 @@ static void isp_frame_poll(void) {
   if (!(ISP->STATUS & ISP_ST_FRAME_DONE)) return;
   ISP->STATUS = ISP_ST_FRAME_DONE;
   st.frames++;
+  /* a sensor test pattern follows neither exposure, gain nor white balance:
+   * AE / AWB wait until it is off (as sw/apps/camera) */
+  if (st.cam && st.tp != 0) return;
   if (!(st.ae && st.cam) && !st.awb) return;
   if (st.frames % CTRL_PERIOD) return;
   bow_isp_stats_t s;
@@ -405,14 +402,18 @@ static bool record(uint32_t n, uint32_t skip, uint32_t kbytes) {
       .width = st.w, .height = st.h, .fps_num = fps, .fps_den = skip + 1u, .full_range = false};
   uint32_t hdr = bow_h264_write_headers(VRAM, 256, &p);
   uint32_t space = BOW32_VRAM_SIZE - hdr;
-  uint32_t target = kbytes ? kbytes * 1024u : space / (n ? n : 1u);
-  uint32_t qp = st.qp, qmin = 99, qmax = 0, ovf = 0, big = 0, coded = 0;
+  uint32_t qmin = 99, qmax = 0, ovf = 0, big = 0, coded = 0;
+  /* rate control (bow_h264.h): every frame aims at the free space over the
+   * frames still to code (at most kbytes), the QP follows each frame by
+   * 6 x log2(size / target); the first QP from the mode (qp auto) or `qp` */
+  bow_h264_rc_t rc;
+  bow_h264_rc_init(&rc, st.w, st.h, space, n, kbytes * 1024u, st.qp);
 
   bow_dma_stream(0, VRAM + hdr, space, false);
-  bow_h264_init(st.w, st.h, qp, st.deblock);
+  bow_h264_init(st.w, st.h, rc.qp, st.deblock);
   bow_h264_start(n, skip);
-  bow_printf("rec: %u frames %ux%u, %u/%u fps, QP %u, %u bytes per frame\n", n, st.w, st.h, fps,
-             skip + 1u, qp, target);
+  bow_printf("rec: %u frames %ux%u, %u/%u fps, QP %u%s, %u bytes per frame\n", n, st.w, st.h, fps,
+             skip + 1u, rc.qp, st.qp ? "" : " (auto)", rc.target);
 
   uint32_t last = bow_cycles(), tmo = 3u * bow_clk_hz();
   uint32_t vid_mhz = st.csi ? CSI2RX_INFO_MHZ(CSI2RX->INFO) : 0;   /* video clock */
@@ -423,28 +424,29 @@ static bool record(uint32_t n, uint32_t skip, uint32_t kbytes) {
     uint32_t s = H264->STATUS, cnt = H264->FRAME_CNT;
     done = (s & H264_ST_DONE) != 0;
     if (cnt != coded) {
-      /* FRAME_BYTES is the size of the newest frame; the QP of a frame is
-       * the one written before its start (one frame of delay) */
-      uint32_t bytes = H264->FRAME_BYTES, used = qp;
+      /* FRAME_BYTES is the size of the newest frame, TOTAL_BYTES the sum of
+       * the coded ones; the QP of a frame is the one written before its
+       * start (one frame of delay: the vertical blanking, or the skipped
+       * frames, leave the time) */
+      uint32_t bytes = H264->FRAME_BYTES, total = H264->TOTAL_BYTES, used = rc.qp;
       coded = cnt;
       if (bytes > big) big = bytes;
       if (used < qmin) qmin = used;
       if (used > qmax) qmax = used;
-      /* rate control: one QP step per frame toward the target */
-      if (bytes > target + target / 8u && qp < H264_QP_MAX) qp++;
-      else if (bytes < target - target / 4u && qp > H264_QP_MIN) qp--;
-      bow_h264_set_qp(qp);
-      bow_printf("frame %u: %u bytes, %u us\n", coded, bytes, H264->FRAME_CYCLES / vid_mhz);
+      bool fits = bow_h264_rc_frame(&rc, coded, bytes, total);
+      bow_h264_set_qp(rc.qp);
+      /* stop before the video RAM is full: the next frame would not fit */
+      if (!fits && !full) {
+        bow_h264_stop();
+        full = true;
+      }
+      bow_printf("frame %u: %u bytes, QP %u, %u us\n", coded, bytes, used,
+                 H264->FRAME_CYCLES / vid_mhz);
       last = bow_cycles();
     }
     if (s & H264_ST_ERR_OVF) {
       H264->STATUS = H264_ST_ERR_OVF;
       ovf++;
-    }
-    /* stop before the video RAM is full (the frames in flight still fit) */
-    if (!full && space - DMA->CH[0].WPTR < 2u * big + 16384u) {
-      bow_h264_stop();
-      full = true;
     }
     if ((DMA->CH[0].STATUS & DMA_ST_DONE) || (full && !(H264->STATUS & H264_ST_BUSY))) break;
     if (done) break;
@@ -475,7 +477,6 @@ static bool record(uint32_t n, uint32_t skip, uint32_t kbytes) {
   st.rec_frames = frames;
   st.fps_num = fps;
   st.fps_den = skip + 1u;
-  st.qp = qp;
   bow_printf("rec: %u frames, %u bytes (QP %u..%u, largest %u)%s\n", frames, st.rec_bytes,
              qmin == 99 ? 0 : qmin, qmax, big, full ? ", video RAM full" : "");
   if (ovf || (H264->STATUS & H264_ST_ERR_OVF)) {
@@ -567,8 +568,13 @@ static void info(void) {
   bow_printf("sensor %s  exp %u gain %u  ae %s awb %s (r %u b %u)\n",
              st.sensor ? sen->name : "none", st.exposure, st.again, st.ae ? "on" : "off",
              st.awb ? "on" : "off", st.wb_r, st.wb_b);
-  bow_printf("encoder QP %u deblock %s, video RAM %u KiB at %08x\n", st.qp,
-             st.deblock ? "on" : "off", BOW32_VRAM_SIZE / 1024u, BOW32_VRAM_BASE);
+  if (st.qp) {
+    bow_printf("encoder QP %u", st.qp);
+  } else {
+    bow_puts("encoder QP auto");
+  }
+  bow_printf(" deblock %s, video RAM %u KiB at %08x\n", st.deblock ? "on" : "off",
+             BOW32_VRAM_SIZE / 1024u, BOW32_VRAM_BASE);
   if (st.csi) bow_csi2rx_print_status();
 }
 
@@ -657,6 +663,10 @@ static bool execute(const char *line) {
     return on_off(a, &st.awb);
   }
   if ((a = match(line, "qp"))) {
+    if (word_is(a, "auto")) {
+      st.qp = 0;
+      return true;
+    }
     if (!parse_num(a, &v, false) || v < H264_QP_MIN || v > H264_QP_MAX) return false;
     st.qp = v;
     return true;
@@ -716,8 +726,8 @@ static void probe_hardware(void) {
   if (st.sensor) {
     bow_printf("camera: %s found (id %04x)\n", sen->name, d.id);
   } else {
-    bow_printf("camera: no IMX219 (I2C %d) - ISP test pattern only\n", d.r219);
-    if (d.tried274) bow_printf("camera: no IMX274 (I2C %d, id %04x)\n", d.r274, d.id274);
+    cam_print_not_found(&d);
+    bow_printf("camera: ISP test pattern only (tpg)\n");
   }
   /* frame format of the sensor layer: the default mode (720p30) */
   sen->mode(st.w, st.h, st.fps, true);

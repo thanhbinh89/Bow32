@@ -12,6 +12,7 @@
 #   make run TEST=load WAVES=1 also dump build/sim/waves.fst (open with GTKWave)
 #   make run TEST=csi2_274 PLUSARGS="+DPHY_CORNER=2 +S274_CONTCLK=1"   more testbench plusargs
 #   make run TEST=csi2_274 FW=brst0   csi2_test built for BurstRxRst = 0 with SETTLE 115 ns
+#                              (model only: PA5 = 0 fails on silicon)
 #   RUN_LOG=name               log build/sim/<name>.log instead of <test>.log
 #   JOBS=8                     C++ build jobs of Verilator (default 0: all cores)
 #
@@ -58,6 +59,8 @@ IMAGE_load  := $(SW_BUILD)/hello/hello.vmem
 # setting of the Huins camera build, BurstRxRst = 0 (its receiver starts set
 # PA5 = 0) with SETTLE 115 ns (sw/common/include/cam_sensor.h), into
 # build/sim/sw-brst0/; the testbench then expects PA5 0 and SETTLE 115 ns.
+# Model only: on the Huins board PA5 = 0 broke the link at the first receiver
+# re-enable during a stream, at every SETTLE (docs/camera_huins.md 6.3).
 FW ?=
 SW_BRST0 := $(BUILD)/sw-brst0/csi2_test
 ifeq ($(FW),brst0)
@@ -67,10 +70,11 @@ else ifneq ($(FW),)
 $(error unknown firmware variant FW=$(FW) (brst0))
 endif
 
-# H.264 streams the testbench writes into build/sim, decoded after the run:
-# 3 frames, each with the 8 colour bars
-H264_h264     := h264.hex
-H264_video274 := h264_274a.hex h264_274b.hex
+# H.264 streams the testbench writes into build/sim, decoded after the run,
+# "<file>:<frames>[:bars]": that many frames, each with the 8 colour bars
+# with :bars (h264_rc.hex: the rate control test, checker pattern)
+H264_h264     := h264.hex:3:bars h264_rc.hex:8
+H264_video274 := h264_274a.hex:3:bars h264_274b.hex:3:bars
 
 # Separate model directories per build, with and without waveform tracing.
 WAVES_SFX   := $(if $(filter 1,$(WAVES)),-waves)
@@ -122,8 +126,9 @@ run: $(RUN_BIN) sw $(if $(FW),sw-$(FW))
 	  $(if $(IMAGE_$(TEST)),+IMAGE=$(IMAGE_$(TEST))) \
 	  $(if $(filter 1,$(WAVES)),+WAVES) $(FW_PLUSARGS) $(PLUSARGS) | tee $(BUILD)/$(RUN_LOG).log
 	@grep -q "TEST PASSED" $(BUILD)/$(RUN_LOG).log
-	@for f in $(H264_$(TEST)); do \
-	  $(PYTHON) $(REPO)/tools/h264/h264_model.py decode $(BUILD)/$$f --hex --bars --frames 3 \
+	@for e in $(H264_$(TEST)); do \
+	  set -- $$(echo $$e | tr : ' '); f=$$1; bars=$${3:+--bars}; \
+	  $(PYTHON) $(REPO)/tools/h264/h264_model.py decode $(BUILD)/$$f --hex $$bars --frames $$2 \
 	    > $(BUILD)/$$f.txt 2>&1; r=$$?; \
 	  cat $(BUILD)/$$f.txt; cat $(BUILD)/$$f.txt >> $(BUILD)/$(RUN_LOG).log; \
 	  [ $$r = 0 ] || exit 1; \
@@ -145,7 +150,8 @@ test: $(SIM_BIN) $(SIM_BIN_274) sw
 # Optional variants of the IMX274 tests (a few minutes each, not in CI): the
 # D-PHY corners and clock lane modes 'make test' does not run, BurstRxRst = 0
 # (the firmware variant brst0: PA5 = 0 with SETTLE 115 ns at the longest
-# HS-PREPARE; the PHY model forced to 0 without glitch words, and in the
+# HS-PREPARE, model only: it fails on silicon; the PHY model forced to 0
+# without glitch words, and in the
 # camera app with the FIFO drift), and the full size modes of the driver at
 # the stream start (geo274). "<test> <name> [+plusarg | VAR=value]...";
 # logs build/sim/<test>_<name>.log.

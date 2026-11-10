@@ -23,9 +23,12 @@
  * simulation). 95 ns starts it after any HS-PREPARE and still before the
  * earliest sync byte (HS-PREPARE + HS-ZERO >= 145 ns + 10 UI). That holds
  * while the XPHY's RX FIFOs restart with every burst (BurstRxRst, the
- * default of the Huins camera build: cam_rx_start() in cam_sensor.c); without
- * it glitch words can add up to 8 words, then ~115 ns is needed: build option
- * -DSETTLE_VID_NS=115 together with -DCAM_BURST_RST=0 (cam_sensor.h). */
+ * default of the Huins camera build: cam_rx_start() in cam_sensor.c). On the
+ * Huins board (IMX274, 2026-11-10) every SETTLE from 65 to 170 ns was clean
+ * with it (95 ns: 30 ns above the lower edge). Without it (PA5 = 0) the
+ * simulation needs ~115 ns (-DSETTLE_VID_NS=115 with -DCAM_BURST_RST=0,
+ * cam_sensor.h), but the board broke at a receiver re-enable at every
+ * SETTLE: that variant is for the simulation only. */
 #ifndef SETTLE_VID_NS
 #define SETTLE_VID_NS 95u
 #endif
@@ -256,11 +259,20 @@ uint32_t bow_csi2rx_link_errors(const bow_csi2rx_cnt_t *c) {
          c->sot[3] + c->ovf + c->misc_err + c->extra;
 }
 
-/* the terms of bow_csi2rx_link_errors(): keep both lists in step (sot: 4
- * values while 4 lanes are in use, else 2) */
+/* Values of the per lane lists (sot, LP state, bursts, delay): 4 while 4
+ * lanes are in use, else 2. While the receiver is off (CTRL.PHY_EN = 0:
+ * CTRL holds no lane selection then) the lanes of the build (INFO): 4 on the
+ * Huins camera build, e.g. after `stop` or `sensor on`. */
+static uint32_t list_lanes(void) {
+  uint32_t n = (CSI2RX->CTRL & CSI2RX_CTRL_PHY_EN) ? bow_csi2rx_lanes() : num_lanes();
+  return n > 2u ? CSI2RX_MAX_LANES : 2u;
+}
+
+/* the terms of bow_csi2rx_link_errors(): keep both lists in step (sot: as
+ * list_lanes()) */
 void bow_csi2rx_print_errors(const bow_csi2rx_cnt_t *c) {
   bow_printf("ecc %u/%u crc %u trunc %u sot ", c->ecc_corr, c->ecc_err, c->crc, c->trunc);
-  put_list(c->sot, bow_csi2rx_lanes() > 2u ? 4u : 2u);
+  put_list(c->sot, list_lanes());
   bow_printf(" ovf %u misc %u extra %u", c->ovf, c->misc_err, c->extra);
 }
 
@@ -851,9 +863,6 @@ static const char *lp_state(uint32_t st, uint32_t lp, uint32_t hs_bit) {
   return (st & hs_bit) ? "HS" : names[lp];
 }
 
-/* Values of the per lane lists: 4 while 4 lanes are in use, else 2 */
-static uint32_t list_lanes(void) { return bow_csi2rx_lanes() > 2u ? CSI2RX_MAX_LANES : 2u; }
-
 /* Delays of the first n lanes: DLY_VID the ones in use ([24:16]: the BISC
  * result until a tap is loaded, the written [8:0] reads 0 before), else the
  * written taps (the IDELAY takes them at the next burst). */
@@ -862,6 +871,10 @@ static void delays(uint32_t *d, uint32_t n, bool vid) {
     uint32_t v = dly_read(l, vid);
     d[l] = vid ? CSI2RX_DLY_OUT(v) : CSI2RX_DLY_TAP(v);
   }
+}
+
+void bow_csi2rx_get_delays(uint32_t *taps) {
+  delays(taps, CSI2RX_MAX_LANES, (CSI2RX->INFO & CSI2RX_INFO_DLY_VID) != 0);
 }
 
 void bow_csi2rx_print_delays(void) {

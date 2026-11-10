@@ -490,9 +490,11 @@ static bool execute(const char *line) {
       bow_printf("error: not streaming or not calibrated (start, cal)\n");
       return false;
     }
-    /* around the taps in use (`delay`), k from the eye of the last calibration */
+    /* around the taps in use on every lane (after `delay`, or the BISC
+     * delays after `phy reinit`; DLY_VID: [24:16], the written [8:0] may be
+     * an old tap), k from the eye of the last calibration */
     bow_csi2rx_cal_t c = ct.cal;
-    for (uint32_t l = 0; l < 2; l++) c.tap[l] = CSI2RX_DLY_TAP(CSI2RX->DLY[l]);
+    bow_csi2rx_get_delays(c.tap);
     int r = bow_csi2rx_margin(&c, k, frames, tap_timeout_ms(), &m, true);
     bow_printf("csi2rx: margin %s", r > 0 ? "ok " : r == 0 ? "low " : "");
     bow_csi2rx_print_margin(&m, r);
@@ -623,16 +625,7 @@ static void probe_hardware(void) {
   if (ct.sensor) {
     bow_printf("camera: %s found (id %04x)\n", ct.s->name, d.id);
   } else {
-    if (d.r219 == I2C_OK) {
-      bow_printf("camera: unknown sensor id %04x\n", d.id219);
-    } else {
-      bow_printf("camera: no IMX219 on I2C (error %d)\n", d.r219);
-    }
-    if (d.tried274 && d.r274 == I2C_OK) {
-      bow_printf("camera: unknown sensor at 0x1a (MDSEL %04x, IMX274 not reset?)\n", d.id274);
-    } else if (d.tried274) {
-      bow_printf("camera: no IMX274 on I2C (error %d)\n", d.r274);
-    }
+    cam_print_not_found(&d);
   }
   ct.tp = ct.s->tp_solid;
   ct.s->mode(ct.w, ct.h, ct.fps, false); /* the default mode (1080p30) */

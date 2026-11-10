@@ -298,7 +298,7 @@ void bow_csi2rx_counters(bow_csi2rx_cnt_t *c);
 uint32_t bow_csi2rx_link_errors(const bow_csi2rx_cnt_t *c);
 /* "ecc 0/0 crc 0 trunc 0 sot 0/0 ovf 0 misc 0 extra 0": every term of
  * bow_csi2rx_link_errors() (no newline); sot has 4 values while 4 lanes are
- * in use. */
+ * in use, or while the receiver is off on a build with 4 lanes (INFO). */
 void bow_csi2rx_print_errors(const bow_csi2rx_cnt_t *c);
 
 /* Clear the counters, then true once `packets` packets arrived without a
@@ -327,6 +327,10 @@ uint32_t bow_csi2rx_read_delay(uint32_t lane);
  * use, else 2 (as bow_csi2rx_print_status). DLY_VID 1: the delays in use
  * ([24:16], the BISC result until a tap is loaded); 0: the written taps. */
 void bow_csi2rx_print_delays(void);
+/* The same delays of all CSI2RX_MAX_LANES lanes into taps[] (0 for lanes
+ * the receiver does not have): the centre of a margin check at the taps in
+ * use (after `delay`, a PHY re-initialisation, or without a calibration). */
+void bow_csi2rx_get_delays(uint32_t *taps);
 /* DLY_VID 1, after a PHY re-initialisation (XPLL lock + BISC again, e.g.
  * csi2_test `phy reinit`): the loaded taps are gone, every lane uses its new
  * BISC delay; DLYn [8:0] still reads the last written tap, so
@@ -393,9 +397,10 @@ uint32_t bow_csi2rx_byteclk_hz(uint32_t timeout_ms);
  * of the last frame), timing and PHY state. The byte clock is measured over
  * one frame period + 2 ms (a non-continuous clock may stop for the whole
  * vertical blanking). The per lane lists (sot, LP state, bursts, delay)
- * have 4 values while 4 lanes are in use (CTRL.LANES4), else 2 as before.
- * delay: as bow_csi2rx_print_delays() (DLY_VID 1: in use, else written);
- * ", PHY not ready" only with DLY_VID 1. */
+ * have 4 values while 4 lanes are in use (CTRL.LANES4), else 2 as before;
+ * while the receiver is off (CTRL.PHY_EN = 0) as many as the build has
+ * (INFO: 4 on the Huins camera build). delay: as bow_csi2rx_print_delays()
+ * (DLY_VID 1: in use, else written); ", PHY not ready" only with DLY_VID 1. */
 void bow_csi2rx_print_status(void);
 
 #endif /* BOW_CSI2RX_H_ */

@@ -67,7 +67,10 @@
 //                     receiver start of the firmware)
 //   +S274_PA5=<0|1> +S274_SETTLE=<ns>  csi2_274: PA5 and data lane SETTLE
 //                     the firmware must have set at its receiver starts
-//                     (default 1 and 95 ns; sim/Makefile FW=brst0: 0, 115 ns)
+//                     (default 1 and 95 ns; sim/Makefile FW=brst0: 0, 115 ns,
+//                     a model-only variant: PA5 = 0 fails on silicon)
+//   +S274_VMAX_RST=<hex> IMX274 build: VMAX after reset (default 906, the
+//                     value of the Huins board; video274: 905, the datasheet's)
 //   +S274_GLITCH=<pct> IMX274 build: % of byte clock gate openings that add a
 //                     glitch word to the PHY model's RX FIFOs (default 20)
 //   +S274_GEO=<mode>  geo274: csi2_test mode to start (default 1080p)
@@ -739,8 +742,10 @@ module tb_bow32 #(
   // map of the datasheet (multi-byte registers LSB first, at the lower
   // address). XCLR = PA7 driven high: low puts every register back to its
   // default (among them the probe signature of the driver: MDSEL1..4 = 03 31
-  // 00 09, HMAX 0x0104, VMAX 0x00905, BLKLEVEL 0x32) and holds the I2C
-  // interface; the first access must come >= 20 us after XCLR rises.
+  // 00 09, HMAX 0x0104, VMAX 0x00906 as on the Huins board (the datasheet
+  // says 0x00905: video274 runs with that, +S274_VMAX_RST=<hex>), BLKLEVEL
+  // 0x32) and holds the I2C interface; the first access must come >= 20 us
+  // after XCLR rises.
   // Standby cancel sequence, checked:
   //   step 1  0x3000 = 0x12, PLRD1..5, 0x310B = 0 (PLLs on, last)
   //   step 2  0x3000 = 0x00 >= 10 ms after the PLL start (+ SYS_MODE 0x303E)
@@ -756,10 +761,12 @@ module tb_bow32 #(
   logic [7:0]  s274_reg [65536];
   logic [15:0] s274_ptr = '0;
   int unsigned s274_tdiv = 1;
+  int unsigned s274_vmax_rst = 'h906; // VMAX after reset (board 0x906, datasheet 0x905)
   realtime     s274_t_xclr = 0.0;     // XCLR rising edge
   realtime     s274_t_pll = -1.0;     // step 1: PLLs started (-1: not since the last stop)
   realtime     s274_t_step2 = -1.0;   // step 2
   bit          s274_run = 1'b0;       // streaming: step 3 done, no standby / reset since
+  int unsigned s274_ctrl_tp = 0;      // PGC / SHR writes while streaming a test pattern (AE)
   int unsigned s274_starts = 0, s274_stops = 0;
   wire         s274_xclr = gpioa_oe[7] && gpioa_o[7];
 
@@ -778,8 +785,9 @@ module tb_bow32 #(
     s274_reg[16'h30F4] = 8'h01;   // XMSTA
     s274_reg[16'h30F6] = 8'h04;   // HMAX 0x0104
     s274_reg[16'h30F7] = 8'h01;
-    s274_reg[16'h30F8] = 8'h05;   // VMAX 0x00905
-    s274_reg[16'h30F9] = 8'h09;
+    s274_reg[16'h30F8] = 8'(s274_vmax_rst);        // VMAX 0x00906 (s274_vmax_rst)
+    s274_reg[16'h30F9] = 8'(s274_vmax_rst >> 8);
+    s274_reg[16'h30FA] = 8'(s274_vmax_rst >> 16);
     s274_reg[16'h310B] = 8'h11;   // STBPL_IF, STBPL_AD: PLLs off
     s274_reg[16'h3120] = 8'h80;   // PLRD1..5
     s274_reg[16'h3122] = 8'h03;
@@ -853,6 +861,9 @@ module tb_bow32 #(
       end
       16'h310B: begin                                    // PLLs on (step 1, after 0x3000 = 0x12)
         if (v == 8'h00 && s274_reg[16'h3000] == 8'h12) s274_t_pll = now;
+      end
+      16'h300A, 16'h300B, 16'h300C, 16'h300D: begin      // PGC, SHR: AE of the firmware
+        if (s274_run && s274_reg[16'h303C] == 8'h11) s274_ctrl_tp++;
       end
       16'h30F4: begin                                    // XMSTA = 0: master start (step 3)
         if (!v[0]) begin
@@ -1560,8 +1571,10 @@ module tb_bow32 #(
     return trans;
   endfunction
 
-  // RAW10 pixel x of line y. RGGB at the top left; the vertical flip mirrors
-  // the lines (line 0 shows sensor line H - 1: GBRG). Test patterns (0x303D +
+  // RAW10 pixel x of line y. RGGB at the top left; the vertical flip reverses
+  // the order of the line pairs and keeps the colour phase (line 0 shows
+  // line H - 2, line 1 line H - 1: still RGGB, as measured on the Huins
+  // board on 2026-11-10). Test patterns (0x303D +
   // 1, the menu of the Linux driver, 12 bit values >> 2, no black level):
   // 1..4 solid 000h/FFFh/555h/AAAh, 5..10 stripes of 2 columns (555h/AAAh,
   // AAAh/555h, 000h/555h, 555h/000h, 000h/FFFh, FFFh/000h), 11 vertical and
@@ -1572,7 +1585,7 @@ module tb_bow32 #(
     int unsigned yy, c, bar;
     longint unsigned lin, v;
     bit on, odd;
-    yy  = f274_vflip ? f274_h - 1 - y : y;
+    yy  = f274_vflip ? f274_h - 2 - (y & ~32'd1) + (y & 32'd1) : y;
     c   = {yy[0], x[0]};                                   // 0 R, 1 Gr, 2 Gb, 3 B
     odd = x[1];
     case (f274_tp)
@@ -2110,6 +2123,39 @@ module tb_bow32 #(
     expect_text(0, rsp, mark);
   endtask
 
+  // Rate control of `rec n skip kbytes` (video app): the lines "frame k:
+  // <bytes> bytes, QP <qp>, ..." of all n frames; the QP must move at least
+  // once and never against the size error (no lower QP after a frame more
+  // than 12 % above the target, no higher one after a frame more than 12 %
+  // below it), and the second half of the frames within -50 %..+25 % of the
+  // target.
+  function automatic void check_rc(int unsigned from, int unsigned n, int unsigned target);
+    int unsigned b [$], q [$], bytes, qp, moved;
+    string       s;
+    for (int unsigned k = 1; k <= n; k++) begin
+      s = log0_line($sformatf("frame %0d: ", k), from);
+      if ($sscanf(s, "%d bytes, QP %d", bytes, qp) != 2) $fatal(1, "rate control: no line for frame %0d", k);
+      b.push_back(bytes);
+      q.push_back(qp);
+    end
+    moved = 0;
+    for (int unsigned k = 0; k + 1 < n; k++) begin
+      if (q[k + 1] != q[k]) moved++;
+      if ((b[k] * 8 > target * 9 && q[k + 1] < q[k]) || (b[k] * 8 < target * 7 && q[k + 1] > q[k])) begin
+        $fatal(1, "rate control: frame %0d %0d bytes at QP %0d, next QP %0d (target %0d)", k + 1,
+               b[k], q[k], q[k + 1], target);
+      end
+    end
+    for (int unsigned k = n / 2; k < n; k++) begin
+      if (b[k] * 2 < target || b[k] * 4 > target * 5) begin
+        $fatal(1, "rate control: frame %0d %0d bytes at QP %0d, target %0d", k + 1, b[k], q[k], target);
+      end
+    end
+    if (moved == 0) $fatal(1, "rate control: the QP never moved");
+    $display("[%0t] tb   | rate control: %0d frames, QP %0d..%0d, last %0d bytes (target %0d)", $time,
+             n, q[0], q[n - 1], b[n - 1], target);
+  endfunction
+
   // Stream transfer of `send`: "H264 <bytes> <crc> <frames> <w> <h> <num> <den>"
   // line + raw bytes, a stream of ew x eh; written to build/sim/<file> for the
   // decoder check of sim/Makefile (tools/h264/h264_model.py decode --bars).
@@ -2460,6 +2506,25 @@ module tb_bow32 #(
         expect_text(0, "END\nok\n> ", mark);
         if (frames != 3) $fatal(1, "%0d frames in the stream, expected 3", frames);
         video_cmd("stat", "record 3 frames");
+        // rate control (bow_h264_rc_*): 8 frames of the checker pattern at
+        // 1 KiB each, the first QP from the frame size (qp auto); the QP
+        // follows the frame sizes, all 8 frames are recorded and the stream
+        // decodes (sim/Makefile: h264_rc.hex). 3 frames skipped after each
+        // coded one: the test pattern runs at ~4000 fps, faster than the app
+        // prints a line at 1 Mbaud (the new QP must also come before the
+        // next coded frame starts)
+        video_cmd("tpg 2", "tpg 2 64x48");
+        video_cmd("qp auto", "ok\n> ");
+        mark = log0.len();
+        video_cmd("rec 8 3 1", "rec: 8 frames, ");
+        expect_text(0, "ok\n> ", mark);
+        check_rc(mark, 8, 1024);
+        mark = log0.len();
+        rxq0.delete();
+        uart_send_str(0, "send\r");
+        receive_h264(frames, 64, 48, "h264_rc.hex");
+        expect_text(0, "END\nok\n> ", mark);
+        if (frames != 8) $fatal(1, "%0d frames in the rate control stream, expected 8", frames);
       end
       // MKV block cipher with sw/apps/mkv: Annex A of TCVN 14263:2024 on
       // the IP and in software, IP vs software, ECB, errors, CLEAR, the
@@ -2539,15 +2604,21 @@ module tb_bow32 #(
       // IMX274 camera path (Imx274 build) with sw/apps/camera: detection
       // (XCLR reset, reset default signature, 100 kHz I2C), a start before
       // the D-PHY is ready (gives up after 10 ms), then PHY_RDY 1 ms after
-      // the next start: the link is clean at the BISC delays (inside every
-      // eye), so the app keeps them (VT tracked); `cal` then walks the 4
-      // lanes outward from them. Sensor colour bars -> CSI-2 receiver -> ISP
-      // -> capture -> image over UART (RGGB, and GBRG after the vertical flip,
-      // written under REGHOLD: no frame with half of it), AE/AWB on the
-      // scene, a 1920 pixel wide window (readout mode 3 at HMAX 384: receiver
-      // FIFO and ISP at the line rate of the IMX274), stream stop with the
-      // receiver stopped before the sensor standby. Clock lane in HS for a
-      // whole frame.
+      // the next start. The first start calibrates (on the Huins board the
+      // BISC delays sit at the early edge of the eyes): here lane 0 has no
+      // eye at first, the calibration fails and the lanes keep the BISC
+      // delays (loaded back); `margin` then measures around the delays in
+      // use (no calibration: never tap 0). With the eye back the next `cam`
+      // calibrates (walk of the 4 lanes from the delays in use), `cal` again.
+      // AE and AWB are on with a target and a white balance the colour bars
+      // cannot meet: they must not step while the sensor test pattern is on
+      // (no SHR / PGC write, white balance kept). Sensor colour bars ->
+      // CSI-2 receiver -> ISP -> capture -> image over UART (RGGB, also
+      // after the vertical flip, written under REGHOLD: no frame with half
+      // of it), AE/AWB on the scene, a 1920 pixel wide window (readout mode
+      // 3 at HMAX 384: receiver FIFO and ISP at the line rate of the IMX274),
+      // stream stop with the receiver stopped before the sensor standby.
+      // Clock lane in HS for a whole frame.
       "camera274": begin
         expect_text(0, "Bow32 camera demo (ISP + IMX274), type h for help");
         expect_text(0, "camera: IMX274 found (id 0274)");
@@ -2560,18 +2631,36 @@ module tb_bow32 #(
         expect_text(0, "note: 64x48 is below the IMX274 minimum window (simulation only)", mark);
         expect_text(0, "mode 64x48 @1992 fps (HMAX 260 VMAX 139)\nok\n> ", mark);
         video_cmd("tp 11", "ok\n> ");
+        video_cmd("wb 280 230", "ok\n> ");
+        video_cmd("ae 1000", "ok\n> ");
+        video_cmd("awb on", "ok\n> ");
+        s274_ctrl_tp = 0;
         // D-PHY not ready (XPLL lock + BISC still running)
         video_cmd("csi", ", PHY not ready\nok\n> ");
         err_ok = 1'b1;
         video_cmd("cam", "error: D-PHY not ready (CSI2RX STATUS.PHY_RDY = 0)\nerror\n> ");
-        err_ok = 1'b0;
         u_csi.t_phy_rdy = 32'(longint'(csi2_now())) + 1_000_000;
+        // the first start calibrates; lane 0 without an eye: it fails, the
+        // lanes keep (load) the BISC delays, the stream runs
+        u_csi.eye_lo[0] = 600;
+        mark = send_cmd("cam");
+        expect_text(0, "csi2rx: calibration failed\nerror\n> ", mark);
+        err_ok = 1'b0;
+        u_csi.eye_lo[0] = eye274_lo[0];
+        for (int l = 0; l < 4; l++) begin
+          if (u_csi.dly_loads[l] == 0) $fatal(1, "camera: the first start did not calibrate lane %0d", l);
+        end
+        mark = send_cmd("margin 0 2");
+        expect_text(0, "ok\n> ", mark);
+        expect_text(0, "csi2rx: not calibrated: margin around the delays in use 97/112/88/120 (loading them ends the VT tracking)",
+                    mark);
+        expect_text(0, "margin centre taps 97/112/88/120: 2 frames, 0 errors", mark);
+        expect_text(0, "csi2rx: margin ok +-40/+-40/+-40/+-40 taps: 0 errors in 9 x 2 frames", mark);
+        // not calibrated yet: the next start calibrates, from the delays in use
         mark = send_cmd("cam");
         expect_text(0, "streaming 64x48 RGGB\nok\n> ", mark);
-        expect_text(0, "csi2rx: link ok with the delays in use 97/112/88/120 (kept", mark);
-        if (u_csi.dly_loads[0] + u_csi.dly_loads[1] + u_csi.dly_loads[2] + u_csi.dly_loads[3] != 0) begin
-          $fatal(1, "Versal PHY: delays loaded although the link was clean at the BISC delays");
-        end
+        check_cal274("csi2rx: calibrated taps ", mark, 16);
+        expect_text(0, "csi2rx: margin ok +-40/+-40/+-40/+-40 taps: 0 errors in 9 x 8 frames", mark);
         mark = send_cmd("cal");
         expect_text(0, "ok\n> ", mark);
         check_cal274("csi2rx: calibrated taps ", mark, 16);
@@ -2589,9 +2678,11 @@ module tb_bow32 #(
         expect_text(0, "ok\n> ", mark);
         check_counters274(mark, 1'b0);
         video_cmd("sr 3045", "sensor[3045] = 32\nok\n> ");
-        // colour bars in the middle rows: RGGB, then GBRG with the vertical flip
+        // colour bars in the middle rows: RGGB, also with the vertical flip
+        // (ISP BAYER stays 0)
         for (int i = 0; i < 2; i++) begin
           if (i == 1) video_cmd("flip 0 1", "ok\n> ");
+          video_cmd("rd 40006028", "40006028: 00000000\nok\n> ");
           video_cmd("cap 0 22 64 4 0", "captured 64x4 (scale 0)\nok\n> ");
           if (f274_vflip != (i == 1)) $fatal(1, "IMX274: vertical flip %0d at the capture", f274_vflip);
           mark = send_cmd("dump");
@@ -2603,10 +2694,19 @@ module tb_bow32 #(
         video_cmd("flip 1 0", "error: the IMX274 has no horizontal mirror\nerror\n> ");
         err_ok = 1'b0;
         video_cmd("flip 0 0", "ok\n> ");
+        // AE / AWB did not step during the test pattern: no exposure / gain
+        // write, the white balance as set
+        if (s274_ctrl_tp != 0) begin
+          $fatal(1, "IMX274: %0d exposure / gain writes while a test pattern streamed (AE ran)",
+                 s274_ctrl_tp);
+        end
+        mark = send_cmd("info");
+        expect_text(0, "ae on (target 1000)  awb on (r 280 b 230)  source camera", mark);
+        expect_text(0, "ok\n> ", mark);
         // scene: auto exposure (SHR) and gray world white balance
         video_cmd("tp 0", "ok\n> ");
         mark = log0.len();
-        video_cmd("ae on", "ok\n> ");
+        video_cmd("ae 180", "ok\n> ");
         video_cmd("awb on", "ok\n> ");
         expect_text(0, "ae: locked", mark);
         expect_text(0, "awb: locked", mark);
@@ -2659,9 +2759,14 @@ module tb_bow32 #(
       // words, which moves the sync search back into the longest HS-PREPARE
       // at SETTLE 95 ns (false syncs, lost lines; +S274_BURSTRST=0 shows it).
       // make -C sim test-extra also runs the firmware built for the other
-      // setting, BurstRxRst = 0 with SETTLE 115 ns (sim/Makefile FW=brst0).
+      // setting, BurstRxRst = 0 with SETTLE 115 ns (sim/Makefile FW=brst0):
+      // model only, on the Huins board PA5 = 0 broke at the first receiver
+      // re-enable during a stream. Then 'margin' at the taps in use of every
+      // lane (lane 2 moved by 'delay'), and 'stat' with the receiver off
+      // after 'stop' (the 4 lanes of the build).
       "csi2_274": begin
-        int unsigned us, pa5, settle;
+        int unsigned us, pa5, settle, tq [4];
+        string       dl;
         expect_text(0, "csi2_test: Bow32 MIPI CSI-2 receiver test");
         expect_text(0, "camera: IMX274 found (id 0274)");
         expect_text(0, "csi2rx: Bow32 receiver, 4 lanes, PHY clock 200 MHz");
@@ -2687,6 +2792,9 @@ module tb_bow32 #(
         end
         check_cal274("[PASS] calibrate taps ", mark, 32);
         check_margin274(mark);
+        void'($sscanf(log0_line("[PASS] calibrate taps ", mark), "%d/%d/%d/%d", tq[0], tq[1], tq[2],
+                      tq[3]));
+        dl = $sformatf("%0d/%0d/240/%0d", tq[0], tq[1], tq[3]);   // after 'delay 2 240'
         // the PHY setting of the firmware's receiver starts: PA5 (BurstRxRst)
         // and SETTLE = PHY_CFG [7:0] in 5 ns cycles (0x4000_800C: CLK_MISS 5,
         // CLK_SETTLE 30, LP_FILTER 2)
@@ -2700,9 +2808,20 @@ module tb_bow32 #(
         expect_text(0, $sformatf("4000800c: 051e02%02x\nok\n> ", (settle * 200 + 500) / 1000), mark);
         $display("[%0t] tb   | csi2_274: receiver starts with PA5 %0d, SETTLE %0d ns, PHY model BurstRxRst %0d",
                  $time, pa5, settle, u_csi.v_burst_rst);
+        // margin at the taps in use of every lane: lane 2 moved by hand stays
+        // there (centre 240, side points 208 / 272), not back at its
+        // calibrated tap
+        video_cmd("delay 2 240", "lane 2 tap 240: in use\nok\n> ");
+        mark = send_cmd("margin 32 1");
+        expect_text(0, "ok\n> ", mark);
+        expect_text(0, {"margin centre taps ", dl, ": 1 frames, 0 errors"}, mark);
+        expect_text(0, "margin lane2 -32 tap 208: 1 frames, 0 errors", mark);
+        expect_text(0, "margin lane2 +32 tap 272: 1 frames, 0 errors", mark);
+        expect_text(0, "csi2rx: margin ok +-32/+-32/+-32/+-32 taps: 0 errors in 9 x 1 frames", mark);
         inject_errors();
         mark = send_cmd("stat");
         expect_text(0, "ok\n> ", mark);
+        expect_text(0, {", delay ", dl, "\n"}, mark);
         check_counters274(mark, 1'b1);
         mark = send_cmd("raw");
         expect_text(0, "lane 3:", mark);
@@ -2714,6 +2833,11 @@ module tb_bow32 #(
         s274_win_cmd = 1'b0;
         video_cmd("stop", "ok\n> ");
         if (s274_run) $fatal(1, "IMX274: still streaming after 'stop'");
+        // receiver off: the lane lists of 'stat' have the 4 lanes of the build
+        mark = send_cmd("stat");
+        expect_text(0, " sot 0/0/0/0 ovf ", mark);
+        expect_text(0, " d3 ", mark);
+        expect_text(0, {", delay ", dl, "\nok\n> "}, mark);
         video_cmd("start", "streaming 1920x8 RAW10, link check ok\nok\n> ");
         mark = send_cmd("irq");
         expect_text(0, "FS interrupts in 4 frames\nok\n> ", mark);
@@ -2725,16 +2849,20 @@ module tb_bow32 #(
         check_s274_end();
       end
       // Video path with sw/apps/video on the IMX274 (Imx274 build): the
-      // camera start of the video app with the real standby cancel waits
-      // (the app has no `simfast`), the IMX274 timing it programs for the
-      // H.264 encoder, sensor colour bars -> CSI-2 receiver -> ISP (YUV) ->
-      // H.264 encoder at the 200 MHz video clock -> DMA -> video RAM ->
-      // stream over UART0, decoded by sim/Makefile (h264_274a.hex,
-      // h264_274b.hex: tools/h264/h264_model.py decode --bars). A 64x48
-      // window, then 1920x32 at the line length the app sets for the encoder
-      // (the stream restarts): no dropped pixel, 3 frames each, then `stop`
-      // (receiver off before the sensor standby). Clock lane in HS for a
-      // whole frame, D-PHY timing at the shortest HS-PREPARE (corner 2).
+      // sensor model with the datasheet's VMAX reset value 0x905 (the others
+      // run with the board's 0x906), the camera start of the video app with
+      // the real standby cancel waits (the app has no `simfast`) and its
+      // calibration, the IMX274 timing it programs for the H.264 encoder,
+      // sensor colour bars -> CSI-2 receiver -> ISP (YUV) -> H.264 encoder at
+      // the 200 MHz video clock -> DMA -> video RAM -> stream over UART0,
+      // decoded by sim/Makefile (h264_274a.hex, h264_274b.hex:
+      // tools/h264/h264_model.py decode --bars). A 64x48 window, then
+      // 1920x32 at the line length the app sets for the encoder (the stream
+      // restarts): no dropped pixel, 3 frames each, then `stop` (receiver off
+      // before the sensor standby). AE and AWB stay on (the default) with a
+      // target the colour bars cannot meet: no exposure / gain write while
+      // the test pattern is on. Clock lane in HS for a whole frame, D-PHY
+      // timing at the shortest HS-PREPARE (corner 2).
       "video274": begin
         int unsigned frames, coded, w, h, fps, hmax, vmax, load;
         longint      mbc;
@@ -2743,14 +2871,15 @@ module tb_bow32 #(
         expect_text(0, "csi2rx: Bow32 receiver, 4 lanes, PHY clock 200 MHz");
         expect_text(0, "h264: Bow32 encoder, max width 2048, 4 strips; DMA 2 channels; video RAM 1024 KiB");
         expect_text(0, "> ");
-        // AE / AWB off (on by default): on the test pattern AE never locks and
-        // writes the sensor every 3 frames at 100 kHz, which keeps the CPU
-        // away from the shell long enough to lose bytes of a typed command
-        // in the 16 byte UART FIFO
-        video_cmd("ae off", "ok\n> ");
-        video_cmd("awb off", "ok\n> ");
+        // AE / AWB on (the default), AE with a target the bars cannot meet:
+        // while the sensor test pattern is on neither steps (else AE would
+        // write the sensor every 3 frames at 100 kHz, which also keeps the
+        // CPU away from the shell long enough to lose bytes of a typed
+        // command in the 16 byte UART FIFO)
+        video_cmd("ae 1000", "ok\n> ");
         video_cmd("tp 11", "ok\n> ");
         video_cmd("qp 26", "ok\n> ");
+        s274_ctrl_tp = 0;
         for (int k = 0; k < 2; k++) begin
           // 64x48 at the shortest frame (sensor minimum HMAX), then 1920x32
           // at the encoder line length with a short frame (VMAX)
@@ -2800,11 +2929,15 @@ module tb_bow32 #(
                    $time, w, h, hmax, vmax, mbc, load);
           if (load > 100) $fatal(1, "video app: HMAX %0d is too short for the encoder (%0d %%)", hmax, load);
         end
+        if (s274_ctrl_tp != 0) begin
+          $fatal(1, "IMX274: %0d exposure / gain writes while a test pattern streamed (AE ran)",
+                 s274_ctrl_tp);
+        end
         // stop: frame end, receiver off, sensor standby (s274_stop checks)
         mark = s274_stops;
         video_cmd("stop", "ok\n> ");
         if (s274_stops != mark + 1 || s274_run) $fatal(1, "IMX274: not stopped by 'stop'");
-        check_s274_end(1'b0);
+        check_s274_end();
       end
       // Optional (sim/Makefile test-extra): csi2_test starts the IMX274 in a
       // full size mode (+S274_GEO, default 1080p; 720p...): the sensor model
@@ -2872,6 +3005,10 @@ module tb_bow32 #(
       u_csi.t_phy_rdy    = (test == "camera274") ? 32'hFFFF_FFFF : 40_000;
       u_csi.t_reinit     = 40_000;
       u_csi.v_glitch_pct = 20;
+      // VMAX after reset: the board's 0x906, the datasheet's 0x905 in video274
+      s274_vmax_rst = (test == "video274") ? 'h905 : 'h906;
+      if ($value$plusargs("S274_VMAX_RST=%h", contclk)) s274_vmax_rst = contclk;
+      s274_defaults();
       if (test == "camera274" || test == "video274") begin
         eye274_lo = '{40, 60, 30, 70};
         eye274_hi = '{180, 200, 150, 220};

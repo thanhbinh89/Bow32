@@ -11,8 +11,9 @@ Examples:
 
 `rec` starts the source (camera by default: `mode`, `cam`, then waits for
 auto exposure / white balance), records n frames into the 1 MiB video RAM of
-the board (`rec n skip kbytes`: a rate control aims at kbytes per frame,
-default the size that fits), transfers the stream (`send`):
+the board (`rec n skip kbytes`: a rate control aims every frame at the free
+space over the frames still to code, at most kbytes; the first QP from the
+frame size, or --qp), transfers the stream (`send`):
   H264 <bytes> <crc32> <frames> <w> <h> <fps_num> <fps_den>\\r\\n <bytes>  \\r\\nEND
 checks the CRC and writes <output>.h264 (Annex B) and <output>.mp4.
 
@@ -140,7 +141,7 @@ def cmd_rec(cam, args):
         if args.settle > 0:
             print(f"waiting {args.settle:.0f} s for exposure / white balance")
             wait_3a(cam, args.settle)
-    cam.command(f"qp {args.qp}")
+    cam.command(f"qp {args.qp}" if args.qp else "qp auto")
     cam.command("deblock " + ("off" if args.no_deblock else "on"))
     print(f"recording {args.frames} frames (skip {args.skip})")
     cam.record(args.frames, args.skip, args.kbytes)
@@ -163,7 +164,8 @@ def main():
     p.add_argument("-n", "--frames", type=int, default=45)
     p.add_argument("--skip", type=int, default=1, help="input frames dropped between two coded")
     p.add_argument("--kbytes", type=int, default=0, help="target size per frame (0: what fits)")
-    p.add_argument("--qp", type=int, default=30, help="first QP (10..51)")
+    p.add_argument("--qp", type=int, default=0,
+                   help="first QP (10..51; default 0: the board picks it from the frame size)")
     p.add_argument("--no-deblock", action="store_true", help="no deblocking filter in the decoder")
     p.add_argument("--source", default="cam",
                    help="cam (default), tpg<n> (ISP test pattern n, +4 moving) or none (keep)")

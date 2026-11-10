@@ -8,8 +8,28 @@
 ### Added
 - **Camera Sony IMX274 trên Huins MFP-VP1902**: module Leopard LI-IMX274MIPI-FMC qua bo chuyển
   camera của Huins ở khe FMC+01 (một bank XPIO, 705), 4 lane × 1440 Mbit/s, RAW10
-  (`make fpga BOARD=huins_vp1902 CARD=cam`, [docs/camera_huins.md](docs/camera_huins.md)). PDI đã
-  build (timing đạt), **chưa chạy trên bo**.
+  (`make fpga BOARD=huins_vp1902 CARD=cam`, [docs/camera_huins.md](docs/camera_huins.md)). Chạy
+  trên bo lần 1 (2026-11-10, trước khi gộp main): `csi2_test` PASS 15/15 sau hiệu chỉnh, 1080p30
+  và 720p60 không lỗi, sọc màu và cảnh thật đúng màu, H.264 1080p giải mã được; bản gộp main
+  cùng các sửa dưới đây chưa chạy lại trên bo.
+  - Sửa theo lần chạy bo 1: `imx274_probe()` nhận VMAX sau reset 0x906 (cảm biến trên bo) và
+    0x905 (datasheet), MDSEL / HMAX / đọc lại BLKLEVEL vẫn phải khớp; khi không khớp các app in
+    giá trị đã đọc (`cam_print_not_found()`) thay cho gợi ý XCLR sai. `imx274_bayer()` trả RGGB
+    cả khi lật dọc (đo trên bo; mô hình mô phỏng lật theo cặp dòng). `camera` và `video` luôn
+    hiệu chỉnh ở `cam` đầu, cả trên Versal: trễ BISC nằm ở mép sớm của eye (~11 % dòng lỗi
+    CRC; câu hỏi mở của RTL ở docs/camera_huins.md mục 9). PA5 = 1, `SETTLE` 95 ns giữ nguyên
+    (đo: sạch 65–170 ns); PA5 = 0 hỏng trên bo sau lần bật lại bộ thu, bản `FW=brst0` chỉ còn
+    cho mô phỏng. `stat` / `csi` liệt kê đủ lane của bản build khi bộ thu tắt. AE/AWB dừng khi
+    test pattern của cảm biến bật. `rec` của `video`: rate control mới (`bow_h264_rc_*`: đích
+    = chỗ trống còn lại / số frame còn lại, bước QP 6 · log2(kích thước / đích) tối đa ±12, QP
+    đầu theo kích thước frame, `qp auto`, `bow32_video.py --qp` mặc định auto): 30 frame 1080p
+    vừa 1 MiB (lần 1: 20 / 30); test host với kích thước frame của bo và của mô hình H.264
+    (`tools/tests/test_h264_model.py`), test hệ thống `h264` có thêm một bản quay rate control.
+  - Sửa theo review bản gộp: `margin` của `camera` đo quanh trễ đang dùng (không bao giờ tap 0
+    khi chưa hiệu chỉnh), `margin` của `csi2_test` lấy tap đang dùng của mọi lane
+    (`bow_csi2rx_get_delays()`; `DLY_VID`: `[24:16]`); `csi2_model.py` `extra_thr()` giữ 64 cho
+    1–2 lane trên UltraScale+ như stimulus của main; tài liệu: 17 check, `dropped by DT/VC`,
+    FIFO 512 × 45 bit.
   - Bộ thu CSI-2 4 lane (`Lanes` 1, 2 hoặc 4): ghép lane 1/2/4 byte mỗi word, CRC 1–4 byte mỗi
     chu kỳ, `rx_valid_i` (word mới của từng lane), `phy_rdy_i`; nạp tap ở clock video
     (`DlyVid = 1`: không nạp sau reset, mỗi lần ghi `DLYn` đúng một lần nạp); độ sâu FIFO pixel
@@ -57,10 +77,10 @@
     (`sw/common/src/cam_sensor.c`: tự nhận IMX219 hay IMX274); `camera`, `csi2_test`, `video`
     chạy với cả hai. `bow_csi2rx`: 4 lane, chờ `STATUS.PHY_RDY` khi `INFO.DLY_VID` = 1,
     `SETTLE` 95 ns với XPHY, đọc `DLYn` tới khi hai lần đọc khớp, `bow_csi2rx_read_delay()`,
-    `bow_csi2rx_print_delays()`, `bow_csi2rx_forget_delays()`. Trên Versal: ứng dụng giữ trễ
-    BISC khi link sạch (hiệu chỉnh khi có lỗi) và đặt PA5 = 1 (`BurstRxRst`) mỗi lần khởi động
-    bộ thu (`cam_rx_start()`; tuỳ chọn build `CAM_BURST_RST=0` cùng `SETTLE_VID_NS=115` cho cấu
-    hình kia); `csi2_test`
+    `bow_csi2rx_print_delays()`, `bow_csi2rx_forget_delays()`. Trên Versal: ứng dụng hiệu
+    chỉnh ở lần khởi động đầu (như KV260) và đặt PA5 = 1 (`BurstRxRst`) mỗi lần khởi động
+    bộ thu (`cam_rx_start()`; tuỳ chọn build `CAM_BURST_RST=0` cùng `SETTLE_VID_NS=115` chỉ cho
+    mô phỏng); `csi2_test`
     có `phy`, `phy reinit`, `phy burstrst 0|1`, `sensor on|off` và từ chối mode có dòng làm tràn
     FIFO của bộ thu (`mode 4k` cần 1024 nhóm); `video` đặt dòng dài cho H.264 (1080p30 HMAX
     672, 720p30 448: tải ~78 %, như IMX219 trên KV260); AE/AWB ghi IMX274 tối đa một lần mỗi
@@ -72,7 +92,8 @@
   - Mô phỏng: bản `Imx274 = 1` của testbench hệ thống (mô hình IMX274 + PHY Versal: FIFO RX
     8 word như XPHY, word glitch, `BurstRxRst`, khởi động lại PHY), test `camera274`,
     `csi2_274`, `video274` (trong `make test` và CI) và `geo274` cùng các biến thể của
-    `make -C sim test-extra` (cả firmware `FW=brst0`: `BurstRxRst` = 0, `SETTLE` 115 ns); `make
+    `make -C sim test-extra` (cả firmware `FW=brst0`: `BurstRxRst` = 0, `SETTLE` 115 ns, chỉ
+    mô hình); `make
     test` chạy mọi test rồi in tổng kết; `make run` nhận `PLUSARGS`, `RUN_LOG`. Unit test bộ thu: model 4 lane, test `skew` (69 case);
     `csi2_model.py` 4 lane + PHY Versal. `hw/fpga/common/dv/tb_bow_dphy_io_versal.sv` (xsim,
     model XPHY của AMD, 24 cấu hình, `make -C hw/fpga/common/dv test-dphy-versal`, cần Vivado).
