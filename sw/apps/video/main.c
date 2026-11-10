@@ -128,6 +128,9 @@ static void isp_setup(uint32_t bayer) {
 
 static uint32_t frame_ms(void) { return imx219_frame_us(st.fll) / 1000u + 1u; }
 
+/* Timeout of one tap (calibration, margin check): 1.2 frames + 3 ms */
+static uint32_t tap_ms(void) { return imx219_frame_us(st.fll) * 12u / 10000u + 3u; }
+
 static void stop_all(void) {
   if (st.cam) {
     if (st.sensor) imx219_stream(false);
@@ -174,17 +177,46 @@ static int sensor_apply_ctrl(void) {
   return r;
 }
 
+/* Eye calibration, then a short margin check (8 frames per point, k = eye /
+ * 4): a low margin is reported, the calibrated taps stay. */
 static bool calibrate(void) {
   bow_csi2rx_cal_t cal;
-  uint32_t tap_ms = imx219_frame_us(st.fll) * 12u / 10000u + 3u;
-  if (!bow_csi2rx_calibrate(16, tap_ms, &cal, false)) {
+  bow_csi2rx_margin_t m;
+  if (!bow_csi2rx_calibrate(16, tap_ms(), &cal, false)) {
     bow_printf("csi2rx: calibration failed\n");
     return false;
   }
   bow_printf("csi2rx: calibrated taps %u/%u eye %u/%u\n", cal.tap[0], cal.tap[1], cal.width[0],
              cal.width[1]);
   st.calibrated = true;
+  int r = bow_csi2rx_margin(&cal, 0, 8, tap_ms(), &m, false);
+  bow_printf("csi2rx: margin %s", r > 0 ? "ok " : r == 0 ? "low " : "");
+  bow_csi2rx_print_margin(&m, r);
+  bow_puts("\n");
   return true;
+}
+
+/* Calibrate at the first start; later, when the link check with the kept
+ * taps fails with errors a new tap can fix (ERR_STATUS & CSI2RX_ERR_TAP), or
+ * with no error at all: fewer than 64 packets in 2 x tap_ms() (2.4 frames +
+ * 6 ms: the first frame start is up to a frame away, 64 packets take at most
+ * ~1.3 frames), so no data or a very slow link; without a byte clock the
+ * calibration fails cleanly. Other link errors (EXTRA, FORMAT, FRAME, OVF)
+ * are not a sampling problem: the taps are kept. */
+static bool need_calibration(void) {
+  if (!st.calibrated) return true;
+  uint32_t ms = 2u * tap_ms();
+  if (bow_csi2rx_link_check(64, ms)) return false;
+  bow_csi2rx_cnt_t c;
+  bow_csi2rx_counters(&c);
+  uint32_t err = CSI2RX->ERR_STATUS;
+  if (bow_csi2rx_link_errors(&c) == 0) {
+    bow_printf("csi2rx: %u packets in %u ms, no link error: calibrating\n", c.packets, ms);
+    return true;
+  }
+  if (err & CSI2RX_ERR_TAP) return true;
+  bow_printf("csi2rx: link errors (ERR_STATUS %03x), not a sampling problem: taps kept\n", err);
+  return false;
 }
 
 static bool start_cam(void) {
@@ -223,7 +255,7 @@ static bool start_cam(void) {
   st.cam = true;
   st.frames = 0;
   st.ae_locked = st.awb_locked = false;
-  if (!st.calibrated || !bow_csi2rx_link_check(64, 200)) {
+  if (need_calibration()) {
     if (!calibrate()) return false;
     bow_csi2rx_wait_frame(2u * frame_ms());
     ISP->STATUS = ISP_ST_ERRORS;

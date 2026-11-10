@@ -39,6 +39,35 @@ static uint32_t phy_cycles(uint32_t ns, uint32_t mhz) {
   return n < 1u ? 1u : n > 255u ? 255u : n;
 }
 
+/* SETTLE: hs_active (the aligner arm) rises SETTLE + ~(3 + LP_FILTER) video
+ * cycles after the state machine sees LP-00, ~8 ns (LP receiver) after the
+ * pin. The sync search then also looks at the two ISERDES words before it:
+ * its oldest bit is 16..24 UI (20 UI on average) older. That bit must lie
+ * after T_HS-PREPARE max (85 ns + 6 UI: noise before) and before the zero
+ * byte of the earliest sync (T_HS-PREPARE + T_HS-ZERO >= 145 ns + 10 UI, so
+ * 145 ns + 2 UI). The middle, 115 ns + 4 UI, + 20 UI - 8 ns is the target
+ * for hs_active: 107 ns + 24 UI. 912 Mbit/s, 200 MHz: 22 cycles, the oldest
+ * bit at ~111..126 ns, ~20 ns from both ends of 91.6 ... 147.2 ns. */
+static uint32_t settle_cycles(uint32_t lane_rate, uint32_t mhz, uint32_t lp_filter) {
+  if (lane_rate == 0) return phy_cycles(70, mhz);
+  uint64_t ui_ps = 1000000000000ull / lane_rate;
+  uint64_t n = ((107000u + 24u * ui_ps) * mhz + 500000u) / 1000000u;
+  uint64_t lat = 3u + lp_filter;
+  n = n > lat ? n - lat : 1u;
+  return n > 255u ? 255u : (uint32_t)n;
+}
+
+/* CTRL.EXTRA: bytes the end of a burst may add after a packet on every lane
+ * (T_HS-TRAIL max 105 ns + 12 UI, LP-11 detection ~60 ns, + 6 bytes of
+ * pipeline), times the lanes, + 8. */
+static uint32_t extra_bytes(uint32_t lane_rate, uint32_t lanes) {
+  if (lane_rate == 0) return 64u;
+  uint64_t ui_ps = 1000000000000ull / lane_rate;
+  uint64_t per = (165000u + 12u * ui_ps + 8u * ui_ps - 1u) / (8u * ui_ps) + 6u;
+  uint64_t n = per * lanes + 8u;
+  return n > 255u ? 255u : (uint32_t)n;
+}
+
 /* Clock miss timeout: the clock lane FSM sees one edge per byte clock
  * (8 UI), up to one video cycle late after the synchroniser. One byte clock
  * period, rounded up, + 3 cycles of margin: 5 cycles at 912 Mbit/s and
@@ -60,13 +89,14 @@ bool bow_csi2rx_probe(uint32_t *lanes, bool *phy) {
 
 void bow_csi2rx_start(uint32_t lanes, uint32_t dt, uint32_t lane_rate) {
   uint32_t mhz = CSI2RX_INFO_MHZ(CSI2RX->INFO);
-  uint32_t ctrl = (lanes >= 2 ? CSI2RX_CTRL_LANES2 : 0) | CSI2RX_CTRL_DT(dt);
+  uint32_t ctrl = (lanes >= 2 ? CSI2RX_CTRL_LANES2 : 0) | CSI2RX_CTRL_DT(dt) |
+                  CSI2RX_CTRL_EXTRA(extra_bytes(lane_rate, lanes >= 2 ? 2u : 1u));
   /* PHY_CFG and the stream selection only change while the receiver is off;
    * 1 us lets the LP state machines reach their off state. */
   rx_off();
   bow_delay_us(1);
-  CSI2RX->PHY_CFG = CSI2RX_PHY_SETTLE(phy_cycles(70, mhz)) | CSI2RX_PHY_LP_FILTER(2) |
-                    CSI2RX_PHY_CLK_SETTLE(phy_cycles(150, mhz)) |
+  CSI2RX->PHY_CFG = CSI2RX_PHY_SETTLE(settle_cycles(lane_rate, mhz, 2)) |
+                    CSI2RX_PHY_LP_FILTER(2) | CSI2RX_PHY_CLK_SETTLE(phy_cycles(150, mhz)) |
                     CSI2RX_PHY_CLK_MISS(clk_miss_cycles(lane_rate, mhz));
   CSI2RX->CTRL = ctrl;
   CSI2RX->CTRL = ctrl | CSI2RX_CTRL_PHY_EN | CSI2RX_CTRL_RX_EN;
@@ -139,11 +169,20 @@ void bow_csi2rx_counters(bow_csi2rx_cnt_t *c) {
   c->clk_burst = v & 0xFFFFu;
   c->lp_err = (v >> 16) & 0xFFu;
   c->misc_err = v >> 24;
+  v = CSI2RX->CNT_EXT;
+  c->extra = v & 0xFFFFu;
+  c->deskew = v >> 16;
 }
 
 uint32_t bow_csi2rx_link_errors(const bow_csi2rx_cnt_t *c) {
   return c->ecc_corr + c->ecc_err + c->crc + c->trunc + c->sot[0] + c->sot[1] + c->ovf +
-         c->misc_err;
+         c->misc_err + c->extra;
+}
+
+/* the terms of bow_csi2rx_link_errors(): keep both lists in step */
+void bow_csi2rx_print_errors(const bow_csi2rx_cnt_t *c) {
+  bow_printf("ecc %u/%u crc %u trunc %u sot %u/%u ovf %u misc %u extra %u", c->ecc_corr,
+             c->ecc_err, c->crc, c->trunc, c->sot[0], c->sot[1], c->ovf, c->misc_err, c->extra);
 }
 
 bool bow_csi2rx_link_check(uint32_t packets, uint32_t timeout_ms) {
@@ -188,11 +227,9 @@ bool bow_csi2rx_wait_delay(uint32_t timeout_ms) {
 #define CAL_LINES 32u   /* error free accepted lines = good tap */
 #define CAL_BOTH  2u    /* sweep both lanes together */
 
-/* Errors that a bad sampling point causes. Frame errors are not among them:
- * a frame that lost its FS at the previous tap ends with an FE without FS. */
-#define CAL_TAP_ERRORS                                                                       \
-  (CSI2RX_ERR_SOT | CSI2RX_ERR_ECC_CORR | CSI2RX_ERR_ECC | CSI2RX_ERR_CRC | CSI2RX_ERR_TRUNC | \
-   CSI2RX_ERR_SKEW)
+/* Errors that a bad sampling point causes: CSI2RX_ERR_TAP. Frame errors are
+ * not among them: a frame that lost its FS at the previous tap ends with an
+ * FE without FS. */
 
 typedef struct {
   uint32_t step, npts, timeout_ms;
@@ -211,7 +248,7 @@ static int cal_point(uint32_t tap0, uint32_t tap1, uint32_t timeout_ms) {
   uint32_t start = bow_cycles(), limit = ms_cycles(timeout_ms);
   for (;;) {
     uint32_t lines = CSI2RX->CNT_LINE;
-    if (CSI2RX->ERR_STATUS & CAL_TAP_ERRORS) return 0;
+    if (CSI2RX->ERR_STATUS & CSI2RX_ERR_TAP) return 0;
     if (lines >= CAL_LINES) return 1;
     if (expired(start, limit)) return 0;
   }
@@ -328,11 +365,13 @@ bool bow_csi2rx_calibrate(uint32_t step, uint32_t tap_timeout_ms, bow_csi2rx_cal
   }
 
   /* Program the result; the frame received during the change ends, then
-   * start from clean counters. */
+   * start from clean counters. That frame may have lost its frame start at
+   * the last swept tap: its end does not count, the next one is up to about
+   * two frames away. */
   bow_csi2rx_set_delay(0, cal->tap[0]);
   bow_csi2rx_set_delay(1, cal->tap[1]);
   if (!bow_csi2rx_wait_delay(tap_timeout_ms)) goto no_clock;
-  if (!bow_csi2rx_wait_frame(tap_timeout_ms)) {
+  if (!bow_csi2rx_wait_frame(2u * tap_timeout_ms)) {
     if (verbose) bow_puts("no frame end with the new taps\n");
     goto fail;
   }
@@ -345,6 +384,214 @@ fail:
   bow_csi2rx_set_delay(0, old0);
   bow_csi2rx_set_delay(1, old1);
   return false;
+}
+
+/* ----------------------------------------------------------- margin check */
+/* Data lanes in use (CTRL.LANES2), not more than the receiver has. */
+static uint32_t used_lanes(void) {
+  return ((CSI2RX->CTRL & CSI2RX_CTRL_LANES2) && num_lanes() > 1) ? 2u : 1u;
+}
+
+/* Start and end of frame interrupts, polled by the margin check. */
+#define MARGIN_IRQ (CSI2RX_IRQ_FS | CSI2RX_IRQ_FE)
+
+/* One margin point.
+ * at_fe: the previous point has just seen a frame end (it was clean), so no
+ * burst is in flight. The counters are cleared first, then the taps are
+ * written. They load at the next burst, the frame start (or at once with a
+ * continuous clock), so a frame start lost at the new taps counts as an
+ * error of this point. Otherwise the taps are written first, and the events
+ * of the burst in flight pass (50 us) before the counters are cleared.
+ * Then `frames` frame ends, the first sampling error, or timeout_ms without
+ * a frame start or end. The frame in progress may have lost its frame start
+ * at the previous taps, and its end then does not count (IRQ_STATUS.FE needs
+ * the FS): the timer restarts on the first frame start after each frame end.
+ * 1 clean, 0 errors, -1 not measured. */
+static int margin_point(uint32_t tap0, uint32_t tap1, bool at_fe, uint32_t frames,
+                        uint32_t timeout_ms, bow_csi2rx_mpoint_t *p) {
+  bow_csi2rx_cnt_t c;
+  bool fs_restart = true;
+  p->tap[0] = tap0;
+  p->tap[1] = tap1;
+  p->frames = p->lines = p->errors = p->err = 0;
+  p->bits = 0;
+  p->result = -1;
+  if (at_fe) {
+    bow_csi2rx_clear();
+    CSI2RX->IRQ_STATUS = MARGIN_IRQ;
+  }
+  bow_csi2rx_set_delay(0, tap0);
+  bow_csi2rx_set_delay(1, tap1);
+  if (!bow_csi2rx_wait_delay(timeout_ms)) return -1;
+  if (!at_fe) {
+    bow_delay_us(50);
+    bow_csi2rx_clear();
+    CSI2RX->IRQ_STATUS = MARGIN_IRQ;
+  }
+  uint32_t start = bow_cycles(), limit = ms_cycles(timeout_ms);
+  while (p->frames < frames) {
+    uint32_t irq;
+    if (CSI2RX->ERR_STATUS & CSI2RX_ERR_TAP) break;
+    irq = CSI2RX->IRQ_STATUS & MARGIN_IRQ;
+    if (irq) CSI2RX->IRQ_STATUS = irq;
+    if (irq & CSI2RX_IRQ_FE) {
+      p->frames++;
+      start = bow_cycles();
+      fs_restart = true;
+    } else if ((irq & CSI2RX_IRQ_FS) && fs_restart) {
+      start = bow_cycles();
+      fs_restart = false;
+    } else if (expired(start, limit)) {
+      break;
+    }
+  }
+  bow_csi2rx_counters(&c);
+  p->err = CSI2RX->ERR_STATUS;
+  p->lines = c.lines;
+  p->errors = c.sot[0] + c.sot[1] + c.ecc_corr + c.ecc_err + c.crc + c.trunc +
+              ((p->err & CSI2RX_ERR_SKEW) ? 1u : 0u);
+  p->bits = ((uint64_t)c.lines * (CSI2RX_LINE_WC(CSI2RX->LINE_INFO) + 6u) * 8u) >>
+            (used_lanes() - 1u);
+  p->result = p->errors ? 0 : p->frames >= frames ? 1 : -1;
+  return p->result;
+}
+
+/* v with two significant digits, "6.2e8" (below 100 as is) */
+static void print_e(uint64_t v) {
+  uint32_t e = 1;
+  if (v < 100u) {
+    bow_printf("%u", (uint32_t)v);
+    return;
+  }
+  for (; v >= 100u; e++) v /= 10u;
+  bow_printf("%u.%ue%u", (uint32_t)v / 10u, (uint32_t)v % 10u, e);
+}
+
+/* Bit error rate bound after 0 errors in n bits at 95 % confidence:
+ * -ln(0.05) / n = 2.996 / n, rounded up, "4.9e-9". */
+static void print_ber(uint64_t n) {
+  uint64_t num = 2996u, q; /* bound = num / n x 10^e */
+  int32_t e = -3;
+  if (n == 0) {
+    bow_puts("-");
+    return;
+  }
+  while ((q = (num + n - 1u) / n) < 10u) {
+    num *= 10u;
+    e--;
+  }
+  for (; q >= 100u; e++) q = (q + 9u) / 10u;
+  bow_printf("%u.%ue%d", (uint32_t)q / 10u, (uint32_t)q % 10u, (int)(e + 1));
+}
+
+/* lane 2: centre point */
+static void print_point(uint32_t lane, int32_t dk, const bow_csi2rx_mpoint_t *p) {
+  if (lane > 1) {
+    bow_printf("margin centre taps %u/%u: %u frames, %u errors, ", p->tap[0], p->tap[1], p->frames,
+               p->errors);
+  } else {
+    bow_printf("margin lane%u %c%u tap %u: %u frames, %u errors, ", lane, dk < 0 ? '-' : '+',
+               (uint32_t)(dk < 0 ? -dk : dk), p->tap[lane], p->frames, p->errors);
+  }
+  print_e(p->bits);
+  bow_printf(" bits (%u lines)", p->lines);
+  if (p->errors == 0 && p->bits != 0) {
+    bow_puts(", BER < ");
+    print_ber(p->bits);
+  }
+  if (p->err & ~CSI2RX_ERR_TAP) bow_printf(" (ERR_STATUS %03x)", p->err);
+  bow_puts("\n");
+}
+
+int bow_csi2rx_margin(const bow_csi2rx_cal_t *cal, uint32_t k, uint32_t frames,
+                      uint32_t tap_timeout_ms, bow_csi2rx_margin_t *m, bool verbose) {
+  uint32_t nl = used_lanes();
+  int result = 1, r;
+
+  if (frames == 0) frames = 1;
+  for (uint32_t l = 0; l < 2; l++) {
+    uint32_t a = cal->width[l] / 4u;
+    m->k[l] = l >= nl ? 0u : k ? k : a > CSI2RX_MARGIN_MIN ? a : CSI2RX_MARGIN_MIN;
+    for (uint32_t s = 0; s < 2; s++) {
+      m->side[l][s] = (bow_csi2rx_mpoint_t){{0, 0}, 0, 0, 0, 0, 0, -1};
+    }
+  }
+
+  /* Centre (the taps of the calibration), then each side of each lane, back
+   * to back: the next taps are written at once after a point (printing would
+   * move the change into the frame); a clean point has just seen a frame end. */
+  r = margin_point(cal->tap[0], cal->tap[1], false, frames, tap_timeout_ms, &m->centre);
+  if (r == 0) result = 0;
+  for (uint32_t l = 0; r >= 0 && l < nl; l++) {
+    for (uint32_t s = 0; r >= 0 && s < 2; s++) {
+      uint32_t c = cal->tap[l], t;
+      if (s == 0) {
+        t = c > m->k[l] ? c - m->k[l] : 0u;
+      } else {
+        t = c + m->k[l] > CSI2RX_DLY_MAX ? CSI2RX_DLY_MAX : c + m->k[l];
+      }
+      r = margin_point(l == 0 ? t : cal->tap[0], l == 1 ? t : cal->tap[1], r == 1, frames,
+                       tap_timeout_ms, &m->side[l][s]);
+      if (r == 0) result = 0;
+    }
+  }
+  if (r < 0 && result != 0) result = -1; /* errors found before stay the result */
+
+  /* back to the calibrated taps; the frame in progress ends (it may have
+   * lost its frame start at the last point: then the next one), clean
+   * counters */
+  bow_csi2rx_set_delay(0, cal->tap[0]);
+  bow_csi2rx_set_delay(1, cal->tap[1]);
+  if (bow_csi2rx_wait_delay(tap_timeout_ms)) bow_csi2rx_wait_frame(2u * tap_timeout_ms);
+  bow_csi2rx_clear();
+
+  if (verbose) {
+    if (m->centre.result >= 0) print_point(2, 0, &m->centre);
+    for (uint32_t l = 0; l < nl; l++) {
+      for (uint32_t s = 0; s < 2; s++) {
+        const bow_csi2rx_mpoint_t *p = &m->side[l][s];
+        if (p->result >= 0) print_point(l, (int32_t)p->tap[l] - (int32_t)cal->tap[l], p);
+      }
+    }
+    if (r < 0) {
+      bow_puts("margin: a point was not measured: no byte clock, or no frame start or end"
+               " (is the sensor streaming?)\n");
+    }
+  }
+  return result;
+}
+
+void bow_csi2rx_print_margin(const bow_csi2rx_margin_t *m, int result) {
+  uint64_t bits = m->centre.bits;
+  uint32_t n = 1;
+  if (result < 0) {
+    bow_puts("not measured");
+    return;
+  }
+  bow_printf("+-%u", m->k[0]);
+  if (m->k[1]) bow_printf("/+-%u", m->k[1]);
+  bow_puts(" taps: ");
+  if (m->centre.errors) {
+    bow_printf("%u errors at the calibrated taps %u/%u", m->centre.errors, m->centre.tap[0],
+               m->centre.tap[1]);
+    return;
+  }
+  for (uint32_t l = 0; l < 2 && m->k[l]; l++) {
+    for (uint32_t s = 0; s < 2; s++) {
+      const bow_csi2rx_mpoint_t *p = &m->side[l][s];
+      if (p->errors) {
+        bow_printf("lane %u %c%u (tap %u): %u errors after ", l, s ? '+' : '-', m->k[l],
+                   p->tap[l], p->errors);
+        print_e(p->bits);
+        bow_puts(" bits");
+        return;
+      }
+      if (p->bits < bits) bits = p->bits;
+      n++;
+    }
+  }
+  bow_printf("0 errors in %u x %u frames, BER < ", n, m->centre.frames);
+  print_ber(bits);
 }
 
 /* -------------------------------------------------------- log and raw words */
@@ -430,6 +677,7 @@ void bow_csi2rx_print_status(void) {
   bow_csi2rx_counters(&c);
   uint32_t err = bow_csi2rx_link_errors(&c), clk = bow_clk_hz();
   uint32_t st = CSI2RX->STATUS, fi = CSI2RX->FRAME_INFO, li = CSI2RX->LINE_INFO;
+  uint32_t ferr = CSI2RX->FRAME_ERR;
   uint32_t sum = CSI2RX->FRAME_SUM, ft = CSI2RX->FRAME_TIME, lt = CSI2RX->LINE_TIME;
   uint32_t d0 = CSI2RX->DLY[0], d1 = CSI2RX->DLY[1];
   /* BYTECLK covers 65536 CPU cycles: watch it for a whole frame */
@@ -438,18 +686,20 @@ void bow_csi2rx_print_status(void) {
   if (c.packets == 0) {
     bow_puts("csi2rx: no data\n");
   } else if (c.frames > 0 && err == 0 && c.lines == 0) {
-    /* frames without an accepted line: CTRL.DT/VC do not match the stream,
-     * or the sensor sends several packets per HS burst */
+    /* frames without an accepted line: CTRL.DT/VC do not match the stream */
     bow_puts("csi2rx: no lines (DT/VC filter?)\n");
   } else if (c.frames > 0 && err == 0) {
     bow_puts("csi2rx: link ok\n");
   } else {
     bow_puts("csi2rx: link errors\n");
   }
-  bow_printf("  frames %u lines/frame %u wc %u dt %02x sum %08x\n", c.frames,
-             CSI2RX_FRAME_LINES(fi), CSI2RX_LINE_WC(li), CSI2RX_LINE_DT(li), sum);
-  bow_printf("  errors: ecc %u/%u crc %u trunc %u sot %u/%u drop %u ovf %u misc %u\n", c.ecc_corr,
-             c.ecc_err, c.crc, c.trunc, c.sot[0], c.sot[1], c.drop, c.ovf, c.misc_err);
+  bow_printf("  frames %u lines/frame %u wc %u dt %02x sum %08x frame errors %03x\n", c.frames,
+             CSI2RX_FRAME_LINES(fi), CSI2RX_LINE_WC(li), CSI2RX_LINE_DT(li), sum, ferr);
+  bow_puts("  errors: ");
+  bow_csi2rx_print_errors(&c);
+  bow_printf(" (dropped by DT/VC %u)\n", c.drop);
+  if (c.extra) bow_puts("  no LP-11 between packets? (bytes after packets: dropped)\n");
+  if (c.deskew) bow_printf("  deskew bursts %u\n", c.deskew);
   bow_printf("  timing: frame %u us, line %u ns, byte clock %u kHz\n", muldiv(ft, 1000000u, clk),
              muldiv(lt, 1000000000u, clk), byte_hz / 1000u);
   bow_printf("  phy: lp clk %s d0 %s d1 %s, bursts %u/%u clk %u, delay %u/%u\n",

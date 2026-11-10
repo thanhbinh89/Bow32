@@ -20,7 +20,7 @@ package bow_csi2rx_pkg;
   localparam logic [1:0] EccErr  = 2'd2;   // uncorrectable
 
   // Pixel FIFO entry: up to 4 pixels, px0 in [9:0]
-  localparam int unsigned GroupW = 44;     // {sof, eol, cnt-1 [1:0], px3..px0}
+  localparam int unsigned GroupW = 45;     // {err, sof, eol, cnt-1 [1:0], px3..px0}
 
   // CTRL / PHY_CFG fields (CPU domain; synchronised per bit where they are used)
   typedef struct packed {
@@ -31,6 +31,7 @@ package bow_csi2rx_pkg;
     logic       vc_any;
     logic [1:0] vc;
     logic [5:0] dt;
+    logic [7:0] extra;        // bytes after a packet in its burst before ERR EXTRA, 0 = off
     logic [7:0] settle;       // data lane HS settle, video clock cycles
     logic [3:0] lp_filter;
     logic [7:0] clk_settle;
@@ -50,8 +51,9 @@ package bow_csi2rx_pkg;
     logic fs;         // FS of the selected VC
     logic fe;         // FE of the selected VC that completes a frame
     logic frame_err;  // FS inside a frame, FE without FS
-    logic fmt;        // RAW10 line with WC % 5 != 0, RAW8 line with WC = 0
+    logic fmt;        // accepted line with WC = 0, or RAW10 with WC % 5 != 0
     logic ovf;        // pixel FIFO full during an accepted packet
+    logic extra;      // more than CTRL.EXTRA bytes after a packet in its burst
   } csi2_pkt_ev_t;
 
   // All events as seen by the register file (synchronised to clk_i).
@@ -62,6 +64,8 @@ package bow_csi2rx_pkg;
     logic [1:0]   sot;     // sync byte not found, per data lane
     logic [2:0]   hs;      // HS entries: [0] clock lane, [1] lane 0, [2] lane 1
     logic [2:0]   lp_err;  // unexpected LP sequence / watchdog, same order
+    logic         deskew;  // deskew (skew calibration) burst on data lane 0
+    logic         skip;    // the rest of a frame is skipped (bow_csi2_unpack)
   } csi2_ev_t;
 
   // Header ECC (CSI-2 v1.x): data bits D0..D23 = DI[7:0], WC[15:0];

@@ -19,6 +19,9 @@ typedef struct {
   uint32_t w, h, fll;
   uint32_t tp, colour[4];
   bool streaming;
+  /* last eye calibration (calibrate check or `cal`), for the margin check */
+  bool calibrated;
+  bow_csi2rx_cal_t cal;
 } csi2_test_t;
 
 extern csi2_test_t ct;

@@ -16,6 +16,24 @@
 // is released (receiver enabled in the middle of a burst) does not start a
 // search: the next rising edge does.
 //
+// Deskew (D-PHY v1.2 skew calibration) bursts start with HS-zero and the
+// all-ones skew calibration sync FFFFh (16 UI of ones) instead of 0xB8,
+// followed by a 0101... pattern. Such a burst stops the search without a
+// lock and without a sync error (ev_deskew_o). 8 zero bits followed by 8 one
+// bits (w24[o +: 8] == 8'h00, w24[o+8 +: 8] == 8'hFF) make a candidate; the
+// next word must hold 8 more ones at the same offset. Candidates are only
+// taken where the HS-zero leader ends: the oldest word of the window (q2) is
+// a zero word and no 1 bit was seen since the first zero word of the
+// search. Up to two words of HS-PREPARE noise at the start of the search are
+// ignored; if the third word is still not zero, the search did not start in
+// the leader. So a burst whose 0xB8 is corrupted stays a sync error, whatever
+// its data hold (0x00 0xFF in the pixels, the 0xFF trail after a 0x00 byte,
+// a corrupted sync ending in ones followed by a DI with low ones), unless
+// the corrupted sync and the data after it hold 16 ones in a row. A search
+// that starts after the leader (SETTLE too late: the sync is missed anyway)
+// may take a zero header (FS/FE with frame number 0) for a leader. The two
+// patterns can never match within 8 bits of each other.
+//
 // Outputs are flops (one cycle after the word they come from).
 
 module bow_dphy_align (
@@ -27,7 +45,8 @@ module bow_dphy_align (
   output logic [7:0] data_o,         // LSB = first bit on the wire
   output logic       sot_o,          // with the first byte after the sync byte
   output logic       locked_o,
-  output logic       ev_sync_err_o   // pulse: arm_i fell and no sync was found
+  output logic       ev_sync_err_o,  // pulse: arm_i fell and no sync was found
+  output logic       ev_deskew_o     // pulse: deskew burst (all-ones sync)
 );
 
   logic [7:0]  q1_q, q2_q;
@@ -35,9 +54,11 @@ module bow_dphy_align (
   logic [2:0]  off_q;
   logic [23:0] w24;
   logic [15:0] w16;
-  logic [7:0]  hit;
-  logic [2:0]  hit_off;
-  logic        search;
+  logic [7:0]  hit, dsk;
+  logic [2:0]  hit_off, dsk_off, doff_q;
+  logic        search, dpend_q, dsk_ok;
+  logic        zs_q, over_q, fresh, zs, over, lead;
+  logic [1:0]  age_q;
 
   assign w24 = {rx_i, q1_q, q2_q};
   assign w16 = {rx_i, q1_q};
@@ -45,15 +66,30 @@ module bow_dphy_align (
   always_comb begin
     for (int unsigned o = 0; o < 8; o++) begin
       hit[o] = (w24[o +: 8] == 8'h00) && (w24[o + 8 +: 8] == 8'hB8);
+      dsk[o] = lead && (w24[o +: 8] == 8'h00) && (w24[o + 8 +: 8] == 8'hFF);
     end
     hit_off = 3'd0;
+    dsk_off = 3'd0;
     for (int o = 7; o >= 0; o--) begin
       if (hit[o]) hit_off = 3'(o);
+      if (dsk[o]) dsk_off = 3'(o);
     end
   end
 
+  // deskew candidate of the last cycle: the 8 bits after its 8 ones (the
+  // second half of FFFFh) are now at the same offset in the next word
+  assign dsk_ok = dpend_q && (w24[{2'b00, doff_q} +: 16] == 16'hFFFF);
+
   // searching: from the cycle of the rising edge of arm_i until a match
   assign search = arm_i && (search_q || !arm_q);
+
+  // HS-zero leader tracking of the search (deskew only where it ends):
+  // zs a zero word was seen before this cycle, over the leader has ended
+  // (a 1 bit after it, or no zero word in the first 3 words of the search)
+  assign fresh = !arm_q;                       // with search: its first cycle
+  assign zs    = !fresh && zs_q;
+  assign over  = !fresh && over_q;
+  assign lead  = !over && (q2_q == 8'h00);
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
@@ -61,6 +97,11 @@ module bow_dphy_align (
       q2_q          <= '0;
       arm_q         <= 1'b1;
       search_q      <= 1'b0;
+      dpend_q       <= 1'b0;
+      doff_q        <= '0;
+      zs_q          <= 1'b0;
+      over_q        <= 1'b0;
+      age_q         <= '0;
       locked_q      <= 1'b0;
       first_q       <= 1'b0;
       off_q         <= '0;
@@ -68,12 +109,19 @@ module bow_dphy_align (
       data_o        <= '0;
       sot_o         <= 1'b0;
       ev_sync_err_o <= 1'b0;
+      ev_deskew_o   <= 1'b0;
     end else begin
       q1_q          <= rx_i;
       q2_q          <= q1_q;
       arm_q         <= arm_i;
-      search_q      <= search && (hit == '0);
+      search_q      <= search && (hit == '0) && !dsk_ok;
+      dpend_q       <= search && (hit == '0) && (dsk != '0) && !dpend_q;
+      doff_q        <= dsk_off;
+      zs_q          <= zs || (q2_q == 8'h00);
+      over_q        <= over || ((q2_q != 8'h00) && (zs || (!fresh && (age_q == 2'd2))));
+      age_q         <= fresh ? 2'd1 : ((age_q == 2'd2) ? 2'd2 : age_q + 2'd1);
       ev_sync_err_o <= arm_q && !arm_i && search_q;
+      ev_deskew_o   <= search && (hit == '0) && dsk_ok;
 
       if (!arm_i) begin
         locked_q <= 1'b0;

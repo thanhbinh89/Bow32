@@ -57,6 +57,9 @@ lint: deps
 	  { echo "lint: bow_ddr accepted the DDR2 core at 132 MHz (tREFI > 7.8 us)"; exit 1; }
 	@! $(LINT_CMD) -GDdrEn=1\'b1 -GDdrMem=3 -GDdrClkHz=133333333 > /dev/null 2>&1 || \
 	  { echo "lint: bow_ddr accepted the DDR3 core (125 MHz) at 133 MHz"; exit 1; }
+	@# bow_csi2rx: LP event pulses need vid_clk_i <= 16/3 x clk_i
+	@! $(LINT_CMD) -GVidClkHz=300000000 > /dev/null 2>&1 || \
+	  { echo "lint: bow_csi2rx accepted a 300 MHz video clock with a 50 MHz CPU clock"; exit 1; }
 	@echo "lint OK"
 
 sim: deps

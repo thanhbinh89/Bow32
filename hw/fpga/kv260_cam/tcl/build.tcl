@@ -70,6 +70,9 @@ if {[get_property PROGRESS [get_runs synth_1]] ne "100%"} {
   error "synthesis failed, see [get_property DIRECTORY [get_runs synth_1]]/runme.log"
 }
 
+# Post-route physical optimisation: the 200 MHz H.264 macroblock datapath has
+# little slack, a change elsewhere in the design can move it by tens of ps.
+set_property STEPS.POST_ROUTE_PHYS_OPT_DESIGN.IS_ENABLED true [get_runs impl_1]
 launch_runs impl_1 -to_step write_bitstream -jobs $jobs
 wait_on_run impl_1
 if {[get_property PROGRESS [get_runs impl_1]] ne "100%"} {

@@ -193,6 +193,68 @@
 - Đánh giá khả năng làm DDR trên Bow32 và bo RAM mở rộng `FMC_DDR2_HyperRam`: chỉ hợp
   với Arm MPS4 (VEK280 chỉ nối chân LA của FMC+, KV260 không có FMC), góp ý schematic và
   đề xuất sơ đồ chân chỉ dùng LA ([docs/ddr_board_review.md](docs/ddr_board_review.md)).
+- Đánh giá bộ thu CSI-2 cho camera công nghiệp và SoC camera AI: 12 phát hiện có vị trí
+  mã (tràn FIFO làm hỏng khung AXI4-Stream — tái hiện bằng mô phỏng, lỗi CRC không đi
+  theo luồng ảnh, deskew, eye không bù nhiệt, packet sau trong cùng burst bị bỏ không báo
+  lỗi...), bảng khoảng cách theo use case, kiến trúc PPI / nhiều luồng và lộ trình đề xuất
+  ([docs/csi2rx_review.md](docs/csi2rx_review.md)). F1 (nhiều packet trong một burst) đã
+  được sửa lại thành P2: CSI-2 v1.x bắt buộc LP-11 giữa các packet, chỉ máy phát sai chuẩn
+  hay LRTE của v2.0+ mới gửi như vậy.
+- Bộ thu CSI-2, giai đoạn 0 của review ([docs/csi2rx_review.md](docs/csi2rx_review.md)
+  mục 10), chạy trên KV260 (`csi2_test` 18/18):
+  - `m_axis_tuser_o` 2 bit: [1] = dòng lỗi cùng `tlast` (CRC, FORMAT, bị cắt trong payload,
+    Cut khi tràn FIFO, hoặc một dòng trước đó của frame bị mất: FIFO đầy, không có nhóm
+    pixel, burst mất trước unpack vì header không sửa được / lỗi sync / SKEW / EXTRA /
+    packet bị cắt không phải dòng / vào HS bị từ chối ở mức LP). Nhóm FIFO 45 bit.
+  - `tuser[0]` chỉ ở pixel (0, 0): nhóm `sof` không ghi được (FIFO đầy), dòng đầu không có
+    nhóm pixel nào, hoặc một burst mất trước dòng đầu thì cả frame bị bỏ tới FS/FE sau,
+    `ERR_STATUS.SKIP` [11] (đếm trong `CNT_MISC[31:24]`). Dòng mất chỉ được ghi nhận trong
+    frame: dòng ngoài frame không mang `sof`/`err`.
+  - Thanh ghi `FRAME_ERR` (`0x04C`): các bit `ERR_STATUS` của từng frame (từ FE trước tới FE
+    của nó), chốt ở FE, sự kiện tới trong 2 chu kỳ sau FE vẫn thuộc frame vừa kết thúc;
+    thấy được cả dòng mất ở đuôi frame mà luồng ảnh không báo được.
+  - FORMAT: dòng accepted có WC = 0 (cả RAW10), hoặc RAW10 có WC % 5 ≠ 0.
+  - Tràn FIFO giữ khung dòng: dòng đã bắt đầu luôn có `tlast` (nhờ `afull_o` mới của
+    `bow_fifo_async`), FIFO đầy thì bỏ cả dòng.
+  - Burst deskew (HS-zero rồi sync `FFFFh`) không còn là lỗi SOT, nhưng chỉ được nhận ở
+    chỗ HS-zero kết thúc và với đủ 16 bit 1: byte sync hỏng vẫn là lỗi SOT dù dữ liệu sau đó
+    chứa `0x00 0xFF`, hay sync hỏng thành `0xFC`/`0xFE`/`0xFF` trước DI `0x2B`.
+    `CNT_EXT` (`0x048`): [15:0] burst có byte sau packet vượt `CTRL.EXTRA` ([23:16], reset
+    64, `ERR_STATUS.EXTRA` [10]), [31:16] burst deskew.
+  - Ghi thanh ghi theo byte enable.
+  - Tham số `CpuClkHz` của `bow_csi2rx`: elaborate báo lỗi khi `vid_clk_i` > 16/3 × `clk_i`
+    (`bow32_top` truyền `ClkFreqHz`; `make lint` có case âm 50/300 MHz; mô phỏng dừng bằng
+    `$fatal` cả khi Verilator build với `-Wno-fatal`).
+  - Driver: `SETTLE` đặt bit cũ nhất aligner xét (nó nhìn lùi 2 word ISERDES) vào giữa
+    85 ns + 6 UI … 145 ns + 2 UI (22 ở 912 Mbit/s và 200 MHz; IMX219 trên board chạy sạch ở
+    6…30); `CTRL.EXTRA` theo tốc độ lane; `extra` trong bộ đếm và
+    `bow_csi2rx_link_errors()`; `CSI2RX_ERR_TAP`, `CSI2RX_ERR_SKIP`, `FRAME_ERR`,
+    `bow_csi2rx_print_errors()`; kiểm tra lề sau hiệu chỉnh `bow_csi2rx_margin()` (tâm và
+    tâm ± eye/4 mỗi lane, chỉ báo, BER theo số bit đã kiểm; sau một điểm sạch xoá bộ đếm
+    trước khi ghi tap, timer khởi động lại ở FS nên frame mất FS không làm điểm sau "not
+    measured", lỗi đã thấy vẫn là kết quả).
+  - `csi2_test`: check `margin` (dữ liệu PN9, 60 frame mỗi điểm), lệnh `margin [k]
+    [frames]`, mỗi frame được kiểm cũng phải có `FRAME_ERR` = 0, dòng lỗi in đủ các bộ đếm
+    (cả `extra`); `start` báo "no data" khi không có packet. `camera`, `video`: kiểm tra lề 8
+    frame mỗi điểm sau mỗi lần hiệu chỉnh; chỉ hiệu chỉnh lại khi link check (2,4 frame +
+    6 ms) lỗi do tap hoặc không có dữ liệu (khi đó `cam` báo `calibration failed`, `error`),
+    lỗi khác giữ tap; `camera` có lệnh `margin`.
+  - DV: case `ovf` so từng pixel khi tràn FIFO; case mới `deskew`, `extra`, `loss`, `ovf2`,
+    `ovf8`, `be` và unit test aligner `tb_dphy_align.sv` (53 case, nhiều case chạy cả với 1
+    lane, 1 trên 2 lane và clock liên tục); lệnh `wrbe`, byte sau packet và burst thô (skew
+    calibration) trong `stim.txt`; cột `tuser[1]` trong `out.txt`, `FRAME_ERR` trong bản
+    ghi `fe`; mô hình tính đầu ra giữ 3 nhóm khi nhóm đầu có 1 pixel; `BOW_CDC_JITTER`
+    (chỉ mô phỏng) cho `bow_cdc_pulse` nhận toggle muộn một chu kỳ ngẫu nhiên; 57 mutant
+    RTL đều bị bắt; 29 unit test.
+  - Test mức chân xsim: giá trị của driver, burst skew calibration, T_EOT max, T_HS-PREPARE
+    min/max với HS-ZERO đúng tối thiểu trên mọi lane và sync giả ở cuối HS-PREPARE; kiểm
+    white-box cửa sổ dò đầu tiên bắt đầu trong HS-zero; quét `+SETTLE=`: 20…28 đạt.
+  - SoC sim `camera`: `cam` lại với tap giữ nguyên, lỗi FRAME (`taps kept`), cảm biến im
+    lặng (`error`). SoC sim `csi2`: margin khi eye trôi với thời gian frame như cảm biến
+    thật và điểm lỗi không phải điểm cuối.
+  - `kv260_cam`: `phys_opt_design` sau route (đường macroblock H.264 ở 200 MHz thiếu
+    26 ps sau thay đổi này); WNS +0,005 ns, bus skew đạt. KV260: `csi2_test` 18/18,
+    `camera` và `video` chạy đúng.
 - Review IP DDR theo mục tiêu công nghiệp và SoC camera AI: băng thông (cửa sổ 32 bit
   5 / 3,6 MB/s, DRAM 267 MB/s, cần ≈ 1–2 GB/s), refresh 3,9 µs khi Tc > 85 °C, ECC, bám pha
   theo nhiệt, QoS, DFI chuẩn cho PHY ASIC; lộ trình P0–P3

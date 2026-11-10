@@ -7,14 +7,15 @@
 //   DIR/cfg.txt   settings ('key value': lanes, clock mode, D-PHY timing, eye, ...)
 //   DIR/stim.txt  commands, executed in order by the main process:
 //     rd A / wr A D / poll A MASK VALUE US    register access (hex)
+//     wrbe A D BE                             write with byte enables (hex)
 //     pkt ...                                 one burst for csi2_tx_model (see Burst in the model)
 //     lp MASK LP NS / idle NS / clkon         LP states, idle time, continuous clock start
 //     clkburst NS                             clock lane only burst (deferred work)
 //     wait / delay NS / waitbyte BURST BYTE   wait for the TX model to finish / time / burst progress
 //     tready PCT / knob NAME V / mark N       m_axis tready duty, TX knob, segment marker
 //   and writes
-//   DIR/out.txt   one line per m_axis transfer: pixel tuser tlast, and 'mark N'
-//   DIR/regs.txt  rd/poll results, 'fe FRAME_INFO FRAME_SUM' for every frame end
+//   DIR/out.txt   one line per m_axis transfer: pixel tuser[0] tlast tuser[1], and 'mark N'
+//   DIR/regs.txt  rd/poll results, 'fe FRAME_INFO FRAME_SUM FRAME_ERR' for every frame end
 //                 (IRQ_STATUS.FE polled during wait/delay/poll and cleared),
 //                 per segment invariants ('inv SEG NAME VALUE'), burst end
 //                 times ('tend BURST PS') and 'end'
@@ -48,7 +49,8 @@ module tb_bow_csi2rx;
   bus_rsp_t rsp;
   logic     irq;
 
-  logic                  m_tvalid, m_tuser, m_tlast;
+  logic                  m_tvalid, m_tlast;
+  logic [1:0]            m_tuser;
   logic                  m_tready = 1'b1;
   logic [9:0]            m_tdata;
   logic                  byte_clk, byte_ce, byte_rst, clk_hs_en;
@@ -61,6 +63,7 @@ module tb_bow_csi2rx;
   bow_csi2rx #(
     .Lanes     (Lanes),
     .PhyClkHz  (PhyClkHz),
+    .CpuClkHz  (1_000_000_000 / (CpuPs / 1000)),
     .HasPhy    (1'b1),
     .FifoDepth (FifoDepth)
   ) dut (
@@ -110,7 +113,9 @@ module tb_bow_csi2rx;
   int unsigned tready_pct = 100;
 
   always @(posedge vclk) begin
-    if (m_tvalid && m_tready) $fwrite(out_fd, "%03x %0d %0d\n", m_tdata, m_tuser, m_tlast);
+    if (m_tvalid && m_tready) begin
+      $fwrite(out_fd, "%03x %0d %0d %0d\n", m_tdata, m_tuser[0], m_tlast, m_tuser[1]);
+    end
     #0.5;
     m_tready = ($urandom_range(99) < tready_pct);
   end
@@ -163,12 +168,12 @@ module tb_bow_csi2rx;
 
   // ---------------------------------------------------------------- bus BFM
   task automatic bus_xfer(input bit we, input logic [31:0] addr, input logic [31:0] wdata,
-                          output logic [31:0] rdata);
+                          output logic [31:0] rdata, input logic [3:0] be = 4'hF);
     bus_req_t r;
     r       = BUS_REQ_DEFAULT;
     r.req   = 1'b1;
     r.we    = we;
-    r.be    = 4'hF;
+    r.be    = be;
     r.addr  = addr;
     r.wdata = wdata;
     @(posedge clk);
@@ -182,13 +187,14 @@ module tb_bow_csi2rx;
 
   // One poll of IRQ_STATUS.FE (frame end records), then `cycles` CPU cycles
   task automatic service(input int unsigned cycles);
-    logic [31:0] st, info, fsum, unused;
+    logic [31:0] st, info, fsum, ferr, unused;
     bus_xfer(1'b0, 32'h014, '0, st);
     if (st[1]) begin
       bus_xfer(1'b0, 32'h050, '0, info);
       bus_xfer(1'b0, 32'h058, '0, fsum);
+      bus_xfer(1'b0, 32'h04C, '0, ferr);
       bus_xfer(1'b1, 32'h014, 32'h2, unused);
-      $fwrite(regs_fd, "fe %08x %08x\n", info, fsum);
+      $fwrite(regs_fd, "fe %08x %08x %03x\n", info, fsum, ferr);
     end
     repeat (cycles) @(posedge clk);
   endtask
@@ -225,16 +231,20 @@ module tb_bow_csi2rx;
     endcase
   endfunction
 
-  // 'pkt VC DT WC HFLIP_A HFLIP_B PFLIP TRUNC SYNC0 SYNC1 ZEROS0 ZEROS1 PHASE0 PHASE1 ZERO_NS PAYLOAD'
+  // 'pkt VC DT WC HFLIP_A HFLIP_B PFLIP TRUNC SYNC0 SYNC1 ZEROS0 ZEROS1 PHASE0 PHASE1 ZERO_NS
+  //  PAYLOAD [EXTRA]': EXTRA = bytes sent after the packet in the same burst;
+  //  VC < 0: a raw burst of the EXTRA bytes only (no packet), e.g. skew calibration
   function automatic void push_pkt(string line);
     int          vc, dt, wc, hf0, hf1, pf, tr, s0, s1, z0, z1, p0, p1, zns, n;
-    string       pay;
+    string       pay, ext;
     csi2_flags_t f;
     csi2_bytes_t b;
+    logic [15:0] c;
     pay = "";
-    n = $sscanf(line, "pkt %d %h %h %d %d %d %d %h %h %d %d %d %d %d %s", vc, dt, wc, hf0, hf1, pf,
-                tr, s0, s1, z0, z1, p0, p1, zns, pay);
-    if (n != 15) $fatal(1, "bad pkt line: %s", line);
+    ext = "-";
+    n = $sscanf(line, "pkt %d %h %h %d %d %d %d %h %h %d %d %d %d %d %s %s", vc, dt, wc, hf0, hf1,
+                pf, tr, s0, s1, z0, z1, p0, p1, zns, pay, ext);
+    if (n != 15 && n != 16) $fatal(1, "bad pkt line: %s", line);
     f = csi2_flags();
     f.hdr_flip_a = 8'(hf0);
     f.hdr_flip_b = 8'(hf1);
@@ -244,14 +254,31 @@ module tb_bow_csi2rx;
     f.zeros      = {8'(z1), 8'(z0)};
     f.phase      = {4'(p1), 4'(p0)};
     f.zero_ns    = 16'(zns);
-    if (dt < 'h10) begin
+    if (ext == "-" && dt < 'h10) begin
       u_tx.push_short(vc, dt, wc, f);
-    end else begin
+    end else if (ext == "-") begin
       b.delete();
       if (pay != "-") begin
         for (int i = 0; i + 1 < pay.len(); i += 2) b.push_back(8'(pay.substr(i, i + 1).atohex()));
       end
       u_tx.push_long(vc, dt, b, f);
+    end else begin
+      // packet + extra bytes in one burst (raw bytes, as push_short/push_long build them)
+      if (vc < 0) b.delete();
+      else        b = csi2_header(vc, dt, wc);
+      if (vc >= 0 && dt >= 'h10) begin
+        csi2_bytes_t p;
+        p.delete();
+        if (pay != "-") begin
+          for (int i = 0; i + 1 < pay.len(); i += 2) p.push_back(8'(pay.substr(i, i + 1).atohex()));
+        end
+        foreach (p[i]) b.push_back(p[i]);
+        c = csi2_crc(p);
+        b.push_back(c[7:0]);
+        b.push_back(c[15:8]);
+      end
+      for (int i = 0; i + 1 < ext.len(); i += 2) b.push_back(8'(ext.substr(i, i + 1).atohex()));
+      u_tx.push_burst(b, f);
     end
   endfunction
 
@@ -304,6 +331,10 @@ module tb_bow_csi2rx;
         "wr": begin
           n = $sscanf(line, "wr %h %h", a, d);
           bus_xfer(1'b1, a, d, unused);
+        end
+        "wrbe": begin
+          n = $sscanf(line, "wrbe %h %h %h", a, d, m);
+          bus_xfer(1'b1, a, d, unused, 4'(m));
         end
         "poll": begin
           n = $sscanf(line, "poll %h %h %h %d", a, mask, val, us);

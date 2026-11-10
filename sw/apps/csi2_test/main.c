@@ -23,6 +23,8 @@ static const char help[] =
     "  start | stop        stream from the sensor / stop it\n"
     "  stat                receiver status: link, counters, timing, PHY state\n"
     "  cal [step]          calibrate the data lane delays while streaming (step 16)\n"
+    "  margin [k] [frames] errors at the taps in use and k taps around them\n"
+    "                      (k 0: eye / 4 of the last calibration; 60 frames per point)\n"
     "  delay <lane> <tap>  set the delay tap (0..511) of a data lane\n"
     "  log [fs] [fe]       log of 64 packets: now, from the next FS, up to an FE\n"
     "  raw [now]           64 raw PHY words per lane from the next HS burst (or now)\n"
@@ -239,9 +241,19 @@ static bool execute(const char *line) {
     if (!need_phy()) return false;
     if (ct.streaming) stream_stop();
     if (!stream_start(true)) return false;
-    bool ok = bow_csi2rx_link_check(64, 4u * tap_timeout_ms());
-    bow_printf("streaming %ux%u RAW%u, link check %s\n", ct.w, ct.h, imx219_format(),
-               ok ? "ok" : "failed (try cal)");
+    uint32_t ms = 4u * tap_timeout_ms();
+    bool ok = bow_csi2rx_link_check(64, ms);
+    bow_csi2rx_cnt_t c;
+    bow_csi2rx_counters(&c);
+    uint32_t err = CSI2RX->ERR_STATUS;
+    bow_printf("streaming %ux%u RAW%u, link check %s", ct.w, ct.h, imx219_format(),
+               ok ? "ok\n" : "failed");
+    if (!ok && bow_csi2rx_link_errors(&c) == 0) {
+      bow_printf(": no data (%u packets in %u ms, stat)\n", c.packets, ms);
+    } else if (!ok) {
+      bow_printf(" (ERR_STATUS %03x)%s\n", err,
+                 (err & CSI2RX_ERR_TAP) ? ", try cal" : ", not a sampling problem (stat)");
+    }
     return true;
   }
   if ((a = match(line, "stop"))) {
@@ -263,7 +275,27 @@ static bool execute(const char *line) {
     }
     bow_printf("csi2rx: calibrated taps %u/%u eye %u/%u\n", cal.tap[0], cal.tap[1], cal.width[0],
                cal.width[1]);
+    ct.cal = cal;
+    ct.calibrated = true;
     return true;
+  }
+  if ((a = match(line, "margin"))) {
+    bow_csi2rx_margin_t m;
+    uint32_t k = 0, frames = 60;
+    if ((a = parse_num(a, &k))) parse_num(a, &frames);
+    if (frames == 0 || k > CSI2RX_DLY_MAX) return false;
+    if (!ct.streaming || !ct.calibrated) {
+      bow_printf("error: not streaming or not calibrated (start, cal)\n");
+      return false;
+    }
+    /* around the taps in use (`delay`), k from the eye of the last calibration */
+    bow_csi2rx_cal_t c = ct.cal;
+    for (uint32_t l = 0; l < 2; l++) c.tap[l] = CSI2RX_DLY_TAP(CSI2RX->DLY[l]);
+    int r = bow_csi2rx_margin(&c, k, frames, tap_timeout_ms(), &m, true);
+    bow_printf("csi2rx: margin %s", r > 0 ? "ok " : r == 0 ? "low " : "");
+    bow_csi2rx_print_margin(&m, r);
+    bow_puts("\n");
+    return r > 0;
   }
   if ((a = match(line, "delay"))) {
     if (!(a = parse_num(a, &v)) || !parse_num(a, &v2) || v >= ct.lanes || v2 > CSI2RX_DLY_MAX) {
