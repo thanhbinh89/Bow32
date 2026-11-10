@@ -6,6 +6,12 @@
 ## [Unreleased]
 
 ### Added
+- Đặc tả kiến trúc bộ thu MIPI cho ASIC, chưa có RTL ([docs/ip/mipi_rx_arch.md](docs/ip/mipi_rx_arch.md)):
+  camera → AFE (D-PHY analog) → giao diện AFE → D-PHY số `bow_dphy_rx` → PPI → bộ điều khiển
+  CSI-2; hợp đồng AFE có timing bằng số (phát / bắt nửa chu kỳ trên `hs_byte_clk`, `des_rst`
+  chỉ xoá đường dữ liệu, `clk_act` bắt buộc cho 80 Mbit/s), thanh ghi D-PHY ở `0x4000_8C00`
+  (không alias), hồ sơ PPI cho PHY / controller của hãng khác, bộ máy deskew không cần byte
+  tham chiếu, cổng sẵn sàng ASIC và kế hoạch chuyển theo bước 0–11 giữ mọi build và test.
 - **Camera Sony IMX274 trên Huins MFP-VP1902**: module Leopard LI-IMX274MIPI-FMC qua bo chuyển
   camera của Huins ở khe FMC+01 (một bank XPIO, 705), 4 lane × 1440 Mbit/s, RAW10
   (`make fpga BOARD=huins_vp1902 CARD=cam`, [docs/camera_huins.md](docs/camera_huins.md)).
