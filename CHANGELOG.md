@@ -6,6 +6,110 @@
 ## [Unreleased]
 
 ### Added
+- **Bo Huins MFP-VP1902** (`hw/fpga/huins_vp1902`, AMD Versal Premium xcvp1902): Bow32 với DDR2
+  và HyperRAM của bo RAM mở rộng FMC+_DDR2_HyperRam ở khe FMC+ (mặc định FMC+10), image PDI nạp
+  qua USB JTAG (`make fpga BOARD=huins_vp1902`, `make fpga-jtag BOARD=huins_vp1902`,
+  [docs/ddr_huins.md](docs/ddr_huins.md)).
+  - Clock trên Versal: `bow_ddr_clk_versal` (2 MMCME5: pha ghi `wclk` / `wclk90` là hai đầu
+    ra dịch pha động của cùng một MMCM, không còn tầng MMCM_W) và `bow_hyperram_clk_versal`;
+    768 / 1024 bước dịch pha mỗi CK; clock vào là dao động 200 MHz cố định của bo
+    (`CLK_SRC=ref200`; clock PL của khe, `CLK_SRC=site`, chưa dùng được: chưa có bias đầu vào
+    đã kiểm, clock module đang ở 16 MHz).
+  - `bow_ddr_io_xilinx` / `bow_hyperram_io_xilinx`: tham số `TFromOddr` (mặc định 0, MPS4
+    không đổi): trên XPIO của Versal, T của mỗi chân hai chiều lấy từ một ODDRE1 trong site
+    của chân (DRC PDCN-2749).
+  - Không có số chân FPGA của Huins trong repo (tài liệu của Huins là tài liệu mật):
+    `constr/pins.txt` ghi cổng → net của bo, `tools/huins_pins.py` sinh XDC chân từ netlist
+    trong bản sao cục bộ lúc build.
+  - Chạy trên bo (2026-11-09, bo RAM ở FMC+10): DDR2 self-test 21/21, `verify` 40/40, BIST
+    214 MB/s, lần đầu IP DDR2 chạy với chip DDR2 thật; HyperRAM self-test 19/19, `verify`
+    40/40, BIST 188 / 180 MB/s (sau lần chạy chip thật trên MPS4).
+  - Kiểm chứng: cấu hình `vcard`/`vx16`/`vlb` (DDR) và `vcard`/`vdirect`/`vlb` (HyperRAM) của
+    testbench chân trong xsim, `test-vclk` (hai wrapper clock MMCME5), `make mutants` 117 bản.
+- Review bo RAM mở rộng `FMC_DDR2_HyperRam` (cả DDR2 và HyperRAM, cơ khí, BOM) và khả năng lắp
+  trên Arm MPS4 và Huins MFP-VP1902 ([docs/fmc_ram_card_review.md](docs/fmc_ram_card_review.md)):
+  53 chân của bo đối chiếu với XDC của MPS4 và netlist của cả 8 khe FMC+ của Huins; chỉ cấp
+  nguồn khi VADJ ≥ 1,5 V; DQ và DQS của DDR2 ở hai level shifter khác nhau (lệch không hiệu
+  chỉnh được); bo dài ~84 mm (chuẩn 76,5 mm); MPS4 test được ngay với bản build bo RAM, Huins
+  cần port (Vivado trên xcvp1902: T của chân hai chiều phải lấy từ TDDR cùng site, DRC
+  PDCN-2749); bảng chức năng IP test được trên mỗi board; đề xuất rev-B.
+- `bow_bus_deny` (`hw/ip/bus`): tường lửa trước một host, yêu cầu tới một cửa sổ địa chỉ
+  trả lỗi bus; `bow32_top` dùng nó để chặn DMA khỏi thanh ghi MKV. NMI của Ibex nối vào
+  alert nghiêm trọng của MKV.
+- **DDR: độ tin cậy cho mục tiêu công nghiệp** (P0 của
+  [docs/ddr_review_industrial_ai.md](docs/ddr_review_industrial_ai.md)):
+  - Refresh theo nhiệt độ: lõi LiteDRAM refresh mỗi 3,87 µs (Tc 85..95 °C); `CTRL.REF_NORM`
+    cho bộ đếm refresh của lõi chạy chu kỳ gấp đôi (7,74 µs, Tc ≤ 85 °C), có hiệu lực từ lần
+    refresh kế tiếp.
+  - Giám sát refresh: `CTRL.REF_MON`, `STATUS.REF_STARVE` + ngắt sau 8 khoảng không có REF,
+    khoảng REF dài nhất ở `ST_RGAP` (`0x0BC`).
+  - Khoá cấu hình `CTRL.LOCK` (chỉ reset SoC xoá): `CTRL`/`LAT`/pha, lệnh (trừ `SNAP`,
+    `CLR_STATS`) và ghi CSR LiteDRAM bị từ chối, `STATUS.LOCK_ERR`.
+  - Firmware: chính sách refresh (`bow_ld_set_refresh_norm`), bật giám sát sau bàn giao, tắt
+    trong đoạn DFII; telemetry độ rộng mắt (% chu kỳ CK, cảnh báo dưới 25 %); lệnh
+    `refresh`, `lock`; March C- trong `memtest`; self-test 21 mục (thêm tốc độ refresh, giám
+    sát refresh, March C-).
+  - Kiểm chứng: bước refresh / giám sát / `LOCK` trong `tb_bow_ddr`, `LOCK` qua reset SoC
+    trong `tb_bow_ddr_rst`, mô hình DRAM kiểm thêm nợ REF trung bình theo JEDEC (hoãn tối đa
+    8, trả trước tối đa 8) với chế độ nóng `hot_i`; `make -C hw/ip/ddr/dv regress NSEEDS=n` và workflow hằng đêm
+    `ddr-nightly.yml` (25 seed).
+- **HyperRAM** `bow_hyperram` (`hw/ip/hyperram`): bộ điều khiển HyperBus tự viết cho
+  HyperRAM 2.0 x8 (Infineon S80KS2562, 32 MiB) của bo RAM mở rộng. Cửa sổ 256 MiB ở
+  `0x6000_0000` (device thứ 9 của main crossbar, 32 MiB có thiết bị, ngoài vùng → lỗi bus),
+  thanh ghi ở `0x4000_F000`, ngắt `irq_fast[12]` ([docs/ip/hyperram.md](docs/ip/hyperram.md)).
+  - Controller (miền CK): bộ thực thi lệnh (APPLY, bước pha đọc/ghi, chụp thô, HW_RESET,
+    đọc/ghi CR0/CR1, WAKE, BIST, thống kê), lịch giao dịch theo HyperBus (CA 48 bit, latency
+    1×/2× cố định hoặc theo RWDS, mặt nạ RWDS khi ghi, burst tuyến tính / wrapped), mọi
+    thông số thời gian là thanh ghi tính từ tần số CK, giao dịch vượt tCSM bị từ chối, CS#
+    giữ thấp thêm `RD_HOLD` chu kỳ sau word đọc cuối, bản sao CR0/CR1 và trạng thái nguồn
+    (deep power down, hybrid sleep) giữ qua reset SoC.
+  - Cửa sổ bus: read buffer 4 line × 32 byte (line fill wrapped, word cần trước), ghi
+    posted gộp khối 32 byte (đẩy thành một burst), write-through, `NOT_READY` / `RANGE` /
+    timeout → `BROKEN` tới `CORE_RST`; hai FIFO 2 clock (gray) tới controller.
+  - PHY: `ODDRE1`/`IDDRE1` qua wrapper chân của bo, FIFO đọc 2 clock chạy liên tục, bộ căn
+    dữ liệu theo RWDS (chế độ `STRICT` báo lỗi thay vì trả dữ liệu lệch), chụp thô 64 chu
+    kỳ; điều khiển DIR/OE của level shifter TXV0108 theo từng chu kỳ.
+  - BIST trong phần cứng (PRBS xorshift32 / đếm, đo băng thông thật của HyperBus).
+  - HyperRAM giả lập tổng hợp được `bow_hyperram_dev` (UltraRAM, kiểm tra giao thức, mã lỗi
+    ở `DBG`) cho bản loopback trên bo khi chưa có chip.
+  - `HrEn = 0`: bản stub (KV260).
+- Driver `sw/common/src/bow_hyperram.c` (khởi tạo, hiệu chỉnh pha đọc bằng chụp thô và pha
+  ghi, BIST, nguồn), ứng dụng `sw/apps/hyperram` (shell, self-test 19 mục) và
+  `tools/bow32_hyperram.py` (self-test, hiệu chỉnh, mắt đọc, băng thông, `verify` so dữ liệu
+  đọc lại với mô hình Python của BIST và xorshift).
+- Mô phỏng: test hệ thống `hyperram` (firmware thật trên SoC + mô hình clock/pad + HyperRAM
+  giả lập); `hw/ip/hyperram/dv`: mô hình S80KS2562 mức chân viết từ datasheet (thời gian,
+  thanh ghi, mọi kiểu burst, nguồn, 21 bộ đếm vi phạm), mô hình bo TXV0108 (độ trễ theo seed,
+  tranh chấp, đầu vào thả nổi), mô hình clock MMCM và pad twin; `tb_bow_hyperram` lái IP như
+  driver ở 5 cấu hình (loopback, bo RAM, nối thẳng 166 MHz, stub, chip tắt DQ sớm), trong
+  `make test-ip` và CI (Verilator 5.020); `tb_bow_hyperram_io_xilinx`
+  (xsim, unisim) cho hai wrapper chân / clock của bo, cấu hình bo RAM / nối thẳng / loopback,
+  và 42 bản đột biến của hai wrapper trong `make -C hw/fpga/common/dv mutants` (đều bị bắt).
+- Đã chạy trên Arm MPS4 (bản loopback, 2026-11-07, hai lượt): self-test 19/19 (cả sau `RESET`
+  của MCC), `verify` 340/340 case so với mô hình Python, BIST trên toàn 1 MiB 0 lỗi ở 184,4 MB/s
+  (đỉnh 200 MB/s), hybrid sleep / deep power down, 24/24 lần `init` từ 24 pha xuất phát; DDR 18/18
+  trên cùng bitstream. Trên bo lộ ra một lỗi của hiệu chỉnh đọc (đã sửa: bản đồ mắt gập theo T/2,
+  [docs/ip/hyperram.md](docs/ip/hyperram.md) mục 4). Sau review của PR #6 (42 / 49 phát hiện được
+  xác nhận, đều đã sửa) chạy lại 2026-11-08: self-test 19/19 ba lượt, `verify` 60/60, DDR 18/18.
+  Vòng review thứ hai (của chính các bản sửa) xác nhận thêm 5 phát hiện; khi viết test hồi quy
+  cho từng bản sửa (mục 9b của testbench IP) lộ thêm hai lỗi RTL quanh reset kênh (POWER đọc
+  "hoạt động" ngay sau reset kênh giữa lúc hồi phục; reset kênh cắt ngang xung WAKE), đều đã sửa.
+  `make -C hw/ip/hyperram/dv mutants`: 18 bản RTL, mỗi bản gỡ một bản sửa, đều bị testbench bắt.
+  Bitstream sau vòng hai chạy trên MPS4: self-test 19/19 ba lượt, `verify` 60/60, DDR 18/18.
+  Trên chip thật (bo RAM ở khe FMC+ J11 của MPS4, `FMC_FORCE: 1V5`, bitstream bản bo RAM từ
+  main `ed949e1`, 2026-11-09): self-test 19/19, `verify` 40/40, mắt ghi tốt ở mọi điểm quét,
+  BIST (PRBS hai seed và dữ liệu đếm) và `memtest` của CPU trên toàn 32 MiB 0 lỗi, BIST
+  184,1 MB/s; luật dùng chung bo khi bo RAM đang cắm và thứ tự trả bo ở
+  [docs/hyperram_mps4.md](docs/hyperram_mps4.md) mục 5.4.
+- Arm MPS4: bản build có cả DDR và HyperRAM (`HR_LOOPBACK`, mặc định theo `DDR_LOOPBACK`),
+  hai MMCM HyperRAM (`bow_hyperram_clk_xusp`) sau BUFGCE riêng từ cùng oscillator, wrapper
+  chân `bow_hyperram_io_xilinx`, XDC loopback (bank 65) và bo RAM (khe FMC+), ràng buộc CDC
+  và bus skew, kiểm tra trong `tcl/timing_checks.tcl`; hướng dẫn chạy
+  [docs/hyperram_mps4.md](docs/hyperram_mps4.md).
+- Hướng dẫn đưa HyperRAM lên ASIC ([docs/ip/hyperram.md](docs/ip/hyperram.md) mục 9): IP
+  không có phần analog; phần giữ / phần thay (pad, flop DDR, PLL, DLL), hai kiến trúc đường
+  đọc, SDC, DFT, kiểm chứng.
+
 - **SDRAM DDR2/DDR3** `bow_ddr` (`hw/ip/ddr`): controller **LiteDRAM** trên PHY riêng
   của Bow32. Cửa sổ bộ nhớ 512 MiB ở `0x8000_0000` trên main crossbar (3 × 8), CSR của
   LiteDRAM ở `0x4000_C000` (8 KiB), thanh ghi PHY/cầu ở `0x4000_E000`, ngắt
@@ -109,6 +213,10 @@
     `bow_csi2rx_link_errors()`.
   - DV: case `ovf` so từng pixel khi tràn FIFO; case mới `deskew`, `extra`; lệnh `wrbe`
     và byte sau packet trong `stim.txt`; cột `tuser[1]` trong `out.txt`.
+- Review IP DDR theo mục tiêu công nghiệp và SoC camera AI: băng thông (cửa sổ 32 bit
+  5 / 3,6 MB/s, DRAM 267 MB/s, cần ≈ 1–2 GB/s), refresh 3,9 µs khi Tc > 85 °C, ECC, bám pha
+  theo nhiệt, QoS, DFI chuẩn cho PHY ASIC; lộ trình P0–P3
+  ([docs/ddr_review_industrial_ai.md](docs/ddr_review_industrial_ai.md)).
 - **Mã khối MKV** `bow_mkv` (`hw/ip/mkv`) theo TCVN 14263:2024 "Thuật toán mã khối
   MKV" (lúc đầu theo bản dự thảo, xem Changed): MKV-128 (khoá 128 / 192 / 256 bit)
   và MKV-256 (khoá 256 / 384 / 512 bit), R = 7 / 8 / 9. Lược đồ khoá trong phần cứng (8R + 1 chu kỳ, khoá nửa vòng trong
@@ -234,8 +342,24 @@
   PS-PL, nhả `pl_resetn0`).
 - `bow32_flash.py monitor` là terminal tương tác; báo lỗi rõ khi adapter không
   gửi được BREAK.
+- Đánh giá IP MKV cho SoC camera AI ([docs/mkv_security_review.md](docs/mkv_security_review.md)):
+  mô hình đe doạ, chuẩn tham chiếu (TCVN 14263, QĐ 724/QĐ-BTTTT, ISO/IEC 19790, 17825,
+  CRA, CWE), phát hiện về tiêm lỗi, kênh kề, khoá, tích hợp, kiểm chứng, lộ trình P0–P2.
+  `make -C hw/ip/mkv/dv review` (`tb_mkv_review.sv`, nay trong `make test` của IP) chạy 8 thí
+  nghiệm: lỗi 2 bit trong một byte khoá vòng và dòng RAM bị tráo cho bản mã sai mà không
+  `FAULT`, `dout_q` không được kiểm, `CLEAR` / xoá sau reset cắt ngắn được, FSM, giữ bus
+  144 chu kỳ, không giới hạn số lần thử.
 
 ### Changed
+- DDR: lõi LiteDRAM sinh với `trefi_ns: 3900` (`ddr2.yml`, `ddr3.yml`; DDR2 129 chu kỳ,
+  DDR3 121), bộ đếm refresh của lõi có thêm chu kỳ 2 × tREFI (chân `ref_norm`, đi theo
+  `CTRL.REF_NORM`); kiểm tra lúc elaboration theo 3,9 µs. Mặc định 3,9 µs chậm hơn: BIST trên
+  MPS4 ghi / đọc 213,7 / 213,7 MB/s, so với 233,5 / 226,4 MB/s ở 7,8 µs. `REF_STARVE` của
+  emulator / mô hình DRAM kiểm thêm nợ REF trung bình (hoãn tối đa 8, trả trước tối đa 8)
+  bên cạnh 9 × tREFI không có REF.
+- `bow_ddr_ps` chuyển sang `hw/ip/common` thành `bow_mmcm_ps` (dùng chung cho DDR và HyperRAM).
+- `bow_ddr_clk_xusp` xuất thêm đầu ra IBUF của oscillator (`clk_ibuf_o`) cho các cây clock
+  khác; cây clock DDR giữ nguyên.
 - **MKV theo TCVN 14263:2024** thay cho bản dự thảo. Bản chuẩn khác bản dự thảo ở
   ba điểm của thuật toán, nên là một mã khác (dữ liệu mã bằng IP cũ không giải mã
   được bằng IP mới) ([docs/ip/mkv.md](docs/ip/mkv.md), "So với bản dự thảo"):
@@ -296,6 +420,12 @@
   nó (`sw/apps/camera/csi2rx.c/.h`).
 
 ### Fixed
+- Self-test HyperRAM: dòng chi tiết không kèm số in thêm `(null)(null)` (thấy trên bo RAM ở
+  mục [14]: `level shifters: variable latency refused (fixed only)(null)(null)`); `detail()`
+  giờ nhận số đối số tùy ý.
+- `docs/hyperram_mps4.md`: hướng dẫn cũ bảo `restore` và trả `FMC_FORCE` về `1V2` ngay sau
+  khi thử, lúc bo RAM còn cắm (lần bật kế tiếp cấp 1,2 V cho TXV0108 hay nạp thiết kế khác với
+  bo RAM trên khe); giờ tháo bo RAM trước (mục 5.4).
 - CI: test hệ thống `ddr` hỏng với Verilator 5.020 (`init: APPLY refused`).
   Verilator trước 5.022 inline `ddr_clk_model` (1 ps) vào `tb_bow32` (1 ns) và tính
   delay theo đơn vị 1 ns của module cha (verilator/verilator#4806). Kết quả là clock
@@ -314,6 +444,51 @@
   đồng bộ, prompt thừa không còn làm lệnh kế tiếp báo lỗi.
 
 ### Security
+- MKV (`bow_mkv`): sửa các phát hiện của bản đánh giá bảo mật
+  ([docs/mkv_security_review.md](docs/mkv_security_review.md), mục 8; mô tả ở
+  [docs/ip/mkv.md](docs/ip/mkv.md)). Cả 8 thí nghiệm của bản đánh giá giờ là test đạt.
+  - RAM khoá vòng: 8 từ mã Hsiao (39,32) xen kẽ mỗi dòng, gắn địa chỉ dòng, thay cho
+    parity byte (32 × 312 bit). Lỗi 2 bit trong một byte, chùm tới 24 bit, dòng bị chép
+    sang dòng khác trước đây cho bản mã sai với `DONE`; giờ là `FAULT`.
+  - `DOUT` có bản bù, kiểm ở `Check` và suốt lúc còn đọc được. Mỗi quyết định của
+    `Check` qua hai bộ so sánh khác cấu trúc, cờ cho ra kết quả là mubi4 ghép từ cả hai;
+    FSM mã thưa 6 bit (khoảng cách 3); `STATUS.KEY_VALID` = AND với engine, lệch là lỗi.
+  - Xoá có kiểm tra: `CLEAR` / sau reset / sau lỗi ghi 0 rồi đọc lại 32 dòng, bộ đếm
+    chu kỳ kiểm ở mọi chu kỳ, phát hiện lỗi chạy cả khi xoá (cắt ngắn → xoá lại,
+    `FAULT`, không `DONE`). `CLEAR` 33 → 65 chu kỳ, xoá sau reset 32 → 64. `KEY` đọc lại
+    các dòng phía trên `h[2R]` nó đã xoá.
+  - Bộ đếm lỗi và `LOCKED` trong miền power-on reset (cổng mới `por_rst_ni`): 4 lỗi
+    (`FaultLimit`) → IP tự khoá tới lần bật nguồn sau, alert nghiêm trọng nối vào NMI
+    của Ibex (`irq_nm_i`, handler mặc định `bow_nmi_handler` in và dừng);
+    `STATUS[6]` `LOCKED`, `[7]` `ALERT`, `[15:12]` `FAULTS`.
+  - Lệnh `TEST` (`CMD[4]` kèm `KEY`/`ENC`/`DEC`): làm lệch lượt hai, phải ra `FAULT`
+    (không đếm); `TEST` không bị phát hiện thì IP tự khoá.
+  - `CTRL[3]` `NOSTALL` (không truy cập nào bị giữ, thay cho chờ tới 144 chu kỳ),
+    `CTRL[4]` `KEY_LOCK`, `CTRL[5]` `NO_DEC`, `CTRL[6]` `NO_ENC`. `DIN` chỉ ghi; đọc
+    `CMD`/`KEY`/`DIN`, ghi `ID`/`INFO`/`CYCLES`/`DOUT` và offset trống trả lỗi bus.
+    Mất `KEY_VALID` (ghi `KEY`, đổi phiên bản) thì engine xoá lược đồ khoá và `DOUT`
+    ngay; `KEY` bị từ chối xoá các từ khoá. `INFO` = `0x000404FF`.
+  - DMA không tới được thanh ghi MKV: tường lửa `bow_bus_deny` (`hw/ip/bus`) trước
+    cổng DMA của main crossbar.
+  - Driver: `bow_mkv_selftest()` (KAT 6 phiên bản + 3 `TEST`, sinh từ mô hình vào
+    `sw/common/src/bow_mkv_kat.h`; chưa qua thì không nạp được khoá), `bow_mkv_error()`,
+    `bow_mkv_wipe()`, `bow_mkv_set_nostall()`, `bow_mkv_lock_key()`; ECB kiểm `ERR` /
+    `FAULT` của cả lần gọi. App `mkv` chạy tự kiểm tra lúc khởi động, `test` có 19
+    nhóm (thêm lỗi bus, `NOSTALL`, chính sách, `TEST`, DMA bị chặn, tự kiểm tra), lệnh
+    `post`.
+  - Kiểm chứng: assertion SVA (`--assert`), tiêm lỗi 48 điểm mỗi seed (thêm mã RAM,
+    `DOUT`, xoá, FSM từng bit, cờ mubi4, bộ so sánh kẹt, `TEST`, lockout),
+    `tb_mkv_review.sv` trong `make test`, `make mutants` (33 bản RTL bỏ từng biện pháp,
+    đều làm test hỏng).
+  - Chi phí (`kv260_cam`, cùng flow): MKV 9 526 → 12 100 LUT, 2 278 → 2 792 FF,
+    168 → 180 LUTRAM; timing vẫn đạt (MKV +1,44 ns, WNS cả thiết kế +0,155 ns ở H.264).
+    `CLEAR` 33 → 65 chu kỳ; `KEY`, `ENC`, `DEC` không đổi. Qua driver: lược đồ khoá
+    +94…127 chu kỳ, một khối +6…16, ECB +1…8 chu kỳ mỗi khối (132 / 240; lệch vài chu
+    kỳ theo vị trí code trong flash) vì các kiểm tra mới; lõi và bus không chậm đi.
+  - Trên board (Arm MPS4, bitstream `mps4` có cả DDR và HyperRAM, WNS +0,169 ns, MKV
+    13 300 LUT): tự kiểm tra lúc khởi động PASS, `test` 19/19, `kat` 6/6, `verify`
+    360/360 và 1 800/1 800 khối; `ddr` 21/21, `hyperram` 19/19 trên cùng bitstream
+    ([docs/mkv_kv260.md](docs/mkv_kv260.md)).
 - MKV (`bow_mkv`): khoá và dữ liệu không còn nằm lại sau khi dùng
   ([docs/ip/mkv.md](docs/ip/mkv.md), "Bảo mật"):
   - Lệnh `KEY` xoá thanh ghi `KEY` và chỉ chạy khi đã ghi đủ k/32 từ khoá mới

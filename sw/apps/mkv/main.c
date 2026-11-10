@@ -11,6 +11,7 @@
  *   key <l> <hex>         key schedule of MKV-<l>, key size from the hex string
  *   enc <hex>, dec <hex>  one block -> "out <hex>" (tools/bow32_mkv.py)
  *   bench                 cycles of the IP and of the software
+ *   post                  power-on self-test of the driver (also run at start-up)
  */
 #include "bow32.h"
 #include "mkv_sw.h"
@@ -20,13 +21,15 @@
 
 static const char help[] =
     "  test [quick] [seed]  self-test: Annex A (software and IP), IP vs software on\n"
-    "                       random keys / blocks, ECB, errors, CLEAR, interrupt\n"
+    "                       random keys / blocks, ECB, errors, CLEAR, interrupt, bus\n"
+    "                       errors, NOSTALL, use policy, TEST, DMA firewall, POST\n"
     "  kat                  Annex A test vectors on the IP\n"
     "  key <l> <hex>        key schedule, l = 128 | 256, key of l, 3l/2 or 2l bits\n"
     "  enc <hex>            encrypt one block with the IP -> out <hex>\n"
     "  dec <hex>            decrypt one block with the IP -> out <hex>\n"
     "  bench                cycles: key schedule, one block, ECB (IP / software)\n"
     "  clear                CLEAR: forget the key\n"
+    "  post                 power-on self-test of the driver again\n"
     "  info  baud <rate>  rd <addr>  wr <addr> <val>\n";
 
 static const unsigned versions[6][2] = {{128, 128}, {128, 192}, {128, 256},
@@ -290,9 +293,9 @@ static bool test_clear(void) {
   bow_mkv_clear();
   uint32_t st = MKV->STATUS;
   if ((st & MKV_ST_KEY_VALID) || MKV_ST_ROUNDS(st) != 0) ok = fail_detail("CLEAR, STATUS", st);
-  if (MKV->CYCLES != 33u) ok = fail_detail("CLEAR, CYCLES", MKV->CYCLES);
+  if (MKV->CYCLES != 65u) ok = fail_detail("CLEAR, CYCLES", MKV->CYCLES);   /* wipe + read back */
   for (unsigned i = 0; i < 8; i++) {
-    if (MKV->DOUT[i] != 0 || MKV->DIN[i] != 0) ok = fail_detail("CLEAR left data in DIN / DOUT word", i);
+    if (MKV->DOUT[i] != 0) ok = fail_detail("CLEAR left data in DOUT word", i);
   }
   return ok;
 }
@@ -348,7 +351,8 @@ static bool test_stall(void) {
 
 /* KEY takes the key out of the KEY registers: it needs a whole new key, and
  * a key byte that is not written again is 0, never a byte of the old key.
- * ENC / DEC take the block out of DIN, KEY zeroes DOUT. */
+ * KEY zeroes DOUT. (DIN cannot be read back: hw/ip/mkv/dv checks that ENC /
+ * DEC zero it.) */
 static bool test_wipe(void) {
   bool ok = true;
   uint8_t key[16], blk[16], out[16], ref[16];
@@ -371,16 +375,130 @@ static bool test_wipe(void) {
   if (!mkv_sw_set_key(&sw, 128, 128, key)) return false;
   mkv_sw_encrypt(&sw, blk, ref);
   if (!equal(out, ref, 16)) ok = fail_detail("KEY took a byte of the old key", 0);
-  for (unsigned i = 0; i < 8; i++) MKV->DIN[i] = ~0u;
-  MKV->CMD = MKV_CMD_DEC;
-  for (unsigned i = 0; i < 8; i++) {
-    if (MKV->DIN[i] != 0) ok = fail_detail("DIN kept after DEC started, word", i);
-  }
-  ok = wait_idle() && ok;
   if (!bow_mkv_set_key(128, 128, key)) return false;
   for (unsigned i = 0; i < 8; i++) {
     if (MKV->DOUT[i] != 0) ok = fail_detail("DOUT kept after KEY, word", i);
   }
+  return ok;
+}
+
+/* a wrong access answers with a bus error (load / store access fault) */
+static bool test_bus_errors(void) {
+  bool ok = true;
+  uint32_t v;
+  static const uint16_t no_read[] = {0x00C, 0x040, 0x07C, 0x080, 0x09C, 0x01C, 0x0A0, 0x0E0, 0xFFC};
+  static const uint16_t no_write[] = {0x000, 0x004, 0x018, 0x0C0, 0x0DC, 0x01C, 0x0A0, 0x0E0, 0xFFC};
+  for (unsigned i = 0; i < sizeof(no_read) / sizeof(no_read[0]); i++) {
+    if (bow_probe_read32(BOW32_MKV_BASE + no_read[i], &v)) ok = fail_detail("read without bus error, offset", no_read[i]);
+  }
+  for (unsigned i = 0; i < sizeof(no_write) / sizeof(no_write[0]); i++) {
+    if (bow_probe_write32(BOW32_MKV_BASE + no_write[i], 0)) ok = fail_detail("write without bus error, offset", no_write[i]);
+  }
+  if (!bow_probe_read32(BOW32_MKV_BASE + 0x010, &v) || !bow_probe_read32(BOW32_MKV_BASE + 0x0C0, &v) ||
+      MKV->ID != MKV_ID_VALUE) {
+    ok = fail_detail("STATUS / DOUT / ID read", 0);
+  }
+  return ok;
+}
+
+/* NOSTALL: during a command, CMD is dropped (ERR) and DOUT reads 0 at once;
+ * the driver polls BUSY and gets the same results */
+static bool test_nostall(void) {
+  static uint8_t buf[8 * 32], ref[8 * 32];
+  bool ok = true;
+  const mkv_vector_t *t = &mkv_vectors[5];   /* MKV-256/512: KEY 146 cycles */
+  bow_mkv_set_nostall(true);
+  if (!bow_mkv_set_key(t->block_bits, t->key_bits, t->key)) ok = fail_detail("KEY with NOSTALL", 0);
+  for (unsigned i = 0; i < 16; i++) MKV->KEY[i] = le32(t->key + 4 * i);   /* wipes the schedule */
+  ok = wait_idle() && ok;
+  MKV->STATUS = MKV_ST_DONE | MKV_ST_ERR;
+  uint32_t t0 = bow_cycles();
+  MKV->CMD = MKV_CMD_KEY;
+  MKV->CMD = MKV_CMD_ENC;                   /* busy: dropped, no wait */
+  uint32_t w = MKV->DOUT[0];                /* busy: 0, no wait */
+  uint32_t t1 = bow_cycles();
+  uint32_t st = MKV->STATUS;
+  if (!(st & MKV_ST_ERR)) ok = fail_detail("CMD during KEY not dropped, STATUS", st);
+  if (w != 0) ok = fail_detail("DOUT during KEY not 0", w);
+  if (t1 - t0 >= 16u * t->rounds) ok = fail_detail("the accesses waited, cycles", t1 - t0);
+  if (!wait_idle() || !(MKV->STATUS & MKV_ST_KEY_VALID)) ok = fail_detail("KEY with NOSTALL, STATUS", MKV->STATUS);
+  MKV->STATUS = MKV_ST_DONE | MKV_ST_ERR;
+  rng_fill(buf, sizeof(buf));
+  if (!mkv_sw_set_key(&sw, t->block_bits, t->key_bits, t->key)) return false;
+  for (unsigned b = 0; b < 8; b++) mkv_sw_encrypt(&sw, buf + 32 * b, ref + 32 * b);
+  if (!bow_mkv_ecb(false, buf, buf, 8) || !equal(buf, ref, sizeof(buf))) ok = fail_detail("ECB with NOSTALL", 0);
+  bow_mkv_set_nostall(false);
+  return ok;
+}
+
+/* use policy: NO_ENC refuses ENC, NO_DEC refuses DEC (KEY_LOCK, which only a
+ * reset undoes, is tested in hw/ip/mkv/dv) */
+static bool test_policy(void) {
+  bool ok = true;
+  const mkv_vector_t *t = &mkv_vectors[0];
+  uint8_t out[32];
+  if (!bow_mkv_set_key(t->block_bits, t->key_bits, t->key)) return false;
+  uint32_t c = MKV->CTRL;
+  MKV->CTRL = c | MKV_CTRL_NO_ENC;
+  if (bow_mkv_encrypt(t->pt, out) || bow_mkv_error() != MKV_E_REFUSED) ok = fail_detail("ENC under NO_ENC", 0);
+  if (!bow_mkv_decrypt(t->ct, out) || !equal(out, t->pt, 16)) ok = fail_detail("DEC under NO_ENC", 0);
+  MKV->CTRL = c | MKV_CTRL_NO_DEC;
+  if (bow_mkv_decrypt(t->ct, out) || bow_mkv_error() != MKV_E_REFUSED) ok = fail_detail("DEC under NO_DEC", 0);
+  if (!bow_mkv_encrypt(t->pt, out) || !equal(out, t->ct, 16)) ok = fail_detail("ENC under NO_DEC", 0);
+  MKV->CTRL = c;
+  if (!(MKV->STATUS & MKV_ST_KEY_VALID)) ok = fail_detail("policy change dropped the key", 0);
+  MKV->STATUS = MKV_ST_DONE | MKV_ST_ERR;
+  return ok;
+}
+
+/* TEST: a corrupted second pass of KEY / ENC / DEC must end in FAULT (not
+ * counted), release nothing, and the IP works again after CLEAR + KEY */
+static bool test_fault_test(void) {
+  bool ok = true;
+  const mkv_vector_t *t = &mkv_vectors[3];   /* MKV-256/256 */
+  static const uint32_t cmds[3] = {MKV_CMD_KEY, MKV_CMD_ENC, MKV_CMD_DEC};
+  uint8_t out[32];
+  unsigned faults = MKV_ST_FAULTS(MKV->STATUS);
+  for (unsigned i = 0; i < 3; i++) {
+    if (!bow_mkv_set_key(t->block_bits, t->key_bits, t->key)) return false;
+    for (unsigned j = 0; j < 8; j++) {
+      if (cmds[i] == MKV_CMD_KEY) MKV->KEY[j] = le32(t->key + 4 * j);
+      else MKV->DIN[j] = le32((cmds[i] == MKV_CMD_ENC ? t->pt : t->ct) + 4 * j);
+    }
+    MKV->STATUS = MKV_ST_DONE | MKV_ST_ERR;
+    MKV->CMD = cmds[i] | MKV_CMD_TEST;
+    ok = wait_idle() && ok;
+    uint32_t st = MKV->STATUS;
+    if ((st & (MKV_ST_FAULT | MKV_ST_DONE | MKV_ST_KEY_VALID | MKV_ST_LOCKED)) != MKV_ST_FAULT) {
+      ok = fail_detail("TEST not caught, STATUS", st);
+    }
+    if (MKV->DOUT[0] != 0) ok = fail_detail("TEST released a result, command", i);
+    bow_mkv_clear();
+  }
+  if (MKV_ST_FAULTS(MKV->STATUS) != faults) ok = fail_detail("TEST counted as a fault", MKV_ST_FAULTS(MKV->STATUS));
+  if (!bow_mkv_set_key(t->block_bits, t->key_bits, t->key) || !bow_mkv_encrypt(t->pt, out) ||
+      !equal(out, t->ct, 32)) {
+    ok = fail_detail("ENC after the TESTs", 0);
+  }
+  return ok;
+}
+
+/* the DMA cannot reach the MKV registers (bus firewall in bow32_top: no
+ * encryption on behalf of the CPU, no key writes), the other peripherals it
+ * can */
+static bool test_dma_blocked(void) {
+  static uint32_t buf[4];
+  bool ok = true;
+  if (DMA->ID != DMA_ID_VALUE) return fail_detail("no DMA, ID", DMA->ID);
+  buf[0] = 0xdeadbeefu;
+  bow_dma_copy(1, buf, (const void *)(uintptr_t)BOW32_MKV_BASE, 4);       /* MKV ID */
+  if (bow_dma_wait(1, 10) || buf[0] != 0xdeadbeefu) ok = fail_detail("DMA read the MKV ID", buf[0]);
+  buf[1] = 0x12345678u;
+  bow_dma_copy(1, (void *)(uintptr_t)(BOW32_MKV_BASE + 0x080), &buf[1], 4);   /* -> DIN[0] */
+  if (bow_dma_wait(1, 10)) ok = fail_detail("DMA wrote MKV DIN", 0);
+  bow_dma_copy(1, &buf[2], (const void *)(uintptr_t)BOW32_DMA_BASE, 4);   /* DMA ID: allowed */
+  if (!bow_dma_wait(1, 10) || buf[2] != DMA_ID_VALUE) ok = fail_detail("DMA could not read its own ID", buf[2]);
+  bow_dma_disable(1);
   return ok;
 }
 
@@ -389,7 +507,9 @@ static bool self_test(bool quick, uint32_t seed) {
   fault_seen = false;
   rng_state = seed ? seed : 1;
   bow_printf("mkv: self-test (%s, seed %u)\n", quick ? "quick" : "full", rng_state);
-  check(bow_mkv_present() && MKV->INFO == 0x407u, "IP present (ID, INFO)");
+  unsigned faults = MKV_ST_FAULTS(MKV->STATUS);
+  check(bow_mkv_present() && (MKV->INFO & 0xFFFFu) == 0x04FFu && MKV_INFO_FAULT_LIMIT(MKV->INFO) != 0,
+        "IP present (ID, INFO)");
   check(test_sw_annex_a(), "software MKV vs Annex A (round keys, ct, decryption)");
   check(test_ip_annex_a(false), "IP vs Annex A: encryption (6 versions), STATUS, CYCLES");
   check(test_ip_annex_a(true), "IP vs Annex A: decryption (6 versions)");
@@ -398,13 +518,22 @@ static bool self_test(bool quick, uint32_t seed) {
   check(test_ecb(), "ECB: next DIN during the block, unaligned, in place");
   check(test_errors(), "errors: ENC without key, KLEN 3, two commands");
   check(test_key_valid(), "KEY_VALID: KEY write, CTRL change");
-  check(test_clear(), "CLEAR: key schedule, DIN, DOUT zeroed");
+  check(test_clear(), "CLEAR: key schedule, DOUT zeroed, rows read back");
   check(test_irq(), "interrupt DONE / ERR on irq_fast[10]");
   check(test_stall(), "bus stall: CMD during KEY, DOUT during ENC");
-  check(test_wipe(), "wipe: KEY needs a whole new key, DIN / DOUT zeroed");
-  /* every command above was done twice and checked by the IP: no FAULT */
-  check((MKV->INFO & MKV_INFO_FAULT_DETECTION) && !fault_seen && !(MKV->STATUS & MKV_ST_FAULT),
-        "fault detection on (INFO), no fault during the self-test");
+  check(test_wipe(), "wipe: KEY needs a whole new key, DOUT zeroed");
+  check(test_bus_errors(), "bus errors: CMD / KEY / DIN read, ID / DOUT write, holes");
+  check(test_nostall(), "NOSTALL: CMD dropped, DOUT 0 while busy; driver polls");
+  check(test_policy(), "use policy: NO_ENC / NO_DEC");
+  check(test_fault_test(), "TEST: corrupted check of KEY / ENC / DEC gives FAULT");
+  check(test_dma_blocked(), "DMA blocked from the MKV registers (bus firewall)");
+  check(bow_mkv_selftest(), "power-on self-test (driver): 6 known answers, 3 TESTs");
+  /* every command above was done twice and checked by the IP: no FAULT but
+   * the expected ones of TEST, which the IP does not count */
+  uint32_t st = MKV->STATUS;
+  check((MKV->INFO & MKV_INFO_FAULT_DETECTION) && !fault_seen && !(st & (MKV_ST_FAULT | MKV_ST_LOCKED)) &&
+        MKV_ST_FAULTS(st) == faults,
+        "fault detection on (INFO), no fault, FAULTS unchanged");
   bow_mkv_clear();
   bow_printf("mkv: %s (%u/%u)\n", failures ? "FAIL" : "PASS", checks - failures, checks);
   return failures == 0;
@@ -437,9 +566,15 @@ static bool cmd_key(const char *a) {
   if (!(a = parse_num(a, &l, false))) return false;
   unsigned n = parse_hex(a, key, sizeof(key));
   if (n == 0 || !bow_mkv_set_key(l, 8u * n, key)) {
-    bow_printf("error: no MKV-%u version with a %u bit key\n", l, 8u * n);
+    if (n == 0 || bow_mkv_error() == MKV_E_VERSION) {
+      bow_printf("error: no MKV-%u version with a %u bit key\n", l, 8u * n);
+    } else {
+      bow_printf("error: KEY failed: %s\n", bow_mkv_error_name(bow_mkv_error()));
+    }
+    bow_mkv_wipe(key, sizeof(key));
     return false;
   }
+  bow_mkv_wipe(key, sizeof(key));
   bow_printf("key MKV-%u/%u R=%u (%u cycles)\n", l, 8u * n, MKV_ST_ROUNDS(MKV->STATUS), MKV->CYCLES);
   return true;
 }
@@ -456,7 +591,7 @@ static bool cmd_crypt(const char *a, bool decrypt) {
     return false;
   }
   if (!(decrypt ? bow_mkv_decrypt(in, out) : bow_mkv_encrypt(in, out))) {
-    bow_printf("error: MKV fault, result dropped (clear, then key again)\n");
+    bow_printf("error: %s, no result\n", bow_mkv_error_name(bow_mkv_error()));
     return false;
   }
   bow_printf("out ");
@@ -498,6 +633,14 @@ static void info(void) {
   bow_printf("MKV ID %08x INFO %08x CTRL %08x STATUS %08x (busy %u key %u done %u err %u fault %u, R %u, %s)\n",
              MKV->ID, MKV->INFO, MKV->CTRL, st, st & 1u, (st >> 1) & 1u, (st >> 2) & 1u, (st >> 3) & 1u,
              (st >> 5) & 1u, MKV_ST_ROUNDS(st), (st & MKV_ST_WIDE) ? "MKV-256" : "MKV-128");
+  bow_printf("    faults since power-on %u (lock at %u), locked %u, alert %u\n", MKV_ST_FAULTS(st),
+             MKV_INFO_FAULT_LIMIT(MKV->INFO), (st >> 6) & 1u, (st >> 7) & 1u);
+}
+
+static bool post(void) {
+  bool ok = bow_mkv_selftest();
+  bow_printf("mkv: power-on self-test %s%s\n", ok ? "PASS" : "FAIL: ", ok ? "" : bow_mkv_error_name(bow_mkv_error()));
+  return ok;
 }
 
 static bool execute(const char *line) {
@@ -538,6 +681,7 @@ static bool execute(const char *line) {
     info();
     return true;
   }
+  if ((a = match(line, "post"))) return post();
   if ((a = match(line, "baud"))) {
     if (!parse_num(a, &v, false) || v < 1200) return false;
     bow_printf("ok, switching to %u baud\n", v);
@@ -580,6 +724,7 @@ int main(void) {
                (MKV->INFO >> 8) & 0xFFu,
                (MKV->INFO & MKV_INFO_FAULT_DETECTION) ? " with fault detection" : "",
                bow_clk_hz() / 1000000u);
+    post();   /* no key can be loaded before it has passed */
   } else {
     bow_printf("mkv: IP not found (ID %08x)\n", MKV->ID);
   }

@@ -170,12 +170,13 @@ bool bow_ddr_set_lat(uint32_t lat) {
   return bow_ddr_apply();
 }
 
-/* CORE_RST acts at once; the APPLY keeps the applied copy of CTRL in step */
+/* CORE_RST acts at once; the APPLY keeps the applied copy of CTRL in step.
+ * The core in reset does not refresh: the refresh monitor goes off with it. */
 bool bow_ddr_core_reset(bool on) {
   uint32_t ctrl = RD(CTRL);
-  if (!bow_ddr_set_ctrl(on ? (ctrl | DDR_CTRL_CORE_RST) : (ctrl & ~DDR_CTRL_CORE_RST))) {
-    return false;
-  }
+  if (on) ctrl = (ctrl | DDR_CTRL_CORE_RST) & ~DDR_CTRL_REF_MON;
+  else    ctrl &= ~DDR_CTRL_CORE_RST;
+  if (!bow_ddr_set_ctrl(ctrl)) return false;
   if (on) return true;
   /* the reset release crosses into the controller clock domain: wait until
    * the ddr_ctrl slot answers without a bus error (the CSR_ERR of these
@@ -189,6 +190,22 @@ bool bow_ddr_core_reset(bool on) {
   if (polled) WR(STATUS, DDR_ST_CSR_ERR);
   return true;
 }
+
+/* REF_NORM / REF_MON act at once: a CTRL write without APPLY (the other
+ * bits are written back unchanged, so the next APPLY sees no difference) */
+bool bow_ddr_set_refresh(bool norm, bool mon) {
+  const uint32_t m = DDR_CTRL_REF_NORM | DDR_CTRL_REF_MON;
+  uint32_t v = (RD(CTRL) & ~m) | (norm ? DDR_CTRL_REF_NORM : 0u) | (mon ? DDR_CTRL_REF_MON : 0u);
+  WR(CTRL, v);
+  return (RD(CTRL) & m) == (v & m);
+}
+
+bool bow_ddr_lock(void) {
+  WR(CTRL, RD(CTRL) | DDR_CTRL_LOCK);
+  return bow_ddr_locked();
+}
+
+bool bow_ddr_locked(void) { return (RD(CTRL) & DDR_CTRL_LOCK) != 0; }
 
 static bool phase_go(bool write, int32_t target) {
   if (target < -32768 || target > 32767) return false;
@@ -243,6 +260,7 @@ bool bow_ddr_stats(bow_ddr_stats_t *s, bool clear) {
   s->act = RD(ST_ACT);
   s->ref = RD(ST_REF);
   s->rmw = RD(ST_RMW);
+  s->rgap = RD(ST_RGAP);
   if (clear) ok = bow_ddr_cmd(DDR_CMD_CLR_STATS) && ok;
   return ok;
 }
@@ -254,15 +272,16 @@ static void print_flags(uint32_t v, const char *const *names, unsigned n) {
 }
 
 void bow_ddr_print_status(void) {
-  static const char *const ctrl_names[13] = {"EN",    "",      "",           "",
-                                             "DM_EN", "DDR3",  "IDLE_DRIVE", "LS_EN",
-                                             "",      "",      "ODT_EN",     "CK_EN",
-                                             "CORE_RST"};
-  static const char *const st_names[24] = {
+  static const char *const ctrl_names[16] = {"EN",       "",        "",           "",
+                                             "DM_EN",    "DDR3",    "IDLE_DRIVE", "LS_EN",
+                                             "",         "",        "ODT_EN",     "CK_EN",
+                                             "CORE_RST", "REF_NORM", "REF_MON",   "LOCK"};
+  static const char *const st_names[26] = {
       "BUSY",     "READY",     "CLK_OK",     "APPLIED",    "",          "PS_DONE",
       "CAP_DONE", "",          "",           "CMD_ERR",    "RFIFO_ERR", "BUS_TIMEOUT",
       "DBG_ERR",  "LINK",      "PS_ERR",     "RFIFO_BROKEN", "INIT_DONE", "INIT_ERROR",
-      "RD_LATE",  "RD_EXTRA",  "NOT_READY",  "RANGE",      "CSR_ERR",   "BROKEN"};
+      "RD_LATE",  "RD_EXTRA",  "NOT_READY",  "RANGE",      "CSR_ERR",   "BROKEN",
+      "REF_STARVE", "LOCK_ERR"};
   uint32_t st = RD(STATUS), ctrl = RD(CTRL), lat = RD(LAT), dbg = bow_ddr_dbg();
   bow_ddr_stats_t s;
 
@@ -276,9 +295,9 @@ void bow_ddr_print_status(void) {
     bow_puts("ddr: not ready (not initialised / calibrated, init error or a bridge broken)\n");
   }
   bow_printf("  STATUS %08x:", st);
-  print_flags(st, st_names, 24);
+  print_flags(st, st_names, 26);
   bow_printf("\n  CTRL %08x:", ctrl);
-  print_flags(ctrl, ctrl_names, 13);
+  print_flags(ctrl, ctrl_names, 16);
   bow_printf("\n  LAT %08x: RL %u WL %u RD_DLY %u SLIP %u OE_PRE %u LEAD %u TAIL %u OE_POST %u\n",
              lat, DDR_LAT_GET_RL(lat), DDR_LAT_GET_WL(lat), DDR_LAT_GET_RD_DLY(lat),
              DDR_LAT_GET_SLIP(lat), (lat >> 18) & 3u, (lat >> 20) & 15u, (lat >> 24) & 15u,
@@ -286,7 +305,9 @@ void bow_ddr_print_status(void) {
   bow_printf("  phase %d (of %u per CK), write phase %d, ERR_ADDR %08x\n", bow_ddr_ps_now(),
              bow_ddr_ps_steps(), bow_ddr_wps_now(), RD(ERR_ADDR));
   if (!(st & DDR_ST_BUSY) && (st & DDR_ST_CLK_OK) && bow_ddr_stats(&s, false)) {
-    bow_printf("  counters: rd %u wr %u act %u ref %u rmw %u\n", s.rd, s.wr, s.act, s.ref, s.rmw);
+    bow_printf("  counters: rd %u wr %u act %u ref %u rmw %u", s.rd, s.wr, s.act, s.ref, s.rmw);
+    if (s.rgap) bow_printf(", longest REF interval %u CK", s.rgap + 1u);
+    bow_puts("\n");
   }
   bow_printf("  DBG %08x (init %u, %u errors, code %02x)\n", dbg, (dbg >> 30) & 1u,
              DDR_DBG_COUNT(dbg), DDR_DBG_CODE(dbg));

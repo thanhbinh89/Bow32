@@ -14,5 +14,6 @@ rdphase: 2
 wrphase: 2
 read_latency: 12
 write_latency: 0
+trefi_ns: 3900                 # tREFI for Tc 85..95 C; CTRL.REF_NORM: 7.8 us (bow_ddr_dfi)
 with_dm: true
 cmd_buffer_depth: 8

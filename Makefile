@@ -22,8 +22,8 @@ help:
 	@echo "  make test-ip     unit tests of the ISP, CSI-2 RX, H.264, MKV and DDR IPs (RTL vs. Python models)"
 	@echo "  make test-fpga-dv  pin level tests in xsim (needs Vivado): KV260 D-PHY I/O + CSI-2 RX, DDR pads + clocks"
 	@echo "  make run TEST=x  run one test (boot|load|break|flash|irq|gpio|camera|csi2|h264|mkv|ddr), WAVES=1 for waves"
-	@echo "  make fpga        Vivado build, BOARD=kv260|kv260_cam|mps4 -> build/fpga/$(BOARD)/"
-	@echo "  make fpga-jtag   load the bitstream into a running Kria over JTAG (xsdb)"
+	@echo "  make fpga        Vivado build, BOARD=kv260|kv260_cam|mps4|huins_vp1902 -> build/fpga/$(BOARD)/"
+	@echo "  make fpga-jtag   load the bitstream over JTAG (Kria: xsdb; huins_vp1902: the device image)"
 	@echo "  make gen         regenerate memory map files from hw/top/data/bow32_memmap.yaml"
 	@echo "  make gen-check   check that generated files are up to date (memory map, H.264 / MKV tables)"
 	@echo "  make litedram    regenerate the LiteDRAM controller cores (Python venv in build/litex-venv)"
@@ -38,9 +38,11 @@ deps: $(IBEX_DIR)/rtl/ibex_top.sv
 sw:
 	$(MAKE) -C sw all
 
-# The SoC as built for simulation (DdrEn = 0) and with each LiteDRAM core
-# (DDR2 at 133 MHz, DDR3 at 125 MHz CK), then two CKs that bow_ddr's
-# elaboration checks must refuse (refresh interval, CK above the core's).
+# The SoC with the default parameters (DdrEn = HrEn = 0: the KV260 build, stubs),
+# with each LiteDRAM core (DDR2 at 133 MHz, DDR3 at 125 MHz CK), with HyperRAM
+# (the card's pads with level shifters; the MPS4 loopback / system-simulation
+# configuration: emulator of 1 MiB, together with DDR2), then two CKs that
+# bow_ddr's elaboration checks must refuse (refresh interval, CK above the core's).
 LINT_CMD = $(VERILATOR) --lint-only -Wall hw/lint/verilator_waivers.vlt \
 	  -F hw/top/bow32_top.f -F hw/vendor/lowrisc_ibex_prim_generic.f --top-module bow32_top
 
@@ -48,6 +50,8 @@ lint: deps
 	$(LINT_CMD)
 	$(LINT_CMD) -GDdrEn=1\'b1 -GDdrMem=2 -GDdrClkHz=133333333
 	$(LINT_CMD) -GDdrEn=1\'b1 -GDdrMem=3 -GDdrClkHz=125000000
+	$(LINT_CMD) -GHrEn=1\'b1
+	$(LINT_CMD) -GHrEn=1\'b1 -GHrPhyKind=2 -GHrHasLs=1\'b0 -GHrEmuBytes=1048576 -GDdrEn=1\'b1
 	@# the elaboration checks of bow_ddr must refuse a CK the core was not made for
 	@! $(LINT_CMD) -GDdrEn=1\'b1 -GDdrMem=2 -GDdrClkHz=132000000 > /dev/null 2>&1 || \
 	  { echo "lint: bow_ddr accepted the DDR2 core at 132 MHz (tREFI > 7.8 us)"; exit 1; }
@@ -70,6 +74,7 @@ test-ip:
 	$(MAKE) -C hw/ip/h264/dv test
 	$(MAKE) -C hw/ip/mkv/dv test
 	$(MAKE) -C hw/ip/ddr/dv test
+	$(MAKE) -C hw/ip/hyperram/dv test
 
 test-fpga-dv:
 	$(MAKE) -C hw/fpga/common/dv test
