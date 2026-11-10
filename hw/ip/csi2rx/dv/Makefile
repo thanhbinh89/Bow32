@@ -4,10 +4,12 @@
 # CSI-2 receiver unit test: RTL vs the reference model (tools/csi2/csi2_model.py),
 # the D-PHY side driven by csi2_tx_model.sv (lanes + receive I/O model).
 #
-#   make test                          random cases (SEEDS x lanes x errors) + directed tests
+#   make test                          aligner unit test + random cases (SEEDS x lanes x errors)
+#                                      + directed tests
+#   make align                         aligner unit test only (tb_dphy_align.sv)
 #   make run SEED=7 LANES=1 ERRORS=1   one random case, dumps in build/csi2rx_dv/<name>
 #   make run TEST=clk                  one directed test (lp watchdog clk cmd ovf stop byteclk eye
-#                                      deskew extra)
+#                                      deskew extra loss ovf2 ovf8 be)
 #   make test SEEDS="1 2 3 4 5 6 7 8"
 # Options of 'run': LANES (lanes used), DUT_LANES (Lanes parameter, default LANES),
 # ERRORS=1, RAW8=1, CONTCLK=1.
@@ -26,7 +28,12 @@ DUT_LANES ?= $(LANES)
 ERRORS    ?= 0
 RAW8      ?= 0
 CONTCLK   ?= 0
-DIRECTED  := lp watchdog clk cmd ovf stop byteclk eye deskew extra
+DIRECTED  := lp watchdog clk cmd ovf stop byteclk eye deskew extra loss ovf2 ovf8 be
+# directed tests also run with 1 lane (Lanes = 1), with 1 lane of 2, and with
+# the continuous clock (DLY read back while the byte clock runs)
+DIRECTED1 := cmd stop deskew extra ovf ovf2 loss be eye
+DIRECTED12 := deskew extra ovf ovf2 loss eye
+DIRECTEDC := be eye loss
 
 sim_bin  = $(BUILD)/obj_l$(1)/Vtb_bow_csi2rx
 FLISTS  := -F $(REPO)/hw/ip/common/common.f -F $(REPO)/hw/ip/bus/bus.f -F $(REPO)/hw/ip/csi2rx/csi2rx.f
@@ -34,10 +41,22 @@ SRCS    := $(shell find $(REPO)/hw/ip/csi2rx $(REPO)/hw/ip/common $(REPO)/hw/ip/
 
 build: $(call sim_bin,1) $(call sim_bin,2)
 
+# Aligner unit test: search window edges (deskew, sync errors, HS-PREPARE noise)
+ALIGN_BIN := $(BUILD)/obj_align/Vtb_dphy_align
+$(ALIGN_BIN): $(REPO)/hw/ip/csi2rx/rtl/bow_dphy_align.sv tb_dphy_align.sv
+	@mkdir -p $(BUILD)
+	$(VERILATOR) --binary --timing -j 0 -Wno-fatal -Wno-lint -Wno-style -Wno-TIMESCALEMOD \
+	  --top-module tb_dphy_align -Mdir $(BUILD)/obj_align -o Vtb_dphy_align $^
+
+align: $(ALIGN_BIN)
+	@$(ALIGN_BIN) > $(BUILD)/align.log 2>&1; grep -h 'ERROR\|tb_dphy_align:' $(BUILD)/align.log; \
+	  grep -q 'tb_dphy_align: PASS' $(BUILD)/align.log
+
 # One model per Lanes parameter
 $(BUILD)/obj_l%/Vtb_bow_csi2rx: $(SRCS)
 	@mkdir -p $(BUILD)
 	$(VERILATOR) --binary --timing -j 0 -O2 -Wno-fatal -Wno-lint -Wno-style -Wno-TIMESCALEMOD \
+	  +define+BOW_CDC_JITTER \
 	  --top-module tb_bow_csi2rx -GLanes=$* -Mdir $(BUILD)/obj_l$* -o Vtb_bow_csi2rx \
 	  $(FLISTS) csi2_tx_model.sv tb_bow_csi2rx.sv
 
@@ -48,14 +67,15 @@ CASE = $(BUILD)/$(NAME)
 run: $(call sim_bin,$(DUT_LANES))
 	@$(MODEL) gen $(CASE) --test $(TEST) --seed $(SEED) --lanes $(LANES) --dut-lanes $(DUT_LANES) \
 	  $(call flag,ERRORS,--errors) $(call flag,RAW8,--raw8) $(call flag,CONTCLK,--contclk) > /dev/null
-	@$(call sim_bin,$(DUT_LANES)) +DIR=$(CASE) > $(CASE)/sim.log 2>&1 || \
+	@$(call sim_bin,$(DUT_LANES)) +DIR=$(CASE) +verilator+seed+$(SEED) > $(CASE)/sim.log 2>&1 || \
 	  { echo "$(CASE): simulation failed"; tail -5 $(CASE)/sim.log; exit 1; }
 	@$(MODEL) check $(CASE)
 
 # Every seed: 2 lanes with and without errors, 1 lane (Lanes = 1) with errors,
 # 1 lane used of 2 with and without errors; RAW8 / continuous clock alternate.
-test: build
-	@fail=0; for s in $(SEEDS); do \
+test: build $(ALIGN_BIN)
+	@fail=0; $(MAKE) --no-print-directory align || fail=1; \
+	for s in $(SEEDS); do \
 	  r=$$((s % 2)); c=$$((s / 2 % 2)); \
 	  for cfg in "2 2 0" "2 2 1" "1 1 1" "1 2 0" "1 2 1"; do \
 	    set -- $$cfg; \
@@ -64,10 +84,14 @@ test: build
 	  done; \
 	done; \
 	for t in $(DIRECTED); do $(MAKE) --no-print-directory run TEST=$$t || fail=1; done; \
-	for t in cmd stop; do $(MAKE) --no-print-directory run TEST=$$t LANES=1 || fail=1; done; \
+	for t in $(DIRECTED1); do $(MAKE) --no-print-directory run TEST=$$t LANES=1 || fail=1; done; \
+	for t in $(DIRECTED12); do \
+	  $(MAKE) --no-print-directory run TEST=$$t LANES=1 DUT_LANES=2 || fail=1; \
+	done; \
+	for t in $(DIRECTEDC); do $(MAKE) --no-print-directory run TEST=$$t CONTCLK=1 || fail=1; done; \
 	exit $$fail
 
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: build run test clean
+.PHONY: build align run test clean

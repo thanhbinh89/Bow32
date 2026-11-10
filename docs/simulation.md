@@ -40,15 +40,15 @@ make test-tools    # unit test của công cụ Python (gồm mô hình CSI-2, M
 | `flash` | ROM + `flash_demo` | program/erase từ ứng dụng, lỗi khi lập trình bit 0→1, soft reset, dữ liệu còn sau reset |
 | `irq` | ROM + `uart_irq` | ngắt nhanh UART1, WFI, ISR |
 | `gpio` | ROM + `gpio_demo` | gửi lệnh qua UART0 rồi kiểm tra pad: xuất, set/clear/toggle, đọc `IN`, ngắt cạnh xuống, open-drain, tắt/bật chức năng thay thế PB0/PB1 (UART1) |
-| `camera` | ROM + `camera` | dò IMX219 qua I2C (PA7, TCA9546A, clock stretching); cửa sổ AXI4-Lite (đọc/ghi qua cầu, bus error khi `SLVERR`/timeout); mode 64×48, `cam` hiệu chỉnh eye (mọi tap tốt: `taps 248/248 eye 512/512`), `csi` → `csi2rx: link ok`, 48 dòng, WC 80; sọc màu của cảm biến → bộ thu CSI-2 → ISP → capture → ảnh RGB qua UART (CRC + kiểm tra màu từng sọc), AE và AWB hội tụ, flip (BGGR), TPG của ISP ở YUV |
+| `camera` | ROM + `camera` | dò IMX219 qua I2C (PA7, TCA9546A, clock stretching); cửa sổ AXI4-Lite (đọc/ghi qua cầu, bus error khi `SLVERR`/timeout); mode 64×48, `cam` hiệu chỉnh eye (mọi tap tốt: `taps 248/248 eye 512/512`) rồi kiểm tra lề (`csi2rx: margin ok +-128/+-128 taps: 0 errors in 5 x 8 frames`), `csi` → `csi2rx: link ok`, 48 dòng, WC 80, `margin 0 2`; `cam` lại với tap đã hiệu chỉnh (link tốt: không hiệu chỉnh lại), rồi với một FE không có FS sau mỗi frame (lỗi FRAME: `link errors (ERR_STATUS 100), not a sampling problem: taps kept`); sọc màu của cảm biến → bộ thu CSI-2 → ISP → capture → ảnh RGB qua UART (CRC + kiểm tra màu từng sọc), AE và AWB hội tụ, flip (BGGR), TPG của ISP ở YUV; cuối cùng cảm biến nhận thanh ghi nhưng không gửi gì: `cam` → `no link error: calibrating`, `calibration failed`, `error`, rồi `cam` chạy lại bình thường |
 | `h264` | ROM + `video` | `dmatest` (DMA kênh 1: SRAM → VRAM → SRAM, lỗi bus ở địa chỉ không ánh xạ); mode 64×48, TPG sọc màu → ISP (YUV) → bộ mã hoá H.264 → DMA kênh 0 → VRAM; `rec 3` rồi `send`: stream qua UART (CRC), lưu `build/sim/h264.hex`; sau mô phỏng `h264_model.py decode --bars` giải mã ra 3 frame 64×48 có đủ 8 sọc màu |
 | `mkv` | ROM + `mkv` | tự kiểm tra lúc khởi động của driver (`mkv: power-on self-test PASS`: KAT 6 phiên bản, 3 lệnh `TEST`), rồi `test quick` → `mkv: PASS (19/19)`: MKV phần mềm và IP (mỗi lệnh làm hai lần và đối chiếu) khớp 6 véc tơ của Phụ lục A (cả khoá vòng), IP ↔ phần mềm trên khoá/khối ngẫu nhiên, ECB (ghi `DIN` khi IP đang chạy), lệnh lỗi, `KEY_VALID`, `CLEAR`, ngắt `irq_fast[10]` (`mip`), stall bus, xoá khoá / `DOUT`, lỗi bus, `NOSTALL`, chính sách `NO_ENC`/`NO_DEC`, `TEST` cho `FAULT`, DMA không tới được thanh ghi MKV, không `FAULT` nào ngoài các `TEST`; rồi `key`/`enc`/`dec` qua shell phải ra đúng giá trị của `mkv_model.py`; một dòng `FAIL`/`error` dừng mô phỏng ngay (~13,9 M chu kỳ) |
 | `ddr` | ROM + `ddr` | `test quick` → `ddr: PASS (18/18)`: khởi tạo JEDEC DDR2 bằng chuỗi sinh từ LiteDRAM (qua DFII), hiệu chỉnh đọc (quét pha của mô hình MMCM, chụp thô, mắt, `RD_DLY`/`RD_SLIP`), bàn giao cho controller, cửa sổ CPU (walking 1/0, đường địa chỉ, đọc-sửa-ghi byte/halfword, xorshift), BIST của LiteDRAM và dữ liệu đọc qua cửa sổ = bản C của bộ sinh dữ liệu, refresh, giới hạn pha, ngắt `irq_fast[11]`; rồi `wr`/`rd` qua shell ở đầu và cuối 4 MiB; cuối cùng DRAM giả lập không được thấy vi phạm JEDEC nào (`DBG`). Một dòng `FAIL`/`error`/`[trap]` dừng mô phỏng ngay (~4,9 M chu kỳ, ~1 phút) |
 | `hyperram` | ROM + `hyperram` | `test quick` → `hyperram: PASS (19/19)`: IP có mặt, lệnh bị từ chối đúng luật, khởi tạo (RESET#, quét pha đọc của mô hình MMCM với chụp thô ID0, `RD_DLY`, CR0/CR1, mắt của mẫu, mở cửa sổ), thanh ghi thiết bị, cửa sổ CPU (walking 1/0, đường địa chỉ, ghi byte/halfword bằng mặt nạ RWDS, xorshift với ghi posted và không posted), read buffer (word cần trước, trúng, ghi xuyên), `RANGE`, BIST PRBS/đếm và dữ liệu đọc qua cửa sổ = bản C, latency biến đổi (trùng refresh 2×), hybrid sleep, deep power down, giới hạn pha, ngắt `irq_fast[12]`; rồi `wr`/`rd` qua shell ở đầu và cuối 1 MiB; cuối cùng HyperRAM giả lập không được thấy vi phạm giao thức nào (`DBG`) (~7,4 M chu kỳ) |
-| `csi2` | ROM + `csi2_test` | `test quick` → `csi2_test: PASS (11/11)` (eye mô hình: lane 0 tap 100…300, lane 1 180…400, tap reset 0 xấu; hiệu chỉnh phải ra ~208/288); rồi cài lỗi vào một frame đang chạy (lật 1 bit header → ECC sửa, lật 1 bit payload → CRC, byte sync sai trên lane 1 → SOT + skew) và `stat` phải in đúng `ecc 1/0 crc 1 trunc 0 sot 0/1 ovf 0`, `misc ≥ 1`; một dòng `[FAIL]` dừng mô phỏng ngay |
+| `csi2` | ROM + `csi2_test` | `test quick` → `csi2_test: PASS (12/12)` (eye mô hình: lane 0 tap 100…300, lane 1 180…400, tap reset 0 xấu; hiệu chỉnh phải ra ~208/288, kiểm tra lề `+-48/+-56 taps: 0 errors in 5`); rồi cài lỗi vào một frame đang chạy (lật 1 bit header → ECC sửa, lật 1 bit payload → CRC, byte sync sai trên lane 1 → SOT + skew) và `stat` phải in đúng `ecc 1/0 crc 1 trunc 0 sot 0/1 ovf 0`, `misc ≥ 1`, `extra 0`; rồi eye lane 0 thu về 100…240: `margin 0 4` phải báo `low` đúng ở điểm lane 0 +48 (tap 256), 4 điểm kia sạch, tap vẫn 208/288; rồi cùng việc đó với thời gian frame như cảm biến thật (LP-11 47,5 µs sau mỗi dòng, vertical blanking 555 µs: frame ~3 ms so với thời gian chờ một tap 4 ms, như 1080p30 so với 42 ms) và eye lane 0 bắt đầu ở 170: điểm thứ hai lane 0 −48 (tap 160) lỗi và có thể làm mất FS của frame đang chạy, các điểm sau vẫn phải đo đủ 4 frame; eye trả lại: `margin` ok, `stat` → `link ok`. Một dòng `[FAIL]` (hay `error`, trừ lần `margin` được chờ thất bại) dừng mô phỏng ngay (~8,4 M chu kỳ) |
 
 Một test PASS khi in `TEST PASSED`; lỗi dùng `$fatal` (mã thoát ≠ 0). Có
-watchdog `+TIMEOUT=<cycles>` (mặc định 20 M chu kỳ; `csi2` cần ~3,7 M).
+watchdog `+TIMEOUT=<cycles>` (mặc định 20 M chu kỳ, `camera` 30 M; `csi2` cần ~8,4 M, `camera` ~14,7 M vì link check không có dữ liệu chờ 2,4 frame của cấu hình cảm biến).
 `camera` và `csi2` kết thúc bằng một kiểm tra PHY: cổng byte clock chỉ mở và
 đóng khi lane clock đứng yên ở HS-0, không có xung runt.
 
@@ -236,34 +236,66 @@ quan: cả 18 phải FAIL.
 viết từ đặc tả và quy tắc MIPI chứ không từ RTL. Mô hình sinh cấu hình và kích
 thích (`cfg.txt`, `stim.txt`); `tb_bow_csi2rx.sv` chơi chúng qua
 `csi2_tx_model.sv` với `tready` ngẫu nhiên, ghi pixel (`out.txt`) và thanh ghi
-(`regs.txt`); mô hình so sánh pixel (`tuser`/`tlast`), bộ đếm, FRAME/LINE_INFO,
-FRAME_SUM, FRAME/LINE_TIME, LOG và các bất biến PHY.
+(`regs.txt`, mỗi FE một dòng `fe FRAME_INFO FRAME_SUM FRAME_ERR`); mô hình so
+sánh pixel (`tuser[0]`/`tlast`/`tuser[1]`, cả khi FIFO tràn), bộ đếm,
+FRAME/LINE_INFO, FRAME_SUM, `FRAME_ERR`, FRAME/LINE_TIME, LOG và các bất biến PHY.
+`stim.txt` có thêm lệnh `wrbe A D BE` (ghi theo byte enable).
 
 ```bash
-make -C hw/ip/csi2rx/dv test                          # 30 case (~5 s)
+make -C hw/ip/csi2rx/dv test                          # 53 case (~10 s)
+make -C hw/ip/csi2rx/dv align                         # chỉ unit test của aligner
 make -C hw/ip/csi2rx/dv test SEEDS="1 2 3 4 5 6 7 8"
 make -C hw/ip/csi2rx/dv run SEED=7 LANES=1 ERRORS=1   # thêm DUT_LANES=1|2 RAW8=1 CONTCLK=1
 make -C hw/ip/csi2rx/dv run TEST=clk                  # một test directed
 ```
 
+- Unit test aligner (`tb_dphy_align.sv`, chạy đầu tiên trong `test`): word
+  ISERDES của một burst đặt cửa sổ dò ở các mép mà test mức D-PHY không chạm
+  tới: sync và deskew `FFFFh` ở mọi pha bit, 8 và 15 bit 1, sync hỏng
+  `0xFC`/`0xFE`/`0xFF` + DI `0x2B`, `0xB9` + `00 FF FF`, 1–3 word nhiễu
+  HS-PREPARE, cửa sổ ở word 0 cuối hay sau HS-zero; mỗi case đúng một kết quả
+  (khoá, deskew, lỗi sync).
+- Bản build DV định nghĩa `BOW_CDC_JITTER`: mỗi `bow_cdc_pulse` ngẫu nhiên nhận
+  toggle muộn một chu kỳ (như flop metastable), seed Verilator = seed của case.
 - Random, mỗi seed 5 cấu hình: 2 lane có/không lỗi, 1 lane (`Lanes = 1`) có
   lỗi, 1 lane trên bộ thu 2 lane có/không lỗi; RAW8 và clock liên tục xen kẽ.
   Lỗi: lật bit header (1 và 2 bit), lật bit payload, sync sai, lệch lane, cắt
   packet.
 - Directed: `lp` (escape, LP-00 từ Stop, độ trễ LP-00 → `hs_en`), `watchdog`,
   `clk` (CE chỉ đổi ở HS-0, mất clock), `cmd` (lệnh LOG/RAW khi byte clock
-  dừng), `ovf` (tràn FIFO), `stop` (dừng giữa burst rồi chạy lại), `byteclk`,
-  `eye` (nạp và đọc lại tap, mô hình eye); `cmd` và `stop` chạy thêm với 1 lane.
+  dừng), `ovf` (tràn FIFO khi `tready` thấp: dòng Cut có `tlast` + `tuser[1]`,
+  dòng Lost, frame có nhóm `sof` không ghi được bị bỏ, so từng pixel), `ovf2`
+  (nhả `tready` giữa frame sau dòng Lost, dòng 1 nhóm gặp FIFO đầy, đuôi frame
+  mất: `FRAME_ERR`), `ovf8` (RAW8, nhóm đầu 1 pixel: đầu ra giữ 3 nhóm), `stop`
+  (dừng giữa burst rồi chạy lại), `byteclk`, `eye` (nạp và đọc lại tap, mô hình
+  eye), `deskew` (burst skew calibration thật: burst thô `FFFFh` + `0101…`, không
+  phải lỗi SOT, đếm ở `CNT_EXT[31:16]`, cả giữa các dòng; deskew chỉ trên một
+  lane là SKEW; sync hỏng với `00 FF` trong pixel hay trail, `0xFC`/`0xFE`/`0xFF`
+  trước DI, bit sync ngay trước cuối HS-zero vẫn là SOT), `extra` (byte sau packet trong cùng burst vượt
+  `CTRL.EXTRA` → `ERR_STATUS.EXTRA`, `CNT_EXT[15:0]`: dòng + dòng, EMB + dòng,
+  VC khác + dòng, FS + dòng thì frame bị bỏ, long packet nhỏ dưới ngưỡng,
+  EXTRA = 0 tắt, 255 cần bão hoà 256), `loss` (burst mất trước unpack: dòng sau
+  có `tuser[1]`, mất ở dòng đầu thì frame bị bỏ, mất ở dòng cuối chỉ thấy ở
+  `FRAME_ERR`, mất giữa hai frame tính cho frame sau; dòng đầu không có nhóm
+  pixel thì frame bị bỏ, dòng không có nhóm giữa frame đánh dấu dòng sau, ngoài
+  frame thì không; vào HS bị từ chối ở mức LP trên data lane hay lane clock,
+  với `CLK_FORCE` thì lane clock không tính; packet bị cắt không phải dòng;
+  ECC_CORR của header FE thuộc frame nó kết thúc), `be` (ghi theo byte enable
+  trên mọi thanh ghi). `cmd`, `stop`, `deskew`, `extra`, `ovf`, `ovf2`, `loss`,
+  `be`, `eye` chạy thêm với 1 lane; `deskew`, `extra`, `ovf`, `ovf2`, `loss`,
+  `eye` với 1 trên 2 lane; `be`, `eye`, `loss` với clock liên tục.
 - Mỗi case giữ file trong `build/csi2rx_dv/<case>/` (`sim.log` cho CI); một
-  binary Verilator cho mỗi giá trị `Lanes` (`build/csi2rx_dv/obj_l1`, `obj_l2`).
-- `make test-tools` chạy 19 unit test của mô hình (`tools/tests/test_csi2_model.py`).
+  binary Verilator cho mỗi giá trị `Lanes` (`build/csi2rx_dv/obj_l1`, `obj_l2`)
+  và một cho aligner (`obj_align`).
+- `make test-tools` chạy 29 unit test của mô hình (`tools/tests/test_csi2_model.py`).
 
 ### D-PHY I/O trên FPGA (xsim)
 
 `hw/fpga/common/dv/` mô phỏng `bow_dphy_io_xusp` + `bow_csi2rx` với model
 unisim của Vivado (`IBUFDS_DPHY`, `IDELAYE3`, `ISERDESE3`, `BUFGCE_DIV`). Máy
 phát trong testbench lái chân P/N từng bit ở 912 Mbit/s: clock không liên tục,
-HS-ZERO dài ngẫu nhiên (pha bit của byte sync), lệch nhỏ giữa hai lane; mức LP
+HS-ZERO dài ngẫu nhiên (pha bit của byte sync), lệch nhỏ giữa hai lane (trừ frame
+4/5, xem dưới); mức LP
 lái mạnh, mức HS lái yếu (model `IBUFDS_DPHY` dựa vào đó để phân biệt LP và HS).
 
 ```bash
@@ -275,7 +307,19 @@ make -C hw/fpga/common/dv run SEED=5 WAVES=1   # waveform trong build/fpga_dv/se
 Kiểm tra: word ISERDES chứa HS-zero + sync + đúng các byte đã gửi, clock /1 và
 /4 không có xung runt và thẳng pha qua các lần gate, CE chỉ đổi khi lane clock ở
 HS-0, `RST` của ISERDES nhả mỗi burst ≥ 20 byte clock trước sync, ghi `DLY` →
-CNTVALUEOUT ở burst sau, pixel và thanh ghi của bộ thu. Cần Vivado nên không
+CNTVALUEOUT ở burst sau, pixel và thanh ghi của bộ thu với `PHY_CFG`/`CTRL.EXTRA`
+của driver; một burst skew calibration (HS-zero, `FFFFh`, `0101…`) là deskew,
+không phải lỗi SOT; frame với T_HS-TRAIL = T_EOT max (không EXTRA), với
+T_HS-PREPARE min, và max (nhiễu tới 85 ns + 6 UI, kết thúc bằng `00 B8` giả),
+cả hai với T_HS-PREPARE + T_HS-ZERO đúng tối thiểu trên mọi lane (pha bit ngẫu
+nhiên qua T_CLK-PRE): bộ thu bỏ qua nhiễu và vẫn thấy mọi sync. White box: ở chu
+kỳ đầu của mỗi lần dò, word cũ nhất của cửa sổ aligner phải là HS-zero (cửa sổ
+bắt đầu sau nhiễu và trước sync); `00 B8` giả một mình chỉ thấy cửa sổ lấn ≥ 16
+UI vào nhiễu. `+SETTLE=<n>` thay SETTLE của driver để quét: 20…28 đạt ở mọi seed,
+19 ở một nửa, ≤ 18 cửa sổ bắt đầu trong nhiễu (≤ 15 còn khoá vào sync giả), ≥ 29
+lỡ sync thật; driver dùng 22 (mô hình không có trễ ~8 ns của bộ thu LP, trên
+thiết bị cửa sổ muộn hơn ~1,6 chu kỳ). Hai lần chạy xsim song song không được
+dùng chung một snapshot (`xsim.dir`): plusarg và seed lẫn nhau. Cần Vivado nên không
 chạy trong CI; pass/fail lấy từ dòng `tb_bow_dphy_io_xusp: PASS` (mã thoát của
 xsim không phản ánh kết quả). Eye không mô phỏng được: unisim không có lệch
 clock/data.

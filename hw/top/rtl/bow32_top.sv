@@ -453,6 +453,7 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
   bow_csi2rx #(
     .Lanes    (CsiLanes),
     .PhyClkHz (VidClkHz),
+    .CpuClkHz (ClkFreqHz),
     .HasPhy   (CsiPhy)
   ) u_csi2rx (
     .clk_i,

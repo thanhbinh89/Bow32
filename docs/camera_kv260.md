@@ -7,11 +7,13 @@ Trước khi đọc, hãy chạy được Bow32 cơ bản theo [fpga_kria.md](fp
 (UART0 trên PMOD J2, nạp chương trình bằng `bow32_flash.py`). Chi tiết bộ thu:
 [ip/csi2rx.md](ip/csi2rx.md).
 
-> **Trạng thái (2026-10-30):** bitstream `kv260_cam` build bằng Vivado 2025.2
-> (WNS +1,023 ns ở clock video 200 MHz, bus skew 7/7 đạt, 0 lỗi DRC) và chạy
-> trên KV260, nạp qua JTAG. Với camera v2 thật: `csi2_test` → `test` PASS 16/16
-> (1080p30 và 720p60), link 2 lane × 912 Mbit/s không có lỗi ECC/CRC/SoT trong
-> nhiều phút, eye ~260 tap mỗi lane; ứng dụng `camera` hiệu chỉnh eye ở `cam`
+> **Trạng thái (2026-11-10):** bitstream `kv260_cam` build bằng Vivado 2025.2
+> (WNS +0,005 ns ở clock video 200 MHz, với `phys_opt_design` sau route; bus
+> skew đạt, 0 lỗi DRC) và chạy
+> trên KV260, nạp qua JTAG. Với camera v2 thật: `csi2_test` → `test` PASS 18/18
+> (1080p30 và 720p60, có kiểm tra lề), link 2 lane × 912 Mbit/s không có lỗi
+> ECC/CRC/SoT trong nhiều phút, eye ~260 tap mỗi lane, 0 lỗi trong 1800 frame
+> ở tâm ± 68 tap (BER < 3,6×10^-10); ứng dụng `camera` hiệu chỉnh eye ở `cam`
 > đầu tiên, AE/AWB khoá, ảnh PNG 1080p30 và 720p60 đúng. Bitstream cơ bản
 > `kv260` giờ có thêm khối CSI2RX không có D-PHY (WNS +5,985 ns ở 50 MHz);
 > trên board `csi2_test` báo `csi2rx: Bow32 receiver, no D-PHY in this
@@ -81,8 +83,8 @@ là 99,999 MHz nên ra 199,998 / 49,9995 MHz) và 2 `proc_sys_reset`. Ràng bu�
 
 | File | Phải thấy |
 |------|-----------|
-| `timing_summary.rpt` | WNS ≥ 0 và WHS ≥ 0 (bản hiện tại: +1,023 ns / +0,010 ns) |
-| `bus_skew.rpt` | 7 ràng buộc `set_bus_skew`, cả 7 `Slack (MET)` |
+| `timing_summary.rpt` | WNS ≥ 0 và WHS ≥ 0 (bản hiện tại: +0,005 ns / +0,010 ns; đường găng ở bộ macroblock H.264, `tcl/build.tcl` bật `phys_opt_design` sau route cho nó) |
+| `bus_skew.rpt` | 7 ràng buộc `set_bus_skew` của bộ thu (+ 2 của H.264), tất cả `Slack (MET)` |
 | `clockInfo.txt` | `The following 2 clock nets belong to CLOCK_DELAY_GROUP bow_dphy_rx_clk`: `u_dphy/dphy_byte_clk`, `u_dphy/hs_clk` |
 | `drc.rpt` | không có lỗi (nhất là REQP-1742: `CLK` của IDELAYE3 phải là `CLKDIV` của ISERDESE3) |
 | `clocks.rpt`, `clock_interaction.rpt` | `dphy_hs_clk` 2,193 ns; `dphy_byte_clk` và `dphy_hs_clk_DIV4_INV` 8,772 ns; các cặp clock khác miền là *Asynchronous Groups* |
@@ -134,7 +136,8 @@ Một phiên làm việc điển hình:
 
 ```
 > cam                      # 1080p30 RGGB: bộ thu + cảm biến + ISP, lần đầu hiệu chỉnh eye
-csi2rx: calibrated taps 208/200 eye 272/256
+csi2rx: calibrated taps 208/192 eye 272/272
+csi2rx: margin ok +-68/+-68 taps: 0 errors in 5 x 8 frames, BER < 3.7e-8
 streaming 1920x1080 RGGB
 ok
 > stat                     # thống kê frame kế tiếp
@@ -147,6 +150,7 @@ ae: locked exp=1210 gain=0 mean=181
 awb: locked r=402 b=355
 > csi                      # trạng thái bộ thu (bên dưới)
 > cal                      # hiệu chỉnh lại eye (bước 16), in bản đồ eye
+> margin 0 30              # lề quanh tap: tâm và tâm +-eye/4 mỗi lane, 30 frame mỗi điểm
 > csilog fs                # 64 packet từ FS kế tiếp (csilog fe: tới FE, csilog: ngay)
 > mode 720p                # 1280x720 @60 fps
 > tp 2                     # sọc màu của cảm biến: kiểm tra đường dữ liệu và thứ tự Bayer
@@ -156,25 +160,31 @@ awb: locked r=402 b=355
 
 `cam` làm theo thứ tự: cấu hình ISP → `bow_csi2rx_start(2, RAW10, 912 Mbit/s)` khi cảm biến
 còn ở LP-11 → cấu hình cảm biến (exposure ≤ FLL − 4) → bật ISP → stream on →
-lần đầu, hoặc khi 64 packet đầu có lỗi (`bow_csi2rx_link_check`): hiệu chỉnh
-eye. Tap được giữ cho các lần `cam` sau. `stop`, `mode`, `tpg` tắt stream rồi
+lần đầu, hoặc khi 64 packet đầu có lỗi do tap (`bow_csi2rx_link_check`,
+`ERR_STATUS & CSI2RX_ERR_TAP`: SOT, ECC, CRC, TRUNC, SKEW), hoặc không có đủ 64
+packet trong 2,4 frame + 6 ms mà không có lỗi nào (không có dữ liệu: `csi2rx: N
+packets in M ms, no link error: calibrating`): hiệu chỉnh eye rồi kiểm tra lề 8
+frame mỗi điểm (chỉ báo, tap không đổi). Không có byte clock thì hiệu chỉnh thất
+bại và `cam` trả `error` (`csi2rx: calibration failed`). Lỗi khác (EXTRA,
+FORMAT, FRAME, OVF) chỉ được báo: `csi2rx: link errors (ERR_STATUS ...), not a
+sampling problem: taps kept`. Tap được giữ cho các lần `cam` sau. `stop`, `mode`, `tpg` tắt stream rồi
 chờ cảm biến gửi nốt frame (`bow_csi2rx_stop`) trước khi tắt bộ thu.
 
-`csi` in (đo trên board, 1080p30, cảnh thật, ~3 s sau `cam`):
+`csi` in (đo trên board 2026-11-10, 1080p30, cảnh thật, ngay sau `cam`):
 
 ```
 csi2rx: link ok
-  frames 91 lines/frame 1080 wc 2400 dt 2b sum 19156a6b
-  errors: ecc 0/0 crc 0 trunc 0 sot 0/0 drop 182 ovf 0 misc 0
-  timing: frame 33326 us, line 18860 ns, byte clock 114062 kHz
-  phy: lp clk 11 d0 11 d1 11, bursts 65535/65535 clk 91, delay 208/192
+  frames 5 lines/frame 1080 wc 2400 dt 2b sum 0c3e70c2 frame errors 000
+  errors: ecc 0/0 crc 0 trunc 0 sot 0/0 ovf 0 misc 0 extra 0 (dropped by DT/VC 10)
+  timing: frame 33326 us, line 18960 ns, byte clock 114062 kHz
+  phy: lp clk 11 d0 11 d1 11, bursts 5420/5420 clk 5, delay 208/192
 ```
 
 | Dòng | Nội dung |
 |------|----------|
-| 1 | `link ok` (có frame, không lỗi link), `link errors`, `no data` (chưa có packet nào), hoặc `no lines` (có frame nhưng không dòng nào được nhận: `CTRL.DT`/`VC` không khớp, hoặc cảm biến gửi nhiều packet trong một burst) |
-| `frames` | số FS từ lần xoá bộ đếm; số dòng của frame cuối, WC và DT của dòng cuối, `FRAME_SUM` |
-| `errors` | ECC đã sửa/không sửa được, CRC, packet bị cắt, SoT lane 0/1, `drop` (bộ lọc VC/DT: IMX219 gửi 2 dòng embedded mỗi frame, nên tăng 2 mỗi frame là bình thường), tràn FIFO, misc (skew + format + frame) |
+| 1 | `link ok` (có frame, không lỗi link), `link errors`, `no data` (chưa có packet nào), hoặc `no lines` (có frame nhưng không dòng nào được nhận: `CTRL.DT`/`VC` không khớp luồng) |
+| `frames` | số FS từ lần xoá bộ đếm; số dòng của frame cuối, WC và DT của dòng cuối, `FRAME_SUM`, `frame errors` = `FRAME_ERR` (bit `ERR_STATUS` của frame cuối, 000 = frame sạch) |
+| `errors` | ECC đã sửa/không sửa được, CRC, packet bị cắt, SoT lane 0/1, tràn FIFO, misc (skew + format + frame + frame bị bỏ), `extra` (burst có quá `CTRL.EXTRA` byte sau packet: máy phát không về LP-11 giữa các packet, packet sau bị bỏ; IMX219 luôn 0), rồi `dropped by DT/VC` (bộ lọc VC/DT: IMX219 gửi 2 dòng embedded mỗi frame, nên tăng 2 mỗi frame là bình thường, không phải lỗi). Hai dòng chỉ in khi khác 0: `no LP-11 between packets? (bytes after packets: dropped)` khi `extra` > 0, `deskew bursts N` khi có burst skew calibration của D-PHY v1.2 (không phải lỗi; IMX219 không gửi) |
 | `timing` | `FRAME_TIME`, `LINE_TIME`, `BYTECLK` (912 Mbit/s / 8 = 114 MHz) |
 | `phy` | trạng thái LP của từng lane (`11`, `01`, `00`) hoặc `HS`, số lần vào HS của lane 0/1 (16 bit, bão hoà ở 65535) và lane clock (IMX219: 1 lần mỗi frame), tap IDELAY |
 
@@ -204,22 +214,30 @@ lanes |###......################################......#################| tap 196
 lane0 |####.....##################################....#################| tap 204 width 272 (other lane at 196)
 lane1 |###.....#################################....###################| tap 192 width 264 (other lane at 196)
 [PASS] calibrate taps 204/192 eye 272/264
+margin centre taps 204/192: 60 frames, 0 errors, 6.2e8 bits (64800 lines), BER < 4.9e-9
+margin lane0 -68 tap 136: 60 frames, 0 errors, 6.2e8 bits (64800 lines), BER < 4.9e-9
+margin lane0 +68 tap 272: 60 frames, 0 errors, 6.2e8 bits (64800 lines), BER < 4.9e-9
+margin lane1 -66 tap 126: 60 frames, 0 errors, 6.2e8 bits (64800 lines), BER < 4.9e-9
+margin lane1 +66 tap 258: 60 frames, 0 errors, 6.2e8 bits (64800 lines), BER < 4.9e-9
+[PASS] margin +-68/+-66 taps: 0 errors in 5 x 60 frames, BER < 4.9e-9
 [PASS] integrity 60 frames 1920x1080 RAW10: wc 2400, sum 3d2e1c00
-[PASS] packets FS, embedded data, lines, FE: headers and CRC ok; frame numbers 70, 71
+[PASS] packets FS, embedded data, lines, FE: headers and CRC ok; frame numbers 122, 123
 [PASS] timing frame 33326 us, line 18860 ns, byte clock 114062 kHz
 csi2_test: 1280x720, frame 16653 us, 60 frames per check, calibration step 8
 [PASS] link-up bursts 3/3, clock lane 1
 ...                                         (bản đồ eye như trên)
 [PASS] calibrate taps 204/192 eye 272/264
+...                                         (5 điểm margin, 2.7e8 bit mỗi điểm)
+[PASS] margin +-68/+-66 taps: 0 errors in 5 x 60 frames, BER < 1.1e-8
 [PASS] integrity 60 frames 1280x720 RAW10: wc 1600, sum 1b30f000
-[PASS] packets FS, embedded data, lines, FE: headers and CRC ok; frame numbers 74, 75
-[PASS] timing frame 16653 us, line 18940 ns, byte clock 114062 kHz
+[PASS] packets FS, embedded data, lines, FE: headers and CRC ok; frame numbers 127, 128
+[PASS] timing frame 16653 us, line 18960 ns, byte clock 114062 kHz
 [PASS] isp 8 colour bars ok, capture 160x90 (scale 3)
 [PASS] raw8 60 frames RAW8: wc 1280, sum 1c200000; back to RAW10
 [PASS] filter VC 1: no line, 43320 packets dropped in 60 frame periods; VC 0: frames resume
 [PASS] restart 3 x stop/start at random phases, frames resume without errors
 [PASS] irq 59 FS interrupts in 60 frames
-csi2_test: PASS (16/16)
+csi2_test: PASS (18/18)
 ok
 ```
 
@@ -228,7 +246,8 @@ ok
 | `phy-idle` | cảm biến standby, PHY bật: mọi lane LP-11, không có HS |
 | `link-up` | stream màu đơn: số lần vào HS của hai data lane và lane clock tăng |
 | `calibrate` | có eye trên mọi lane (bước 8), tap đã nạp (`DLYn` đọc lại), rồi 64 packet không lỗi |
-| `integrity` | 60 frame RAW10: không lỗi link, `FRAME_INFO` = H dòng, `LINE_INFO` WC = W·5/4 và DT 0x2B, `FRAME_SUM` = (W/2)(H/2)(R + Gr + B + Gb) |
+| `margin` | test pattern PN9: 60 frame ở tap đã hiệu chỉnh, rồi 60 frame ở tap − k và tap + k của từng lane (k = eye / 4, ≥ 40), không lỗi lấy mẫu nào; in BER bị chặn trên (95 %); tap trở về tâm, rồi lại màu đơn |
+| `integrity` | 60 frame RAW10: không lỗi link, `FRAME_INFO` = H dòng, `LINE_INFO` WC = W·5/4 và DT 0x2B, `FRAME_SUM` = (W/2)(H/2)(R + Gr + B + Gb), `FRAME_ERR` = 0 (`raw8` và `restart` cũng đòi điều này; `margin` chỉ đếm lỗi lấy mẫu, các check khác không đọc `FRAME_ERR`) |
 | `packets` | LOG từ FS: FS, embedded (0x12), dòng 0x2B, ECC và CRC đúng; LOG tới FE: dòng rồi FE; số frame tăng 1 |
 | `timing` | chu kỳ frame ±2 % so với mode, line time 3448 / 182,4 MHz ±2 %, byte clock 114 MHz ±3 % |
 | `isp` | sọc màu của cảm biến qua ISP, capture: tâm mỗi sọc đúng thành phần R/G/B |
@@ -237,16 +256,18 @@ ok
 | `restart` | 3 lần stop/start stream ở pha ngẫu nhiên: frame chạy lại không lỗi |
 | `irq` | `IRQ_EN.FS`: ISR đếm `irq_fast[7]` (mcause `0x80000017`) |
 
-Bản đầy đủ chạy `link-up` … `timing` ở 1080p30 rồi lại ở 720p60 (16 check).
-`test quick` (11 check, frame 64×48, bước 32, 4 frame mỗi check) dành cho mô
-phỏng. Sau `test` stream vẫn chạy, bộ đếm vừa được xoá (để `stat` chỉ thấy sự
+Bản đầy đủ chạy `link-up` … `timing` ở 1080p30 rồi lại ở 720p60 (18 check,
+~4 phút). `test quick` (12 check, frame 64×48, bước 32, 4 frame mỗi check) dành
+cho mô phỏng. Dòng `[FAIL]` vì lỗi link in đủ bộ đếm (`ecc … extra n
+(ERR_STATUS xxx)`); có EXTRA thì thêm dòng nhắc rằng hiệu chỉnh không giúp được. Sau `test` stream vẫn chạy, bộ đếm vừa được xoá (để `stat` chỉ thấy sự
 kiện mới). Lệnh khác:
 
 | Lệnh | Việc |
 |------|------|
-| `start`, `stop` | stream (kèm kiểm tra 64 packet, không tự hiệu chỉnh) / dừng stream |
+| `start`, `stop` | stream (kèm kiểm tra 64 packet, không tự hiệu chỉnh; lỗi thì in `ERR_STATUS` và `try cal` nếu là lỗi do tap) / dừng stream |
 | `stat` | như `csi` của ứng dụng `camera` |
 | `cal [step]` | hiệu chỉnh eye (mặc định bước 16), in bản đồ |
+| `margin [k] [frames]` | lề quanh tap đang dùng: tâm và tâm ± k mỗi lane (k 0: eye / 4 của lần hiệu chỉnh cuối), mặc định 60 frame mỗi điểm; `margin 0 1800` ở 720p60 ≈ 2,5 phút, BER < 3,6×10^-10 mỗi điểm |
 | `delay <lane> <tap>` | đặt tap 0…511 của một lane |
 | `log [fs] [fe]` | LOG 64 packet: ngay, từ FS kế tiếp, tới FE (cả hai: từ FS tới FE) |
 | `raw [now]` | 64 word thô mỗi lane từ burst kế tiếp (hoặc ngay), tìm byte sync |
@@ -287,6 +308,8 @@ mỗi frame, xoay tới khi số lớn nhất.
 | `csi2rx: not present` | bitstream cũ, chưa có bộ thu của Bow32 (`0x4000_8000` trả bus error) → build lại |
 | `csi` → `no data` | dòng `phy`: lane ở `11` mãi = cảm biến không stream (`sr 0100` phải là 01); ở `00` mãi = IMX219 chưa ra LP-11 (sau khi bật nguồn nó chỉ vào LP-11 khi đã stream một lần: khởi động lại ứng dụng để `imx219_probe()` làm việc đó); không bao giờ `HS` = cáp, PA7 |
 | `csi` → `link errors` (ecc/crc/sot tăng) | `cal` để hiệu chỉnh lại và xem bản đồ: eye hẹp hoặc không có → cáp, đầu nối J9; `csilog` xem packet nào lỗi |
+| `csi` → `link errors` chỉ với `extra` > 0 (dòng `no LP-11 between packets?`) | không phải lỗi eye, `cal` không giúp: máy phát gửi nhiều packet trong một HS burst (sai CSI-2 v1.x), hoặc `CTRL.EXTRA` thấp hơn trail của cảm biến (IMX219: trail 17–20 byte, ngưỡng 62); `csilog` xem packet nào mất |
+| `csi2rx: margin low … lane L ±k (tap t)` | lề ở một phía của lane đó nhỏ hơn k tap: cáp, đầu nối J9, hoặc eye đã trôi (nhiệt độ); `cal` rồi `margin` lại, so bản đồ eye; tap vẫn ở tâm đã hiệu chỉnh |
 | `calibration failed`, `tap not applied: no byte clock` | không có burst khi hiệu chỉnh: cảm biến có đang stream không? |
 | `stat` → `error: no frame (STATUS .., input 0x0)` | `csi`: có frame không, `lines/frame`, `wc` đúng chưa, lỗi gì |
 | đổi RAW8/RAW10 bằng `sr 018c ..` khi đang stream → `ovf` tăng, pixel sai | IMX219 chỉ nhận format (0x018C/0x018D, 0x0309) ở standby: dừng stream, đổi, rồi stream lại (lệnh `fmt` của `csi2_test` làm vậy) |

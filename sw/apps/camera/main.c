@@ -45,6 +45,7 @@ static const char help[] =
     "CSI-2 receiver:\n"
     "  csi                 link status, counters, timing, PHY state\n"
     "  cal [step]          calibrate the data lane delays while streaming (step 16)\n"
+    "  margin [k] [frames] errors at the calibrated taps +-k (k 0: eye / 4, 60 frames)\n"
     "  csilog [fs|fe]      log of 64 packets: now, from the next FS or up to an FE\n"
     "misc:\n"
     "  info  baud <rate>  rd <addr>  wr <addr> <val>\n";
@@ -62,6 +63,7 @@ static struct {
   /* hardware found at start-up: sensor, CSI-2 receiver, its D-PHY; the
    * data lane delays were calibrated */
   bool sensor, csi, phy, calibrated;
+  bow_csi2rx_cal_t cal; /* last calibration (taps, eye widths) */
   /* state */
   bool cam, tpg, yuv, hflip, vflip;
   uint32_t tp, exposure, again;
@@ -171,19 +173,58 @@ static int sensor_apply_ctrl(void) {
   return r;
 }
 
-/* Eye calibration of the data lanes while the sensor streams. One tap may
- * have to wait for a whole frame: allow 1.2 frame periods + 2 ms per tap. */
+/* Time for one calibration tap or margin frame: 1.2 frame periods + 2 ms
+ * (a tap may wait for the vertical blanking). */
+static uint32_t tap_ms(void) { return imx219_frame_us(cam.fll) * 12u / 10000u + 3u; }
+
+/* Margin around the calibrated taps (k = eye / 4): reported, the taps stay.
+ * A passing check does not disturb the stream (taps change at frame ends). */
+static bool margin(uint32_t k, uint32_t frames, bool verbose) {
+  bow_csi2rx_margin_t m;
+  int r = bow_csi2rx_margin(&cam.cal, k, frames, tap_ms(), &m, verbose);
+  bow_printf("csi2rx: margin %s", r > 0 ? "ok " : r == 0 ? "low " : "");
+  bow_csi2rx_print_margin(&m, r);
+  bow_puts("\n");
+  return r > 0;
+}
+
+/* Eye calibration of the data lanes while the sensor streams, then a short
+ * margin check (8 frames per point). */
 static bool calibrate(uint32_t step, bool verbose) {
   bow_csi2rx_cal_t cal;
-  uint32_t tap_ms = imx219_frame_us(cam.fll) * 12u / 10000u + 3u;
-  if (!bow_csi2rx_calibrate(step, tap_ms, &cal, verbose)) {
+  if (!bow_csi2rx_calibrate(step, tap_ms(), &cal, verbose)) {
     bow_printf("csi2rx: calibration failed\n");
     return false;
   }
   bow_printf("csi2rx: calibrated taps %u/%u eye %u/%u\n", cal.tap[0], cal.tap[1], cal.width[0],
              cal.width[1]);
+  cam.cal = cal;
   cam.calibrated = true;
+  margin(0, 8, verbose);
   return true;
+}
+
+/* Calibrate at the first start; later, when the link check with the kept
+ * taps fails with errors a new tap can fix (ERR_STATUS & CSI2RX_ERR_TAP), or
+ * with no error at all: fewer than 64 packets in 2 x tap_ms() (2.4 frames +
+ * 6 ms: the first frame start is up to a frame away, 64 packets take at most
+ * ~1.3 frames), so no data or a very slow link; without a byte clock the
+ * calibration fails cleanly. Other link errors (EXTRA, FORMAT, FRAME, OVF)
+ * are not a sampling problem: the taps are kept. */
+static bool need_calibration(bool calibrated) {
+  if (!calibrated) return true;
+  uint32_t ms = 2u * tap_ms();
+  if (bow_csi2rx_link_check(64, ms)) return false;
+  bow_csi2rx_cnt_t c;
+  bow_csi2rx_counters(&c);
+  uint32_t err = CSI2RX->ERR_STATUS;
+  if (bow_csi2rx_link_errors(&c) == 0) {
+    bow_printf("csi2rx: %u packets in %u ms, no link error: calibrating\n", c.packets, ms);
+    return true;
+  }
+  if (err & CSI2RX_ERR_TAP) return true;
+  bow_printf("csi2rx: link errors (ERR_STATUS %03x), not a sampling problem: taps kept\n", err);
+  return false;
 }
 
 static bool start_cam(void) {
@@ -225,7 +266,7 @@ static bool start_cam(void) {
   /* The first start calibrates (the reset tap 0 can sit at the edge of the
    * eye). The receiver keeps the taps: calibrate again only when the link
    * has errors with them. */
-  if (!cam.calibrated || !bow_csi2rx_link_check(64, 200)) {
+  if (need_calibration(cam.calibrated)) {
     if (!calibrate(16, false)) return false;
     /* The ISP drops the frames broken by the tap sweep (input error), the
      * last one just ended: after one clean frame, clear its error flags. */
@@ -599,6 +640,18 @@ static bool execute(const char *line) {
     parse_num(a, &v, false);
     if (v == 0 || v > 256) return false;
     return calibrate(v, true);
+  }
+  if ((a = match(line, "margin"))) {
+    uint32_t k = 0, frames = 60;
+    if (!cam.cam || !cam.calibrated) {
+      bow_printf("error: the camera is not streaming (cam)\n");
+      return false;
+    }
+    if ((a = parse_num(a, &k, false))) parse_num(a, &frames, false);
+    if (frames == 0 || k > CSI2RX_DLY_MAX) return false;
+    bool ok = margin(k, frames, true);
+    ISP->STATUS = ISP_ST_ERRORS; /* frames cut by a point with errors */
+    return ok;
   }
   if ((a = match(line, "csilog"))) {
     static uint32_t entries[CSI2RX_LOG_ENTRIES];

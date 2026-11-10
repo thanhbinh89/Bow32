@@ -15,7 +15,7 @@
 //     tready PCT / knob NAME V / mark N       m_axis tready duty, TX knob, segment marker
 //   and writes
 //   DIR/out.txt   one line per m_axis transfer: pixel tuser[0] tlast tuser[1], and 'mark N'
-//   DIR/regs.txt  rd/poll results, 'fe FRAME_INFO FRAME_SUM' for every frame end
+//   DIR/regs.txt  rd/poll results, 'fe FRAME_INFO FRAME_SUM FRAME_ERR' for every frame end
 //                 (IRQ_STATUS.FE polled during wait/delay/poll and cleared),
 //                 per segment invariants ('inv SEG NAME VALUE'), burst end
 //                 times ('tend BURST PS') and 'end'
@@ -63,6 +63,7 @@ module tb_bow_csi2rx;
   bow_csi2rx #(
     .Lanes     (Lanes),
     .PhyClkHz  (PhyClkHz),
+    .CpuClkHz  (1_000_000_000 / (CpuPs / 1000)),
     .HasPhy    (1'b1),
     .FifoDepth (FifoDepth)
   ) dut (
@@ -186,13 +187,14 @@ module tb_bow_csi2rx;
 
   // One poll of IRQ_STATUS.FE (frame end records), then `cycles` CPU cycles
   task automatic service(input int unsigned cycles);
-    logic [31:0] st, info, fsum, unused;
+    logic [31:0] st, info, fsum, ferr, unused;
     bus_xfer(1'b0, 32'h014, '0, st);
     if (st[1]) begin
       bus_xfer(1'b0, 32'h050, '0, info);
       bus_xfer(1'b0, 32'h058, '0, fsum);
+      bus_xfer(1'b0, 32'h04C, '0, ferr);
       bus_xfer(1'b1, 32'h014, 32'h2, unused);
-      $fwrite(regs_fd, "fe %08x %08x\n", info, fsum);
+      $fwrite(regs_fd, "fe %08x %08x %03x\n", info, fsum, ferr);
     end
     repeat (cycles) @(posedge clk);
   endtask
@@ -230,7 +232,8 @@ module tb_bow_csi2rx;
   endfunction
 
   // 'pkt VC DT WC HFLIP_A HFLIP_B PFLIP TRUNC SYNC0 SYNC1 ZEROS0 ZEROS1 PHASE0 PHASE1 ZERO_NS
-  //  PAYLOAD [EXTRA]': EXTRA = bytes sent after the packet in the same burst
+  //  PAYLOAD [EXTRA]': EXTRA = bytes sent after the packet in the same burst;
+  //  VC < 0: a raw burst of the EXTRA bytes only (no packet), e.g. skew calibration
   function automatic void push_pkt(string line);
     int          vc, dt, wc, hf0, hf1, pf, tr, s0, s1, z0, z1, p0, p1, zns, n;
     string       pay, ext;
@@ -261,8 +264,9 @@ module tb_bow_csi2rx;
       u_tx.push_long(vc, dt, b, f);
     end else begin
       // packet + extra bytes in one burst (raw bytes, as push_short/push_long build them)
-      b = csi2_header(vc, dt, wc);
-      if (dt >= 'h10) begin
+      if (vc < 0) b.delete();
+      else        b = csi2_header(vc, dt, wc);
+      if (vc >= 0 && dt >= 'h10) begin
         csi2_bytes_t p;
         p.delete();
         if (pay != "-") begin

@@ -449,11 +449,14 @@ module tb_bow32;
   string        line0 = "", line1 = "";
 
   // csi2 test: a failed check of the firmware, or a command answered with
-  // "error" (every command of this test must succeed), stops the simulation
-  // at once
+  // "error" (every command of this test must succeed, except a margin check
+  // that is meant to fail), stops the simulation at once
+  bit csi2_expect_error = 1'b0;
+
   function automatic void check_line0(string line);
     if (test == "csi2" && (contains(line, "[FAIL]") || contains(line, "csi2_test: FAIL") ||
-                           (line.len() >= 5 && line.substr(0, 4) == "error"))) begin
+                           (!csi2_expect_error && line.len() >= 5 &&
+                            line.substr(0, 4) == "error"))) begin
       $fatal(1, "csi2_test reported a failure: %s", line);
     end
     if (test == "mkv" && (contains(line, " FAIL") || contains(line, "mkv: FAIL") ||
@@ -924,9 +927,15 @@ module tb_bow32;
   // which a bad sync byte on lane 1 cannot lead to a later false lock (lane
   // 1 sync error; skew: only lane 0 locked, the burst is dropped).
   bit inj_req = 1'b0, inj_frame = 1'b0, inj_sent = 1'b0;
+  // camera test knobs ("!mute" / "!unmute", "!fe" / "!nofe" steps): the
+  // sensor takes its registers but sends nothing; an FE without FS after
+  // every frame (FRAME error, not a sampling problem)
+  bit imx_mute = 1'b0, imx_fe_extra = 1'b0;
+  // frame timing of the IMX219 model: LP-11 after every line, vertical blanking
+  int unsigned imx_gap_ns = 0, imx_vblank_ns = VblankNs;
 
   function automatic bit imx_streaming();
-    return imx_reg[16'h0100][0] && cam_powered;
+    return imx_reg[16'h0100][0] && cam_powered && !imx_mute;
   endfunction
 
   // Pixels: colour bars (0x0600 = 2), a solid colour (1), else a smooth
@@ -1029,8 +1038,10 @@ module tb_bow32;
         end
       end
       u_csi.push_long(0, dt, pay, fl);
+      if (imx_gap_ns != 0) u_csi.idle(imx_gap_ns);
     end
     u_csi.push_short(0, 8'h01, cf_num, f);                              // FE
+    if (imx_fe_extra) u_csi.push_short(0, 8'h01, cf_num, f);           // FE without FS
     if (inj_frame && !bad_done) $fatal(1, "IMX219: no line for the bad sync byte");
   endfunction
 
@@ -1110,7 +1121,7 @@ module tb_bow32;
           u_csi.contclk = 1'b0;
           cam_frames++;
           if (inj_frame) inj_sent = 1'b1;
-          #(VblankNs);
+          #(imx_vblank_ns);
         end
       end
     end
@@ -1271,9 +1282,20 @@ module tb_bow32;
     cam_add("mode 64 48");                        // small frames for the simulation
     cam_add("tp 2");                              // sensor colour bars
     // first start: eye calibration (step 16, every tap good in this test)
-    cam_add("cam", "csi2rx: calibrated taps 248/248 eye 512/512\nstreaming 64x48 RGGB");
+    // then the margin check (8 frames at the taps and at +-eye/4)
+    cam_add("cam", {"csi2rx: calibrated taps 248/248 eye 512/512\n",
+                    "csi2rx: margin ok +-128/+-128 taps: 0 errors in 5 x 8 frames, BER < "},
+            "streaming 64x48 RGGB");
     cam_add("stat", "in 64x48", "", 1'b1);
     cam_add("csi", "csi2rx: link ok\n", "lines/frame 48 wc 80 dt 2b");
+    cam_add("margin 0 2", "csi2rx: margin ok +-128/+-128 taps: 0 errors in 5 x 2 frames");
+    // restarts with the calibrated taps: the link check passes (taps kept);
+    // a link error that a tap cannot fix (FRAME) keeps the taps
+    cam_add("cam", "streaming 64x48 RGGB");
+    cam_add("!fe");
+    cam_add("cam", "csi2rx: link errors (ERR_STATUS 100), not a sampling problem: taps kept",
+            "streaming 64x48 RGGB");
+    cam_add("!nofe");
     cam_add("cap 0 0 32 24 1", "captured 32x24");
     cam_add("dump", "END\nok\n> ");               // RGB colour bars
     cam_add("tp 0");                              // scene with a colour cast
@@ -1288,6 +1310,13 @@ module tb_bow32;
     cam_add("fmt yuv");
     cam_add("cap 0 0 32 24 1", "captured 32x24");
     cam_add("dump", "END\nok\n> ");               // YUV colour bars
+    // no data at all (the sensor takes its registers, sends nothing): the
+    // link check (2.4 frames of the sensor configuration) times out, the
+    // calibration fails without a byte clock; then a restart (taps kept)
+    cam_add("!mute");
+    cam_add("cam", "no link error: calibrating", "csi2rx: calibration failed\nerror\n> ");
+    cam_add("!unmute");
+    cam_add("cam", "streaming 64x48 BGGR");
   endfunction
 
   // Image transfer of `dump`: "IMG <w> <h> <fmt> <len> <crc>" line + raw bytes.
@@ -1363,6 +1392,35 @@ module tb_bow32;
     $display("[%0t] tb   | calibration: taps %0d/%0d eye %0d/%0d ok", $time, t0, t1, e0, e1);
   endfunction
 
+  // margin check: k = eye / 4 = 48/56 with the calibration above
+  function automatic void check_margin(int unsigned from);
+    string s;
+    s = log0_line("[PASS] margin ", from);
+    if (s.len() < 30 || s.substr(0, 28) != "+-48/+-56 taps: 0 errors in 5") begin
+      $fatal(1, "margin check '%s', expected +-48/+-56 taps, 0 errors at 5 points", s);
+    end
+    $display("[%0t] tb   | margin check: %s", $time, s);
+  endfunction
+
+  // One point line of 'margin': errors 0 (or not 0)
+  // want_frames != 0: a clean point must have counted that many frames
+  function automatic void check_margin_point(string point, bit bad, int unsigned from,
+                                             int unsigned want_frames = 0);
+    string s;
+    int unsigned frames, errors;
+    s = log0_line({"margin ", point, ": "}, from);
+    if ($sscanf(s, "%d frames, %d errors", frames, errors) != 2) begin
+      $fatal(1, "no margin line for '%s'", point);
+    end
+    if (bad ? errors == 0 : errors != 0) begin
+      $fatal(1, "margin %s: %0d errors, expected %s", point, errors, bad ? "some" : "none");
+    end
+    if (!bad && want_frames != 0 && frames != want_frames) begin
+      $fatal(1, "margin %s: %0d frames, expected %0d", point, frames, want_frames);
+    end
+    $display("[%0t] tb   | margin %s: %0d frames, %0d errors ok", $time, point, frames, errors);
+  endfunction
+
   task automatic inject_errors();
     longint unsigned t0;
     inj_sent = 1'b0;
@@ -1395,15 +1453,16 @@ module tb_bow32;
   // The 'stat' answer after inject_errors(): exactly these error counts
   function automatic void check_error_counters(int unsigned from);
     string       s;
-    int unsigned ecc0, ecc1, crc, trunc, sot0, sot1, drop, ovf, misc;
+    int unsigned ecc0, ecc1, crc, trunc, sot0, sot1, ovf, misc, extra, drop;
     s = log0_line("  errors: ", from);
-    if ($sscanf(s, "ecc %d/%d crc %d trunc %d sot %d/%d drop %d ovf %d misc %d", ecc0, ecc1, crc,
-                trunc, sot0, sot1, drop, ovf, misc) != 9) begin
+    if ($sscanf(s, "ecc %d/%d crc %d trunc %d sot %d/%d ovf %d misc %d extra %d (dropped by DT/VC %d)",
+                ecc0, ecc1, crc, trunc, sot0, sot1, ovf, misc, extra, drop) != 10) begin
       $fatal(1, "no error counters in the 'stat' answer");
     end
     if (ecc0 != 1 || ecc1 != 0 || crc != 1 || trunc != 0 || sot0 != 0 || sot1 != 1 || ovf != 0 ||
-        misc < 1) begin
-      $fatal(1, "error counters '%s', expected ecc 1/0 crc 1 trunc 0 sot 0/1 ovf 0 misc >= 1", s);
+        misc < 1 || extra != 0) begin
+      $fatal(1, "error counters '%s', expected ecc 1/0 crc 1 trunc 0 sot 0/1 ovf 0 misc >= 1 extra 0",
+             s);
     end
     $display("[%0t] tb   | error counters ok: %s", $time, s);
   endfunction
@@ -1520,6 +1579,19 @@ module tb_bow32;
         step = 0;
         mark = log0.len();
         while (step < cam_cmd.size()) begin
+          // "!..." sets a testbench knob
+          if (cam_cmd[step].len() > 1 && cam_cmd[step].substr(0, 0) == "!") begin
+            case (cam_cmd[step])
+              "!mute":   imx_mute = 1'b1;
+              "!unmute": imx_mute = 1'b0;
+              "!fe":     imx_fe_extra = 1'b1;
+              "!nofe":   imx_fe_extra = 1'b0;
+              default:   $fatal(1, "unknown testbench step '%s'", cam_cmd[step]);
+            endcase
+            $display("[%0t] tb   | camera knob %s", $time, cam_cmd[step]);
+            step++;
+            continue;
+          end
           // an empty command waits for more text after the previous command
           if (cam_cmd[step] != "") begin
             mark = log0.len();
@@ -1551,13 +1623,61 @@ module tb_bow32;
         expect_text(0, "type h for help\n> ");
         mark = log0.len();
         uart_send_str(0, "test quick\r");
-        expect_text(0, "csi2_test: PASS (11/11)\nok\n> ", mark);
+        expect_text(0, "csi2_test: PASS (12/12)\nok\n> ", mark);
         check_calibration(mark);
+        check_margin(mark);
         inject_errors();
         mark = log0.len();
         uart_send_str(0, "stat\r");
         expect_text(0, "ok\n> ", mark);
         check_error_counters(mark);
+        // drift: the eye of lane 0 now ends at tap 240, so only lane 0 + 48
+        // (tap 256) has errors and the points after it are clean again; the
+        // taps stay 208/288 and the link is clean once the eye is back
+        u_csi.eye_hi[0] = 240;
+        csi2_expect_error = 1'b1;
+        mark = log0.len();
+        uart_send_str(0, "margin 0 4\r");
+        expect_text(0, "csi2rx: margin low +-48/+-56 taps: lane 0 +48 (tap 256): ", mark);
+        expect_text(0, "error\n> ", mark);
+        csi2_expect_error = 1'b0;
+        check_margin_point("centre taps 208/288", 1'b0, mark);
+        check_margin_point("lane0 -48 tap 160", 1'b0, mark);
+        check_margin_point("lane0 +48 tap 256", 1'b1, mark);
+        check_margin_point("lane1 -56 tap 232", 1'b0, mark);
+        check_margin_point("lane1 +56 tap 344", 1'b0, mark);
+        u_csi.eye_hi[0] = 300;
+        // the same with the frame timing of a real sensor (LP-11 after every
+        // line, vertical blanking: a ~3 ms frame against the 4 ms tap timeout,
+        // as 1080p30 against 42 ms), lane 0 - 48 (tap 160, the second point)
+        // outside the eye: it may lose the FS of its frame, whose FE then does
+        // not count; the points after it must still be measured
+        imx_gap_ns    = 47_500;
+        imx_vblank_ns = 555_000;
+        u_csi.eye_lo[0] = 170;
+        csi2_expect_error = 1'b1;
+        mark = log0.len();
+        uart_send_str(0, "margin 0 4\r");
+        expect_text(0, "csi2rx: margin low +-48/+-56 taps: lane 0 -48 (tap 160): ", mark);
+        expect_text(0, "error\n> ", mark);
+        csi2_expect_error = 1'b0;
+        check_margin_point("centre taps 208/288", 1'b0, mark, 4);
+        check_margin_point("lane0 -48 tap 160", 1'b1, mark);
+        check_margin_point("lane0 +48 tap 256", 1'b0, mark, 4);
+        check_margin_point("lane1 -56 tap 232", 1'b0, mark, 4);
+        check_margin_point("lane1 +56 tap 344", 1'b0, mark, 4);
+        u_csi.eye_lo[0] = 100;
+        imx_gap_ns    = 0;
+        imx_vblank_ns = VblankNs;
+        mark = log0.len();
+        uart_send_str(0, "margin 0 4\r");
+        expect_text(0, "csi2rx: margin ok +-48/+-56 taps: 0 errors in 5 x 4 frames", mark);
+        expect_text(0, "ok\n> ", mark);
+        mark = log0.len();
+        uart_send_str(0, "stat\r");
+        expect_text(0, "csi2rx: link ok", mark);
+        expect_text(0, "delay 208/288", mark);
+        expect_text(0, "ok\n> ", mark);
         $display("[%0t] tb   | camera frames %0d, D-PHY bursts %0d, bit flips outside the eye %0d",
                  $time, cam_frames, u_csi.bursts_done, u_csi.flips);
         check_dphy_gate();
@@ -1667,6 +1787,7 @@ module tb_bow32;
   initial begin
     longint unsigned timeout = 20_000_000;
     if (!$value$plusargs("TEST=%s", test)) test = "boot";
+    if (test == "camera") timeout = 30_000_000;   // + a link check without data
     if (!$value$plusargs("ROM=%s", rom_file)) $fatal(1, "+ROM=<vmem> required");
     void'($value$plusargs("TIMEOUT=%d", timeout));
     if ($test$plusargs("WAVES")) begin

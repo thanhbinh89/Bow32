@@ -166,7 +166,7 @@ module bow_csi2_packet import bow_csi2rx_pkg::*; (
   assign accept    = long_pkt && vc_hit && (di[5:0] == dt_i) &&
                      ((di[5:0] == DtRaw8) || (di[5:0] == DtRaw10));
   assign raw10     = (di[5:0] == DtRaw10);
-  assign fmt       = accept && (raw10 ? !mod5_zero(wc) : (wc == '0));
+  assign fmt       = accept && ((wc == '0) || (raw10 && !mod5_zero(wc)));
 
   // =========================================================================
   // Stage D: packet body

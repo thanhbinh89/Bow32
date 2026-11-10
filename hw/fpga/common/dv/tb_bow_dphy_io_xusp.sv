@@ -29,9 +29,24 @@
 //    high whenever the gate opens and is released once per burst while the
 //    clock runs, at least 20 byte clocks before the sync byte; a DLY write
 //    reaches IDELAYE3 CNTVALUEOUT at the next burst and reads back.
-//  * receiver: RAW10 pixels on m_axis with tuser/tlast (random tready), ID,
-//    INFO, PHY_CFG, STATUS, counters, FRAME_INFO, LINE_INFO, FRAME_SUM,
-//    ERR_STATUS after each frame, raw capture (RAW_CTRL ARM) of a burst.
+//  * receiver, with the PHY_CFG and CTRL.EXTRA of the driver (bow_csi2rx_start
+//    for 2 x 912 Mbit/s, 200 MHz): RAW10 pixels on m_axis with tuser/tlast
+//    (random tready), ID, INFO, PHY_CFG, STATUS, counters, CNT_EXT,
+//    FRAME_INFO, LINE_INFO, FRAME_SUM, FRAME_ERR, ERR_STATUS after each
+//    frame; a D-PHY v1.2 skew calibration burst (HS-zero, FFFFh, 0101...)
+//    counted as deskew, not as a sync error; raw capture (RAW_CTRL ARM) of a
+//    burst; frames with T_HS-TRAIL at T_EOT max (no EXTRA from the trail),
+//    with T_HS-PREPARE min and with T_HS-PREPARE max (noise until 85 ns +
+//    6 UI, ending with a false 0x00 0xB8), both with T_HS-PREPARE + T_HS-ZERO
+//    exactly at its minimum 145 ns + 10 UI on every lane (the bit phase is
+//    random through T_CLK-PRE instead): the SETTLE of the driver ignores the
+//    noise and still finds every sync byte (the old 14 locks on the false
+//    sync, 34 misses the real one).
+//  * white box: the first search window of every lane in every burst starts
+//    after the HS-PREPARE noise (its oldest ISERDES word is HS-zero). The
+//    false 0x00 0xB8 alone only shows a window reaching 16 UI into the noise.
+//    The model has no LP receiver delay (~8 ns on the device): its windows
+//    are ~1.6 video cycles earlier than on the KV260.
 // The test prints "tb_bow_dphy_io_xusp: PASS" or "... FAIL (<n> errors)".
 
 `timescale 1ps / 1ps
@@ -46,9 +61,6 @@ module tb_bow_dphy_io_xusp;
 
   localparam time UI          = 1096;            // 912 Mbit/s
   localparam time TLpx        = 60_000;
-  localparam time THsPrepare  = 60_000;
-  localparam time THsZero     = 150_000;         // + 0..63 random bits
-  localparam time THsTrail    = 70_000;
   localparam time TClkPrepare = 60_000;
   localparam time TClkZero    = 300_000;
   localparam time TClkPre     = 20_000;
@@ -57,6 +69,21 @@ module tb_bow_dphy_io_xusp;
   localparam time TLp11       = 120_000;         // LP-11 between two bursts
 
   localparam logic [31:0] Base = 32'h4000_8000;
+
+  // bow_csi2rx_start() for 2 lanes at 912 Mbit/s with a 200 MHz video clock:
+  // SETTLE 22, LP_FILTER 2, CLK_SETTLE 30 (150 ns), CLK_MISS 5; CTRL.EXTRA 62
+  localparam logic [31:0] PhyCfg = {8'd5, 8'd30, 4'h0, 4'd2, 8'd22};
+  logic [31:0] phy_cfg = PhyCfg;                 // +SETTLE=<n> for a sweep
+  localparam logic [7:0]  Extra  = 8'd62;
+
+  // Data lane HS timing of the transmitter (changed between frames)
+  time         THsPrepare = 60_000;              // noise in its second half
+  time         THsZero    = 150_000;             // + 0..zero_rnd random bits
+  time         THsTrail   = 70_000;
+  int unsigned zero_rnd   = 63;
+  int unsigned lane_rnd   = 15;                  // + 0..lane_rnd bits per lane (skew)
+  int unsigned pre_rnd    = 0;                   // T_CLK-PRE + 0..pre_rnd UI
+  bit          fake_sync  = 1'b0;                // HS-PREPARE noise ends with 0x00, 0xB8
 
   // ---------------------------------------------------------------- clocks
   logic clk = 1'b0, vclk = 1'b0, rst_n = 1'b0, vrst_n = 1'b0;
@@ -77,6 +104,22 @@ module tb_bow_dphy_io_xusp;
     errors++;
     $display("%t ERROR: %s", $time, msg);
   endfunction
+
+  // White box: in the first cycle of every sync search (arm rises), the
+  // oldest word of the aligner window must be HS-zero, i.e. SETTLE placed the
+  // window after the HS-PREPARE noise (and before the sync byte).
+  int unsigned n_search [Lanes];
+  for (genvar l = 0; l < Lanes; l++) begin : g_win
+    always @(posedge u_rx.g_align[l].u_align.clk_i) begin
+      if (u_rx.g_align[l].u_align.arm_i && !u_rx.g_align[l].u_align.arm_q) begin
+        n_search[l]++;
+        if (u_rx.g_align[l].u_align.q2_q !== 8'h00) begin
+          err($sformatf("lane %0d: the first search window does not start in HS-zero (%02h)",
+                        l, u_rx.g_align[l].u_align.q2_q));
+        end
+      end
+    end
+  end
 
   // ------------------------------------------------------- D-PHY transmitter
   // Index Lanes is the clock lane. The pull driver always drives the HS level,
@@ -120,6 +163,8 @@ module tb_bow_dphy_io_xusp;
   typedef struct {
     int unsigned  n [Lanes];
     byte unsigned b [Lanes][128];
+    logic [7:0]   sync;                          // 0xB8, 0xFF: skew calibration burst
+    int unsigned  zmin;                          // HS-zero bits the PHY monitor needs
   } burst_t;
 
   burst_t      exp_burst [$];
@@ -139,7 +184,10 @@ module tb_bow_dphy_io_xusp;
     #(TLpx);
     tx_lp[l] = 2'b00;                            // HS-PREPARE
     #(THsPrepare / 2);
-    repeat (THsPrepare / 2 / UI) hs_bit(l, 1'($urandom));
+    for (int i = 0, nb = THsPrepare / 2 / UI; i < nb; i++) begin
+      if (fake_sync && i >= nb - 16) hs_bit(l, (i >= nb - 8) && 8'hB8 >> (i - nb + 8) & 1);
+      else                           hs_bit(l, 1'($urandom));
+    end
     repeat (zero_bits) hs_bit(l, 1'b0);          // HS-ZERO
     @(data_tick);
     if (!sync_sent) begin
@@ -151,8 +199,8 @@ module tb_bow_dphy_io_xusp;
                       $time - rst_rel_time));
       end
     end
-    tx_hs[l] = 1'b0;                             // first sync bit (0xB8, LSB first)
-    for (int i = 1; i < 8; i++) hs_bit(l, 1'((8'hB8 >> i) & 1));
+    tx_hs[l] = e.sync[0];                        // first sync bit (LSB first)
+    for (int i = 1; i < 8; i++) hs_bit(l, e.sync[i]);
     for (int k = 0; k < e.n[l]; k++) begin
       for (int i = 0; i < 8; i++) hs_bit(l, 1'((e.b[l][k] >> i) & 1));
     end
@@ -166,17 +214,37 @@ module tb_bow_dphy_io_xusp;
 
   // One packet in one HS burst. Byte i goes to lane i % Lanes.
   task automatic send_packet(input byte unsigned pkt[$]);
-    burst_t      e;
-    int unsigned zero, done;
+    burst_t e;
     for (int l = 0; l < Lanes; l++) e.n[l] = 0;
     foreach (pkt[i]) begin
       e.b[i % Lanes][e.n[i % Lanes]] = pkt[i];
       e.n[i % Lanes]++;
     end
+    e.sync = 8'hB8;
+    send_burst(e);
+  endtask
+
+  // D-PHY v1.2 skew calibration burst: HS-zero, 16 UI of ones (FFFFh), then
+  // 0101... (here ~1 kUI) on every data lane
+  task automatic send_deskew();
+    burst_t e;
+    for (int l = 0; l < Lanes; l++) begin
+      e.n[l]    = 128;
+      e.b[l][0] = 8'hFF;
+      for (int k = 1; k < 128; k++) e.b[l][k] = 8'h55;
+    end
+    e.sync = 8'hFF;
+    send_burst(e);
+  endtask
+
+  // One HS burst of the lane bytes in e, sync byte e.sync
+  task automatic send_burst(input burst_t e);
+    int unsigned zero, done;
+    zero   = (THsZero + UI - 1) / UI + $urandom_range(0, zero_rnd);
+    e.zmin = (THsZero / UI > 136) ? 128 : THsZero / UI - 8;
     exp_burst.push_back(e);
     n_bursts++;
     sync_sent = 1'b0;
-    zero = THsZero / UI + $urandom_range(0, 63);
 
     tx_lp[Lanes] = 2'b01;                        // clock lane: HS request
     #(TLpx);
@@ -186,11 +254,11 @@ module tb_bow_dphy_io_xusp;
     tx_lp_mode[Lanes] = 1'b0;
     #(TClkZero);
     clk_run = 1'b1;
-    #(TClkPre);
+    #(TClkPre + $urandom_range(0, pre_rnd) * UI);
     done = 0;
     for (int l = 0; l < Lanes; l++) begin
       automatic int unsigned ll = l;
-      automatic int unsigned zz = zero + $urandom_range(0, 15);
+      automatic int unsigned zz = zero + $urandom_range(0, lane_rnd);
       fork
         begin
           lane_burst(ll, e, zz);
@@ -280,6 +348,7 @@ module tb_bow_dphy_io_xusp;
   bow_csi2rx #(
     .Lanes    (Lanes),
     .PhyClkHz (200_000_000),
+    .CpuClkHz (50_000_000),
     .HasPhy   (1'b1)
   ) u_rx (
     .clk_i           (clk),
@@ -395,17 +464,19 @@ module tb_bow_dphy_io_xusp;
     end
   end
 
-  // Bit position after the sync byte, preceded by at least zmin zero bits, in
-  // the bit stream of n words (bit i = word i / 8, Q[i % 8]); -1: not found.
+  // Bit position after the first sync byte that starts at bit `from` or later
+  // and is preceded by at least zmin zero bits, in the bit stream of n words
+  // (bit i = word i / 8, Q[i % 8]); -1: not found.
   function automatic int find_sync(input logic [7:0] w [512], input int unsigned n,
-                                   input int unsigned zmin);
+                                   input int unsigned zmin, input logic [7:0] sync,
+                                   input int unsigned from);
     int unsigned zrun;
     zrun = 0;
     for (int i = 0; i + 8 <= 8 * n; i++) begin
       bit hit;
-      hit = (zrun >= zmin);
+      hit = (i >= from) && (zrun >= zmin);
       for (int k = 0; k < 8 && hit; k++) begin
-        hit = (w[(i + k) / 8][(i + k) % 8] === 1'((8'hB8 >> k) & 1));
+        hit = (w[(i + k) / 8][(i + k) % 8] === sync[k]);
       end
       if (hit) return i + 8;
       zrun = (w[i / 8][i % 8] === 1'b0) ? zrun + 1 : 0;
@@ -413,33 +484,48 @@ module tb_bow_dphy_io_xusp;
     return -1;
   endfunction
 
-  // Compare the bytes after the sync with the sent ones (all: every byte must
-  // have been captured). The sync search skips the HS-PREPARE garbage: the
-  // words of a whole burst need a full HS-ZERO before the sync, a raw capture
-  // starts after the settle time. Returns the number of matching bytes.
+  // Compare the bytes after a sync with the sent ones (all: every byte must
+  // have been captured). Every sync byte after enough zero bits is tried in
+  // turn (the words of a whole burst may hold the zeros of the LP time,
+  // then HS-PREPARE noise that can end like a sync byte): the words must hold
+  // the sent bytes after one of them. A whole burst needs most of HS-ZERO
+  // before the sync, a raw capture starts after the settle time. Returns the
+  // number of matching bytes.
   function automatic int unsigned check_bytes(input string what, input logic [7:0] w [512],
                                               input int unsigned n, input int unsigned l,
                                               input burst_t e, input bit all);
-    int pos;
-    pos = find_sync(w, n, all ? 128 : 32);
-    if (pos < 0) begin
+    int         pos, best, best_pos;
+    logic [7:0] best_v;
+    best = -1;
+    pos  = -7;
+    forever begin
+      int unsigned k;
+      logic [7:0]  v;
+      pos = find_sync(w, n, all ? e.zmin : 16, e.sync, pos + 7);
+      if (pos < 0) break;
+      for (k = 0; k < e.n[l] && pos + 8 * k + 8 <= 8 * n; k++) begin
+        for (int i = 0; i < 8; i++) v[i] = w[(pos + 8 * k + i) / 8][(pos + 8 * k + i) % 8];
+        if (v !== e.b[l][k]) break;
+      end
+      if (k == e.n[l] || pos + 8 * k + 8 > 8 * n) begin    // all bytes, or the end of the words
+        offs_seen[l] |= 1 << ((pos - 8) % 8);
+        if (all && k < e.n[l]) err($sformatf("%s lane %0d: only %0d of %0d bytes", what, l, k,
+                                             e.n[l]));
+        return k;
+      end
+      if (int'(k) > best) begin
+        best     = k;
+        best_pos = pos;
+        best_v   = v;
+      end
+    end
+    if (best < 0) begin
       err($sformatf("%s lane %0d: no HS-zero + sync byte in %0d words", what, l, n));
       return 0;
     end
-    offs_seen[l] |= 1 << ((pos - 8) % 8);
-    for (int k = 0; k < e.n[l]; k++) begin
-      logic [7:0] v;
-      if (pos + 8 * k + 8 > 8 * n) begin
-        if (all) err($sformatf("%s lane %0d: only %0d of %0d bytes", what, l, k, e.n[l]));
-        return k;
-      end
-      for (int i = 0; i < 8; i++) v[i] = w[(pos + 8 * k + i) / 8][(pos + 8 * k + i) % 8];
-      if (v !== e.b[l][k]) begin
-        err($sformatf("%s lane %0d byte %0d: 0x%02h, sent 0x%02h", what, l, k, v, e.b[l][k]));
-        return k;
-      end
-    end
-    return e.n[l];
+    err($sformatf("%s lane %0d byte %0d: 0x%02h, sent 0x%02h (sync before bit %0d)", what, l, best,
+                  best_v, e.b[l][best], best_pos));
+    return best;
   endfunction
 
   task automatic check_phy_burst();
@@ -575,7 +661,9 @@ module tb_bow_dphy_io_xusp;
     reg_check("CNT_DROP",   12'h03C, 1);
     reg_check("CNT_BURST",  12'h040, {16'(pkts), 16'(pkts)});
     reg_check("CNT_MISC",   12'h044, pkts);
+    reg_check("CNT_EXT",    12'h048, 0);         // no EXTRA (trail bytes < 62), no deskew
     reg_check("ERR_STATUS", 12'h01C, 0);
+    reg_check("FRAME_ERR",  12'h04C, 0);
     reg_check("FRAME_INFO", 12'h050, {fnum, 16'(Height)});
     reg_check("LINE_INFO",  12'h054, {8'h00, 2'b00, 6'h2B, 16'(Wc)}, 32'h00FF_FFFF);
     reg_check("FRAME_SUM",  12'h058, frame_sum);
@@ -587,6 +675,7 @@ module tb_bow_dphy_io_xusp;
   initial begin
     logic [31:0] d;
     byte unsigned pkt[$], pl[$];
+    int unsigned settle;
 
     #10_000;
     tx_lp_mode = '1;                             // LP-11 on all lanes
@@ -606,8 +695,12 @@ module tb_bow_dphy_io_xusp;
 
     reg_check("ID",      12'h000, 32'h4353_3201);
     reg_check("INFO",    12'h004, {16'd256, 8'd200, 3'd0, 1'b1, 4'(Lanes)});
-    reg_check("PHY_CFG", 12'h00C, 32'h081E_020E);
-    reg_wr(12'h008, {18'd0, 6'h2B, 5'd0, 1'b1, 1'b1, 1'b1});     // DT 0x2B, 2 lanes, RX_EN, PHY_EN
+    reg_check("PHY_CFG", 12'h00C, 32'h081E_020E);              // reset value
+    if ($value$plusargs("SETTLE=%d", settle)) phy_cfg[7:0] = 8'(settle);
+    reg_wr(12'h00C, phy_cfg);                                  // the driver's (PHY_EN = 0)
+    reg_check("PHY_CFG", 12'h00C, phy_cfg);
+    // EXTRA 62, DT 0x2B, 2 lanes, RX_EN, PHY_EN
+    reg_wr(12'h008, {8'd0, Extra, 2'b00, 6'h2B, 5'd0, 1'b1, 1'b1, 1'b1});
     #1_000_000;
     reg_check("STATUS idle", 12'h010, 32'h0000_003F, 32'h0000_1FFF);
     if (n_byte_clk != 0) err("byte clock running before the first burst");
@@ -615,6 +708,16 @@ module tb_bow_dphy_io_xusp;
     $display("%t frame 1", $time);
     send_frame(16'd1);
     check_frame(16'd1);
+
+    // skew calibration burst: counted on lane 0, no sync error, no packet
+    $display("%t deskew burst", $time);
+    reg_wr(12'h020, 32'h1);                      // CNT_CLR
+    send_deskew();
+    #1_000_000;
+    reg_check("CNT_EXT deskew",    12'h048, 32'h0001_0000);
+    reg_check("CNT_SOT deskew",    12'h038, 0);
+    reg_check("CNT_PKT deskew",    12'h028, 0);
+    reg_check("ERR_STATUS deskew", 12'h01C, 0);
 
     // IDELAY taps: loaded at the next burst (lane 1: more than one UI)
     reg_wr(12'h070, 32'd37);
@@ -650,6 +753,7 @@ module tb_bow_dphy_io_xusp;
         e.b[i % Lanes][e.n[i % Lanes]] = pkt[i];
         e.n[i % Lanes]++;
       end
+      e.sync = 8'hB8;
       d = '0;
       for (int t = 0; t < 100 && !d[8]; t++) reg_rd(12'h084, d);
       if (!d[8]) err("RAW_CTRL: no DONE");
@@ -665,6 +769,33 @@ module tb_bow_dphy_io_xusp;
       end
     end
 
+    // T_HS-TRAIL at T_EOT max (105 ns + 12 UI): the bytes of the trail stay
+    // below CTRL.EXTRA
+    $display("%t frame 3 (T_HS-TRAIL %0d ps)", $time, 105_000 + 12 * UI);
+    THsTrail = 105_000 + 12 * UI;
+    reg_wr(12'h020, 32'h1);
+    send_frame(16'd3);
+    check_frame(16'd3);
+    THsTrail = 70_000;
+
+    // T_HS-PREPARE min (40 ns + 4 UI) and max (85 ns + 6 UI; its noise ends
+    // with a false 0x00, 0xB8 that the receiver must not see), each with
+    // T_HS-PREPARE + T_HS-ZERO = 145 ns + 10 UI on every lane (no random
+    // HS-zero bits, no lane skew; the bit phase varies through T_CLK-PRE)
+    zero_rnd = 0;
+    lane_rnd = 0;
+    pre_rnd  = 7;
+    for (int f = 4; f <= 5; f++) begin
+      fake_sync  = (f == 5);
+      THsPrepare = (f == 4) ? 40_000 + 4 * UI : 85_000 + 6 * UI;
+      THsZero    = 145_000 + 10 * UI - THsPrepare;
+      $display("%t frame %0d (T_HS-PREPARE %0d ps, T_HS-ZERO %0d ps)", $time, f, THsPrepare,
+               THsZero);
+      reg_wr(12'h020, 32'h1);
+      send_frame(16'(f));
+      check_frame(16'(f));
+    end
+
     // End of test
     #1_000_000;
     if (exp_burst.size() != 0) begin
@@ -675,6 +806,11 @@ module tb_bow_dphy_io_xusp;
     end
     if (n_rst_rel != n_bursts) begin
       err($sformatf("ISERDESE3 RST released %0d times for %0d bursts", n_rst_rel, n_bursts));
+    end
+    for (int l = 0; l < Lanes; l++) begin
+      if (n_search[l] != n_bursts) begin
+        err($sformatf("lane %0d: %0d sync searches for %0d bursts", l, n_search[l], n_bursts));
+      end
     end
     for (int l = 0; l < Lanes; l++) begin            // random bit phase: most offsets seen
       if ($countones(offs_seen[l]) < 4) begin

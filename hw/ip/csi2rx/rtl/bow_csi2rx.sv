@@ -13,9 +13,15 @@
 //                                                                                       |
 //   m_axis <- bow_csi2rx_out <-------------- bow_fifo_async (byte -> video clock) <-----+
 //
-// m_axis_tuser_o[0] = first pixel of a frame, [1] = line error, with tlast:
-// the line has a CRC or format error, was truncated or cut by a FIFO
-// overflow, or lines of the frame were lost before it.
+// m_axis_tuser_o[0] = first pixel of a frame (pixel 0 of its first line: a
+// frame whose first line cannot be output is skipped, ERR_STATUS.SKIP),
+// [1] = line error, with tlast: the line has a CRC or format error, was
+// truncated or cut by a FIFO overflow, or an earlier line of the frame was
+// lost (FIFO full, no pixel group, or its burst was lost: uncorrectable
+// header, sync error, lane skew, a dropped packet cut short, packets after
+// EXTRA, an HS entry refused at the LP level). Lines lost after the last
+// output line of a frame cannot be flagged on the stream: FRAME_ERR (the
+// error flags of each frame, latched at FE) holds them.
 //
 // Clock domains:
 //   clk_i       CPU: registers, counters, LOG/RAW read (bow_csi2rx_regs)
@@ -42,6 +48,7 @@
 module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
   parameter int unsigned Lanes     = 2,            // physical data lanes: 1 or 2
   parameter int unsigned PhyClkHz  = 200_000_000,  // vid_clk_i frequency (INFO)
+  parameter int unsigned CpuClkHz  = 0,            // clk_i frequency (0: not checked)
   parameter bit          HasPhy    = 1'b1,         // INFO.PHY: a D-PHY is connected
   parameter int unsigned FifoDepth = 256           // pixel FIFO entries (4 px each), power of 2
 ) (
@@ -71,8 +78,21 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
 );
 
   localparam int unsigned NumPktEv = $bits(csi2_pkt_ev_t);
-  localparam int unsigned NumBEv   = NumPktEv + 2 + Lanes;   // packet, skew, deskew, sot per lane
+  localparam int unsigned NumBEv   = NumPktEv + 3 + Lanes;   // packet, skew, deskew, skip, sot per lane
   localparam int unsigned NumVEv   = 2 * (Lanes + 1);        // hs, lp_err per lane FSM
+
+  // The LP event release below (one pulse per kind every 16 video cycles)
+  // needs 3 CPU cycles per pulse: vid_clk_i <= 16/3 x clk_i. The elaboration
+  // $fatal stops lint and synthesis, the initial copy stops simulations whose
+  // build turns USERFATAL into a warning (-Wno-fatal).
+  if ((CpuClkHz != 0) && (64'(PhyClkHz) * 64'd3 > 64'(CpuClkHz) * 64'd16)) begin : g_bad_clk
+    $fatal(1, "bow_csi2rx: vid_clk_i %0d Hz > 16/3 x clk_i %0d Hz (LP event pulses merge)",
+           PhyClkHz, CpuClkHz);
+`ifndef SYNTHESIS
+    initial $fatal(1, "bow_csi2rx: vid_clk_i %0d Hz > 16/3 x clk_i %0d Hz (LP event pulses merge)",
+                   PhyClkHz, CpuClkHz);
+`endif
+  end
 
   // =========================================================================
   // Resets
@@ -279,8 +299,9 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
 
   // LP events -> CPU. Each kind is released at most every 16 video cycles,
   // so the pulse synchronisers never merge two pulses (needs vid_clk_i <=
-  // 5 x clk_i); real D-PHY sequences are much slower (T_LPX >= 50 ns per LP
-  // state), only a glitching line can lose counts.
+  // 16/3 x clk_i, checked with CpuClkHz); real D-PHY sequences are much
+  // slower (T_LPX >= 50 ns per LP state), only a glitching line can lose
+  // counts.
   logic [NumVEv-1:0] vev, vev_pend_q, vev_fire, vev_sys;
   logic [3:0]        vdiv_q;
 
@@ -296,6 +317,27 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
       vev_pend_q <= (vev_pend_q & ~vev_fire) | vev;
     end
   end
+
+  // HS entries refused at the LP level (LP error of an enabled data lane, or
+  // of the clock lane when the byte clock is gated) lose a burst that the
+  // packet layer never sees. A request toggle tells the byte domain, which
+  // counts it as a lost burst at the next packet start (drop of the unpacker,
+  // only inside a frame). Requests while one is pending merge into it.
+  logic lpl_ev, lpl_req_q, lpl_ack_s, lpl_ack_q, lpl_req_s, lpl_pend_q;
+
+  assign lpl_ev = (|(ev_lp_err[Lanes:1] & lane_en[Lanes:1])) || (ev_lp_err[0] && !clk_force);
+
+  always_ff @(posedge vid_clk_i or negedge vrst_n) begin
+    if (!vrst_n)                                   lpl_req_q <= 1'b0;
+    else if (lpl_ev && (lpl_req_q == lpl_ack_s))   lpl_req_q <= ~lpl_req_q;
+  end
+
+  bow_sync u_sync_lpl_ack (
+    .clk_i  (vid_clk_i),
+    .rst_ni (vrst_n),
+    .d_i    (lpl_ack_q),
+    .q_o    (lpl_ack_s)
+  );
 
   for (genvar i = 0; i < NumVEv; i++) begin : g_cdc_vev
     bow_cdc_pulse u_cdc (
@@ -331,6 +373,20 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
     .d_i    ({cfg.lanes2, cfg.vc_any, cfg.vc, cfg.dt, cfg.extra}),
     .q_o    ({lanes2, vc_any, vc, dt, extra})
   );
+
+  // LP level loss request (see above): acknowledged as soon as it is seen,
+  // pending until the next packet start
+  bow_sync u_sync_lpl_req (
+    .clk_i  (byte_clk_i),
+    .rst_ni (brst_n),
+    .d_i    (lpl_req_q),
+    .q_o    (lpl_req_s)
+  );
+
+  always_ff @(posedge byte_clk_i or negedge brst_n) begin
+    if (!brst_n) lpl_ack_q <= 1'b0;
+    else         lpl_ack_q <= lpl_req_s;
+  end
 
   bow_csi2_sync #(
     .Width (Lanes)
@@ -422,8 +478,22 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
     .ev_o          (pkt_ev)
   );
 
-  logic              grp_push, fifo_full, fifo_afull, fifo_empty, fifo_pop;
+  logic              grp_push, fifo_full, fifo_afull, fifo_empty, fifo_pop, px_drop, px_skip;
   logic [GroupW-1:0] grp_wdata, grp_rdata;
+
+  // HS entry refused at the LP level: pending until the next packet start
+  always_ff @(posedge byte_clk_i or negedge drst_n) begin
+    if (!drst_n)                      lpl_pend_q <= 1'b0;
+    else if (lpl_req_s != lpl_ack_q)  lpl_pend_q <= 1'b1;
+    else if (lm_sop)                  lpl_pend_q <= 1'b0;
+  end
+
+  // a burst of the frame was lost before the unpacker: the next line gets
+  // tuser[1], or the frame is skipped if its first line has not started.
+  // A truncation that did not end an accepted line (cut in the header, or a
+  // dropped packet cut short) may have been a line with a corrupted header.
+  assign px_drop = in_frame && (pkt_ev.ecc_err || pkt_ev.extra || lm_skew || (|al_sync_err) ||
+                                (pkt_ev.trunc && !px_eol) || (lpl_pend_q && lm_sop));
 
   bow_csi2_unpack u_unpack (
     .clk_i       (byte_clk_i),
@@ -436,11 +506,13 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
     .err_i       (px_err),
     .fs_i        (fs),
     .fe_i        (fe),
+    .drop_i      (px_drop),
     .push_o      (grp_push),
     .group_o     (grp_wdata),
     .full_i      (fifo_full),
     .afull_i     (fifo_afull),
     .ovf_o       (px_ovf),
+    .skip_o      (px_skip),
     .frame_sum_o (frame_sum)
   );
 
@@ -489,8 +561,8 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
   logic [NumBEv-1:0] bev, bev_sys;
 
   // deskew bursts are counted on lane 0 (the other lanes then deskew too,
-  // or the burst is a skew error)
-  assign bev = {al_sync_err, al_deskew[0], lm_skew, pkt_ev};
+  // or the burst is a skew or sync error)
+  assign bev = {al_sync_err, px_skip, al_deskew[0], lm_skew, pkt_ev};
 
   for (genvar i = 0; i < NumBEv; i++) begin : g_cdc_bev
     bow_cdc_pulse u_cdc (
@@ -508,6 +580,7 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
     ev_sys.pl              = bev_sys[NumPktEv-1:0];
     ev_sys.skew            = bev_sys[NumPktEv];
     ev_sys.deskew          = bev_sys[NumPktEv + 1];
+    ev_sys.skip            = bev_sys[NumPktEv + 2];
     ev_sys.sot[Lanes-1:0]  = bev_sys[NumBEv-1 -: Lanes];
     ev_sys.hs[Lanes:0]     = vev_sys[Lanes:0];
     ev_sys.lp_err[Lanes:0] = vev_sys[NumVEv-1 -: Lanes + 1];

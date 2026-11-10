@@ -51,7 +51,7 @@ package bow_csi2rx_pkg;
     logic fs;         // FS of the selected VC
     logic fe;         // FE of the selected VC that completes a frame
     logic frame_err;  // FS inside a frame, FE without FS
-    logic fmt;        // RAW10 line with WC % 5 != 0, RAW8 line with WC = 0
+    logic fmt;        // accepted line with WC = 0, or RAW10 with WC % 5 != 0
     logic ovf;        // pixel FIFO full during an accepted packet
     logic extra;      // more than CTRL.EXTRA bytes after a packet in its burst
   } csi2_pkt_ev_t;
@@ -65,6 +65,7 @@ package bow_csi2rx_pkg;
     logic [2:0]   hs;      // HS entries: [0] clock lane, [1] lane 0, [2] lane 1
     logic [2:0]   lp_err;  // unexpected LP sequence / watchdog, same order
     logic         deskew;  // deskew (skew calibration) burst on data lane 0
+    logic         skip;    // the rest of a frame is skipped (bow_csi2_unpack)
   } csi2_ev_t;
 
   // Header ECC (CSI-2 v1.x): data bits D0..D23 = DI[7:0], WC[15:0];

@@ -13,10 +13,12 @@
 //   0x014 IRQ_STATUS  W1C  [0] FS [1] FE [2] ERR [3] LOG_DONE [4] RAW_DONE
 //   0x018 IRQ_EN      RW   same bits, irq_o = |(IRQ_STATUS & IRQ_EN)
 //   0x01C ERR_STATUS  W1C  [0] SOT [1] ECC_CORR [2] ECC_ERR [3] CRC [4] TRUNC [5] OVF
-//                          [6] SKEW [7] FORMAT [8] FRAME [9] LP [10] EXTRA
+//                          [6] SKEW [7] FORMAT [8] FRAME [9] LP [10] EXTRA [11] SKIP
 //   0x020 CNT_CLR     W    [0] clear the counters 0x024..0x048
 //   0x024..0x048      R    counters (saturating); 0x048 CNT_EXT: [15:0] bursts with
 //                          more than EXTRA bytes after the packet, [31:16] deskew bursts
+//   0x04C FRAME_ERR   R    [11:0] ERR_STATUS events of the last complete frame: from the
+//                          FE before it (or the RX start) to its FE, latched at FE
 //   0x050..0x064      R    FRAME_INFO, LINE_INFO, FRAME_SUM, FRAME_TIME, LINE_TIME, BYTECLK
 //   0x070, 0x074      RW   DLY0, DLY1: [8:0] tap, R [24:16] CNTVALUEOUT
 //   0x080 LOG_CTRL    RW   W [0] ARM [1] TRIG_FS [2] STOP_FE; R [0] ARMED [2:1] modes
@@ -256,10 +258,11 @@ module bow_csi2rx_regs import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
   // ------------------------------------------------- interrupts and errors
   logic [4:0]  irq_set, irq_status_q, irq_en_q;
   logic [31:0] irq_en_w;
-  logic [10:0] err_set, err_status_q;
+  logic [11:0] err_set, err_status_q, ferr_q, frame_err_q;
+  logic [1:0]  fe_dly_q;
 
-  assign err_set = {ev_i.pl.extra, |ev_i.lp_err, ev_i.pl.frame_err, ev_i.pl.fmt, ev_i.skew,
-                    ev_i.pl.ovf, ev_i.pl.trunc, ev_i.pl.crc_err, ev_i.pl.ecc_err,
+  assign err_set = {ev_i.skip, ev_i.pl.extra, |ev_i.lp_err, ev_i.pl.frame_err, ev_i.pl.fmt,
+                    ev_i.skew, ev_i.pl.ovf, ev_i.pl.trunc, ev_i.pl.crc_err, ev_i.pl.ecc_err,
                     ev_i.pl.ecc_corr, |ev_i.sot};
 
   always_comb begin
@@ -278,9 +281,30 @@ module bow_csi2rx_regs import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
       err_status_q <= '0;
     end else begin
       irq_status_q <= (irq_status_q & ~(wd[4:0] & bm[4:0] & {5{we && (a == 12'h014)}})) | irq_set;
-      err_status_q <= (err_status_q & ~(wd[10:0] & bm[10:0] & {11{we && (a == 12'h01C)}})) |
+      err_status_q <= (err_status_q & ~(wd[11:0] & bm[11:0] & {12{we && (a == 12'h01C)}})) |
                       err_set;
       if (we && (a == 12'h018)) irq_en_q <= irq_en_w[4:0];
+    end
+  end
+
+  // FRAME_ERR: the error events of one frame, collected from the previous
+  // FE (or the RX start) and latched at its FE together with FRAME_INFO.
+  // Errors between frames (vertical blanking) count for the next frame:
+  // the lost burst may have been its FS or one of its lines. Events of the
+  // FE packet itself (a corrected header) leave the byte domain in the same
+  // cycle as FE but may arrive one CPU cycle later (separate pulse
+  // synchronisers): the 2 cycles after FE still go to the frame that ended.
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      ferr_q      <= '0;
+      frame_err_q <= '0;
+      fe_dly_q    <= '0;
+    end else begin
+      fe_dly_q <= {fe_dly_q[0], ev_i.pl.fe};
+      if (!rx_on_q || ev_i.pl.fe) ferr_q <= '0;
+      else if (fe_dly_q == '0)    ferr_q <= ferr_q | err_set;
+      if (ev_i.pl.fe)           frame_err_q <= ferr_q | err_set;
+      else if (fe_dly_q != '0)  frame_err_q <= frame_err_q | err_set;
     end
   end
 
@@ -296,9 +320,9 @@ module bow_csi2rx_regs import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
     return (e && (c != '1)) ? c + 16'd1 : c;
   endfunction
 
-  function automatic logic [7:0] add8(logic [7:0] c, logic [1:0] n);
+  function automatic logic [7:0] add8(logic [7:0] c, logic [2:0] n);
     logic [8:0] s;
-    s = {1'b0, c} + {7'd0, n};
+    s = {1'b0, c} + {6'd0, n};
     return s[8] ? 8'hFF : s[7:0];
   endfunction
 
@@ -307,12 +331,13 @@ module bow_csi2rx_regs import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
   logic [15:0]      cnt_clk_q, cnt_extra_q, cnt_deskew_q;
   logic [1:0][15:0] cnt_sot_q, cnt_burst_q;
   logic [7:0]       cnt_lp_q, cnt_misc_q;
-  logic [1:0]       n_lp, n_misc;
+  logic [1:0]       n_lp;
+  logic [2:0]       n_misc;
   logic             cnt_clr;
 
   assign cnt_clr = we0 && (a == 12'h020) && wd[0];
   assign n_lp    = 2'(ev_i.lp_err[0]) + 2'(ev_i.lp_err[1]) + 2'(ev_i.lp_err[2]);
-  assign n_misc  = 2'(ev_i.skew) + 2'(ev_i.pl.fmt) + 2'(ev_i.pl.frame_err);
+  assign n_misc  = 3'(ev_i.skew) + 3'(ev_i.pl.fmt) + 3'(ev_i.pl.frame_err) + 3'(ev_i.skip);
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
@@ -366,7 +391,7 @@ module bow_csi2rx_regs import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
       cnt_sot_q[1]   <= inc16(cnt_sot_q[1], ev_i.sot[1]);
       cnt_burst_q[0] <= inc16(cnt_burst_q[0], ev_i.hs[1]);
       cnt_burst_q[1] <= inc16(cnt_burst_q[1], ev_i.hs[2]);
-      cnt_lp_q       <= add8(cnt_lp_q, n_lp);
+      cnt_lp_q       <= add8(cnt_lp_q, {1'b0, n_lp});
       cnt_misc_q     <= add8(cnt_misc_q, n_misc);
     end
   end
@@ -477,7 +502,7 @@ module bow_csi2rx_regs import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
       12'h010: rdata_d = status;
       12'h014: rdata_d = {27'h0, irq_status_q};
       12'h018: rdata_d = {27'h0, irq_en_q};
-      12'h01C: rdata_d = {21'h0, err_status_q};
+      12'h01C: rdata_d = {20'h0, err_status_q};
       12'h024: rdata_d = cnt_frame_q;
       12'h028: rdata_d = cnt_pkt_q;
       12'h02C: rdata_d = cnt_line_q;
@@ -488,6 +513,7 @@ module bow_csi2rx_regs import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
       12'h040: rdata_d = {cnt_burst_q[1], cnt_burst_q[0]};
       12'h044: rdata_d = {cnt_misc_q, cnt_lp_q, cnt_clk_q};
       12'h048: rdata_d = {cnt_deskew_q, cnt_extra_q};
+      12'h04C: rdata_d = {20'h0, frame_err_q};
       12'h050: rdata_d = frame_info_q;
       12'h054: rdata_d = line_info_q;
       12'h058: rdata_d = frame_sum_q;
