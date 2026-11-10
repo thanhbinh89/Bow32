@@ -8,6 +8,9 @@ package bow_csi2rx_pkg;
 
   localparam logic [31:0] Csi2rxId = 32'h4353_3201;   // "CS2", version 1
 
+  // Largest Lanes parameter (data lanes: 1, 2 or 4)
+  localparam int unsigned MaxLanes = 4;
+
   // Data types (DI[5:0]). 0x00..0x0F are short packets.
   localparam logic [5:0] DtFs    = 6'h00;
   localparam logic [5:0] DtFe    = 6'h01;
@@ -26,7 +29,8 @@ package bow_csi2rx_pkg;
   typedef struct packed {
     logic       phy_en;
     logic       rx_en;
-    logic       lanes2;       // 2 data lanes in use
+    logic       lanes2;       // 2 data lanes in use (CTRL.LANES)
+    logic       lanes4;       // 4 data lanes in use (CTRL.LANES4, wins over lanes2)
     logic       clk_force;    // clock lane always in HS (continuous clock)
     logic       vc_any;
     logic [1:0] vc;
@@ -57,15 +61,16 @@ package bow_csi2rx_pkg;
   } csi2_pkt_ev_t;
 
   // All events as seen by the register file (synchronised to clk_i).
-  // Lane fields: [0] clock lane / data lane 0, see the field comments.
+  // Lane fields: [0] clock lane / data lane 0, see the field comments; the
+  // bits of lanes above the Lanes parameter are 0.
   typedef struct packed {
-    csi2_pkt_ev_t pl;
-    logic         skew;    // lanes did not lock together
-    logic [1:0]   sot;     // sync byte not found, per data lane
-    logic [2:0]   hs;      // HS entries: [0] clock lane, [1] lane 0, [2] lane 1
-    logic [2:0]   lp_err;  // unexpected LP sequence / watchdog, same order
-    logic         deskew;  // deskew (skew calibration) burst on data lane 0
-    logic         skip;    // the rest of a frame is skipped (bow_csi2_unpack)
+    csi2_pkt_ev_t        pl;
+    logic                skew;    // lanes did not lock together
+    logic [MaxLanes-1:0] sot;     // sync byte not found, per data lane
+    logic [MaxLanes:0]   hs;      // HS entries: [0] clock lane, [1 + l] data lane l
+    logic [MaxLanes:0]   lp_err;  // unexpected LP sequence / watchdog, same order
+    logic                deskew;  // deskew (skew calibration) burst on data lane 0
+    logic                skip;    // the rest of a frame is skipped (bow_csi2_unpack)
   } csi2_ev_t;
 
   // Header ECC (CSI-2 v1.x): data bits D0..D23 = DI[7:0], WC[15:0];
@@ -96,6 +101,14 @@ package bow_csi2rx_pkg;
       c = c[0] ? ((c >> 1) ^ 16'h8408) : (c >> 1);
     end
     return c;
+  endfunction
+
+  // Data lanes in use (1, 2 or 4) for the CTRL fields LANES (lanes2) and
+  // LANES4 (lanes4), never more than the Lanes parameter (`lanes`)
+  function automatic logic [2:0] active_lanes(int unsigned lanes, logic lanes2, logic lanes4);
+    if ((lanes == 4) && lanes4)                  return 3'd4;
+    else if ((lanes >= 2) && (lanes2 || lanes4)) return 3'd2;
+    else                                         return 3'd1;
   endfunction
 
   // v % 5 == 0 for a 16 bit word count (16 = 1 mod 5: sum of the nibbles)

@@ -19,8 +19,12 @@
 //                     logged; log_wptr_o = index of the oldest entry (0 if
 //                     the buffer did not wrap)
 //   TRIG_FS | STOP_FE from the FS until the FE, at most 64 entries
-// RAW: 64 consecutive words {lane 1, lane 0} from the cycle in which lane 0
-// arm (hs_active) rises, or at once (NOW).
+// RAW: 64 consecutive words {lane Lanes-1, .., lane 0} (8 * Lanes bits, byte
+// k = lane k) from the cycle in which lane 0 arm (hs_active) rises, or at
+// once (NOW). Only cycles with a valid word on lane 0 (rx_vld0_i, PHY
+// rx_valid) are written, the other lanes are sampled in the same cycles
+// (the Versal XPHY FIFOs of all lanes are read in step once a burst runs;
+// bow_dphy_io_xusp has a word in every cycle).
 
 module bow_csi2_capture #(
   parameter int unsigned Lanes = 2
@@ -42,7 +46,8 @@ module bow_csi2_capture #(
   input  logic                  raw_now_i,
   output logic [3:0]            raw_ack_o,
   input  logic                  arm0_i,          // lane 0 hs_active, synchronised
-  input  logic [Lanes-1:0][7:0] rx_i,            // registered ISERDES words
+  input  logic                  rx_vld0_i,       // rx_i[0] is a new word (registered rx_valid)
+  input  logic [Lanes-1:0][7:0] rx_i,            // registered PHY words
 
   input  logic                  rclk_i,          // CPU clock: RAM read ports
   input  logic                  log_re_i,
@@ -150,10 +155,13 @@ module bow_csi2_capture #(
   logic [3:0] rcur_q;
   logic       rwait_q, rnow_q, rgo_q, arm0_q;
   logic [5:0] ridx_q;
-  logic       rnew, rwe;
+  logic       rnew, rtrig, rwe;
 
-  assign rnew = (raw_req_i != rcur_q);
-  assign rwe  = !rnew && (rawst_q == CapRun) && (rgo_q || rnow_q || (arm0_i && !arm0_q));
+  // started (rgo_q), NOW, or the rising edge of lane 0 arm (also in a cycle
+  // without a valid word: the capture then starts with the next one)
+  assign rnew  = (raw_req_i != rcur_q);
+  assign rtrig = rgo_q || rnow_q || (arm0_i && !arm0_q);
+  assign rwe   = !rnew && (rawst_q == CapRun) && rtrig && rx_vld0_i;
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
@@ -184,8 +192,8 @@ module bow_csi2_capture #(
             end
           end
           CapRun: begin
+            if (rtrig) rgo_q <= 1'b1;
             if (rwe) begin
-              rgo_q  <= 1'b1;
               ridx_q <= ridx_q + 6'd1;
               if (ridx_q == 6'd63) begin
                 rawst_q <= CapFin;

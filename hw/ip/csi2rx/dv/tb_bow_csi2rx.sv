@@ -4,14 +4,17 @@
 // Unit testbench of the Bow32 CSI-2 receiver (Verilator --binary --timing).
 //
 // Reads a test case written by `tools/csi2/csi2_model.py gen DIR`:
-//   DIR/cfg.txt   settings ('key value': lanes, clock mode, D-PHY timing, eye, ...)
+//   DIR/cfg.txt   settings ('key value': lanes, clock mode, D-PHY timing, eye,
+//                 PHY flavour, ...)
 //   DIR/stim.txt  commands, executed in order by the main process:
 //     rd A / wr A D / poll A MASK VALUE US    register access (hex)
 //     wrbe A D BE                             write with byte enables (hex)
 //     pkt ...                                 one burst for csi2_tx_model (see Burst in the model)
-//     lp MASK LP NS / idle NS / clkon         LP states, idle time, continuous clock start
+//     lp MASK LP NS / idle NS / clkon         LP states (MASK bit 4 = clock lane), idle time,
+//                                             continuous clock start
 //     clkburst NS                             clock lane only burst (deferred work)
 //     wait / delay NS / waitbyte BURST BYTE   wait for the TX model to finish / time / burst progress
+//     waitphy                                 wait for the PHY ready (Versal PHY model)
 //     tready PCT / knob NAME V / mark N       m_axis tready duty, TX knob, segment marker
 //   and writes
 //   DIR/out.txt   one line per m_axis transfer: pixel tuser[0] tlast tuser[1], and 'mark N'
@@ -23,11 +26,12 @@
 //
 // Invariants measured on every burst: LP-01 -> LP-00 at the pins to hs_en
 // (data and clock lanes) and LP-11 to hs_en low, CE open while the clock lane
-// is in an LP state or opened while it toggles (csi2_tx_model counters); at
-// the end irq_o = |(IRQ_STATUS & IRQ_EN).
+// is in an LP state or opened while it toggles (csi2_tx_model counters); with
+// DlyVid = 1 the input delay contract of the Versal PHY model (dly_bad,
+// dly_drop, loads per lane); at the end irq_o = |(IRQ_STATUS & IRQ_EN).
 //
-// Clocks: CPU 50 MHz, video 200 MHz (PhyClkHz), byte clock from the TX model;
-// all unrelated.
+// Clocks: CPU 50 MHz, video 200 MHz (PhyClkHz, also the Versal PHY control
+// clock), byte clock from the TX model; all unrelated.
 
 `timescale 1ns / 1ps
 
@@ -35,10 +39,13 @@ module tb_bow_csi2rx;
   import bow_bus_pkg::*;
   import csi2_tx_pkg::*;
 
-  parameter int unsigned Lanes = 2;
-  localparam int unsigned FifoDepth = 256;
+  parameter int unsigned Lanes     = 2;
+  parameter int unsigned FifoDepth = 256;
+  parameter bit          DlyVid    = 1'b0;
   localparam int unsigned CpuPs = 20000, VidPs = 5000;    // 50 MHz, 200 MHz
   localparam int unsigned PhyClkHz = 200_000_000;
+  localparam int unsigned ML = 4, CL = 4;                 // TX model: lanes, clock lane index
+  localparam int unsigned NEye = (Lanes > 2) ? Lanes : 2; // TX model: eye_lo / eye_hi entries
 
   logic clk = 1'b0, vclk = 1'b0;
   logic rst_n = 1'b1, vrst_n = 1'b1;
@@ -53,10 +60,10 @@ module tb_bow_csi2rx;
   logic [1:0]            m_tuser;
   logic                  m_tready = 1'b1;
   logic [9:0]            m_tdata;
-  logic                  byte_clk, byte_ce, byte_rst, clk_hs_en;
+  logic                  byte_clk, byte_ce, byte_rst, clk_hs_en, phy_rdy;
   logic [1:0]            clk_lp;
   logic [Lanes-1:0][1:0] lp;
-  logic [Lanes-1:0]      hs_en, dly_load;
+  logic [Lanes-1:0]      hs_en, dly_load, rx_valid;
   logic [Lanes-1:0][7:0] rx_data;
   logic [Lanes-1:0][8:0] dly_tap, dly_tap_rb;
 
@@ -65,7 +72,8 @@ module tb_bow_csi2rx;
     .PhyClkHz  (PhyClkHz),
     .CpuClkHz  (1_000_000_000 / (CpuPs / 1000)),
     .HasPhy    (1'b1),
-    .FifoDepth (FifoDepth)
+    .FifoDepth (FifoDepth),
+    .DlyVid    (DlyVid)
   ) dut (
     .clk_i           (clk),
     .rst_ni          (rst_n),
@@ -87,6 +95,8 @@ module tb_bow_csi2rx;
     .lp_i            (lp),
     .hs_en_o         (hs_en),
     .rx_data_i       (rx_data),
+    .rx_valid_i      (rx_valid),
+    .phy_rdy_i       (phy_rdy),
     .dly_tap_o       (dly_tap),
     .dly_load_o      (dly_load),
     .dly_tap_i       (dly_tap_rb)
@@ -101,9 +111,12 @@ module tb_bow_csi2rx;
     .lp_o        (lp),
     .hs_en_i     (hs_en),
     .rx_data_o   (rx_data),
+    .rx_valid_o  (rx_valid),
     .dly_tap_i   (dly_tap),
     .dly_load_i  (dly_load),
-    .dly_tap_o   (dly_tap_rb)
+    .dly_tap_o   (dly_tap_rb),
+    .ctrl_clk_i  (vclk),
+    .phy_rdy_o   (phy_rdy)
   );
 
   string dir;
@@ -121,29 +134,39 @@ module tb_bow_csi2rx;
   end
 
   // -------------------------------------------------------------- invariants
-  // Maxima of this segment in ps (-1: none), CE counters at the segment start
-  longint lat_max [3], off_max [2];
-  int unsigned ce_bad0 = 0, ce_rise0 = 0, runts0 = 0, flips0 = 0;
+  // Maxima of this segment in ps (-1: none; [CL] clock lane), TX model
+  // counters at the segment start
+  longint      lat_max [ML + 1], off_max [ML];
+  int unsigned ce_bad0 = 0, ce_rise0 = 0, runts0 = 0, flips0 = 0, dly_bad0 = 0, dly_drop0 = 0;
+  int unsigned loads0 [ML];
 
   function automatic void seg_reset();
-    for (int i = 0; i < 3; i++) lat_max[i] = -1;
-    for (int i = 0; i < 2; i++) off_max[i] = -1;
-    ce_bad0  = u_tx.ce_bad;
-    ce_rise0 = u_tx.ce_rise_toggle;
-    runts0   = u_tx.runts;
-    flips0   = u_tx.flips;
+    for (int i = 0; i <= int'(ML); i++) lat_max[i] = -1;
+    for (int i = 0; i < int'(ML); i++) off_max[i] = -1;
+    ce_bad0   = u_tx.ce_bad;
+    ce_rise0  = u_tx.ce_rise_toggle;
+    runts0    = u_tx.runts;
+    flips0    = u_tx.flips;
+    dly_bad0  = u_tx.dly_bad;
+    dly_drop0 = u_tx.dly_drop;
+    for (int i = 0; i < int'(ML); i++) loads0[i] = u_tx.dly_loads[i];
   endfunction
 
   function automatic void seg_dump(int seg);
-    $fwrite(regs_fd, "inv %0d lat0 %0d\n", seg, lat_max[0]);
-    if (Lanes > 1) $fwrite(regs_fd, "inv %0d lat1 %0d\n", seg, lat_max[1]);
-    $fwrite(regs_fd, "inv %0d latclk %0d\n", seg, lat_max[2]);
-    $fwrite(regs_fd, "inv %0d off0 %0d\n", seg, off_max[0]);
-    if (Lanes > 1) $fwrite(regs_fd, "inv %0d off1 %0d\n", seg, off_max[1]);
+    for (int l = 0; l < int'(Lanes); l++) $fwrite(regs_fd, "inv %0d lat%0d %0d\n", seg, l, lat_max[l]);
+    $fwrite(regs_fd, "inv %0d latclk %0d\n", seg, lat_max[CL]);
+    for (int l = 0; l < int'(Lanes); l++) $fwrite(regs_fd, "inv %0d off%0d %0d\n", seg, l, off_max[l]);
     $fwrite(regs_fd, "inv %0d ce_bad %0d\n", seg, u_tx.ce_bad - ce_bad0);
     $fwrite(regs_fd, "inv %0d ce_rise_toggle %0d\n", seg, u_tx.ce_rise_toggle - ce_rise0);
     $fwrite(regs_fd, "inv %0d runts %0d\n", seg, u_tx.runts - runts0);
     $fwrite(regs_fd, "inv %0d flips %0d\n", seg, u_tx.flips - flips0);
+    if (DlyVid) begin
+      $fwrite(regs_fd, "inv %0d dly_bad %0d\n", seg, u_tx.dly_bad - dly_bad0);
+      $fwrite(regs_fd, "inv %0d dly_drop %0d\n", seg, u_tx.dly_drop - dly_drop0);
+      for (int l = 0; l < int'(Lanes); l++) begin
+        $fwrite(regs_fd, "inv %0d dly_loads%0d %0d\n", seg, l, u_tx.dly_loads[l] - loads0[l]);
+      end
+    end
   endfunction
 
   // LP-01 -> LP-00 at the pin -> hs_en (only HS requests of the last 1 us)
@@ -164,7 +187,7 @@ module tb_bow_csi2rx;
     always @(posedge hs_en[l]) hs_on(l);
     always @(negedge hs_en[l]) hs_off(l);
   end
-  always @(posedge clk_hs_en) hs_on(2);
+  always @(posedge clk_hs_en) hs_on(CL);
 
   // ---------------------------------------------------------------- bus BFM
   task automatic bus_xfer(input bit we, input logic [31:0] addr, input logic [31:0] wdata,
@@ -201,6 +224,7 @@ module tb_bow_csi2rx;
 
   // ------------------------------------------------------------------ setup
   function automatic void set_knob(string key, int v);
+    int l;
     case (key)
       "lanes":         u_tx.lanes = v;
       "contclk":       u_tx.contclk = v[0];
@@ -218,41 +242,59 @@ module tb_bow_csi2rx;
       "t_clk_post":    u_tx.t_clk_post = v;
       "t_clk_trail":   u_tx.t_clk_trail = v;
       "t_lp11_next":   u_tx.t_lp11_next = v;
-      "eye0_lo":       u_tx.eye_lo[0] = v;
-      "eye0_hi":       u_tx.eye_hi[0] = v;
-      "eye1_lo":       u_tx.eye_lo[1] = v;
-      "eye1_hi":       u_tx.eye_hi[1] = v;
+      "versal":        u_tx.versal = v[0];
+      "t_phy_rdy":     u_tx.t_phy_rdy = v;
+      "t_reinit":      u_tx.t_reinit = v;
+      "phy_reinit":    u_tx.phy_reinit = v[0];
+      "v_burst_rst":   u_tx.v_burst_rst = v[0];
+      "v_lat_lane":    u_tx.v_lat_lane = v[0];
+      "v_glitch_pct":  u_tx.v_glitch_pct = v;
+      "v_gap_pm":      u_tx.v_gap_pm = v;
       "tready":        tready_pct = v;
       "dut_lanes":     if (v != int'(Lanes)) $fatal(1, "test case for %0d lanes, testbench built with %0d", v, Lanes);
       "vid_ps":        if (v != int'(VidPs)) $fatal(1, "vid_ps %0d", v);
       "cpu_ps":        if (v != int'(CpuPs)) $fatal(1, "cpu_ps %0d", v);
-      "fifo_depth":    if (v != int'(FifoDepth)) $fatal(1, "fifo_depth %0d", v);
-      default: ;
+      "fifo_depth":    if (v != int'(FifoDepth)) $fatal(1, "fifo_depth %0d, testbench built with %0d", v, FifoDepth);
+      "dly_vid":       if (v[0] != DlyVid) $fatal(1, "dly_vid %0d, testbench built with %0d", v, DlyVid);
+      default: begin
+        // eye<l>_lo, eye<l>_hi (l < NEye), bisc<l> (l < 4)
+        if (key.len() == 7 && key.substr(0, 2) == "eye" && key.substr(4, 6) == "_lo") begin
+          l = key.substr(3, 3).atoi();
+          if (l < int'(NEye)) u_tx.eye_lo[l] = v;
+        end else if (key.len() == 7 && key.substr(0, 2) == "eye" && key.substr(4, 6) == "_hi") begin
+          l = key.substr(3, 3).atoi();
+          if (l < int'(NEye)) u_tx.eye_hi[l] = v;
+        end else if (key.len() == 5 && key.substr(0, 3) == "bisc") begin
+          l = key.substr(4, 4).atoi();
+          if (l < int'(ML)) u_tx.bisc[l] = v;
+        end
+      end
     endcase
   endfunction
 
-  // 'pkt VC DT WC HFLIP_A HFLIP_B PFLIP TRUNC SYNC0 SYNC1 ZEROS0 ZEROS1 PHASE0 PHASE1 ZERO_NS
-  //  PAYLOAD [EXTRA]': EXTRA = bytes sent after the packet in the same burst;
+  // 'pkt VC DT WC HFLIP_A HFLIP_B PFLIP TRUNC SYNC0..3 ZEROS0..3 PHASE0..3 ZERO_NS PAYLOAD
+  //  [EXTRA]': EXTRA = bytes sent after the packet in the same burst;
   //  VC < 0: a raw burst of the EXTRA bytes only (no packet), e.g. skew calibration
   function automatic void push_pkt(string line);
-    int          vc, dt, wc, hf0, hf1, pf, tr, s0, s1, z0, z1, p0, p1, zns, n;
+    int          vc, dt, wc, hf0, hf1, pf, tr, s0, s1, s2, s3, z0, z1, z2, z3, p0, p1, p2, p3, zns, n;
     string       pay, ext;
     csi2_flags_t f;
     csi2_bytes_t b;
     logic [15:0] c;
     pay = "";
     ext = "-";
-    n = $sscanf(line, "pkt %d %h %h %d %d %d %d %h %h %d %d %d %d %d %s %s", vc, dt, wc, hf0, hf1,
-                pf, tr, s0, s1, z0, z1, p0, p1, zns, pay, ext);
-    if (n != 15 && n != 16) $fatal(1, "bad pkt line: %s", line);
+    n = $sscanf(line, "pkt %d %h %h %d %d %d %d %h %h %h %h %d %d %d %d %d %d %d %d %d %s %s", vc,
+                dt, wc, hf0, hf1, pf, tr, s0, s1, s2, s3, z0, z1, z2, z3, p0, p1, p2, p3, zns, pay,
+                ext);
+    if (n != 21 && n != 22) $fatal(1, "bad pkt line: %s", line);
     f = csi2_flags();
     f.hdr_flip_a = 8'(hf0);
     f.hdr_flip_b = 8'(hf1);
     f.pay_flip   = pf;
     f.trunc      = tr;
-    f.sync       = {8'(s1), 8'(s0)};
-    f.zeros      = {8'(z1), 8'(z0)};
-    f.phase      = {4'(p1), 4'(p0)};
+    f.sync       = {8'(s3), 8'(s2), 8'(s1), 8'(s0)};
+    f.zeros      = {8'(z3), 8'(z2), 8'(z1), 8'(z0)};
+    f.phase      = {4'(p3), 4'(p2), 4'(p1), 4'(p0)};
     f.zero_ns    = 16'(zns);
     if (ext == "-" && dt < 'h10) begin
       u_tx.push_short(vc, dt, wc, f);
@@ -380,6 +422,10 @@ module tb_bow_csi2rx;
           n = $sscanf(line, "waitbyte %d %d", k, m);
           wait ((u_tx.cur_burst == k && u_tx.cur_byte >= m) || u_tx.bursts_done > k);
         end
+        "waitphy": begin
+          wait (phy_rdy);
+          repeat (4) @(posedge clk);
+        end
         "tready": n = $sscanf(line, "tready %d", tready_pct);
         "knob": begin
           n = $sscanf(line, "knob %s %d", key, v);
@@ -413,6 +459,11 @@ module tb_bow_csi2rx;
     if (u_tx.ce_bad != 0) $display("tb_bow_csi2rx: first CE open in an LP state of the clock lane at %0.3f ns",
                                    u_tx.t_ce_bad);
     $display("tb_bow_csi2rx: %0d bursts, %0d lanes - dumps written", u_tx.bursts_done, Lanes);
+    if (u_tx.versal) begin
+      $display("tb_bow_csi2rx: Versal PHY FIFOs (BurstRxRst %0d, per lane latency %0d): %0d glitch words, %0d read gaps, at most %0d words, wraps %0d/%0d/%0d/%0d",
+               u_tx.v_burst_rst, u_tx.v_lat_lane, u_tx.v_glitches, u_tx.v_gaps, u_tx.v_occ_max,
+               u_tx.v_wraps[0], u_tx.v_wraps[1], u_tx.v_wraps[2], u_tx.v_wraps[3]);
+    end
     $finish;
   end
 

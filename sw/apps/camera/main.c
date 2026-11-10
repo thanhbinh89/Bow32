@@ -2,12 +2,15 @@
  * Copyright Bow32 contributors.
  * SPDX-License-Identifier: Apache-2.0
  *
- * Camera demo: Raspberry Pi camera v2 (IMX219) -> Bow32 MIPI CSI-2 receiver
- * -> Bow32 ISP, controlled from a small shell on UART0. Type `h` for help.
+ * Camera demo: camera sensor -> Bow32 MIPI CSI-2 receiver -> Bow32 ISP,
+ * controlled from a small shell on UART0. Type `h` for help.
  *
- * Works on both KV260 builds:
- *   hw/fpga/kv260      no D-PHY: ISP test pattern (`tpg`), I2C probe
- *   hw/fpga/kv260_cam  camera: `cam` streams 1080p30 (or `mode 720p` = 60 fps)
+ * Sensors (sw/common/include/cam_sensor.h, detected at start-up):
+ *   Raspberry Pi camera v2 (IMX219, 2 lanes) on the KV260 builds:
+ *     hw/fpga/kv260      no D-PHY: ISP test pattern (`tpg`), I2C probe
+ *     hw/fpga/kv260_cam  camera: `cam` streams 1080p30 (or `mode 720p` = 60 fps)
+ *   LI-IMX274MIPI-FMC (IMX274, 4 lanes) on the Huins MFP-VP1902 camera build:
+ *     `cam` streams 1080p30 (mode 3 + crop) or `mode 720p` = 60 fps (mode 5)
  * Images are read from the ISP capture buffer and sent to the PC with `snap`
  * (tools/bow32_cam.py turns them into PNG files). See docs/camera_kv260.md.
  *
@@ -16,20 +19,38 @@
  * statistics driven auto exposure / auto white balance, capture.
  */
 #include "bow32.h"
-#include "imx219.h"
+#include "cam_sensor.h"
 
-static const char help[] =
+/* `h`: source line of the sensor, help_tpg, mode and sensor lines of the
+ * sensor, help_isp */
+static const char help_src219[] =
     "source:\n"
-    "  cam                 stream from the IMX219 (needs the kv260_cam build)\n"
+    "  cam                 stream from the IMX219 (needs the kv260_cam build)\n";
+static const char help_src274[] =
+    "source:\n"
+    "  cam                 stream from the IMX274 (needs the Huins camera build)\n";
+static const char help_tpg[] =
     "  tpg [0..3]          ISP test pattern: 0 bars 1 ramp 2 checker 3 solid\n"
-    "  stop                stop streaming\n"
+    "  stop                stop streaming\n";
+static const char help_sen219[] =
     "  mode 1080p|720p|<w> <h> [fps]   frame size (default 1080p, 30 fps)\n"
     "sensor:\n"
     "  tp <n>              sensor test pattern (0 off, 1 solid, 2 colour bars)\n"
     "  exp <lines>         exposure (turns AE off)\n"
     "  gain <0..232>       analog gain code, gain = 256 / (256 - code)\n"
     "  flip <h> <v>        mirror / flip (0|1)\n"
+    "  sr <reg> [val]      read / write a sensor register (hex)\n";
+static const char help_sen274[] =
+    "  mode 1080p|720p|4k|<w> <h> [fps]   frame size (default 1080p, 30 fps)\n"
+    "sensor:\n"
+    "  tp <n>              sensor test pattern (0 off, 1..4 solid 000/FFF/555/AAA,\n"
+    "                      5..10 stripes, 11 colour bars, 12 horizontal bars)\n"
+    "  exp <n>             exposure in HMAX periods (turns AE off)\n"
+    "  gain <0..1957>      analog gain code, gain = 2048 / (2048 - code)\n"
+    "  flip 0 <v>          vertical flip (0|1), no mirror\n"
     "  sr <reg> [val]      read / write a sensor register (hex)\n"
+    "  simfast on|off      sensor start-up waits / 64 (simulation only)\n";
+static const char help_isp[] =
     "ISP:\n"
     "  ae on|off|<target>  auto exposure (target = mean linear luma, 0..1023)\n"
     "  awb on|off          gray world white balance\n"
@@ -45,24 +66,27 @@ static const char help[] =
     "CSI-2 receiver:\n"
     "  csi                 link status, counters, timing, PHY state\n"
     "  cal [step]          calibrate the data lane delays while streaming (step 16)\n"
-    "  margin [k] [frames] errors at the calibrated taps +-k (k 0: eye / 4, 60 frames)\n"
+    "  margin [k] [frames] errors at the taps in use +-k (k 0: eye / 4, 60 frames)\n"
     "  csilog [fs|fe]      log of 64 packets: now, from the next FS or up to an FE\n"
     "misc:\n"
     "  info  baud <rate>  rd <addr>  wr <addr> <val>\n";
 
-/* Starting point for the IMX219 colour matrix (s3.8, rows sum to 1.0);
- * tune it for your light. */
-static const int16_t ccm_imx219[9] = {461, -128, -77, -102, 461, -103, -38, -166, 460};
+/* The colour matrix of the sensor table (s3.8, rows sum to 1.0) is a
+ * starting point; tune it for your light. */
 static const int16_t ccm_off0[3] = {0, 0, 0};
 
 #define CTRL_PERIOD 3 /* frames between AE/AWB steps (sensor latency) */
 
+/* the sensor found at start-up (none: the IMX219 table, for its formulas) */
+static const cam_sensor_t *sen = &cam_imx219;
+
 static struct {
   /* frame format */
-  uint32_t w, h, fll;
-  /* hardware found at start-up: sensor, CSI-2 receiver, its D-PHY; the
-   * data lane delays were calibrated */
+  uint32_t w, h, fps;
+  /* hardware found at start-up: sensor, CSI-2 receiver (data lanes), its
+   * D-PHY; the data lane delays were calibrated (cal holds the result) */
   bool sensor, csi, phy, calibrated;
+  uint32_t lanes;
   bow_csi2rx_cal_t cal; /* last calibration (taps, eye widths) */
   /* state */
   bool cam, tpg, yuv, hflip, vflip;
@@ -74,7 +98,7 @@ static struct {
   /* last capture */
   uint32_t cap_w, cap_h;
 } cam = {
-    .w = 1920, .h = 1080, .fll = 1763,
+    .w = 1920, .h = 1080, .fps = 30,
     .exposure = 1000, .modules = ISP_MOD_BLC | ISP_MOD_DPC | ISP_MOD_WB | ISP_MOD_CCM | ISP_MOD_GAMMA,
     .ae_target = 180, .wb_r = 256, .wb_b = 256,
 };
@@ -131,7 +155,8 @@ static const char *match(const char *line, const char *cmd) {
 /* ---------------------------------------------------------------- ISP setup */
 static void isp_setup(uint32_t bayer) {
   bow_isp_init(cam.w, cam.h, bayer);
-  bow_isp_set_ccm(ccm_imx219, ccm_off0);
+  if (sen->black_level != ISP->BLC) ISP->BLC = sen->black_level; /* init: 64 */
+  bow_isp_set_ccm(sen->ccm, ccm_off0);
   bow_isp_set_yuv(cam.yuv);
   ISP->MODULES = (cam.modules & ~ISP_MOD_CSC) | (cam.yuv ? ISP_MOD_CSC : 0);
   ISP->WB[ISP_WB_R] = cam.wb_r;
@@ -139,13 +164,11 @@ static void isp_setup(uint32_t bayer) {
 }
 
 /* Frame period of the current mode in ms, rounded up. */
-static uint32_t frame_ms(void) { return imx219_frame_us(cam.fll) / 1000u + 1u; }
+static uint32_t frame_ms(void) { return cam_frame_us(sen) / 1000u + 1u; }
 
 static void stop_all(void) {
-  if (cam.cam) {
-    if (cam.sensor) imx219_stream(false);
-    bow_csi2rx_stop(frame_ms() + 10u); /* the sensor finishes its frame first */
-  }
+  /* the IMX219 finishes its frame, the IMX274 is stopped after a frame end */
+  if (cam.cam) cam_stream_stop(cam.sensor ? sen : NULL, frame_ms() + 10u);
   ISP->CTRL = 0;
   cam.cam = cam.tpg = false;
 }
@@ -168,20 +191,33 @@ static bool start_tpg(uint32_t pattern) {
 }
 
 static int sensor_apply_ctrl(void) {
-  int r = imx219_set_exposure(cam.exposure);
-  if (r == I2C_OK) r = imx219_set_analog_gain(cam.again);
+  int r = sen->set_exposure(cam.exposure);
+  if (r == I2C_OK) r = sen->set_gain(cam.again);
   return r;
 }
 
 /* Time for one calibration tap or margin frame: 1.2 frame periods + 2 ms
  * (a tap may wait for the vertical blanking). */
-static uint32_t tap_ms(void) { return imx219_frame_us(cam.fll) * 12u / 10000u + 3u; }
+static uint32_t tap_ms(void) { return cam_frame_us(sen) * 12u / 10000u + 3u; }
 
-/* Margin around the calibrated taps (k = eye / 4): reported, the taps stay.
- * A passing check does not disturb the stream (taps change at frame ends). */
+/* Margin around the delays in use, which are the calibrated taps after a
+ * calibration (k = eye / 4 of it, at least CSI2RX_MARGIN_MIN): reported, the
+ * taps stay. Without a calibration (the first one failed) the delays the
+ * lanes use, k = CSI2RX_MARGIN_MIN (Versal XPHY: their BISC delays, never a
+ * blind tap 0). A passing check does not disturb the stream (taps change at
+ * frame ends). */
 static bool margin(uint32_t k, uint32_t frames, bool verbose) {
   bow_csi2rx_margin_t m;
-  int r = bow_csi2rx_margin(&cam.cal, k, frames, tap_ms(), &m, verbose);
+  bow_csi2rx_cal_t c = cam.cal; /* eye widths; none: k = CSI2RX_MARGIN_MIN */
+  bow_csi2rx_get_delays(c.tap);
+  c.lanes = bow_csi2rx_lanes();
+  if (!cam.calibrated) {
+    bow_puts("csi2rx: not calibrated: margin around the delays in use ");
+    bow_csi2rx_print_delays();
+    bow_puts((CSI2RX->INFO & CSI2RX_INFO_DLY_VID) ? " (loading them ends the VT tracking)\n"
+                                                    : "\n");
+  }
+  int r = bow_csi2rx_margin(&c, k, frames, tap_ms(), &m, verbose);
   bow_printf("csi2rx: margin %s", r > 0 ? "ok " : r == 0 ? "low " : "");
   bow_csi2rx_print_margin(&m, r);
   bow_puts("\n");
@@ -196,8 +232,9 @@ static bool calibrate(uint32_t step, bool verbose) {
     bow_printf("csi2rx: calibration failed\n");
     return false;
   }
-  bow_printf("csi2rx: calibrated taps %u/%u eye %u/%u\n", cal.tap[0], cal.tap[1], cal.width[0],
-             cal.width[1]);
+  bow_puts("csi2rx: calibrated ");
+  bow_csi2rx_print_cal(&cal);
+  bow_puts("\n");
   cam.cal = cal;
   cam.calibrated = true;
   margin(0, 8, verbose);
@@ -208,12 +245,13 @@ static bool calibrate(uint32_t step, bool verbose) {
  * taps fails with errors a new tap can fix (ERR_STATUS & CSI2RX_ERR_TAP), or
  * with no error at all: fewer than 64 packets in 2 x tap_ms() (2.4 frames +
  * 6 ms: the first frame start is up to a frame away, 64 packets take at most
- * ~1.3 frames), so no data or a very slow link; without a byte clock the
+ * ~1.3 frames; + the frames the sensor does not output after its start,
+ * IMX274), so no data or a very slow link; without a byte clock the
  * calibration fails cleanly. Other link errors (EXTRA, FORMAT, FRAME, OVF)
  * are not a sampling problem: the taps are kept. */
 static bool need_calibration(bool calibrated) {
   if (!calibrated) return true;
-  uint32_t ms = 2u * tap_ms();
+  uint32_t ms = 2u * tap_ms() + sen->start_frames * frame_ms();
   if (bow_csi2rx_link_check(64, ms)) return false;
   bow_csi2rx_cnt_t c;
   bow_csi2rx_counters(&c);
@@ -229,30 +267,39 @@ static bool need_calibration(bool calibrated) {
 
 static bool start_cam(void) {
   if (!cam.sensor) {
-    bow_printf("error: no IMX219 (check the ribbon cable, then `info`)\n");
+    bow_printf("error: no %s (check the ribbon cable, then `info`)\n", sen->name);
     return false;
   }
   if (!cam.phy) {
-    bow_printf("error: this bitstream has no D-PHY, use the kv260_cam build\n");
+    bow_printf("error: this bitstream has no D-PHY, use the %s build\n", sen->build);
+    return false;
+  }
+  if (cam.lanes < sen->lanes) {
+    bow_printf("error: the %s needs %u lanes, the receiver has %u\n", sen->name, sen->lanes,
+               cam.lanes);
     return false;
   }
   stop_all();
-  isp_setup(imx219_bayer(cam.hflip, cam.vflip));
+  isp_setup(sen->bayer(cam.hflip, cam.vflip));
   if (!bow_isp_update(100)) {
     bow_printf("error: ISP does not take the configuration (no video clock?)\n");
     return false;
   }
-  bow_csi2rx_start(2, CSI2_DT_RAW10, IMX219_LANE_RATE); /* the sensor is still in LP-11 */
-  uint32_t max_exp = cam.fll - IMX219_EXP_OFFSET;
+  /* the IMX219 is still in LP-11, the IMX274 in LP-00 until its start */
+  if (cam_rx_start(sen, sen->dt()) != CSI2RX_OK) {
+    bow_printf("error: D-PHY not ready (CSI2RX STATUS.PHY_RDY = 0)\n");
+    return false;
+  }
+  uint32_t max_exp = sen->exposure_max();
   if (cam.exposure > max_exp) cam.exposure = max_exp;
-  int r = imx219_configure(cam.w, cam.h, cam.fll);
-  if (r == I2C_OK) r = imx219_set_orientation(cam.hflip, cam.vflip);
-  if (r == I2C_OK) r = imx219_set_test_pattern(cam.tp);
+  int r = sen->configure();
+  if (r == I2C_OK) r = sen->set_flip(cam.hflip, cam.vflip);
+  if (r == I2C_OK) r = sen->set_test_pattern(cam.tp);
   if (r == I2C_OK) r = sensor_apply_ctrl();
   if (r == I2C_OK) {
     ISP->STATUS = 0xFF;
     ISP->CTRL = ISP_CTRL_EN;
-    r = imx219_stream(true);
+    r = sen->start();
   }
   if (r != I2C_OK) {
     bow_printf("error: I2C %d while programming the sensor\n", r);
@@ -263,9 +310,14 @@ static bool start_cam(void) {
   cam.cam = true;
   cam.frames = 0;
   cam.ae_locked = cam.awb_locked = false;
-  /* The first start calibrates (the reset tap 0 can sit at the edge of the
-   * eye). The receiver keeps the taps: calibrate again only when the link
-   * has errors with them. */
+  /* The first start calibrates: the reset tap 0 of the KV260 can sit at the
+   * edge of the eye, and so do the delays of the Versal XPHY's
+   * self-calibration (BISC), which on the Huins board sit at the early edge
+   * of every eye (~11 % CRC errors at 1080p; a 64 packet check can pass by
+   * chance; docs/camera_huins.md 6.4). The tap loads end the XPHY's VT
+   * tracking of those lanes. The receiver keeps the taps: calibrate again
+   * only when the link check with them fails with errors a new tap can fix,
+   * or without data (need_calibration). */
   if (need_calibration(cam.calibrated)) {
     if (!calibrate(16, false)) return false;
     /* The ISP drops the frames broken by the tap sweep (input error), the
@@ -274,7 +326,7 @@ static bool start_cam(void) {
     ISP->STATUS = ISP_ST_ERRORS;
   }
   static const char *const order[4] = {"RGGB", "GRBG", "GBRG", "BGGR"};
-  bow_printf("streaming %ux%u %s\n", cam.w, cam.h, order[imx219_bayer(cam.hflip, cam.vflip)]);
+  bow_printf("streaming %ux%u %s\n", cam.w, cam.h, order[sen->bayer(cam.hflip, cam.vflip) & 3u]);
   return true;
 }
 
@@ -286,11 +338,9 @@ static bool restart(void) {
 }
 
 /* ------------------------------------------------------------ control loops */
-static uint32_t gain_q8(uint32_t code) { return 65536u / (256u - code); }
-
 /* Auto exposure: scale exposure x gain so that the mean linear luma reaches
  * the target, at most x2 / /2 per step; exposure first, gain when the
- * exposure is at its maximum (frame length - 4). */
+ * exposure is at its maximum (frame length - 4 lines, IMX274: VMAX - SHR_min). */
 static void ae_step(const bow_isp_stats_t *s) {
   if (s->npix == 0) return;
   uint32_t mean = s->sum_y / s->npix;
@@ -307,8 +357,8 @@ static void ae_step(const bow_isp_stats_t *s) {
   if (f > 512u) f = 512u;
   if (f < 128u) f = 128u;
 
-  uint64_t e = (uint64_t)cam.exposure * gain_q8(cam.again) * f >> 8; /* lines, Q8 */
-  uint32_t max_exp = cam.fll - IMX219_EXP_OFFSET;
+  uint64_t e = (uint64_t)cam.exposure * sen->gain_q8(cam.again) * f >> 8; /* units, Q8 */
+  uint32_t max_exp = sen->exposure_max();
   if (e <= (uint64_t)max_exp * 256u) {
     cam.exposure = (uint32_t)(e >> 8);
     if (cam.exposure == 0) cam.exposure = 1;
@@ -317,7 +367,7 @@ static void ae_step(const bow_isp_stats_t *s) {
     uint32_t g = (uint32_t)(e / max_exp); /* Q8 */
     if (g > 2048u) g = 2048u;              /* 8x */
     cam.exposure = max_exp;
-    cam.again = 256u - 65536u / g;
+    cam.again = sen->gain_code(g);
   }
   sensor_apply_ctrl();
 }
@@ -349,6 +399,10 @@ static void awb_step(const bow_isp_stats_t *s) {
 
 static void frame_done(void) {
   cam.frames++;
+  /* A sensor test pattern follows neither exposure, gain nor white balance:
+   * AE / AWB would run to their limits (e.g. exposure 1, then black frames
+   * after `tp 0`). They wait until it is off. */
+  if (cam.cam && cam.tp != 0) return;
   if (!(cam.ae && cam.cam) && !cam.awb) return;
   if (cam.frames % CTRL_PERIOD) return;
   bow_isp_stats_t s;
@@ -408,12 +462,21 @@ static bool capture(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t sc)
   return true;
 }
 
-/* Whole frame with the smallest box filter that fits the buffer. */
+/* Whole frame with the smallest box filter that fits the buffer; a frame
+ * that does not fit even at scale 3 (e.g. 1932x1094: 241x136 words) gives
+ * its centre at scale 3. */
 static bool capture_auto(void) {
   uint32_t bufwords = (ISP->INFO >> 16) * 1024u;
   uint32_t sc = 0;
   while (sc < 3 && (cam.w >> sc) * (cam.h >> sc) > bufwords) sc++;
-  return capture(0, 0, cam.w >> sc, cam.h >> sc, sc);
+  uint32_t w = cam.w >> sc, h = cam.h >> sc, x = 0, y = 0;
+  if (w * h > bufwords || (sc && w > 1024u)) {
+    if (sc && w > 1024u) w = 1024u; /* columns of the box filter */
+    if (w * h > bufwords) h = bufwords / w;
+    x = (cam.w - (w << sc)) / 2u;
+    y = (cam.h - (h << sc)) / 2u;
+  }
+  return capture(x, y, w, h, sc);
 }
 
 /* Image transfer: "IMG <w> <h> rgb|yuv <bytes> <crc32>" line, raw bytes
@@ -446,9 +509,10 @@ static void info(void) {
   bow_printf("ISP    id %08x ctrl %x status %02x frames %u size %ux%u input %ux%u modules %02x\n",
              ISP->ID, ISP->CTRL, ISP->STATUS, ISP->FRAME_CNT, sz & 0xFFFu, (sz >> 16) & 0xFFFu,
              in & 0xFFFu, in >> 16, ISP->MODULES);
-  bow_printf("mode   %ux%u, frame length %u lines = %u fps\n", cam.w, cam.h, cam.fll,
-             IMX219_PIXEL_RATE / (IMX219_LLP * cam.fll));
-  bow_printf("sensor %s  exp %u gain %u  tp %u  flip %u/%u\n", cam.sensor ? "IMX219" : "none",
+  bow_printf("mode   %ux%u, ", cam.w, cam.h);
+  sen->print_timing(CAM_TIMING_LINES);
+  bow_printf(" = %u fps\n", cam_fps(sen));
+  bow_printf("sensor %s  exp %u gain %u  tp %u  flip %u/%u\n", cam.sensor ? sen->name : "none",
              cam.exposure, cam.again, cam.tp, cam.hflip, cam.vflip);
   bow_printf("ae %s (target %u)  awb %s (r %u b %u)  source %s\n", cam.ae ? "on" : "off",
              cam.ae_target, cam.awb ? "on" : "off", cam.wb_r, cam.wb_b,
@@ -463,20 +527,24 @@ static bool set_mode(const char *s) {
     w = 1920, h = 1080;
   } else if (word_is(s, "720p")) {
     w = 1280, h = 720, fps = 60;
+  } else if (sen == &cam_imx274 && word_is(s, "4k")) {
+    w = 3840, h = 2160, fps = 15; /* capture only: needs an ISP of 3840 pixels or more */
   } else {
     if (!(s = parse_num(s, &w, false)) || !(s = parse_num(s, &h, false))) return false;
     parse_num(s, &fps, false);
   }
   uint32_t maxw = ISP->INFO & 0xFFFFu;
-  if (w < 16 || h < 8 || w > maxw || w > IMX219_ACTIVE_W || h > IMX219_ACTIVE_H || (w | h) & 1u) {
-    bow_printf("error: size must be even, 16..%u x 8..%u\n", maxw, IMX219_ACTIVE_H);
+  if (w < 16 || h < 8 || w > maxw || w > sen->max_w || h > sen->max_h || (w | h) & 1u) {
+    bow_printf("error: size must be even, 16..%u x 8..%u\n", maxw, sen->max_h);
     return false;
   }
+  if (sen->mode(w, h, fps, false) != I2C_OK) return false;
   cam.w = w;
   cam.h = h;
-  cam.fll = imx219_fll_for_fps(h, fps);
-  bow_printf("mode %ux%u @%u fps (FLL %u)\n", w, h, IMX219_PIXEL_RATE / (IMX219_LLP * cam.fll),
-             cam.fll);
+  cam.fps = fps;
+  bow_printf("mode %ux%u @%u fps (", w, h, cam_fps(sen));
+  sen->print_timing(CAM_TIMING_SHORT);
+  bow_puts(")\n");
   return restart();
 }
 
@@ -489,9 +557,13 @@ static bool sensor_cmd(int r) {
 static bool execute(const char *line) {
   const char *a;
   uint32_t v, v2, x, y, w, h, sc;
+  bool i274 = sen == &cam_imx274;
 
   if ((a = match(line, "h")) || (a = match(line, "help"))) {
-    bow_puts(help);
+    bow_puts(i274 ? help_src274 : help_src219);
+    bow_puts(help_tpg);
+    bow_puts(i274 ? help_sen274 : help_sen219);
+    bow_puts(help_isp);
     return true;
   }
   if ((a = match(line, "info"))) {
@@ -511,28 +583,34 @@ static bool execute(const char *line) {
   if ((a = match(line, "mode"))) return set_mode(a);
   if ((a = match(line, "tp"))) {
     if (!parse_num(a, &v, false)) return false;
+    if (i274 && v > sen->tp_max) return false;
     cam.tp = v;
-    return sensor_cmd(cam.sensor ? imx219_set_test_pattern(v) : I2C_OK);
+    return sensor_cmd(cam.sensor ? sen->set_test_pattern(v) : I2C_OK);
   }
   if ((a = match(line, "exp"))) {
     if (!parse_num(a, &v, false) || v == 0) return false;
+    uint32_t max_exp = sen->exposure_max();
     cam.ae = false;
-    cam.exposure = v > cam.fll - IMX219_EXP_OFFSET ? cam.fll - IMX219_EXP_OFFSET : v;
-    return sensor_cmd(cam.sensor ? imx219_set_exposure(cam.exposure) : I2C_OK);
+    cam.exposure = v > max_exp ? max_exp : v;
+    return sensor_cmd(cam.sensor ? sen->set_exposure(cam.exposure) : I2C_OK);
   }
   if ((a = match(line, "gain"))) {
     if (!parse_num(a, &v, false)) return false;
     cam.ae = false;
-    cam.again = v > IMX219_AGAIN_MAX ? IMX219_AGAIN_MAX : v;
-    return sensor_cmd(cam.sensor ? imx219_set_analog_gain(cam.again) : I2C_OK);
+    cam.again = v > sen->gain_max ? sen->gain_max : v;
+    return sensor_cmd(cam.sensor ? sen->set_gain(cam.again) : I2C_OK);
   }
   if ((a = match(line, "flip"))) {
     if (!(a = parse_num(a, &v, false)) || !parse_num(a, &v2, false)) return false;
+    if (v && !sen->has_hflip) {
+      bow_printf("error: the %s has no horizontal mirror\n", sen->name);
+      return false;
+    }
     cam.hflip = v != 0;
     cam.vflip = v2 != 0;
-    if (cam.sensor && imx219_set_orientation(cam.hflip, cam.vflip) != I2C_OK) return false;
+    if (cam.sensor && sen->set_flip(cam.hflip, cam.vflip) != I2C_OK) return false;
     if (cam.cam) {
-      ISP->BAYER = imx219_bayer(cam.hflip, cam.vflip);
+      ISP->BAYER = sen->bayer(cam.hflip, cam.vflip);
       bow_isp_update(100);
     }
     return true;
@@ -540,9 +618,14 @@ static bool execute(const char *line) {
   if ((a = match(line, "sr"))) {
     uint8_t b;
     if (!(a = parse_num(a, &v, true))) return false;
-    if (parse_num(a, &v2, true)) return sensor_cmd(imx219_write((uint16_t)v, (uint8_t)v2));
-    if (imx219_read((uint16_t)v, &b) != I2C_OK) return false;
+    if (parse_num(a, &v2, true)) return sensor_cmd(sen->write((uint16_t)v, (uint8_t)v2));
+    if (sen->read((uint16_t)v, &b) != I2C_OK) return false;
     bow_printf("sensor[%04x] = %02x\n", v, b);
+    return true;
+  }
+  if (i274 && (a = match(line, "simfast"))) {
+    if (!word_is(a, "on") && !word_is(a, "off")) return false;
+    imx274_set_quick(word_is(a, "on"));
     return true;
   }
   if ((a = match(line, "ae"))) {
@@ -643,7 +726,7 @@ static bool execute(const char *line) {
   }
   if ((a = match(line, "margin"))) {
     uint32_t k = 0, frames = 60;
-    if (!cam.cam || !cam.calibrated) {
+    if (!cam.cam) {
       bow_printf("error: the camera is not streaming (cam)\n");
       return false;
     }
@@ -700,24 +783,26 @@ static bool execute(const char *line) {
 }
 
 /* --------------------------------------------------------------------- main */
+/* Sensor first (silently): the banner names it. */
 static void probe_hardware(void) {
-  uint16_t id = 0;
-  uint32_t lanes;
-  bool phy;
+  cam_detect_t d;
+  uint32_t lanes = 0;
+  bool phy = false;
 
   bow_i2c_init(I2C0, 400000);
-  int r = imx219_probe(&id);
-  cam.sensor = (r == I2C_OK && id == IMX219_CHIP_ID);
+  cam_sensor_detect(&d);
+  sen = d.sensor;
+  cam.sensor = d.found;
+  bow_printf("\nBow32 camera demo (ISP + %s), type h for help\n", sen->name);
   if (cam.sensor) {
-    bow_printf("camera: IMX219 found (id %04x)\n", id);
-  } else if (r == I2C_OK) {
-    bow_printf("camera: unknown sensor id %04x\n", id);
+    bow_printf("camera: %s found (id %04x)\n", sen->name, d.id);
   } else {
-    bow_printf("camera: no IMX219 on I2C (error %d)\n", r);
+    cam_print_not_found(&d);
   }
 
   cam.csi = bow_csi2rx_probe(&lanes, &phy);
   cam.phy = cam.csi && phy;
+  cam.lanes = lanes;
   if (cam.phy) {
     bow_printf("csi2rx: Bow32 receiver, %u lanes, PHY clock %u MHz\n", lanes,
                CSI2RX_INFO_MHZ(CSI2RX->INFO));
@@ -726,8 +811,13 @@ static void probe_hardware(void) {
   } else {
     bow_printf("csi2rx: not present - ISP test pattern only\n");
   }
+  if (!cam.sensor) cam_print_prsnt(lanes);
 
   if (ISP->ID != ISP_ID_VALUE) bow_printf("ISP: unexpected id %08x\n", ISP->ID);
+  /* frame format of the sensor layer: the default mode (1080p30) */
+  sen->mode(cam.w, cam.h, cam.fps, false);
+  cam.wb_r = sen->wb_r;
+  cam.wb_b = sen->wb_b;
 }
 
 int main(void) {
@@ -736,7 +826,6 @@ int main(void) {
   int prev = 0;
 
   bow_uart_init(UART0, SYSCTRL->BOOT_BAUD);
-  bow_printf("\nBow32 camera demo (ISP + IMX219), type h for help\n");
   probe_hardware();
 
   bow_puts("> ");

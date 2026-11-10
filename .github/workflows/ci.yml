@@ -37,7 +37,11 @@ jobs:
       - name: Lint
         run: make lint
 
-      - name: System simulation
+      # Two testbench builds: KV260 camera (IMX219, 2 lanes) for the classic
+      # tests, Huins MFP-VP1902 camera (IMX274, 4 lanes, Versal PHY model,
+      # 200 MHz video clock) for camera274, csi2_274 and video274. Every test
+      # runs; the step fails at the end if one failed (summary in the log).
+      - name: System simulation (KV260 + Huins IMX274 builds)
         run: make test
 
       - name: ISP unit test (bit-exact vs. Python model)
@@ -71,7 +75,7 @@ jobs:
             build/mkv_dv/*/sim.log
             build/ddr_dv/*/sim.log
             build/hyperram_dv/*/sim.log
-            build/sim/h264.hex
+            build/sim/h264*.hex
             build/sw/*/*.bin
             build/sw/*/*.vmem
             build/sw/*/*.dis

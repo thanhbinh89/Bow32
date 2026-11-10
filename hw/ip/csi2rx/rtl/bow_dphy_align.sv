@@ -5,8 +5,8 @@
 // finds the SoT sync byte in the deserialised words and outputs byte
 // aligned data.
 //
-// The ISERDES words arrive at an unknown bit phase (bit 0 = first bit on
-// the wire). With w24 = {rx_i, q1, q2} (the last three words, bit j received
+// The PHY words arrive at an unknown bit phase (bit 0 = first bit on the
+// wire). With w24 = {rx_i, q1, q2} (the last three words, bit j received
 // after bit j-1), offset o matches when w24[o +: 8] == 8'h00 (HS-zero) and
 // w24[o+8 +: 8] == 8'hB8 (sync); only one offset can match. The search
 // runs from a rising edge of arm_i until the match. From the next word on,
@@ -34,14 +34,24 @@
 // may take a zero header (FS/FE with frame number 0) for a leader. The two
 // patterns can never match within 8 bits of each other.
 //
+// vld_i = 0: rx_i is not a new word (Versal XPHY: no FIFO word read in this
+// cycle); the word history, the leader tracking, the deskew candidate, the
+// match and the byte output only advance on valid words, so the lane sees
+// the same word sequence as with a word in every cycle ("the first word of
+// the search" is its first valid word). Words before the search (stale
+// words of the previous burst that a PHY FIFO hands out first) only fill
+// the history. With vld_i = 1 in every cycle (bow_dphy_io_xusp) the
+// behaviour is the one without vld_i.
+//
 // Outputs are flops (one cycle after the word they come from).
 
 module bow_dphy_align (
   input  logic       clk_i,
   input  logic       rst_ni,         // byte clock, datapath reset
   input  logic       arm_i,          // hs_active of the lane, synchronised
-  input  logic [7:0] rx_i,           // registered ISERDES word
-  output logic       valid_o,        // aligned byte, every cycle while locked
+  input  logic       vld_i,          // rx_i is a new word (registered PHY rx_valid)
+  input  logic [7:0] rx_i,           // registered PHY word
+  output logic       valid_o,        // aligned byte, one per valid word while locked
   output logic [7:0] data_o,         // LSB = first bit on the wire
   output logic       sot_o,          // with the first byte after the sync byte
   output logic       locked_o,
@@ -56,8 +66,8 @@ module bow_dphy_align (
   logic [15:0] w16;
   logic [7:0]  hit, dsk;
   logic [2:0]  hit_off, dsk_off, doff_q;
-  logic        search, dpend_q, dsk_ok;
-  logic        zs_q, over_q, fresh, zs, over, lead;
+  logic        search, match, out, dpend_q, dsk_ok;
+  logic        zs_q, over_q, pre_q, fresh, zs, over, lead;
   logic [1:0]  age_q;
 
   assign w24 = {rx_i, q1_q, q2_q};
@@ -76,17 +86,21 @@ module bow_dphy_align (
     end
   end
 
-  // deskew candidate of the last cycle: the 8 bits after its 8 ones (the
-  // second half of FFFFh) are now at the same offset in the next word
-  assign dsk_ok = dpend_q && (w24[{2'b00, doff_q} +: 16] == 16'hFFFF);
+  // deskew candidate of the last valid word: the 8 bits after its 8 ones
+  // (the second half of FFFFh) are now at the same offset in the next word
+  assign dsk_ok = vld_i && dpend_q && (w24[{2'b00, doff_q} +: 16] == 16'hFFFF);
 
   // searching: from the cycle of the rising edge of arm_i until a match
   assign search = arm_i && (search_q || !arm_q);
+  assign match  = search && vld_i && (hit != '0);
+  assign out    = locked_q && vld_i;
 
   // HS-zero leader tracking of the search (deskew only where it ends):
-  // zs a zero word was seen before this cycle, over the leader has ended
-  // (a 1 bit after it, or no zero word in the first 3 words of the search)
-  assign fresh = !arm_q;                       // with search: its first cycle
+  // zs a zero word was seen before this word, over the leader has ended
+  // (a 1 bit after it, or no zero word in the first 3 words of the search).
+  // fresh: no valid word of the search yet (pre_q: arm_i has risen, but
+  // no valid word since), with vld_i the first word of the search.
+  assign fresh = !arm_q || pre_q;
   assign zs    = !fresh && zs_q;
   assign over  = !fresh && over_q;
   assign lead  = !over && (q2_q == 8'h00);
@@ -101,6 +115,7 @@ module bow_dphy_align (
       doff_q        <= '0;
       zs_q          <= 1'b0;
       over_q        <= 1'b0;
+      pre_q         <= 1'b0;
       age_q         <= '0;
       locked_q      <= 1'b0;
       first_q       <= 1'b0;
@@ -111,31 +126,35 @@ module bow_dphy_align (
       ev_sync_err_o <= 1'b0;
       ev_deskew_o   <= 1'b0;
     end else begin
-      q1_q          <= rx_i;
-      q2_q          <= q1_q;
+      if (vld_i) begin
+        q1_q   <= rx_i;
+        q2_q   <= q1_q;
+        doff_q <= dsk_off;
+        zs_q   <= zs || (q2_q == 8'h00);
+        over_q <= over || ((q2_q != 8'h00) && (zs || (!fresh && (age_q == 2'd2))));
+        age_q  <= fresh ? 2'd1 : ((age_q == 2'd2) ? 2'd2 : age_q + 2'd1);
+      end
       arm_q         <= arm_i;
-      search_q      <= search && (hit == '0) && !dsk_ok;
-      dpend_q       <= search && (hit == '0) && (dsk != '0) && !dpend_q;
-      doff_q        <= dsk_off;
-      zs_q          <= zs || (q2_q == 8'h00);
-      over_q        <= over || ((q2_q != 8'h00) && (zs || (!fresh && (age_q == 2'd2))));
-      age_q         <= fresh ? 2'd1 : ((age_q == 2'd2) ? 2'd2 : age_q + 2'd1);
+      pre_q         <= arm_i && fresh && !vld_i;
+      search_q      <= search && !match && !dsk_ok;
+      // a candidate waits for the next valid word, a search end drops it
+      dpend_q       <= search && (vld_i ? ((hit == '0) && (dsk != '0) && !dpend_q) : dpend_q);
       ev_sync_err_o <= arm_q && !arm_i && search_q;
       ev_deskew_o   <= search && (hit == '0) && dsk_ok;
 
       if (!arm_i) begin
         locked_q <= 1'b0;
-      end else if (search && (hit != '0)) begin
+      end else if (match) begin
         locked_q <= 1'b1;
         off_q    <= hit_off;
         first_q  <= 1'b1;
-      end else if (locked_q) begin
+      end else if (out) begin
         first_q <= 1'b0;
       end
 
-      valid_o <= locked_q;
-      sot_o   <= locked_q && first_q;
-      if (locked_q) data_o <= w16[{1'b0, off_q} +: 8];
+      valid_o <= out;
+      sot_o   <= out && first_q;
+      if (out) data_o <= w16[{1'b0, off_q} +: 8];
     end
   end
 

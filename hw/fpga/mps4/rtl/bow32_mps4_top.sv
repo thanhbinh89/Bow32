@@ -297,6 +297,8 @@ module bow32_mps4_top import bow_ddr_pkg::*; #(
     .dphy_lp_i        ('1),
     .dphy_hs_en_o     (),
     .dphy_rx_data_i   ('0),
+    .dphy_rx_valid_i  ('1),
+    .dphy_phy_rdy_i   (1'b1),
     .dphy_dly_tap_o   (),
     .dphy_dly_load_o  (),
     .dphy_dly_tap_i   ('0),

@@ -88,4 +88,41 @@ uint32_t bow_h264_level(uint32_t width, uint32_t height, uint32_t fps);
  * bytes written (multiple of 4), 0 if `size` is too small. */
 uint32_t bow_h264_write_headers(uint8_t *buf, uint32_t size, const bow_h264_params_t *p);
 
+/* Rate control of a recording of `frames` frames into `space` bytes
+ * (sw/apps/video `rec`). Model: the size of an intra frame halves about
+ * every 6 QP. Every frame aims at the space still free, less a reserve for
+ * the scatter of the frame sizes (1/8 of a frame + 4 KiB), over the frames
+ * still to code, at most `cap` bytes. After each frame the QP moves by
+ * 6 x log2(size / target), rounded, at most +-12 per frame, within
+ * H264_QP_MIN..H264_QP_MAX; the encoder takes a new QP at its next frame
+ * start (write it before that: one frame of delay).
+ *   bow_h264_rc_init(&rc, 1920, 1080, space, 30, 0, 0);   // rc.qp: first QP
+ *   bow_h264_init(1920, 1080, rc.qp, true); ... start ...
+ *   at every FRAME_CNT step: fits = bow_h264_rc_frame(&rc, FRAME_CNT,
+ *     FRAME_BYTES, TOTAL_BYTES); bow_h264_set_qp(rc.qp); !fits: STOP */
+typedef struct {
+  uint32_t space;   /* bytes for the frames */
+  uint32_t reserve; /* bytes kept out of the plan */
+  uint32_t frames;  /* frames to code */
+  uint32_t cap;     /* largest target per frame (bytes), 0: none */
+  uint32_t target;  /* bytes the next frame aims at */
+  uint32_t qp;      /* QP of the next frame */
+} bow_h264_rc_t;
+
+/* qp 0: the first QP from the frame size: the QP at which a detailed scene
+ * gives the first target, 30 + 6 log2(W x H / 27 / target) (the office of
+ * the Huins board run: 77 KB at 1920x1080 and QP 30, 1 byte per 27 pixels);
+ * most scenes are smaller, their first frames come out below the target.
+ * Else the first QP is qp. */
+void bow_h264_rc_init(bow_h264_rc_t *rc, uint32_t width, uint32_t height, uint32_t space,
+                      uint32_t frames, uint32_t cap, uint32_t qp);
+/* A frame of `bytes` was coded at rc->qp; `coded` frames with `total` bytes
+ * since the start (FRAME_CNT, TOTAL_BYTES): new target and QP of the next
+ * frame. false: a next frame is due but not expected to fit (bytes left <
+ * its size at the new QP + 1/8 + 1 KiB): stop the recording. */
+bool bow_h264_rc_frame(bow_h264_rc_t *rc, uint32_t coded, uint32_t bytes, uint32_t total);
+/* Expected size of a frame at qp_to from one of `bytes` at qp_from:
+ * bytes x 2^((qp_from - qp_to) / 6), saturated. */
+uint32_t bow_h264_rc_size(uint32_t bytes, uint32_t qp_from, uint32_t qp_to);
+
 #endif /* BOW_H264_H_ */

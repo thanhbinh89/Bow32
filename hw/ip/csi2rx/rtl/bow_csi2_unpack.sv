@@ -15,6 +15,9 @@
 //   [42] eol  last group of a line (normal end or truncation)
 //   [41:40]   number of pixels - 1
 //   [39:0]    px3 .. px0, px0 in [9:0] (first pixel)
+// Up to 4 bytes per cycle (Bytes = 4: RAW10 0.8 groups, RAW8 1 group per
+// cycle on average) still form at most one group per cycle: fewer than g
+// bytes (5 or 4) wait in the buffer, so at most g - 1 + 4 bytes are there.
 // A RAW8 line with WC % 4 != 0 ends with a partial group; leftover RAW10
 // bytes (WC % 5 != 0) are dropped. The last formed group is held back one
 // step so that eol lands on the real last group: when a line ends, the last
@@ -23,7 +26,8 @@
 //
 // FIFO overflow keeps the line structure of the output: a group that is not
 // the last of its line is only written while the FIFO has 2 free slots
-// (!afull_i), so the eol group of a line that has started always finds one.
+// (!afull_i), so the eol group of a line that has started always finds one
+// (one push per cycle at most, whatever Bytes).
 //   Ok    groups are written
 //   Cut   a group found the FIFO almost full: the rest of the line is
 //         dropped except its eol group (err set): a short line with tlast
@@ -50,31 +54,33 @@
 // frame never carry sof or a lost-line err.
 // The frame sum adds up all pixels pushed into the FIFO from FS to FE.
 
-module bow_csi2_unpack import bow_csi2rx_pkg::*; (
-  input  logic              clk_i,
-  input  logic              rst_ni,     // byte clock, datapath reset
-  input  logic              sol_i,      // an accepted line starts (no bytes in this cycle)
-  input  logic              raw10_i,    // 1: RAW10, 0: RAW8 (static during a line)
-  input  logic [1:0]        valid_i,    // payload bytes ([1] only with [0])
-  input  logic [15:0]       data_i,
-  input  logic              eol_i,      // end of the line (no bytes in this cycle)
-  input  logic              err_i,      // with eol_i: CRC / format error, truncated
-  input  logic              fs_i,
-  input  logic              fe_i,       // FE that completes a frame
-  input  logic              drop_i,     // a burst of the frame was lost (see the header)
+module bow_csi2_unpack import bow_csi2rx_pkg::*; #(
+  parameter int unsigned Bytes = 2      // bytes per cycle at most: 1, 2 or 4
+) (
+  input  logic                  clk_i,
+  input  logic                  rst_ni,     // byte clock, datapath reset
+  input  logic                  sol_i,      // an accepted line starts (no bytes in this cycle)
+  input  logic                  raw10_i,    // 1: RAW10, 0: RAW8 (static during a line)
+  input  logic [Bytes-1:0]      valid_i,    // payload bytes ([k] only with [k-1])
+  input  logic [Bytes-1:0][7:0] data_i,
+  input  logic                  eol_i,      // end of the line (no bytes in this cycle)
+  input  logic                  err_i,      // with eol_i: CRC / format error, truncated
+  input  logic                  fs_i,
+  input  logic                  fe_i,       // FE that completes a frame
+  input  logic                  drop_i,     // a burst of the frame was lost (see the header)
 
-  output logic              push_o,
-  output logic [GroupW-1:0] group_o,
-  input  logic              full_i,
-  input  logic              afull_i,    // at most one free slot
+  output logic                  push_o,
+  output logic [GroupW-1:0]     group_o,
+  input  logic                  full_i,
+  input  logic                  afull_i,    // at most one free slot
 
-  output logic              ovf_o,
-  output logic              skip_o,     // pulse: the rest of the frame is skipped
-  output logic [31:0]       frame_sum_o // sum of the last complete frame
+  output logic                  ovf_o,
+  output logic                  skip_o,     // pulse: the rest of the frame is skipped
+  output logic [31:0]           frame_sum_o // sum of the last complete frame
 );
 
   logic [4:0][7:0] buf_q;     // bytes of the group being formed
-  logic [2:0]      n_q;       // number of bytes in buf_q
+  logic [2:0]      n_q;       // number of bytes in buf_q (< g)
   logic            hold_v_q, hold_last_q, hold_sof_q;
   logic [1:0]      hold_cnt_q;
   logic [3:0][9:0] hold_px_q;
@@ -92,16 +98,23 @@ module bow_csi2_unpack import bow_csi2rx_pkg::*; (
 
   logic [9:0][7:0] v;         // buf_q followed by the new bytes
   logic [4:0][7:0] buf_d;
-  logic [2:0]      nb, tot, g;
+  logic [3:0]      nb, tot;
+  logic [2:0]      g;
   logic            full_grp, part_grp, formed, push_eol, leave, fifo_ok, wr_ok, gerr;
   logic [3:0][9:0] px;
   logic [1:0]      cnt;
   logic [11:0]     psum;
 
-  assign nb       = {2'b00, valid_i[0]} + {2'b00, valid_i[1]};
-  assign tot      = n_q + nb;
+  always_comb begin
+    nb = '0;
+    for (int unsigned k = 0; k < Bytes; k++) begin
+      nb = nb + {3'b000, valid_i[k]};
+    end
+  end
+
+  assign tot      = {1'b0, n_q} + nb;
   assign g        = raw10_i ? 3'd5 : 3'd4;
-  assign full_grp = (tot >= g);
+  assign full_grp = (tot >= {1'b0, g});
   assign part_grp = eol_i && !raw10_i && (n_q != 3'd0);
   assign formed   = full_grp || part_grp;
 
@@ -110,10 +123,11 @@ module bow_csi2_unpack import bow_csi2rx_pkg::*; (
     for (int unsigned k = 0; k < 5; k++) begin
       v[k] = buf_q[k];
     end
-    v[n_q]        = data_i[7:0];
-    v[n_q + 3'd1] = data_i[15:8];
+    for (int unsigned k = 0; k < Bytes; k++) begin
+      v[4'({1'b0, n_q} + 4'(k))] = data_i[k];
+    end
 
-    // leftover after a full group: at most one byte (n_q < g, nb <= 2)
+    // leftover after a full group: at most Bytes - 1 bytes (n_q < g)
     buf_d = full_grp ? (raw10_i ? v[9:5] : v[8:4]) : v[4:0];
 
     psum = '0;
@@ -164,8 +178,8 @@ module bow_csi2_unpack import bow_csi2rx_pkg::*; (
     end else begin
       buf_q <= buf_d;
       if (sol_i || eol_i) n_q <= 3'd0;
-      else if (full_grp)  n_q <= tot - g;
-      else                n_q <= tot;
+      else if (full_grp)  n_q <= 3'(tot - {1'b0, g});
+      else                n_q <= 3'(tot);
 
       if (formed) begin
         hold_v_q    <= 1'b1;

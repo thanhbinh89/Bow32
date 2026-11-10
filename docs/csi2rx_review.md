@@ -233,3 +233,18 @@ Kiểm chứng:
   frame ở 1080p30 và 720p60), `camera` (hiệu chỉnh + margin 0 lỗi, `frame
   errors 000`, `extra 0`, `margin 0 30` 0 lỗi, `cam` lần hai giữ tap), `video`
   (ghi H.264 720p, giải mã đủ frame).
+
+Gộp với bộ thu 4 lane (nhánh IMX274 trên Huins MFP-VP1902, 2026-11-10): mọi sửa ở
+trên chạy cả với `Lanes` = 4 và PHY XPHY của Versal ([ip/csi2rx.md](ip/csi2rx.md), mục
+*Bốn lane* và *Kiểm chứng*). Lớp packet nhận 1–4 byte mỗi word (`px_err` cả khi `px_eol`
+trễ một chu kỳ, byte sau packet tính cả phần sau CRC trong word cuối), unpack nhận tới 4
+byte mỗi chu kỳ (Cut/Lost, SKIP không đổi: vẫn tối đa một nhóm mỗi chu kỳ), aligner chỉ
+tiến trên word `rx_valid` (theo dõi HS-zero cho deskew đếm word, không đếm chu kỳ), byte
+enable cả cho `DLY2`/`DLY3`. `CNT_SOT23`/`CNT_BURST23` của nhánh 4 lane nằm ở `0x068`/`0x06C`
+(`0x048`/`0x04C` giữ `CNT_EXT`/`FRAME_ERR`). `CTRL.EXTRA` đếm byte của mọi lane: với 4 lane
+trail đã tới ~160–192 byte, nên driver đặt ngưỡng theo số lane (giá trị reset 64 chỉ hợp 1–2
+lane) và chỉ packet sau dài hơn ~200 byte được báo. `bow_csi2rx_margin` chạy với 4 lane;
+`csi2_test` dùng mẫu AAAh của IMX274 vì cảm biến này không có PN9. DV 4 lane chạy mọi test
+directed mới; unit test aligner thêm 3 lượt có khoảng trống `rx_valid` (301 case) và sửa một
+lỗi của chính test (queue của `pack()` giữ burst của pha trước với Verilator 5.020). Chưa
+chạy trên board 4 lane.

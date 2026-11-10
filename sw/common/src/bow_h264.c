@@ -171,3 +171,77 @@ uint32_t bow_h264_write_headers(uint8_t *buf, uint32_t size, const bow_h264_para
   uint32_t m = put_nal(buf + n, size - n, 0x68, &q);
   return m ? n + m : 0;
 }
+
+/* ------------------------------------------------------------ rate control */
+#define RC_STEP_MAX    12  /* QP change per frame: a factor of 4 in size */
+#define RC_PX_PER_BYTE 27u /* a detailed scene at QP 30 (Huins board, 1080p: 77 KB) */
+
+/* 256 x log2(x), x >= 1 (0 counts as 1): the integer part from the highest
+ * set bit, 8 fraction bits by repeated squaring of the mantissa (Q30). */
+static int32_t log2_q8(uint32_t x) {
+  uint32_t n = 31u - (uint32_t)__builtin_clz(x | 1u), f = 0;
+  uint64_t m = n <= 30u ? (uint64_t)x << (30u - n) : (uint64_t)x >> (n - 30u);
+  for (uint32_t i = 0; i < 8u; i++) {
+    m = (m * m) >> 30;
+    f <<= 1;
+    if (m >= (1ull << 31)) {
+      f |= 1u;
+      m >>= 1;
+    }
+  }
+  return (int32_t)(n << 8 | f);
+}
+
+/* round(6 x log2(a / b)): QP steps between frames of a and b bytes */
+static int32_t qp_steps(uint32_t a, uint32_t b) {
+  int32_t d = 6 * (log2_q8(a) - log2_q8(b)); /* Q8 */
+  return d >= 0 ? (d + 128) >> 8 : -((-d + 128) >> 8);
+}
+
+static uint32_t qp_clamp(int32_t q) {
+  if (q < (int32_t)H264_QP_MIN) return H264_QP_MIN;
+  return q > (int32_t)H264_QP_MAX ? H264_QP_MAX : (uint32_t)q;
+}
+
+uint32_t bow_h264_rc_size(uint32_t bytes, uint32_t qp_from, uint32_t qp_to) {
+  static const uint16_t frac[6] = {256, 287, 323, 362, 406, 456}; /* 256 x 2^(k / 6) */
+  int32_t e = (int32_t)qp_from - (int32_t)qp_to;
+  int32_t q = e >= 0 ? e / 6 : -((5 - e) / 6); /* floor(e / 6) */
+  uint64_t v = (uint64_t)bytes * frac[e - 6 * q];
+  v = q >= 0 ? v << q : v >> -q;
+  v >>= 8;
+  return v > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)v;
+}
+
+/* the bytes still to plan over the frames still to code, at most cap */
+static uint32_t rc_target(const bow_h264_rc_t *rc, uint32_t coded, uint32_t total) {
+  uint32_t plan = rc->space - rc->reserve, left = plan > total ? plan - total : 0;
+  uint32_t t = coded < rc->frames ? left / (rc->frames - coded) : 0;
+  return rc->cap && t > rc->cap ? rc->cap : t;
+}
+
+void bow_h264_rc_init(bow_h264_rc_t *rc, uint32_t width, uint32_t height, uint32_t space,
+                      uint32_t frames, uint32_t cap, uint32_t qp) {
+  rc->space = space;
+  rc->frames = frames ? frames : 1u;
+  rc->cap = cap;
+  rc->reserve = space / rc->frames / 8u + 4096u;
+  if (rc->reserve > space / 2u) rc->reserve = space / 2u;
+  rc->target = rc_target(rc, 0, 0);
+  if (qp == 0) qp = qp_clamp(30 + qp_steps(width * height / RC_PX_PER_BYTE, rc->target));
+  rc->qp = qp_clamp((int32_t)qp);
+}
+
+bool bow_h264_rc_frame(bow_h264_rc_t *rc, uint32_t coded, uint32_t bytes, uint32_t total) {
+  uint32_t used = rc->qp;
+  if (coded >= rc->frames) return true; /* the encoder stops after FRAMES by itself */
+  rc->target = rc_target(rc, coded, total);
+  int32_t s = rc->target ? qp_steps(bytes, rc->target) : RC_STEP_MAX;
+  if (s > RC_STEP_MAX) s = RC_STEP_MAX;
+  if (s < -RC_STEP_MAX) s = -RC_STEP_MAX;
+  rc->qp = qp_clamp((int32_t)used + s);
+  /* the next frame, expected at the new QP, + 1/8 + 1 KiB must fit */
+  uint32_t next = bow_h264_rc_size(bytes, used, rc->qp);
+  uint32_t left = rc->space > total ? rc->space - total : 0;
+  return (uint64_t)next + next / 8u + 1024u <= left;
+}

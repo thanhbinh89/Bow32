@@ -151,11 +151,13 @@ class FakeDdrSerial:
         return out
 
     def write(self, data):
-        self.rx += data
-        while b"\r" in self.rx:
-            i = self.rx.index(b"\r")
-            line, self.rx = self.rx[:i].decode(), self.rx[i + 1:]
-            self.tx += line.encode() + b"\r\n"
+        for b in data:  # the app echoes every character it reads and runs the line at CR
+            if b != 0x0D:
+                self.rx.append(b)
+                self.tx.append(b)
+                continue
+            line, self.rx = self.rx.decode(), bytearray()
+            self.tx += b"\r\n"
             if line:
                 self.commands.append(line)
                 ok, text = self._line(line)

@@ -50,6 +50,18 @@ Khe khác (`FMC_SITE`, mục 2) có slide switch riêng: FMC+01 SW192, FMC+10 SW
 FMC+20 SW197, FMC+03 SW194, FMC+30 SW198, FMC+04 SW195, FMC+40 SW199 (FMC+20 còn cấp nguồn cho
 bank của các DIP switch người dùng).
 
+**Khi bo chuyển camera ở FMC+01** ([camera_huins.md](camera_huins.md) mục 2, bảng "Bo nào ở khe
+nào"): SW192 ở 1,2 V và LED11 / PB5 không phân biệt bo camera với bo RAM.
+
+* Không bao giờ nạp PDI bo RAM build với `FMC_SITE=1` khi bo chuyển camera đang cắm: bản đó lái
+  9 đầu ra vào chân FMC+01 mà bo chuyển nối tới module camera (hai data lane MIPI, SCL, XCE, cuộn
+  của bộ lọc hồng ngoại...). PDI bo RAM cho FMC+10 (mặc định) thì được.
+* Chuyển bo RAM lên FMC+01: tháo bo chuyển camera, đặt SW192 về "2" (1,5 V), bật nguồn khi chưa
+  cắm bo và kiểm tra chỉ LED "1.5" sáng, TP29 ≈ 1,5 V, tắt nguồn rồi mới cắm bo RAM (quy tắc
+  VADJ ≥ 1,5 V ở trên). Không bao giờ nạp PDI camera khi bo RAM ở FMC+01.
+* `make jtag` in khe mà PDI được build cho và từ chối PDI bo RAM cho FMC+01 trừ khi
+  `CONFIRM=1` (mục 3).
+
 Không cần đụng DIP của clock module (đội FPGA đang để 16 MHz, bản build không dùng nó),
 SW209, SW3/SW4/SW5 (mode của các SLR phụ), SW30/SW208 (để ON).
 
@@ -69,7 +81,7 @@ make -C hw/fpga/huins_vp1902 HUINS_DOCS=$HOME/Bow32/docs/fpga/Huins_MFP-VP1902
 | Biến | Mặc định | Ý nghĩa |
 |------|----------|---------|
 | `CLK_SRC` | `ref200` | `ref200`: dao động 200 MHz cố định của main board (C2_DDR4_SYS_CLK, bank 718; trên bo: tụ ghép AC, 100 Ω giữa P/N, bias 6,81k / 2k; trong FPGA: `DIFF_SSTL12` với ODT 40 Ω, đưa chế độ chung về ~0,53 V, gần Vref 0,6 V). `site` (clock PL của khe qua CDCUN1208) **bị build từ chối**: bo chỉ ghép AC, FPGA phải tự bias đầu vào `LVDS15` mà mã `DC_BIAS` đúng chưa được kiểm (`DC_BIAS_0` = không bias), và clock module đang để 16 MHz (mục 6) |
-| `FMC_SITE` | `10` | số khe trong tên net của bo: 1, 10, 2, 20, 3, 30, 4, 40 (silk FMC+01, FMC+10, ...) |
+| `FMC_SITE` | `10` | số khe trong tên net của bo: 1, 10, 2, 20, 3, 30, 4, 40 (silk FMC+01, FMC+10, ...). FMC+01 cũng là khe của bo chuyển camera: mục 1 |
 | `DDR_LOOPBACK` / `HR_LOOPBACK` | `0` | `1`: DRAM / HyperRAM giả lập trong FPGA trả lời qua cùng các chân, level shifter cô lập (OE# = 1): bản thử khi chưa muốn đụng bộ nhớ |
 | `JOBS` | `2` | mỗi lần chạy Vivado trên xcvp1902 cần ~15 GB RAM |
 | `FLASH_VMEM` | | nạp sẵn một ứng dụng vào flash |
@@ -129,10 +141,29 @@ make -C hw/fpga/huins_vp1902 jtag JTAG_SERIAL=210357B8AC4E # khi có nhiều cá
 Digilent là 1,8 V của bo). Sau khi nạp: LED xanh "PS_DONE" sáng, LED đỏ "PS_ERR" tắt.
 Image mất khi tắt bo.
 
+`make pdi` ghi cạnh PDI file `pdi_site.txt` (`CARD`, `FMC_SITE`, `CLK_SRC`, `DDR_LOOPBACK`,
+`HR_LOOPBACK`; xoá khi một lần build bắt đầu, ghi khi build xong). Trước khi nạp, `make jtag` in
+file đó và bo phải cắm, ví dụ:
+
+```
+jtag: bow32_huins_vp1902.pdi was built with CARD=ram FMC_SITE=10 CLK_SRC=ref200 DDR_LOOPBACK=0 HR_LOOPBACK=0
+jtag: fit: the FMC+_DDR2_HyperRam card on FMC+10 (site VCCIO 1.5 V);
+jtag:      no camera adapter on FMC+10
+```
+
+Nó từ chối (`jtag: refused: ...`) PDI không có file này (khe không rõ, ví dụ PDI dựng trước khi
+có khoá: build lại), PDI mới hơn file này (build bằng cách khác, ví dụ Makefile của nhánh khác
+trong cùng thư mục build: file là của image trước), file của bản camera (`CARD=cam`), và PDI bo
+RAM cho FMC+01 (lái chân mà bo chuyển camera nối tới module, mục 1). Kiểm bo và switch xong mới
+vượt bằng
+`make -C hw/fpga/huins_vp1902 jtag CONFIRM=1` (hoặc `make fpga-jtag BOARD=huins_vp1902
+CONFIRM=1`).
+
 ## 4. Kết nối
 
-Console: CP2102N của cổng "UART0", 115200 baud, BREAK được (vào boot loader để nạp ứng dụng
-khác bằng `bow32_flash.py flash`).
+Console: CP2102N của cổng "UART0", 115200 baud. BREAK của bridge này không đưa SoC về boot
+loader (trên hw-station-1): đổi ứng dụng bằng thanh ghi rồi `bow32_flash.py --no-break flash`,
+mục 6 "Nạp lại ứng dụng khi không gửi được BREAK".
 
 ```bash
 PORT=/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_<số serial>-if00-port0
@@ -227,6 +258,7 @@ MMCME5) và XDC `create_clock -period 62.500`; chưa có biến thể build này
 | Triệu chứng | Kiểm tra |
 |-------------|----------|
 | `make jtag`: không có target / không có xcvp1902 | bo chưa bật, cáp "USB JTAG", `hw_server` của người khác đang giữ cáp |
+| `make jtag`: `jtag: refused: ...` | PDI không có `pdi_site.txt` hoặc mới hơn nó (build lại bằng `make pdi`), PDI của bản camera, hoặc PDI bo RAM cho FMC+01: kiểm bo / switch theo mục 1 rồi `CONFIRM=1` |
 | không có gì trên console | cáp ở cổng "UART0" (không phải "UART1"), `PORT` đúng bridge, quyền nhóm `dialout`, LED9 nhấp nháy? |
 | LED12 tắt | không có clock 200 MHz: SW12 phải OFF |
 | LED10 tắt, LED12 sáng | MMCM của DDR/HyperRAM không khoá (clock qua SLR), xem `clock_utilization.rpt` |

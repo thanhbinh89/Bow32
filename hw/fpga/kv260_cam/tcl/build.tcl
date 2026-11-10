@@ -70,8 +70,15 @@ if {[get_property PROGRESS [get_runs synth_1]] ne "100%"} {
   error "synthesis failed, see [get_property DIRECTORY [get_runs synth_1]]/runme.log"
 }
 
-# Post-route physical optimisation: the 200 MHz H.264 macroblock datapath has
-# little slack, a change elsewhere in the design can move it by tens of ps.
+# The 200 MHz video clock has only a few tens of ps of setup slack after routing (H.264
+# macroblock arithmetic, 15..18 logic levels), and any RTL change elsewhere in the SoC
+# moves it: with the default directives the 4-lane CSI-2 receiver RTL (2026-11-10) ended
+# at -0.040 ns. The Explore directives of place, physical optimisation and route close it
+# (+0.065 ns from the same netlist). Post-route physical optimisation as well (the
+# receiver of PR #17 missed by 26 ps without it).
+set_property STEPS.PLACE_DESIGN.ARGS.DIRECTIVE    Explore [get_runs impl_1]
+set_property STEPS.PHYS_OPT_DESIGN.ARGS.DIRECTIVE Explore [get_runs impl_1]
+set_property STEPS.ROUTE_DESIGN.ARGS.DIRECTIVE    Explore [get_runs impl_1]
 set_property STEPS.POST_ROUTE_PHYS_OPT_DESIGN.IS_ENABLED true [get_runs impl_1]
 launch_runs impl_1 -to_step write_bitstream -jobs $jobs
 wait_on_run impl_1
