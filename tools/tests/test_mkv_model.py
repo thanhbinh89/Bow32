@@ -328,6 +328,7 @@ class FakeMkvSerial:
         self.tx = bytearray(b"> ")
         self.key = None
         self.broken = broken
+        self.writes = []    # bytes per write() of the host
 
     @property
     def in_waiting(self):
@@ -342,11 +343,14 @@ class FakeMkvSerial:
         return out
 
     def write(self, data):
-        self.rx += data
-        while b"\r" in self.rx:
-            i = self.rx.index(b"\r")
-            line, self.rx = self.rx[:i].decode(), self.rx[i + 1:]
-            self.tx += line.encode() + b"\r\n"
+        self.writes.append(len(data))
+        for b in data:  # the app echoes every character it reads and runs the line at CR
+            if b != 0x0D:
+                self.rx.append(b)
+                self.tx.append(b)
+                continue
+            line, self.rx = self.rx.decode(), bytearray()
+            self.tx += b"\r\n"
             ok, text = self._line(line)
             self.tx += text.encode() + (b"ok\r\n" if ok else b"error\r\n") + b"> "
         return len(data)
@@ -378,11 +382,15 @@ class FakeMkvSerial:
 
 class ToolTest(unittest.TestCase):
     def test_verify(self):
-        board = bow32_mkv.MkvBoard(FakeMkvSerial())
+        ser = FakeMkvSerial()
+        board = bow32_mkv.MkvBoard(ser)
         board.sync()
         ops, per_version, errors = bow32_mkv.verify(board, 12, seed=4, progress=False)
         self.assertEqual((ops, errors), (36, []))
         self.assertEqual(set(per_version.values()), {2})
+        # the long command lines go out paced by their echo, 8 characters at a
+        # time (at most 8 bytes in the 16 byte receive FIFO of the board)
+        self.assertEqual(max(ser.writes), 8)
 
     def test_verify_finds_errors(self):
         board = bow32_mkv.MkvBoard(FakeMkvSerial(broken=True))

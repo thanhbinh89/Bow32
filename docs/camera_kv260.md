@@ -59,7 +59,9 @@ cho cả hai bitstream), chân D-PHY trong `hw/fpga/kv260_cam/constr/kv260_cam.x
 | Cửa sổ AXI4-Lite `0x5000_0000` | không có thiết bị (timeout → bus error) | như bên trái |
 
 Ứng dụng `camera` và `csi2_test` tự nhận ra mình đang chạy trên bitstream nào
-(`CSI2RX.INFO`).
+(`CSI2RX.INFO`). Driver chỉ chờ `STATUS.PHY_RDY` khi `INFO.DLY_VID` = 1 (XPHY của Versal,
+[camera_huins.md](camera_huins.md)): trên KV260 bit đó nối 1, và bitstream `kv260_cam` dựng
+trước khi có nó (đọc 0) vẫn chạy với firmware mới.
 
 ## 3. Build
 
@@ -81,16 +83,21 @@ là 99,999 MHz nên ra 199,998 / 49,9995 MHz) và 2 `proc_sys_reset`. Ràng bu�
 
 | File | Phải thấy |
 |------|-----------|
-| `timing_summary.rpt` | WNS ≥ 0 và WHS ≥ 0 (bản hiện tại: +1,023 ns / +0,010 ns) |
-| `bus_skew.rpt` | 7 ràng buộc `set_bus_skew`, cả 7 `Slack (MET)` |
+| `timing_summary.rpt` | WNS ≥ 0 và WHS ≥ 0 (2026-10-30, chưa có H.264: +1,023 ns / +0,010 ns; có H.264: +0,066 ns, [video_kv260.md](video_kv260.md)) |
+| `bus_skew.rpt` | 9 ràng buộc `set_bus_skew` (7 của bộ thu, 2 của FIFO ra H.264), cả 9 `Slack (MET)` |
 | `clockInfo.txt` | `The following 2 clock nets belong to CLOCK_DELAY_GROUP bow_dphy_rx_clk`: `u_dphy/dphy_byte_clk`, `u_dphy/hs_clk` |
 | `drc.rpt` | không có lỗi (nhất là REQP-1742: `CLK` của IDELAYE3 phải là `CLKDIV` của ISERDESE3) |
 | `clocks.rpt`, `clock_interaction.rpt` | `dphy_hs_clk` 2,193 ns; `dphy_byte_clk` và `dphy_hs_clk_DIV4_INV` 8,772 ns; các cặp clock khác miền là *Asynchronous Groups* |
 | `bd_ports.txt` | chỉ `sys_clk`, `sys_resetn`, `vid_clk`, `vid_resetn` |
 
 `tcl/build.tcl` in `CRITICAL WARNING` khi WNS < 0, khi bus skew vi phạm hay
-không đủ 7 ràng buộc, hoặc khi `CLOCK_DELAY_GROUP` không đủ 2 net (thường do
-đổi tên instance trong RTL mà XDC còn dùng tên cũ). Cảnh báo bình thường:
+không đủ 9 ràng buộc, hoặc khi `CLOCK_DELAY_GROUP` không đủ 2 net (thường do
+đổi tên instance trong RTL mà XDC còn dùng tên cũ). Clock video 200 MHz chỉ dư
+vài chục ps sau route (phép tính macroblock của H.264): với RTL bộ thu 4 lane
+(2026-11-10) directive mặc định còn −0,040 ns, nên `build.tcl` dùng directive
+`Explore` cho place, phys_opt và route (+0,065 ns với cùng netlist; RTL cuối của
+nhánh IMX274, build 2026-11-10: WNS +0,025 ns, WHS +0,010 ns, bus skew 9/9). Cảnh báo
+bình thường:
 
 - 12 × `[Constraints 18-5254]`: Vivado đổi `DIFF_TERM` mặc định của
   `IBUFDS_DPHY` thành `DIFF_TERM_ADV TERM_100`, giống XDC.
@@ -198,7 +205,7 @@ csi2rx: Bow32 receiver, 2 lanes, PHY clock 200 MHz
 type h for help
 > test
 csi2_test: 1920x1080, frame 33326 us, 60 frames per check, calibration step 8
-[PASS] phy-idle all lanes LP-11, no HS (STATUS 003f)
+[PASS] phy-idle all lanes LP-11, no HS (STATUS 403f)
 [PASS] link-up bursts 3/3, clock lane 1
 lanes |###......################################......#################| tap 196 width 256
 lane0 |####.....##################################....#################| tap 204 width 272 (other lane at 196)
@@ -225,7 +232,7 @@ ok
 
 | Check | Nội dung |
 |-------|----------|
-| `phy-idle` | cảm biến standby, PHY bật: mọi lane LP-11, không có HS |
+| `phy-idle` | cảm biến standby, PHY bật: mọi lane LP-11, không có HS. `STATUS 403f`: bit 14 là `PHY_RDY`, trên KV260 nối 1; bitstream dựng trước khi có bit đó in `003f` (như lần chạy 2026-10-30), firmware mới vẫn chạy trên nó |
 | `link-up` | stream màu đơn: số lần vào HS của hai data lane và lane clock tăng |
 | `calibrate` | có eye trên mọi lane (bước 8), tap đã nạp (`DLYn` đọc lại), rồi 64 packet không lỗi |
 | `integrity` | 60 frame RAW10: không lỗi link, `FRAME_INFO` = H dòng, `LINE_INFO` WC = W·5/4 và DT 0x2B, `FRAME_SUM` = (W/2)(H/2)(R + Gr + B + Gb) |
@@ -263,7 +270,7 @@ kiện mới). Lệnh khác:
 ```bash
 # cả khung, thu nhỏ cho vừa buffer 32K pixel (1080p -> 240x135)
 python3 tools/bow32_cam.py -p /dev/ttyUSB0 --fast 921600 snap -o frame.png
-# crop 1:1 ở giữa ảnh, để lấy nét
+# crop 1:1 ở giữa ảnh, để lấy nét (hoặc --center 160 120: tool tự tính toạ độ theo mode)
 python3 tools/bow32_cam.py -p /dev/ttyUSB0 -b 921600 snap -o crop.png --cap "cap 880 480 160 120 0"
 # chạy lệnh shell
 python3 tools/bow32_cam.py -p /dev/ttyUSB0 -b 921600 cmd "mode 720p" cam "ae on" "awb on"
@@ -273,7 +280,9 @@ python3 tools/bow32_cam.py -p /dev/ttyUSB0 -b 921600 view
 
 `--fast` chuyển UART0 lên tốc độ cao (lệnh `baud`); board giữ tốc độ đó tới
 khi reset, các lần sau dùng `-b 921600`. Ảnh 240×135 (97 KB) mất ~1 s ở
-921600 baud, ~9 s ở 115200 baud.
+921600 baud, ~9 s ở 115200 baud. FIFO nhận của UART0 chỉ có 16 byte, nên tool
+gửi mỗi lệnh từng ký tự và chờ echo (một dòng dài gửi liền khi ứng dụng đang
+bận có thể mất phần đuôi).
 
 Ống kính camera v2 xoay được để lấy nét: lệnh `focus` in độ sắc nét (`ST_AF`)
 mỗi frame, xoay tới khi số lớn nhất.

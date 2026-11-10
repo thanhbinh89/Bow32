@@ -18,6 +18,22 @@
  * quick: 64x48 frames with the shortest vertical blanking (simulation),
  * timing only checked for consistency. Full: link-up .. timing at 1080p30
  * and again at 720p60, timing against the sensor configuration.
+ *
+ * With the IMX274 (4 lanes, test patterns of fixed undocumented values):
+ *   phy-idle   every lane LP-00 (standby, datasheet) or every lane LP-11
+ *   integrity  solid 555h, then solid AAAh (every bit toggles): the first
+ *              two frames with the same pixel sum give the reference, the
+ *              next frames must match it; the two sums must differ
+ *   packets    also embedded data (0x12) and optical black lines (0x37);
+ *              quick: exactly FS, 1 embedded line, the OB lines of the mode,
+ *              H lines, FE in one frame
+ *   timing     frame HMAX x VMAX / 72 MHz, line 2 HMAX / 72 MHz, byte clock
+ *              180 MHz (at most 180 MHz if the clock lane leaves HS after
+ *              every packet: the meter reads such short bursts low)
+ *   isp        colour bars (tp 11): the same capture in two frames, several
+ *              colours along the middle row (printed: the layout is measured
+ *              on the board); solid 555h: grey
+ *   raw8       not run (no RAW8 output)
  */
 #include <stdarg.h>
 
@@ -36,13 +52,13 @@ typedef struct {
 static const uint32_t colour10[4] = {0x135, 0x2CA, 0x0F3, 0x2CA};
 static const uint32_t colour8[4] = {0x100, 0x200, 0x300, 0x200};
 
-/* Camera app ISP setup: IMX219 colour matrix */
-static const int16_t ccm_imx219[9] = {461, -128, -77, -102, 461, -103, -38, -166, 460};
+/* Camera app ISP setup: the colour matrix of the sensor table */
 static const int16_t zero3[3] = {0, 0, 0};
 
 static uint32_t log_e[CSI2RX_LOG_ENTRIES];
 static const char *check_name;
 static uint32_t rnd_state;
+static uint32_t ref_sum; /* IMX274: FRAME_SUM of the test pattern ct.tp (integrity) */
 
 /* ------------------------------------------------------------------ helpers */
 static bool pass(const char *fmt, ...) {
@@ -84,6 +100,16 @@ static uint32_t rnd(void) {
   return rnd_state >> 8;
 }
 
+/* "a/b/c/d" */
+static void put_list(const uint32_t *v, uint32_t n) {
+  bow_printf("%u", v[0]);
+  for (uint32_t i = 1; i < n; i++) bow_printf("/%u", v[i]);
+}
+
+/* Per lane lists in messages: 4 values with a 4 lane stream, else 2 (as
+ * bow_csi2rx_print_status). */
+static uint32_t list_lanes(void) { return stream_lanes() > 2u ? 4u : 2u; }
+
 /* FRAME_SUM of a solid colour frame: every 2x2 block holds R, Gr, Gb, B
  * (RAW8: the receiver makes the 10 bit value byte << 2). */
 static uint32_t solid_sum(const uint32_t c[4], bool raw8) {
@@ -93,8 +119,11 @@ static uint32_t solid_sum(const uint32_t c[4], bool raw8) {
 }
 
 static bool fail_link(const bow_csi2rx_cnt_t *c, uint32_t frame) {
-  return fail("frame %u: link errors: ecc %u/%u crc %u trunc %u sot %u/%u ovf %u misc %u", frame,
-              c->ecc_corr, c->ecc_err, c->crc, c->trunc, c->sot[0], c->sot[1], c->ovf, c->misc_err);
+  bow_printf("[FAIL] %s: frame %u: link errors: ecc %u/%u crc %u trunc %u sot ", check_name, frame,
+             c->ecc_corr, c->ecc_err, c->crc, c->trunc);
+  put_list(c->sot, list_lanes());
+  bow_printf(" ovf %u misc %u\n", c->ovf, c->misc_err);
+  return false;
 }
 
 /* Skip the frame in progress (FE within first_ms), clear the counters, then
@@ -123,38 +152,62 @@ static bool check_frames(const suite_t *s, uint32_t first_ms, uint32_t n, uint32
 }
 
 /* ------------------------------------------------------------------ checks */
-static bool idle(uint32_t st) {
-  bool lp11 = CSI2RX_ST_LP_CLK(st) == 3u && CSI2RX_ST_LP(st, 0) == 3u &&
-              (ct.lanes < 2 || CSI2RX_ST_LP(st, 1) == 3u);
-  return lp11 && !(st & (CSI2RX_ST_HS_CLK | CSI2RX_ST_HS(0) | CSI2RX_ST_HS(1) | CSI2RX_ST_CE));
+/* Clock lane and every data lane of the stream in LP state lp, no HS, byte
+ * clock gate closed. */
+static bool idle(uint32_t st, uint32_t lp) {
+  if (CSI2RX_ST_LP_CLK(st) != lp) return false;
+  for (uint32_t l = 0; l < stream_lanes(); l++) {
+    if (CSI2RX_ST_LP(st, l) != lp) return false;
+  }
+  return !(st & (CSI2RX_ST_HS_CLK | CSI2RX_ST_HS_DATA | CSI2RX_ST_CE));
 }
 
 static bool check_phy_idle(const suite_t *s) {
   bow_csi2rx_cnt_t c;
-  uint32_t start, st;
+  uint32_t start, st, lp = 3u, bursts, n = stream_lanes();
+  bool i274 = sensor_imx274();
   if (ct.streaming) stream_stop();
-  bow_csi2rx_start(2, CSI2_DT_RAW10, IMX219_LANE_RATE);
-  /* the sensor may still finish a frame (probe or last stop) */
+  if (cam_rx_start(ct.s, CSI2_DT_RAW10) != CSI2RX_OK) {
+    return fail("D-PHY not ready (STATUS.PHY_RDY = 0)");
+  }
+  /* the sensor may still finish a frame (probe or last stop); in standby the
+   * IMX219 lanes are LP-11, the IMX274 ones LP-00 (datasheet; LP-11 of every
+   * lane is accepted too) */
   start = bow_cycles();
-  while (!idle(st = CSI2RX->STATUS)) {
-    if (expired(start, s->wait_ms)) return fail("STATUS %04x: lanes not in LP-11 or HS on", st);
+  for (;;) {
+    st = CSI2RX->STATUS;
+    if (i274) lp = CSI2RX_ST_LP_CLK(st) == 0u ? 0u : 3u;
+    if (idle(st, lp)) break;
+    if (expired(start, s->wait_ms)) {
+      if (i274) return fail("STATUS %06x: lanes not all in LP-00 or LP-11, or HS on", st);
+      return fail("STATUS %04x: lanes not in LP-11 or HS on", st);
+    }
   }
   bow_csi2rx_clear();
   bow_delay_ms(s->quick ? 1u : 20u);
   st = CSI2RX->STATUS;
   bow_csi2rx_counters(&c);
-  if (!idle(st) || c.burst[0] || c.burst[1] || c.clk_burst) {
+  bursts = c.clk_burst;
+  for (uint32_t l = 0; l < n; l++) bursts += c.burst[l];
+  if (!idle(st, lp) || bursts) {
+    if (n > 2) {
+      return fail("HS while the sensor is in standby: STATUS %06x, bursts %u/%u/%u/%u clk %u", st,
+                  c.burst[0], c.burst[1], c.burst[2], c.burst[3], c.clk_burst);
+    }
     return fail("HS while the sensor is in standby: STATUS %04x, bursts %u/%u clk %u", st,
                 c.burst[0], c.burst[1], c.clk_burst);
   }
+  if (i274) return pass("all lanes LP-%s, no HS (STATUS %06x)", lp ? "11" : "00 (standby)", st);
   return pass("all lanes LP-11, no HS (STATUS %04x)", st);
 }
 
 static bool check_link_up(const suite_t *s) {
   bow_csi2rx_cnt_t a, b;
-  ct.tp = IMX219_TP_SOLID;
+  uint32_t n = stream_lanes();
+  ct.tp = ct.s->tp_solid;
   for (int i = 0; i < 4; i++) ct.colour[i] = colour10[i];
-  if ((imx219_format() != 10 && imx219_set_format(10) != I2C_OK) || !stream_start(true)) {
+  if ((ct.s->has_raw8 && imx219_format() != 10 && imx219_set_format(10) != I2C_OK) ||
+      !stream_start(true)) {
     return fail("sensor does not start");
   }
   /* first burst after the sensor start-up, then every counter grows */
@@ -170,41 +223,97 @@ static bool check_link_up(const suite_t *s) {
     bow_csi2rx_counters(&b);
     /* continuous clock: one HS entry only, the gate stays open */
     bool clk = b.clk_burst > a.clk_burst || (CSI2RX->STATUS & CSI2RX_ST_CE);
-    if (b.burst[0] > a.burst[0] && (ct.lanes < 2 || b.burst[1] > a.burst[1]) && clk) break;
+    bool all = true;
+    for (uint32_t l = 0; l < n; l++) all = all && b.burst[l] > a.burst[l];
+    if (all && clk) break;
     if (expired(start, s->wait_ms)) {
+      if (n > 2) {
+        return fail("bursts %u/%u/%u/%u clk %u, then %u/%u/%u/%u clk %u", a.burst[0], a.burst[1],
+                    a.burst[2], a.burst[3], a.clk_burst, b.burst[0], b.burst[1], b.burst[2],
+                    b.burst[3], b.clk_burst);
+      }
       return fail("bursts %u/%u clk %u, then %u/%u clk %u", a.burst[0], a.burst[1], a.clk_burst,
                   b.burst[0], b.burst[1], b.clk_burst);
     }
+  }
+  if (n > 2) {
+    return pass("bursts %u/%u/%u/%u, clock lane %u", b.burst[0], b.burst[1], b.burst[2],
+                b.burst[3], b.clk_burst);
   }
   return pass("bursts %u/%u, clock lane %u", b.burst[0], b.burst[1], b.clk_burst);
 }
 
 static bool check_calibrate(const suite_t *s) {
   bow_csi2rx_cal_t cal;
+  uint32_t n = stream_lanes();
   bool ok = bow_csi2rx_calibrate(s->step, s->tap_ms, &cal, true);
-  if (!ok || cal.width[0] == 0 || (ct.lanes > 1 && cal.width[1] == 0)) {
-    return fail("no eye: taps %u/%u eye %u/%u", cal.tap[0], cal.tap[1], cal.width[0], cal.width[1]);
+  for (uint32_t l = 0; l < n; l++) ok = ok && cal.width[l] != 0;
+  if (!ok) {
+    bow_printf("[FAIL] %s: no eye: ", check_name);
+    bow_csi2rx_print_cal(&cal);
+    bow_puts("\n");
+    return false;
   }
-  for (uint32_t l = 0; l < ct.lanes; l++) {
-    uint32_t d = CSI2RX->DLY[l];
+  for (uint32_t l = 0; l < n; l++) {
+    uint32_t d = bow_csi2rx_read_delay(l);
     if (CSI2RX_DLY_TAP(d) != cal.tap[l] || CSI2RX_DLY_OUT(d) != cal.tap[l]) {
       return fail("lane %u: DLY %08x, expected tap %u", l, d, cal.tap[l]);
     }
   }
   if (!bow_csi2rx_link_check(64, 4u * s->tap_ms)) {
-    return fail("link check with taps %u/%u", cal.tap[0], cal.tap[1]);
+    bow_printf("[FAIL] %s: link check with taps ", check_name);
+    put_list(cal.tap, cal.lanes < 2u ? 2u : cal.lanes);
+    bow_puts("\n");
+    return false;
   }
-  return pass("taps %u/%u eye %u/%u", cal.tap[0], cal.tap[1], cal.width[0], cal.width[1]);
+  bow_printf("[PASS] %s ", check_name);
+  bow_csi2rx_print_cal(&cal);
+  bow_puts("\n");
+  return true;
+}
+
+/* IMX274: up to 6 frames until two consecutive ones have the same pixel sum
+ * (a test pattern change is frame latched). */
+static bool settle_sum(const suite_t *s, uint32_t *sum) {
+  uint32_t prev = 0;
+  for (uint32_t i = 0; i < 6; i++) {
+    if (!bow_csi2rx_wait_frame(s->wait_ms)) return fail("no frame end");
+    uint32_t v = CSI2RX->FRAME_SUM;
+    if (i && v == prev) {
+      *sum = v;
+      return true;
+    }
+    prev = v;
+  }
+  return fail("pixel sum does not settle (last %08x)", prev);
+}
+
+/* IMX274: solid 555h and AAAh, reference sums measured (see the top) */
+static bool integrity_274(const suite_t *s, uint32_t wc) {
+  static const uint32_t tps[2] = {IMX274_TP_ALL_555, IMX274_TP_ALL_AAA};
+  uint32_t sum[2], px = ct.w * ct.h;
+  for (uint32_t i = 0; i < 2; i++) {
+    if (ct.s->set_test_pattern(tps[i]) != I2C_OK) return fail("I2C error");
+    ct.tp = tps[i];
+    if (!settle_sum(s, &sum[i])) return false;
+    if (!check_frames(s, s->wait_ms, s->frames, CSI2_DT_RAW10, wc, sum[i])) return false;
+  }
+  if (sum[0] == sum[1]) return fail("555h and AAAh give the same pixel sum %08x", sum[0]);
+  ref_sum = sum[1];
+  return pass("2 x %u frames %ux%u RAW10: wc %u, sum %08x (555h, mean %u) %08x (AAAh, mean %u)",
+              s->frames, ct.w, ct.h, wc, sum[0], sum[0] / px, sum[1], sum[1] / px);
 }
 
 static bool check_integrity(const suite_t *s) {
   uint32_t wc = ct.w * 5u / 4u, sum = solid_sum(colour10, false);
+  if (sensor_imx274()) return integrity_274(s, wc);
   if (!check_frames(s, s->wait_ms, s->frames, CSI2_DT_RAW10, wc, sum)) return false;
   return pass("%u frames %ux%u RAW10: wc %u, sum %08x", s->frames, ct.w, ct.h, wc, sum);
 }
 
 /* Log entry of the RAW10 test stream: NULL, or what is wrong with it.
- * LS/LE are allowed (counted in *lsle; the IMX219 does not send them). */
+ * LS/LE are allowed (counted in *lsle; the IMX219 does not send them), and
+ * the optical black lines of the IMX274 (0x37, dropped by the receiver). */
 static const char *entry_error(uint32_t e, uint32_t *lsle) {
   uint32_t dt = CSI2RX_LOG_DT(e);
   if (CSI2RX_LOG_ECC(e) != CSI2RX_ECC_OK) return "header ECC";
@@ -214,6 +323,7 @@ static const char *entry_error(uint32_t e, uint32_t *lsle) {
     return NULL;
   }
   if (dt == CSI2_DT_RAW10) return CSI2RX_LOG_WC(e) == ct.w * 5u / 4u ? NULL : "line word count";
+  if (dt == CSI2_DT_OB && sensor_imx274()) return NULL;
   return (dt == CSI2_DT_FS || dt == CSI2_DT_FE || dt == CSI2_DT_EMB) ? NULL : "data type";
 }
 
@@ -225,8 +335,18 @@ static bool check_log(const char *what, uint32_t n, uint32_t *lsle) {
   return true;
 }
 
+/* Embedded data and OB packets of a log, up to the first line */
+static void count_head(uint32_t n, uint32_t *emb, uint32_t *ob) {
+  *emb = *ob = 0;
+  for (uint32_t i = 0; i < n && CSI2RX_LOG_DT(log_e[i]) != CSI2_DT_RAW10; i++) {
+    *emb += CSI2RX_LOG_DT(log_e[i]) == CSI2_DT_EMB;
+    *ob += CSI2RX_LOG_DT(log_e[i]) == CSI2_DT_OB;
+  }
+}
+
 static bool check_packets(const suite_t *s) {
-  uint32_t n, lsle = 0, lines = 0;
+  uint32_t n, lsle = 0, lines = 0, emb = 0, ob = 0;
+  bool i274 = sensor_imx274();
 
   /* from the next FS */
   n = bow_csi2rx_log(log_e, CSI2RX_LOG_TRIG_FS, 2u * s->wait_ms);
@@ -235,6 +355,7 @@ static bool check_packets(const suite_t *s) {
     return fail("log fs: entry 0 has data type %02x", CSI2RX_LOG_DT(log_e[0]));
   }
   if (!check_log("fs", n, &lsle)) return false;
+  if (i274) count_head(n, &emb, &ob);
 
   /* up to the next FE: lines, then the FE */
   n = bow_csi2rx_log(log_e, CSI2RX_LOG_STOP_FE, 2u * s->wait_ms);
@@ -262,6 +383,14 @@ static bool check_packets(const suite_t *s) {
       return fail("log fs fe: %u entries with %u lines, expected FS .. %u lines .. FE", n, lines,
                   ct.h);
     }
+    /* IMX274: FS, embedded data, OB lines, lines, FE; nothing else */
+    if (i274) {
+      count_head(n, &emb, &ob);
+      if (emb != ct.s->emb_lines || ob != ct.s->ob_lines() || n != 2u + emb + ob + lines) {
+        return fail("log fs fe: %u entries: %u embedded, %u OB, %u lines, expected %u, %u, %u",
+                    n, emb, ob, lines, ct.s->emb_lines, ct.s->ob_lines(), ct.h);
+      }
+    }
   }
 
   /* frame numbers of two consecutive frames: n + 1, or wrapped to 1 */
@@ -274,7 +403,9 @@ static bool check_packets(const suite_t *s) {
     return fail("frame numbers %u then %u", n1, n2);
   }
 
-  bow_printf("[PASS] %s FS, embedded data, lines, FE: headers and CRC ok", check_name);
+  bow_printf("[PASS] %s FS, embedded data", check_name);
+  if (i274) bow_printf(" (%u), OB lines (%u)", emb, ob);
+  bow_puts(", lines, FE: headers and CRC ok");
   if (s->quick) bow_printf(", %u lines in one frame", lines);
   if (lsle) bow_printf(" (info: %u LS/LE packets)", lsle);
   if (used) {
@@ -287,8 +418,10 @@ static bool check_packets(const suite_t *s) {
 
 static bool check_timing(const suite_t *s) {
   uint32_t clk = bow_clk_hz();
+  bool gated = false;
   if (!bow_csi2rx_wait_frame(s->wait_ms)) return fail("no frame end");
   uint32_t ft = CSI2RX->FRAME_TIME, lt = CSI2RX->LINE_TIME;
+  if (!s->quick) bow_csi2rx_clear(); /* clock lane HS entries during the measurement */
   uint32_t byte_hz = bow_csi2rx_byteclk_hz(s->quick ? 0u : 100u);
   uint32_t f_us = muldiv(ft, 1000000u, clk), l_ns = muldiv(lt, 1000000000u, clk);
   if (s->quick) {
@@ -297,23 +430,90 @@ static bool check_timing(const suite_t *s) {
     }
     if (byte_hz == 0) return fail("no byte clock measured");
   } else {
-    uint32_t f_ref = (uint32_t)((uint64_t)ct.fll * IMX219_LLP * clk / IMX219_PIXEL_RATE);
-    uint32_t l_ref = (uint32_t)((uint64_t)IMX219_LLP * clk / IMX219_PIXEL_RATE);
+    /* IMX219: FLL x 3448 / 182.4 MHz, line 3448; IMX274: HMAX x VMAX /
+     * 72 MHz, line 2 x HMAX */
+    bow_csi2rx_cnt_t c;
+    uint32_t hz = ct.s->timing_hz, rate = cam_lane_rate(ct.s);
+    uint32_t f_ref = (uint32_t)((uint64_t)ct.s->frame_clks() * clk / hz);
+    uint32_t l_ref = (uint32_t)((uint64_t)ct.s->line_clks() * clk / hz);
     if (!within(ft, f_ref, 2)) {
       return fail("frame period %u us, expected %u us +-2 %%", f_us, muldiv(f_ref, 1000000u, clk));
     }
     if (!within(lt, l_ref, 2)) {
       return fail("line time %u ns, expected %u ns +-2 %%", l_ns, muldiv(l_ref, 1000000000u, clk));
     }
-    if (!within(byte_hz, IMX219_LANE_RATE / 8u, 3)) {
-      return fail("byte clock %u kHz, expected %u kHz +-3 %%", byte_hz / 1000u,
-                  IMX219_LANE_RATE / 8000u);
+    /* BYTECLK only measures bursts longer than ~2 x 256 CPU cycles. A clock
+     * lane that leaves HS after every packet (more than 2 HS entries per
+     * frame; the IMX274 may do so) gives shorter bursts: the meter reads low
+     * and only bounds the byte clock from below. */
+    bow_csi2rx_counters(&c);
+    gated = c.clk_burst > 2u * c.frames + 2u;
+    if (gated ? byte_hz == 0 || byte_hz > rate / 800u * 103u : !within(byte_hz, rate / 8u, 3)) {
+      return fail("byte clock %u kHz, expected %u kHz +-3 %%%s", byte_hz / 1000u, rate / 8000u,
+                  gated ? " (or less: clock lane gated per packet)" : "");
     }
   }
-  return pass("frame %u us, line %u ns, byte clock %u kHz", f_us, l_ns, byte_hz / 1000u);
+  return pass("frame %u us, line %u ns, byte clock %u kHz%s", f_us, l_ns, byte_hz / 1000u,
+              gated ? " (lower bound: clock lane gated per packet)" : "");
 }
 
 static bool bar_level(uint32_t v, bool on) { return on ? v > 160u : v < 80u; }
+
+static uint32_t absdiff(uint32_t a, uint32_t b) { return a > b ? a - b : b - a; }
+
+/* Colour of the capture in the middle row at k / 8 of the width + 1/16 */
+static uint32_t bar_rgb(uint32_t cw, uint32_t ch, uint32_t k) {
+  return ISP_BUF[(ch / 2u) * cw + k * cw / 8u + cw / 16u] & 0xFFFFFFu;
+}
+
+static uint32_t capture_hash(uint32_t n) {
+  uint32_t h = 0;
+  for (uint32_t i = 0; i < n; i++) h = h * 31u + ISP_BUF[i];
+  return h;
+}
+
+/* IMX274 (layout and values of the patterns not documented): the colour
+ * bars give the same capture twice and at least 3 colours in the middle row
+ * (printed, so the layout can be written down); solid 555h comes out grey
+ * (white balance 1.0, the rows of the colour matrix sum to 1.0). */
+static bool isp_274(const suite_t *s, uint32_t cw, uint32_t ch, uint32_t sc) {
+  uint32_t c[8], h0, h1, ncol = 0;
+  h0 = capture_hash(cw * ch);
+  for (uint32_t k = 0; k < 8; k++) c[k] = bar_rgb(cw, ch, k);
+  if (!bow_isp_capture(0, 0, cw, ch, sc, 4u * s->wait_ms)) return fail("no second ISP capture");
+  h1 = capture_hash(cw * ch);
+  if (h0 != h1) return fail("colour bars: two captures differ");
+  for (uint32_t k = 0; k < 8; k++) {
+    bool fresh = true;
+    for (uint32_t j = 0; j < k && fresh; j++) {
+      uint32_t d = absdiff(c[k] >> 16, c[j] >> 16) + absdiff((c[k] >> 8) & 0xFFu, (c[j] >> 8) & 0xFFu) +
+                   absdiff(c[k] & 0xFFu, c[j] & 0xFFu);
+      fresh = d > 48u;
+    }
+    ncol += fresh;
+  }
+  if (ncol < 3) {
+    return fail("colour bars: %u colours: %06x %06x %06x %06x %06x %06x %06x %06x", ncol, c[0],
+                c[1], c[2], c[3], c[4], c[5], c[6], c[7]);
+  }
+  /* solid 555h from the next frame on */
+  if (ct.s->set_test_pattern(IMX274_TP_ALL_555) != I2C_OK) return fail("I2C error");
+  for (uint32_t i = 0; i < 3; i++) {
+    if (!bow_csi2rx_wait_frame(s->wait_ms)) return fail("no frame end");
+  }
+  if (!bow_isp_capture(0, 0, cw, ch, sc, 4u * s->wait_ms)) return fail("no ISP capture of 555h");
+  uint32_t grey = bar_rgb(cw, ch, 0);
+  for (uint32_t k = 0; k < 8; k++) {
+    uint32_t v = bar_rgb(cw, ch, k), r = v >> 16, g = (v >> 8) & 0xFFu, b = v & 0xFFu;
+    if (absdiff(r, g) > 8u || absdiff(b, g) > 8u || absdiff(g, (grey >> 8) & 0xFFu) > 8u) {
+      return fail("solid 555h: RGB %u %u %u at bar %u, expected grey", r, g, b, k);
+    }
+  }
+  return pass("colour bars %06x %06x %06x %06x %06x %06x %06x %06x (%u colours), 555h grey %u, "
+              "capture %ux%u (scale %u)",
+              c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], ncol, (grey >> 8) & 0xFFu, cw, ch,
+              sc);
+}
 
 static bool check_isp(const suite_t *s) {
   uint32_t bufwords = (ISP->INFO >> 16) * 1024u, sc = 0;
@@ -323,9 +523,10 @@ static bool check_isp(const suite_t *s) {
   if (ct.w > (ISP->INFO & 0xFFFFu) || cw * ch > bufwords) {
     return fail("%ux%u does not fit the ISP", ct.w, ct.h);
   }
-  if (imx219_set_test_pattern(IMX219_TP_BARS) != I2C_OK) return fail("I2C error");
+  if (ct.s->set_test_pattern(ct.s->tp_bars) != I2C_OK) return fail("I2C error");
   bow_isp_init(ct.w, ct.h, ISP_BAYER_RGGB);
-  bow_isp_set_ccm(ccm_imx219, zero3);
+  if (ct.s->black_level != ISP->BLC) ISP->BLC = ct.s->black_level; /* init: 64 */
+  bow_isp_set_ccm(ct.s->ccm, zero3);
   if (!bow_isp_update(100)) {
     fail("the ISP does not take its configuration");
     goto out;
@@ -342,6 +543,10 @@ static bool check_isp(const suite_t *s) {
     fail("no ISP capture (ISP STATUS %02x)", st);
     goto out;
   }
+  if (sensor_imx274()) {
+    ok = isp_274(s, cw, ch, sc);
+    goto out;
+  }
   /* white yellow cyan green magenta red blue black: centre of every bar */
   for (uint32_t k = 0; k < 8; k++) {
     uint32_t v = ISP_BUF[(ch / 2u) * cw + k * cw / 8u + cw / 16u];
@@ -355,7 +560,7 @@ static bool check_isp(const suite_t *s) {
   ok = pass("8 colour bars ok, capture %ux%u (scale %u)", cw, ch, sc);
 out:
   ISP->CTRL = 0;
-  imx219_set_test_pattern(ct.tp);
+  ct.s->set_test_pattern(ct.tp);
   return ok;
 }
 
@@ -400,8 +605,10 @@ static void set_vc(uint32_t vc) {
 static bool check_filter(const suite_t *s) {
   bow_csi2rx_cnt_t c;
   uint32_t period = CSI2RX->FRAME_TIME, nf = s->frames;
+  /* long packets per frame: lines, embedded data, OB lines */
+  uint32_t per = ct.h + ct.s->emb_lines + ct.s->ob_lines();
   if (period == 0) return fail("no frame period measured");
-  if (nf * (ct.h + 2u) > 0xFFFFu) nf = 0xFFFFu / (ct.h + 2u); /* 16 bit drop counter */
+  if (nf * per > 0xFFFFu) nf = 0xFFFFu / per; /* 16 bit drop counter */
   /* VC 1 between two frames: nothing passes, every long packet is dropped;
    * no FE either, so wait nf frame periods (>= nf - 1 whole frames) */
   if (!bow_csi2rx_wait_frame(s->wait_ms)) return fail("no frame end");
@@ -427,6 +634,8 @@ static bool check_filter(const suite_t *s) {
 
 static bool check_restart(const suite_t *s) {
   uint32_t period = CSI2RX->FRAME_TIME;
+  /* IMX274: the pixel sum of its test pattern measured by `integrity` */
+  uint32_t sum = sensor_imx274() ? ref_sum : solid_sum(colour10, false);
   if (period == 0) period = frame_ms() * (bow_clk_hz() / 1000u);
   rnd_state ^= bow_cycles();
   for (uint32_t i = 0; i < 3; i++) {
@@ -434,10 +643,7 @@ static bool check_restart(const suite_t *s) {
     stream_stop();
     bow_delay_cycles(rnd() % period); /* and on again after a while */
     if (!stream_start(false)) return fail("restart %u: sensor does not start", i);
-    if (!check_frames(s, 4u * s->wait_ms, 2, CSI2_DT_RAW10, ct.w * 5u / 4u,
-                      solid_sum(colour10, false))) {
-      return false;
-    }
+    if (!check_frames(s, 4u * s->wait_ms, 2, CSI2_DT_RAW10, ct.w * 5u / 4u, sum)) return false;
   }
   return pass("3 x stop/start at random phases, frames resume without errors");
 }
@@ -469,6 +675,7 @@ static const check_t stream_checks[] = {
 
 static void run(const check_t *t, uint32_t n, const suite_t *s, uint32_t *passed, uint32_t *total) {
   for (uint32_t i = 0; i < n; i++) {
+    if (t[i].fn == check_raw8 && !ct.s->has_raw8) continue; /* IMX274: RAW10 only */
     check_name = t[i].name;
     (*total)++;
     if (t[i].fn(s)) (*passed)++;
@@ -482,7 +689,7 @@ static void suite_mode(suite_t *s, uint32_t w, uint32_t h, uint32_t fps) {
   s->tap_ms = s->quick ? 5u : tap_timeout_ms();
   s->wait_ms = 3u * s->tap_ms;
   bow_printf("csi2_test: %ux%u, frame %u us, %u frames per check, calibration step %u\n", ct.w,
-             ct.h, imx219_frame_us(ct.fll), s->frames, s->step);
+             ct.h, cam_frame_us(ct.s), s->frames, s->step);
 }
 
 bool run_tests(bool quick) {
@@ -491,7 +698,12 @@ bool run_tests(bool quick) {
   uint32_t passed = 0, total = 0;
 
   if (!ct.sensor || !ct.phy) {
-    bow_printf("error: the test needs the IMX219 and a D-PHY (kv260_cam build)\n");
+    bow_printf("error: the test needs the %s and a D-PHY (%s build)\n", ct.s->name, ct.s->build);
+    return false;
+  }
+  if (ct.lanes < ct.s->lanes) {
+    bow_printf("error: the %s needs %u lanes, the receiver has %u\n", ct.s->name, ct.s->lanes,
+               ct.lanes);
     return false;
   }
   if (quick) {

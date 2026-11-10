@@ -8,13 +8,15 @@ một **bộ thu MIPI CSI-2** tự viết (D-PHY trên primitive I/O của Ultra
 không dùng IP của AMD) và một **bộ mã hoá H.264** tự viết cùng **DMA** và
 **video RAM 1 MiB**: camera → CSI-2 → ISP → H.264 → DMA → RAM là một luồng
 phần cứng liền mạch, ra file **MP4** trên PC. Chạy thử với Raspberry Pi camera
-v2 (IMX219) của KV260 ở **1080p30** hoặc **720p60**. Bow32 còn có khối tăng tốc
+v2 (IMX219) của KV260 ở **1080p30** hoặc **720p60**. Bộ thu còn có bản **4 lane ×
+1440 Mbit/s** cho Sony IMX274 trên bo **Huins MFP-VP1902** (AMD Versal Premium; D-PHY
+trên XPHY của Versal, cũng không dùng IP; chưa chạy trên bo). Bow32 còn có khối tăng tốc
 **mã khối MKV** theo TCVN 14263:2024 (MKV-128 / MKV-256, đủ 6 phiên bản khoá),
 kiểm chứng với Phụ lục A của chuẩn, **SDRAM DDR2/DDR3**:
 controller **LiteDRAM** (sinh từ Python) trên PHY riêng của Bow32 (`ODDRE1`/`IDDRE1` +
 MMCM dịch pha, điều khiển level shifter, hiệu chỉnh bằng phần mềm), và **HyperRAM**
 (bộ điều khiển HyperBus tự viết cho S80KS2562: read buffer, ghi posted, BIST, quản lý
-nguồn), cả hai chạy trên bo **Arm MPS4** (Virtex UltraScale+).
+nguồn), cả hai chạy trên bo **Arm MPS4** (Virtex UltraScale+) và Huins MFP-VP1902.
 
 ```
                  +-----------------------------------------------------------+
@@ -67,7 +69,7 @@ nguồn), cả hai chạy trên bo **Arm MPS4** (Virtex UltraScale+).
 | GPIO (IOPAD) ×2 | 2 port × 8 chân: hướng, push-pull/open-drain, set/clear/toggle nguyên tử, ngắt theo cạnh, **chức năng thay thế** (UART1 trên PB0/PB1); 6 chân ra PMOD của KV260 |
 | SYSCTRL | Chip ID, tần số clock, nguyên nhân reset, soft reset, **UART BREAK → reset vào bootloader** |
 | **ISP** | RAW10 Bayer → RGB888 / YUV444, 1 pixel/clock (200 MHz trên KV260): BLC, DPC, white balance, demosaic, CCM, gamma, CSC; thống kê AE/AWB/AF + histogram; capture có lọc thu nhỏ; test pattern; 2 miền clock ([docs/ip/isp.md](docs/ip/isp.md)) |
-| **Bộ thu MIPI CSI-2** | D-PHY RX trên primitive I/O của UltraScale+ (`IBUFDS_DPHY`, `IDELAYE3`, `ISERDESE3`, `BUFGCE_DIV`; không dùng IP AMD) + CSI-2 RX: 1–2 lane, máy trạng thái LP, tìm sync, ECC, CRC-16, lọc VC/DT, RAW10/RAW8 → AXI4-Stream 1 pixel/clock; eye hiệu chỉnh bằng phần mềm; bộ đếm lỗi, log packet, word thô của PHY; 2 × 912 Mbit/s với IMX219 ([docs/ip/csi2rx.md](docs/ip/csi2rx.md)) |
+| **Bộ thu MIPI CSI-2** | CSI-2 RX 1, 2 hoặc 4 lane: máy trạng thái LP, tìm sync, ghép lane, ECC, CRC-16, lọc VC/DT, RAW10/RAW8 → AXI4-Stream 1 pixel/clock; D-PHY RX không dùng IP AMD: primitive I/O của UltraScale+ (`IBUFDS_DPHY`, `IDELAYE3`, `ISERDESE3`, `BUFGCE_DIV`; KV260) hoặc XPHY chế độ native của Versal (`bow_dphy_io_versal`: `IBUFDS_DPHY`, XPHY, XPLL, BISC; Huins MFP-VP1902); eye hiệu chỉnh bằng phần mềm; bộ đếm lỗi, log packet, word thô của PHY; 2 × 912 Mbit/s với IMX219 (KV260), 4 × 1440 Mbit/s với IMX274 (Huins, mô phỏng, chưa chạy trên bo) ([docs/ip/csi2rx.md](docs/ip/csi2rx.md)) |
 | **Bộ mã hoá H.264** | Constrained Baseline, intra only (IDR mỗi frame, `I_16x16` đủ 4 mode luma + 4 mode chroma, chọn mode theo SAD), CAVLC, 4:2:0, QP 10…51 mỗi frame, cờ deblocking; 392 chu kỳ/macroblock ở 200 MHz (1080p tới ~62 fps); stream Annex B chuẩn, bit-exact với mô hình Python, giải mã bằng FFmpeg trùng từng pixel ([docs/ip/h264.md](docs/ip/h264.md)) |
 | **DMA** | 2 kênh, bus master thứ ba của main crossbar: memory→memory, stream→memory (tuyến tính / vòng / bỏ), đếm packet (frame), lỗi bus, ngắt ([docs/ip/dma.md](docs/ip/dma.md)) |
 | **Video RAM** | 1 MiB (UltraRAM), 0 wait-state, cổng crossbar riêng cho buffer DMA / stream video |
@@ -76,9 +78,9 @@ nguồn), cả hai chạy trên bo **Arm MPS4** (Virtex UltraScale+).
 | **HyperRAM** | bộ điều khiển HyperBus tự viết cho HyperRAM 2.0 x8 (S80KS2562, 32 MiB): cửa sổ ở `0x6000_0000` cho CPU (thực thi mã được), read buffer 4 line với line fill wrapped (word cần trước), ghi posted gộp khối 32 byte thành một burst, latency cố định / biến đổi theo RWDS, BIST trong phần cứng, CR0/CR1, deep power down / hybrid sleep; mọi thông số thời gian là thanh ghi; PHY `ODDRE1`/`IDDRE1` + 2 MMCM (pha đọc 1/672 CK trên cả chu kỳ, pha ghi ±3T/16), bộ căn dữ liệu theo RWDS, điều khiển DIR/OE của level shifter; HyperRAM giả lập tổng hợp được cho bản loopback; đã chạy trên chip thật qua bo RAM ở khe FMC+ của MPS4: toàn 32 MiB 0 lỗi, BIST 184 MB/s ([docs/ip/hyperram.md](docs/ip/hyperram.md)) |
 | I2C master | 100/400 kHz, START lặp lại, clock stretching; điều khiển cảm biến camera |
 | Cầu AXI4-Lite | cửa sổ `0x5000_0000` tới IP AXI4-Lite của block design (hiện để trống), timeout → bus error |
-| Công cụ | `bow32_flash.py` (nạp qua UART), `bow32_cam.py` (chụp ảnh → PNG, xem trực tiếp), `bow32_video.py` (quay video → `.h264` + `.mp4`), `bow32_mkv.py` (kiểm chứng IP MKV trên board), `bow32_ddr.py` (self-test, hiệu chỉnh, mắt đọc, băng thông, kiểm tra dữ liệu DDR trên board), `bow32_hyperram.py` (như vậy cho HyperRAM), `bow32_mps4.py` (chép bitstream lên thẻ microSD của MPS4, khởi động lại bo qua console MCC, trả lại cấu hình cũ), `bow32_image.py` (header/CRC), `gen_memmap.py` (memory map một nguồn), `isp_model.py` (mô hình ISP bit-exact), `csi2_model.py` (mô hình bộ thu CSI-2), `h264/h264_model.py` (mô hình encoder bit-exact + decoder), `h264/mp4.py` (ghi MP4, không cần ffmpeg), `mkv/mkv_model.py` (mô hình MKV + véc tơ trích từ PDF của chuẩn) |
-| Kiểm chứng | Lint Verilator `-Wall`, 12 test mô phỏng hệ thống (boot, nạp qua UART, BREAK, flash, ngắt, GPIO, camera, CSI-2, H.264, MKV, DDR, HyperRAM) + test riêng của ISP, bộ thu CSI-2, bộ mã hoá H.264, khối MKV (so với mô hình Python), DDR (lõi LiteDRAM thật + mô hình DRAM, level shifter) và HyperRAM (mô hình S80KS2562 mức chân viết từ datasheet, level shifter), chạy trong CI; test chân D-PHY, chân DDR / HyperRAM và MMCM bằng xsim (cần Vivado) |
-| FPGA | Flow Vivado bằng script cho Kria KV260 (bản cơ bản và bản camera `kv260_cam`, không cần IP/license MIPI), overlay để nạp bằng `xmutil` trên Linux; Arm MPS4 (`BOARD=mps4`, XCVU13P) có bộ điều khiển DDR và HyperRAM, nạp qua thẻ microSD của MCC |
+| Công cụ | `bow32_flash.py` (nạp qua UART), `bow32_cam.py` (chụp ảnh → PNG, xem trực tiếp), `bow32_video.py` (quay video → `.h264` + `.mp4`), `bow32_mkv.py` (kiểm chứng IP MKV trên board), `bow32_ddr.py` (self-test, hiệu chỉnh, mắt đọc, băng thông, kiểm tra dữ liệu DDR trên board), `bow32_hyperram.py` (như vậy cho HyperRAM), `bow32_mps4.py` (chép bitstream lên thẻ microSD của MPS4, khởi động lại bo qua console MCC, trả lại cấu hình cũ), `huins_pins.py` (XDC chân của bo Huins từ netlist cục bộ lúc build), `bow32_image.py` (header/CRC), `gen_memmap.py` (memory map một nguồn), `isp_model.py` (mô hình ISP bit-exact), `csi2_model.py` (mô hình bộ thu CSI-2), `h264/h264_model.py` (mô hình encoder bit-exact + decoder), `h264/mp4.py` (ghi MP4, không cần ffmpeg), `mkv/mkv_model.py` (mô hình MKV + véc tơ trích từ PDF của chuẩn) |
+| Kiểm chứng | Lint Verilator `-Wall` (cả RTL mức bo của Versal với stub chỉ có cổng của primitive AMD), 15 test mô phỏng hệ thống (boot, nạp qua UART, BREAK, flash, ngắt, GPIO, camera, CSI-2, H.264, MKV, DDR, HyperRAM; bản IMX274 4 lane + PHY Versal: camera, CSI-2, video) + test riêng của ISP, bộ thu CSI-2, bộ mã hoá H.264, khối MKV (so với mô hình Python), DDR (lõi LiteDRAM thật + mô hình DRAM, level shifter) và HyperRAM (mô hình S80KS2562 mức chân viết từ datasheet, level shifter), chạy trong CI; test chân D-PHY (UltraScale+ và XPHY của Versal), chân DDR / HyperRAM và MMCM bằng xsim (cần Vivado) |
+| FPGA | Flow Vivado bằng script cho Kria KV260 (bản cơ bản và bản camera `kv260_cam`, không cần IP/license MIPI), overlay để nạp bằng `xmutil` trên Linux; Arm MPS4 (`BOARD=mps4`, XCVU13P) có bộ điều khiển DDR và HyperRAM, nạp qua thẻ microSD của MCC; Huins MFP-VP1902 (`BOARD=huins_vp1902`, Versal Premium xcvp1902): bo RAM ở khe FMC+ (DDR2 + HyperRAM) hoặc camera IMX274 qua bo chuyển của Huins ở FMC+01 (`CARD=cam`), PDI nạp qua USB JTAG, số chân của Huins không có trong repo (sinh từ netlist cục bộ lúc build) |
 
 ## Bắt đầu nhanh
 
@@ -94,7 +96,7 @@ make lint      # lint RTL
 make test      # chạy toàn bộ test mô phỏng (Verilator)
 make test-ip   # test riêng của ISP, bộ thu CSI-2, bộ mã hoá H.264, MKV, DDR và HyperRAM
 make test-tools # unit test của công cụ Python
-make test-fpga-dv # test mức chân D-PHY I/O + bộ thu CSI-2, chân DDR / HyperRAM + MMCM (xsim, cần Vivado)
+make test-fpga-dv # test mức chân D-PHY I/O + bộ thu CSI-2, D-PHY Versal, chân DDR / HyperRAM + MMCM (xsim, cần Vivado)
 make fpga      # bitstream + firmware cho Kria KV260 (cần Vivado)
 ```
 
@@ -114,6 +116,15 @@ python3 tools/bow32_flash.py -p /dev/ttyUSB0 flash build/sw/camera/camera.bin
 python3 tools/bow32_cam.py -p /dev/ttyUSB0 --fast 921600 cmd cam "ae on" "awb on"
 python3 tools/bow32_cam.py -p /dev/ttyUSB0 -b 921600 snap -o frame.png
 # kiểm tra bộ thu CSI-2: nạp build/sw/csi2_test/csi2_test.bin, gõ `test`
+```
+
+Camera IMX274 4 lane trên Huins MFP-VP1902 (Versal, bo chuyển camera của Huins ở FMC+01;
+chuẩn bị bo, khoá ở `make jtag`, `csi2_test`, ảnh và video), xem
+[docs/camera_huins.md](docs/camera_huins.md):
+
+```bash
+make fpga BOARD=huins_vp1902 CARD=cam      # cần bản sao cục bộ của tài liệu Huins (HUINS_DOCS)
+make fpga-jtag BOARD=huins_vp1902 CARD=cam # in card / khe của PDI và bo phải cắm; có thể từ chối (mục 2 của doc)
 ```
 
 Video H.264 → MP4 (camera → ISP → H.264 → DMA → video RAM → UART), xem
@@ -200,14 +211,15 @@ Bow32/
 │   │   └── rtl/                  #   bow32_top.sv + package sinh tự động
 │   ├── fpga/
 │   │   ├── common/               #   primitive cho Xilinx, đọc filelist bằng Tcl,
-│   │   │                         #   rtl/: D-PHY I/O, chân + clock DDR và HyperRAM (UltraScale+), dv/: test chân (xsim)
+│   │   │                         #   rtl/: D-PHY I/O (UltraScale+, Versal), chân + clock DDR và HyperRAM, dv/: test chân (xsim)
 │   │   ├── kv260/                #   top board, XDC, Tcl Vivado, overlay Linux
 │   │   ├── kv260_cam/            #   bản camera: D-PHY J9 -> bộ thu CSI-2, clock video 200 MHz
-│   │   └── mps4/                 #   Arm MPS4: top board, XDC (DDR / HyperRAM: loopback / bo RAM), file cho thẻ microSD
-│   └── lint/                     # waiver Verilator
+│   │   ├── mps4/                 #   Arm MPS4: top board, XDC (DDR / HyperRAM: loopback / bo RAM), file cho thẻ microSD
+│   │   └── huins_vp1902/         #   Huins MFP-VP1902 (Versal): bo RAM (CARD=ram), camera IMX274 (CARD=cam), pins.txt
+│   └── lint/                     # waiver Verilator, stub chỉ có cổng của primitive Versal
 ├── sim/                          # testbench hệ thống (Verilator)
 ├── sw/
-│   ├── common/                   # HAL, driver (UART, I2C, ISP, CSI-2 RX, IMX219, H.264, DMA, DDR, HyperRAM...), crt0, linker script,
+│   ├── common/                   # HAL, driver (UART, I2C, ISP, CSI-2 RX, IMX219, IMX274, H.264, DMA, DDR, HyperRAM...), crt0, linker script,
 │   │                             # litedram/ (khởi tạo + hiệu chỉnh DDR qua LiteDRAM)
 │   ├── bootrom/                  # romcode: boot + UART loader
 │   ├── apps/                     # hello, uart_irq, flash_demo, gpio_demo, camera, csi2_test, video, mkv, ddr, hyperram
@@ -227,8 +239,9 @@ Bow32/
 | [docs/bus.md](docs/bus.md) | Giao thức bus, crossbar, cách gắn thiết bị mới |
 | [docs/ip/](docs/ip/) | Đặc tả từng IP và thanh ghi: CPU, UART, GPIO, flash, sysctrl, bộ nhớ, ISP, bộ thu CSI-2, H.264, DMA, MKV, DDR, HyperRAM, I2C, cầu AXI4-Lite |
 | [docs/ip/isp.md](docs/ip/isp.md) | ISP: pipeline, công thức từng stage, thống kê, capture, thanh ghi |
-| [docs/ip/csi2rx.md](docs/ip/csi2rx.md) | Bộ thu MIPI CSI-2: D-PHY, I/O UltraScale+, CDC, packet, thanh ghi, hiệu chỉnh eye, ràng buộc |
+| [docs/ip/csi2rx.md](docs/ip/csi2rx.md) | Bộ thu MIPI CSI-2: D-PHY, I/O UltraScale+ và XPHY của Versal, 4 lane, CDC, packet, thanh ghi, hiệu chỉnh eye, ràng buộc |
 | [docs/camera_kv260.md](docs/camera_kv260.md) | Chạy camera trên KV260: bitstream, ứng dụng `camera` và `csi2_test`, chụp ảnh về PC |
+| [docs/camera_huins.md](docs/camera_huins.md) | Camera IMX274 (4 lane) trên Huins MFP-VP1902: VCCIO và bo nào ở khe nào, build `CARD=cam`, khoá ở `make jtag`, `csi2_test`, `camera`, `video`, danh sách kiểm khi bring-up, D-PHY trên XPHY của Versal |
 | [docs/ip/h264.md](docs/ip/h264.md) | Bộ mã hoá H.264: kiến trúc, các khối, quyết định của encoder, stream, thanh ghi, kiểm chứng |
 | [docs/ip/dma.md](docs/ip/dma.md) | DMA: chế độ M2M / stream, ring buffer, thanh ghi |
 | [docs/ip/mkv.md](docs/ip/mkv.md) | Mã khối MKV: thuật toán (TCVN 14263:2024), so với bản dự thảo, kiến trúc, thanh ghi, kiểm chứng |
@@ -238,6 +251,7 @@ Bow32/
 | [docs/ddr_mps4.md](docs/ddr_mps4.md) | Chạy bộ điều khiển DDR trên Arm MPS4: build, thẻ microSD, `test`, `cal`, `verify`, `bench` |
 | [docs/ip/hyperram.md](docs/ip/hyperram.md) | HyperRAM: giao thức HyperBus, cửa sổ (read / write buffer), controller, PHY, level shifter, thanh ghi, khởi tạo, hiệu chỉnh, BIST, kiểm chứng |
 | [docs/hyperram_mps4.md](docs/hyperram_mps4.md) | Chạy bộ điều khiển HyperRAM trên Arm MPS4: build, clock, `test`, `cal`, `verify`, `bench` |
+| [docs/ddr_huins.md](docs/ddr_huins.md) | DDR2 và HyperRAM với bo RAM thật trên Huins MFP-VP1902: VADJ, build, nạp PDI qua JTAG, kết quả trên bo |
 | [docs/ddr_board_review.md](docs/ddr_board_review.md) | Khả năng làm DDR trên Bow32, bo RAM mở rộng hợp với bo FPGA nào, góp ý schematic |
 | [docs/fmc_ram_card_review.md](docs/fmc_ram_card_review.md) | Review toàn bộ bo RAM mở rộng (DDR2 + HyperRAM, cơ khí, BOM), lắp trên Arm MPS4 và Huins MFP-VP1902, chức năng IP test được trên mỗi board |
 | [docs/video_kv260.md](docs/video_kv260.md) | Quay video H.264 / MP4 trên KV260: ứng dụng `video`, `bow32_video.py`, kết quả |

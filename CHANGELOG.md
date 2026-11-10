@@ -6,6 +6,63 @@
 ## [Unreleased]
 
 ### Added
+- **Camera Sony IMX274 trên Huins MFP-VP1902**: module Leopard LI-IMX274MIPI-FMC qua bo chuyển
+  camera của Huins ở khe FMC+01 (một bank XPIO, 705), 4 lane × 1440 Mbit/s, RAW10
+  (`make fpga BOARD=huins_vp1902 CARD=cam`, [docs/camera_huins.md](docs/camera_huins.md)). PDI đã
+  build (timing đạt), **chưa chạy trên bo**.
+  - Bộ thu CSI-2 4 lane (`Lanes` 1, 2 hoặc 4): ghép lane 1/2/4 byte mỗi word, CRC 1–4 byte mỗi
+    chu kỳ, `rx_valid_i` (word mới của từng lane), `phy_rdy_i`; nạp tap ở clock video
+    (`DlyVid = 1`: không nạp sau reset, mỗi lần ghi `DLYn` đúng một lần nạp); độ sâu FIFO pixel
+    là tham số (`FifoDepth`, 512 nhóm trên Huins). `bow32_top`: tham số `CsiFifoDepth`,
+    `CsiDlyVid`, cổng `dphy_rx_valid_i`, `dphy_phy_rdy_i` (các top không có PHY Versal nối 1).
+  - Thanh ghi CSI2RX (`ID` giữ `0x43533201`, firmware cũ vẫn nhận bitstream mới): `INFO[5]`
+    DLY_VID; `CTRL[7]` LANES4; `STATUS` thêm LP / HS của lane 2, 3 và `[14]` PHY_RDY (KV260 nối
+    1: lúc nghỉ đọc `0x403F` thay cho `0x003F`); `CNT_SOT23` (`0x048`), `CNT_BURST23` (`0x04C`),
+    `CNT_CLR` xoá tới `0x04C`; `DLY2`, `DLY3`; `RAW` 8 bit mỗi lane ([docs/ip/csi2rx.md](docs/ip/csi2rx.md)).
+  - `bow_dphy_io_versal` (`hw/fpga/common/rtl`): D-PHY RX trên XPIO của Versal, không dùng IP
+    của AMD: `IBUFDS_DPHY`, XPHY chế độ native với lane clock làm strobe, XPLL 1500 MHz, BISC,
+    byte clock qua BUFGCE. Sơ đồ nibble là tham số (mặc định: một sơ đồ tổng hợp, không phải
+    của bo nào); núm lúc chạy `reinit_i` (khởi động lại PHY: XPLL, BISC, theo dõi VT) và
+    `burst_rst_en_i` (reset FIFO RX mỗi burst).
+  - Bản build `CARD=cam` (`bow32_huins_vp1902_cam_top`, MMCME5: SoC 50 MHz, video 200 MHz):
+    sơ đồ nibble suy ra lúc build từ XDC chân và chức năng chân của Vivado (`make plan
+    CARD=cam`, `tcl/cam_plan.tcl`; file nằm trong thư mục build, không commit), LOC của XPHY và
+    kiểm tra sơ đồ trước place (`tcl/pre_opt_cam.tcl`, `tcl/cam_xphy.tcl`), SoC trong SLR của
+    camera (`tcl/pre_place_cam.tcl`), kiểm tra clock, CDC đã duyệt, 11 bus skew và VCCIO của
+    khe (`tcl/timing_checks_cam.tcl`, `tcl/build.tcl`). GPIO: PA4 khởi động lại D-PHY, PA5
+    `BurstRxRst`, PB6 / PB7 `PHY_RDY` / `DLY_RDY` của mọi nibble, PA7 XCLR, PB5 PRSNT.
+    `pins.txt`: mục `[card=x sites=...]`; `tools/huins_pins.py` từ chối khe khác và không in
+    số chân trong thông báo lỗi.
+  - Khoá ở `make jtag` của bo Huins: `make pdi` ghi `pdi_site.txt` (card, khe); `make jtag` in
+    nó cùng bo phải cắm và từ chối PDI không có file hoặc mới hơn nó, PDI của bo kia và PDI bo
+    RAM cho FMC+01 (lái chân của module camera) trừ khi `CONFIRM=1`.
+  - Phần mềm: driver IMX274 (`sw/common/src/imx274.c`: reset bằng XCLR, nhận diện bằng giá trị
+    mặc định sau reset, chuỗi thoát standby, readout mode 1 / 3 / 5 + crop, HMAX / VMAX,
+    exposure, gain, lật dọc dưới REGHOLD, test pattern) và lớp cảm biến chung
+    (`sw/common/src/cam_sensor.c`: tự nhận IMX219 hay IMX274); `camera`, `csi2_test`, `video`
+    chạy với cả hai. `bow_csi2rx`: 4 lane, chờ `STATUS.PHY_RDY` khi `INFO.DLY_VID` = 1,
+    `SETTLE` 95 ns với XPHY, đọc `DLYn` tới khi hai lần đọc khớp, `bow_csi2rx_read_delay()`,
+    `bow_csi2rx_print_delays()`, `bow_csi2rx_forget_delays()`. Trên Versal: ứng dụng giữ trễ
+    BISC khi link sạch (hiệu chỉnh khi có lỗi) và đặt PA5 = 1 (`BurstRxRst`) mỗi lần khởi động
+    bộ thu (`cam_rx_start()`; tuỳ chọn build `CAM_BURST_RST=0` cùng `SETTLE_VID_NS=115` cho cấu
+    hình kia); `csi2_test`
+    có `phy`, `phy reinit`, `phy burstrst 0|1`, `sensor on|off` và từ chối mode có dòng làm tràn
+    FIFO của bộ thu (`mode 4k` cần 1024 nhóm); `video` đặt dòng dài cho H.264 (1080p30 HMAX
+    672, 720p30 448: tải ~78 %, như IMX219 trên KV260); AE/AWB ghi IMX274 tối đa một lần mỗi
+    frame.
+  - Công cụ: `bow32_cam.py snap --center W H` (crop giữa ảnh theo mode); `bow32_cam.py`,
+    `bow32_video.py`, `bow32_ddr.py` và `bow32_hyperram.py` gửi lệnh từng ký tự và chờ echo,
+    `bow32_mkv.py` (dòng hex dài) từng 8 ký tự (FIFO nhận UART 16 byte; không có echo trong 2 s
+    là lỗi thay vì lệnh bị cắt).
+  - Mô phỏng: bản `Imx274 = 1` của testbench hệ thống (mô hình IMX274 + PHY Versal: FIFO RX
+    8 word như XPHY, word glitch, `BurstRxRst`, khởi động lại PHY), test `camera274`,
+    `csi2_274`, `video274` (trong `make test` và CI) và `geo274` cùng các biến thể của
+    `make -C sim test-extra` (cả firmware `FW=brst0`: `BurstRxRst` = 0, `SETTLE` 115 ns); `make
+    test` chạy mọi test rồi in tổng kết; `make run` nhận `PLUSARGS`, `RUN_LOG`. Unit test bộ thu: model 4 lane, test `skew` (69 case);
+    `csi2_model.py` 4 lane + PHY Versal. `hw/fpga/common/dv/tb_bow_dphy_io_versal.sv` (xsim,
+    model XPHY của AMD, 24 cấu hình, `make -C hw/fpga/common/dv test-dphy-versal`, cần Vivado).
+    `make lint` thêm bộ thu 4 lane / 1 lane, `bow_dphy_io_versal` (3 sơ đồ, một sơ đồ phải bị
+    từ chối) và top camera với stub chỉ có cổng (`hw/lint/xilinx_versal_stubs.sv`).
 - **Bo Huins MFP-VP1902** (`hw/fpga/huins_vp1902`, AMD Versal Premium xcvp1902): Bow32 với DDR2
   và HyperRAM của bo RAM mở rộng FMC+_DDR2_HyperRam ở khe FMC+ (mặc định FMC+10), image PDI nạp
   qua USB JTAG (`make fpga BOARD=huins_vp1902`, `make fpga-jtag BOARD=huins_vp1902`,
@@ -331,6 +388,11 @@
   144 chu kỳ, không giới hạn số lần thử.
 
 ### Changed
+- `kv260_cam`: `tcl/build.tcl` dùng directive `Explore` cho place, phys_opt và route (với RTL bộ
+  thu 4 lane, clock video 200 MHz còn −0,040 ns với directive mặc định, +0,065 ns với
+  `Explore`).
+- CI: bước mô phỏng hệ thống chạy cả hai bản dựng của testbench (KV260 và IMX274), lưu
+  `build/sim/h264*.hex`.
 - DDR: lõi LiteDRAM sinh với `trefi_ns: 3900` (`ddr2.yml`, `ddr3.yml`; DDR2 129 chu kỳ,
   DDR3 121), bộ đếm refresh của lõi có thêm chu kỳ 2 × tREFI (chân `ref_norm`, đi theo
   `CTRL.REF_NORM`); kiểm tra lúc elaboration theo 3,9 µs. Mặc định 3,9 µs chậm hơn: BIST trên
@@ -400,6 +462,9 @@
   nó (`sw/apps/camera/csi2rx.c/.h`).
 
 ### Fixed
+- Bộ thu CSI-2 (`bow_csi2_lane_merge`): lệch đúng 7 byte clock giữa các lane cho SKEW kèm packet
+  bị cắt (TRUNC) vì word vẫn được lấy ra trong chu kỳ tràn; giờ chu kỳ đó không lấy word nào:
+  0–6 byte clock nhận đúng, từ 7 chỉ SKEW, không ra gì (test `skew` của `hw/ip/csi2rx/dv`).
 - Self-test HyperRAM: dòng chi tiết không kèm số in thêm `(null)(null)` (thấy trên bo RAM ở
   mục [14]: `level shifters: variable latency refused (fixed only)(null)(null)`); `detail()`
   giờ nhận số đối số tùy ý.

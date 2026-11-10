@@ -19,6 +19,11 @@ checks the CRC and writes <output>.h264 (Annex B) and <output>.mp4.
 --fast switches the console to a higher baud rate first (921600: about
 90 KB/s, 1 MiB in 12 s); the board stays at that rate until it is reset.
 
+The camera is the one sw/apps/video finds: the IMX219 on the KV260
+(docs/video_kv260.md) or the IMX274 on the Huins MFP-VP1902
+(docs/camera_huins.md; `--mode 1080p` runs it with the longer lines the
+encoder needs, 30 fps). The frame rate in the stream is the sensor's.
+
 Needs pyserial; the MP4 is written by tools/h264/mp4.py (no ffmpeg needed).
 """
 
@@ -69,7 +74,7 @@ class Video(Camera):
     def record(self, frames, skip=0, kbytes=0, timeout=None, progress=True):
         """`rec` on the board, prints its progress lines, returns the summary."""
         line = f"rec {frames} {skip} {kbytes}"
-        self.ser.write(line.encode() + b"\r")
+        self.send_line(line)
         deadline = time.monotonic() + (timeout or 30.0 + frames * 0.5 * (skip + 1))
         text = b""
         while True:
@@ -88,7 +93,7 @@ class Video(Camera):
 
     def receive(self, timeout=120.0, progress=True):
         """`send`: the recorded stream."""
-        self.ser.write(b"send\r")
+        self.send_line("send")
         self._read_until(b"H264 ", 10.0)
         header = b"H264 " + self._read_until(b"\n", 5.0)
         m = H264_RE.match(header)

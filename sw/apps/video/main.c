@@ -2,7 +2,8 @@
  * Copyright Bow32 contributors.
  * SPDX-License-Identifier: Apache-2.0
  *
- * Video demo: Raspberry Pi camera v2 (IMX219) -> Bow32 MIPI CSI-2 receiver
+ * Video demo: camera sensor (IMX219 on the KV260, IMX274 on the Huins
+ * MFP-VP1902, sw/common/include/cam_sensor.h) -> Bow32 MIPI CSI-2 receiver
  * -> ISP (YUV, BT.709 video range) -> H.264 encoder -> DMA -> video RAM
  * -> UART0 -> tools/bow32_video.py (.h264 + .mp4). Shell on UART0, `h` for
  * help.
@@ -15,20 +16,32 @@
  *     H264 <bytes> <crc32> <frames> <width> <height> <fps_num> <fps_den>\r\n
  *     <bytes raw bytes>\r\nEND
  *
- * Works on both KV260 builds (kv260: ISP test pattern only). The camera
- * set-up (eye calibration, AE, gray world AWB) is the one of sw/apps/camera.
+ * Works on both KV260 builds (kv260: ISP test pattern only) and on the Huins
+ * camera build. The camera set-up (eye calibration, AE, gray world AWB) is
+ * the one of sw/apps/camera; the IMX274 runs with the longer lines the
+ * encoder needs, ~79 % encoder load as the IMX219 on the KV260 (1080p30:
+ * HMAX 672, 720p30: 448; at higher frame rates up to ~100 %, imx274.h).
  */
 #include "bow32.h"
-#include "imx219.h"
+#include "cam_sensor.h"
 
-static const char help[] =
+/* `h`: source line of the sensor, help_src, tp line of the sensor, help_enc */
+static const char help_cam219[] =
     "source:\n"
-    "  cam                 stream from the IMX219 (kv260_cam build)\n"
+    "  cam                 stream from the IMX219 (kv260_cam build)\n";
+static const char help_cam274[] =
+    "source:\n"
+    "  cam                 stream from the IMX274 (Huins camera build)\n";
+static const char help_src[] =
     "  tpg [0..3]          ISP test pattern: 0 bars 1 ramp 2 checker 3 solid (+4 moving)\n"
     "  stop                stop the source\n"
     "  mode 1080p|720p|<w> <h> [fps]   frame size (default 720p, 30 fps)\n"
-    "  ae on|off|<target>  auto exposure     awb on|off   gray world white balance\n"
-    "  tp <n>              sensor test pattern (0 off, 2 colour bars)\n"
+    "  ae on|off|<target>  auto exposure     awb on|off   gray world white balance\n";
+static const char help_tp219[] =
+    "  tp <n>              sensor test pattern (0 off, 2 colour bars)\n";
+static const char help_tp274[] =
+    "  tp <n>              sensor test pattern (0 off, 11 colour bars)\n";
+static const char help_enc[] =
     "encoder:\n"
     "  qp <10..51>         first QP of a recording (default 30)\n"
     "  deblock on|off      deblocking filter in the decoder (default on)\n"
@@ -39,8 +52,7 @@ static const char help[] =
     "misc:\n"
     "  info  baud <rate>  rd <addr>  wr <addr> <val>\n";
 
-/* Starting point for the IMX219 colour matrix (s3.8, rows sum to 1.0). */
-static const int16_t ccm_imx219[9] = {461, -128, -77, -102, 461, -103, -38, -166, 460};
+/* The colour matrix comes from the sensor table (s3.8, rows sum to 1.0). */
 static const int16_t ccm_off0[3] = {0, 0, 0};
 /* BT.709 video range: Y 16..235, Cb/Cr 16..240 (the SPS says so) */
 static const int16_t csc709v[9] = {47, 157, 16, -26, -86, 112, 112, -102, -10};
@@ -51,9 +63,13 @@ static const int16_t csc709v_off[3] = {16, 128, 128};
 /* video RAM: SPS/PPS, then the frames */
 #define VRAM ((uint8_t *)BOW32_VRAM_BASE)
 
+/* the sensor found at start-up (none: the IMX219 table, for its formulas) */
+static const cam_sensor_t *sen = &cam_imx219;
+
 static struct {
-  uint32_t w, h, fll, fps;
+  uint32_t w, h, fps;
   bool sensor, csi, phy, calibrated;
+  uint32_t lanes;
   bool cam, tpg, hflip, vflip;
   uint32_t tp, exposure, again;
   bool ae, awb, ae_locked, awb_locked;
@@ -64,7 +80,7 @@ static struct {
   /* last recording */
   uint32_t rec_bytes, rec_frames, fps_num, fps_den;
 } st = {
-    .w = 1280, .h = 720, .fll = 1763, .fps = 30,
+    .w = 1280, .h = 720, .fps = 30,
     .exposure = 1000, .ae = true, .awb = true, .ae_target = 180, .wb_r = 256, .wb_b = 256,
     .qp = 30, .deblock = true,
 };
@@ -118,7 +134,8 @@ static const char *match(const char *line, const char *cmd) {
 /* ------------------------------------------------------------- the source */
 static void isp_setup(uint32_t bayer) {
   bow_isp_init(st.w, st.h, bayer);
-  bow_isp_set_ccm(ccm_imx219, ccm_off0);
+  if (sen->black_level != ISP->BLC) ISP->BLC = sen->black_level; /* init: 64 */
+  bow_isp_set_ccm(sen->ccm, ccm_off0);
   for (int i = 0; i < 9; i++) ISP->CSC[i] = (uint32_t)(int32_t)csc709v[i] & 0xFFFu;
   for (int i = 0; i < 3; i++) ISP->CSC_OFF[i] = (uint32_t)(int32_t)csc709v_off[i] & 0x1FFu;
   ISP->MODULES = ISP_MOD_ALL; /* BLC DPC WB CCM gamma CSC: YUV output */
@@ -126,13 +143,11 @@ static void isp_setup(uint32_t bayer) {
   ISP->WB[ISP_WB_B] = st.wb_b;
 }
 
-static uint32_t frame_ms(void) { return imx219_frame_us(st.fll) / 1000u + 1u; }
+static uint32_t frame_ms(void) { return cam_frame_us(sen) / 1000u + 1u; }
 
 static void stop_all(void) {
-  if (st.cam) {
-    if (st.sensor) imx219_stream(false);
-    bow_csi2rx_stop(frame_ms() + 10u);
-  }
+  /* the IMX219 finishes its frame, the IMX274 is stopped after a frame end */
+  if (st.cam) cam_stream_stop(st.sensor ? sen : NULL, frame_ms() + 10u);
   ISP->CTRL = 0;
   st.cam = st.tpg = false;
 }
@@ -169,50 +184,59 @@ static bool start_tpg(uint32_t pattern) {
 }
 
 static int sensor_apply_ctrl(void) {
-  int r = imx219_set_exposure(st.exposure);
-  if (r == I2C_OK) r = imx219_set_analog_gain(st.again);
+  int r = sen->set_exposure(st.exposure);
+  if (r == I2C_OK) r = sen->set_gain(st.again);
   return r;
 }
 
 static bool calibrate(void) {
   bow_csi2rx_cal_t cal;
-  uint32_t tap_ms = imx219_frame_us(st.fll) * 12u / 10000u + 3u;
+  uint32_t tap_ms = cam_frame_us(sen) * 12u / 10000u + 3u;
   if (!bow_csi2rx_calibrate(16, tap_ms, &cal, false)) {
     bow_printf("csi2rx: calibration failed\n");
     return false;
   }
-  bow_printf("csi2rx: calibrated taps %u/%u eye %u/%u\n", cal.tap[0], cal.tap[1], cal.width[0],
-             cal.width[1]);
+  bow_puts("csi2rx: calibrated ");
+  bow_csi2rx_print_cal(&cal);
+  bow_puts("\n");
   st.calibrated = true;
   return true;
 }
 
 static bool start_cam(void) {
   if (!st.sensor) {
-    bow_printf("error: no IMX219 (check the ribbon cable)\n");
+    bow_printf("error: no %s (check the ribbon cable)\n", sen->name);
     return false;
   }
   if (!st.phy) {
-    bow_printf("error: this bitstream has no D-PHY, use the kv260_cam build\n");
+    bow_printf("error: this bitstream has no D-PHY, use the %s build\n", sen->build);
+    return false;
+  }
+  if (st.lanes < sen->lanes) {
+    bow_printf("error: the %s needs %u lanes, the receiver has %u\n", sen->name, sen->lanes,
+               st.lanes);
     return false;
   }
   stop_all();
-  isp_setup(imx219_bayer(st.hflip, st.vflip));
+  isp_setup(sen->bayer(st.hflip, st.vflip));
   if (!bow_isp_update(100)) {
     bow_printf("error: ISP does not take the configuration (no video clock?)\n");
     return false;
   }
-  bow_csi2rx_start(2, CSI2_DT_RAW10, IMX219_LANE_RATE);
-  uint32_t max_exp = st.fll - IMX219_EXP_OFFSET;
+  if (cam_rx_start(sen, sen->dt()) != CSI2RX_OK) {
+    bow_printf("error: D-PHY not ready (CSI2RX STATUS.PHY_RDY = 0)\n");
+    return false;
+  }
+  uint32_t max_exp = sen->exposure_max();
   if (st.exposure > max_exp) st.exposure = max_exp;
-  int r = imx219_configure(st.w, st.h, st.fll);
-  if (r == I2C_OK) r = imx219_set_orientation(st.hflip, st.vflip);
-  if (r == I2C_OK) r = imx219_set_test_pattern(st.tp);
+  int r = sen->configure();
+  if (r == I2C_OK) r = sen->set_flip(st.hflip, st.vflip);
+  if (r == I2C_OK) r = sen->set_test_pattern(st.tp);
   if (r == I2C_OK) r = sensor_apply_ctrl();
   if (r == I2C_OK) {
     ISP->STATUS = 0xFF;
     ISP->CTRL = ISP_CTRL_EN;
-    r = imx219_stream(true);
+    r = sen->start();
   }
   if (r != I2C_OK) {
     bow_printf("error: I2C %d while programming the sensor\n", r);
@@ -223,18 +247,25 @@ static bool start_cam(void) {
   st.cam = true;
   st.frames = 0;
   st.ae_locked = st.awb_locked = false;
-  if (!st.calibrated || !bow_csi2rx_link_check(64, 200)) {
+  /* as sw/apps/camera: the Versal XPHY (DLY_VID) keeps the delays of its
+   * self-calibration (VT tracked) while the link check passes */
+  bool bisc = (CSI2RX->INFO & CSI2RX_INFO_DLY_VID) != 0;
+  if ((!st.calibrated && !bisc) ||
+      !bow_csi2rx_link_check(64, 200u + sen->start_frames * frame_ms())) {
     if (!calibrate()) return false;
     bow_csi2rx_wait_frame(2u * frame_ms());
     ISP->STATUS = ISP_ST_ERRORS;
+  } else if (!st.calibrated) {
+    bow_puts("csi2rx: link ok with the delays in use ");
+    bow_csi2rx_print_delays();
+    bow_puts(" (kept)\n");
+    st.calibrated = true;
   }
-  bow_printf("streaming %ux%u @%u fps\n", st.w, st.h, IMX219_PIXEL_RATE / (IMX219_LLP * st.fll));
+  bow_printf("streaming %ux%u @%u fps\n", st.w, st.h, cam_fps(sen));
   return true;
 }
 
 /* --------------------------------------------------------- AE / AWB loops */
-static uint32_t gain_q8(uint32_t code) { return 65536u / (256u - code); }
-
 static void ae_step(const bow_isp_stats_t *s) {
   if (s->npix == 0) return;
   uint32_t mean = s->sum_y / s->npix, t = st.ae_target;
@@ -247,8 +278,8 @@ static void ae_step(const bow_isp_stats_t *s) {
   uint32_t f = (t * 256u) / (mean ? mean : 1u);
   if (f > 512u) f = 512u;
   if (f < 128u) f = 128u;
-  uint64_t e = (uint64_t)st.exposure * gain_q8(st.again) * f >> 8;
-  uint32_t max_exp = st.fll - IMX219_EXP_OFFSET;
+  uint64_t e = (uint64_t)st.exposure * sen->gain_q8(st.again) * f >> 8;
+  uint32_t max_exp = sen->exposure_max();
   if (e <= (uint64_t)max_exp * 256u) {
     st.exposure = (uint32_t)(e >> 8);
     if (st.exposure == 0) st.exposure = 1;
@@ -257,7 +288,7 @@ static void ae_step(const bow_isp_stats_t *s) {
     uint32_t g = (uint32_t)(e / max_exp);
     if (g > 2048u) g = 2048u;
     st.exposure = max_exp;
-    st.again = 256u - 65536u / g;
+    st.again = sen->gain_code(g);
   }
   sensor_apply_ctrl();
 }
@@ -301,7 +332,8 @@ static void isp_frame_poll(void) {
 /* Frame rate written into the SPS: the camera rate; the test pattern has
  * no real one (hundreds of fps), its video plays at 30 fps. */
 static uint32_t source_fps(void) {
-  if (st.cam) return (IMX219_PIXEL_RATE + IMX219_LLP * st.fll / 2u) / (IMX219_LLP * st.fll);
+  uint32_t f = sen->frame_clks();
+  if (st.cam && f) return (sen->timing_hz + f / 2u) / f;
   return 30u;
 }
 
@@ -410,7 +442,16 @@ static bool record(uint32_t n, uint32_t skip, uint32_t kbytes) {
   bow_printf("rec: %u frames, %u bytes (QP %u..%u, largest %u)%s\n", frames, st.rec_bytes,
              qmin == 99 ? 0 : qmin, qmax, big, full ? ", video RAM full" : "");
   if (ovf || (H264->STATUS & H264_ST_ERR_OVF)) {
-    bow_printf("warning: the encoder dropped pixels (lower the frame rate or the size)\n");
+    if (st.cam && sen == &cam_imx274) {
+      /* line length set by imx274_set_mode(): a lower frame rate only helps
+       * above ~80 % (lines shorter than the 79 % ones) */
+      uint32_t load = imx274_h264_load(st.w, imx274_mode()->hmax);
+      bow_printf("warning: the encoder dropped pixels (H.264 load %u %%: %sraise qp or give rec "
+                 "fewer kbytes per frame)\n", load,
+                 load > 80u ? "lower the frame rate for longer lines, " : "");
+    } else {
+      bow_printf("warning: the encoder dropped pixels (lower the frame rate or the size)\n");
+    }
   }
   return ok && frames != 0;
 }
@@ -483,10 +524,11 @@ static void print_stat(void) {
 }
 
 static void info(void) {
-  bow_printf("mode   %ux%u @%u fps (frame length %u)  source %s\n", st.w, st.h, st.fps, st.fll,
-             st.cam ? "camera" : st.tpg ? "tpg" : "none");
+  bow_printf("mode   %ux%u @%u fps (", st.w, st.h, st.fps);
+  sen->print_timing(CAM_TIMING_LENGTH);
+  bow_printf(")  source %s\n", st.cam ? "camera" : st.tpg ? "tpg" : "none");
   bow_printf("sensor %s  exp %u gain %u  ae %s awb %s (r %u b %u)\n",
-             st.sensor ? "IMX219" : "none", st.exposure, st.again, st.ae ? "on" : "off",
+             st.sensor ? sen->name : "none", st.exposure, st.again, st.ae ? "on" : "off",
              st.awb ? "on" : "off", st.wb_r, st.wb_b);
   bow_printf("encoder QP %u deblock %s, video RAM %u KiB at %08x\n", st.qp,
              st.deblock ? "on" : "off", BOW32_VRAM_SIZE / 1024u, BOW32_VRAM_BASE);
@@ -504,17 +546,20 @@ static bool set_mode(const char *s) {
     if (!(s = parse_num(s, &w, false)) || !(s = parse_num(s, &h, false))) return false;
   }
   if (s && !word_is(s, "1080p") && !word_is(s, "720p")) parse_num(s, &fps, false);
-  if (w < 16 || h < 16 || (w & 15u) || (h & 1u) || w > (ISP->INFO & 0xFFFFu) || w > IMX219_ACTIVE_W ||
-      h > IMX219_ACTIVE_H || fps == 0) {
+  if (w < 16 || h < 16 || (w & 15u) || (h & 1u) || w > (ISP->INFO & 0xFFFFu) || w > sen->max_w ||
+      h > sen->max_h || fps == 0) {
     bow_printf("error: width multiple of 16, height even, at most %ux%u\n", ISP->INFO & 0xFFFFu,
-               IMX219_ACTIVE_H);
+               sen->max_h);
     return false;
   }
+  /* video: the IMX274 lines are long enough for the encoder */
+  if (sen->mode(w, h, fps, true) != I2C_OK) return false;
   st.w = w;
   st.h = h;
   st.fps = fps;
-  st.fll = imx219_fll_for_fps(h, fps);
-  bow_printf("mode %ux%u @%u fps (FLL %u)\n", w, h, IMX219_PIXEL_RATE / (IMX219_LLP * st.fll), st.fll);
+  bow_printf("mode %ux%u @%u fps (", w, h, cam_fps(sen));
+  sen->print_timing(CAM_TIMING_SHORT);
+  bow_puts(")\n");
   if (st.cam) return start_cam();
   if (st.tpg) return start_tpg(ISP->TPG_CTRL);
   return true;
@@ -532,7 +577,11 @@ static bool execute(const char *line) {
   uint32_t v, v2;
 
   if ((a = match(line, "h")) || (a = match(line, "help"))) {
-    bow_puts(help);
+    bool i274 = sen == &cam_imx274;
+    bow_puts(i274 ? help_cam274 : help_cam219);
+    bow_puts(help_src);
+    bow_puts(i274 ? help_tp274 : help_tp219);
+    bow_puts(help_enc);
     return true;
   }
   if ((a = match(line, "info"))) {
@@ -552,8 +601,9 @@ static bool execute(const char *line) {
   if ((a = match(line, "mode"))) return set_mode(a);
   if ((a = match(line, "tp"))) {
     if (!parse_num(a, &v, false)) return false;
+    if (sen == &cam_imx274 && v > sen->tp_max) return false;
     st.tp = v;
-    return !st.sensor || imx219_set_test_pattern(v) == I2C_OK;
+    return !st.sensor || sen->set_test_pattern(v) == I2C_OK;
   }
   if ((a = match(line, "ae"))) {
     if (parse_num(a, &v, false) && v > 0 && v < 1024) {
@@ -618,22 +668,33 @@ static bool execute(const char *line) {
 
 /* --------------------------------------------------------------------- main */
 static void probe_hardware(void) {
-  uint16_t id = 0;
-  uint32_t lanes;
-  bool phy;
+  cam_detect_t d;
+  uint32_t lanes = 0;
+  bool phy = false;
 
   bow_i2c_init(I2C0, 400000);
-  int r = imx219_probe(&id);
-  st.sensor = (r == I2C_OK && id == IMX219_CHIP_ID);
-  if (st.sensor) bow_printf("camera: IMX219 found (id %04x)\n", id);
-  else           bow_printf("camera: no IMX219 (I2C %d) - ISP test pattern only\n", r);
+  cam_sensor_detect(&d);
+  sen = d.sensor;
+  st.sensor = d.found;
+  if (st.sensor) {
+    bow_printf("camera: %s found (id %04x)\n", sen->name, d.id);
+  } else {
+    bow_printf("camera: no IMX219 (I2C %d) - ISP test pattern only\n", d.r219);
+    if (d.tried274) bow_printf("camera: no IMX274 (I2C %d, id %04x)\n", d.r274, d.id274);
+  }
+  /* frame format of the sensor layer: the default mode (720p30) */
+  sen->mode(st.w, st.h, st.fps, true);
+  st.wb_r = sen->wb_r;
+  st.wb_b = sen->wb_b;
 
   st.csi = bow_csi2rx_probe(&lanes, &phy);
   st.phy = st.csi && phy;
+  st.lanes = lanes;
   if (st.phy) {
     bow_printf("csi2rx: Bow32 receiver, %u lanes, PHY clock %u MHz\n", lanes,
                CSI2RX_INFO_MHZ(CSI2RX->INFO));
   }
+  if (!st.sensor) cam_print_prsnt(lanes);
   if (H264->ID == H264_ID_VALUE && DMA->ID == DMA_ID_VALUE) {
     bow_printf("h264: Bow32 encoder, max width %u, %u strips; DMA %u channels; video RAM %u KiB\n",
                H264->INFO & 0xFFFFu, (H264->INFO >> 16) & 15u, DMA->INFO & 0xFFu,

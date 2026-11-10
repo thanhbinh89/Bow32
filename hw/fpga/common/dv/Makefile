@@ -18,9 +18,13 @@
 #                         clocks (bow_ddr_clk_versal, bow_hyperram_clk_versal:
 #                         two MMCME5 each, fine phase shift driven through
 #                         bow_mmcm_ps, lock-loss reset), configurations VCLK_CFGS
+#   tb_bow_dphy_io_versal Versal D-PHY receive I/O (bow_dphy_io_versal: IBUFDS_DPHY,
+#                         XPHY strobe mode, XPLL, BUFGCE; secureip XPHY model),
+#                         configurations DPHYV_CFGS
 #
 #   make test                 all of them: D-PHY, DDR and HyperRAM pads with every
-#                             seed of SEEDS, DDR clocks once per configuration
+#                             seed of SEEDS, DDR clocks, Versal clocks and the Versal
+#                             D-PHY once per configuration
 #   make test SEEDS="1 2 3 4"
 #   make run SEED=5 WAVES=1   D-PHY, one seed, waveform database in build/fpga_dv/seed5
 #   make test-dphy | test-ddr-io | test-ddr-clk | test-hr-io     one testbench
@@ -33,6 +37,9 @@
 #   make test-vclk                                  Versal clocks, every VCLK_CFGS (in make test)
 #   make run-vclk VCLK_CFG=hr100 WAVES=1            one Versal clock configuration,
 #                                                   files in build/fpga_dv/vclk/hr100/run
+#   make test-dphy-versal                           Versal D-PHY, every DPHYV_CFGS (in make test)
+#   make run-dphy-versal DPHYV_CFG=reinit_idle WAVES=1  one Versal D-PHY configuration,
+#                                                   files in build/fpga_dv/dphy_versal/<cfg>/run
 #   make mutants              not part of test: broken copies of the DDR and HyperRAM
 #                             pad / clock wrappers (mutants.py), each one must FAIL
 #
@@ -346,7 +353,98 @@ test-vclk: check-tools $(foreach c,$(VCLK_CFGS),$(call vclk_snap,$(c)))
 
 .PHONY: run-vclk test-vclk
 
-test: test-dphy test-ddr-io test-ddr-clk test-hr-io test-vclk
+# ---------------------------------------------------------- Versal D-PHY
+# bow_dphy_io_versal in tb_bow_dphy_io_versal (the testbench describes stimulus, plans and
+# checks; ~20 s per configuration). Configurations DPHYV_CFGS (xelab -generic_top):
+#   base             synthetic plan 0 (the RTL defaults: strobe local, inter-nibble,
+#                    inter-byte both ways), 3 bursts, tap loads, merge / spacing contract
+#   rden0 envtc_late the options RdenReg = 0, EnVtcEarly = 0
+#   burstrst         burst_rst_en_i = 1 from reset
+#   skew80 sweep     80 ps lane skew steps; tap sweep 0..511 (one burst per tap)
+#   contclk          continuous clock lane, HS receiver on from reset (strobe toggles
+#                    during BISC); contclk_late: HS turned on after phy_rdy
+#   glitch           glitches on the clock lane at HS entry, glitch_burstrst with
+#                    burst_rst_en_i = 1
+#   vtmode           merge of two requests in the first (VTC) wait
+#   p1*, p2*         plan 1 (two nibbles), plan 2 (inter-byte and inter-nibble chains, 6 -> 8)
+#   burstrst_on      burst_rst_en_i 0 -> 1 in the middle of a burst while streaming
+#   reinit_idle      reinit_i with the clock lane in LP-11, after tap loads (the taps
+#                    return to the BISC delays)
+#   reinit_toggle    reinit_i while the clock lane toggles in HS (BISC with a running
+#                    strobe), reinit_cont the same with the continuous clock
+# One xsim library + snapshot directory per configuration in $(DPHYV_DIR)/<cfg>/, the run
+# in $(DPHYV_DIR)/<cfg>/run; rebuilt when a source or WAVES changes. DPHYV_RTL replaces
+# the PHY under test (a broken copy, say), DPHYV_DIR the output directory. Needs the
+# secureip library of Vivado (XPHY model): not part of CI.
+DPHYV_DIR  ?= $(BUILD)/dphy_versal
+DPHYV_RTL  ?= $(REPO)/hw/fpga/common/rtl/bow_dphy_io_versal.sv
+DPHYV_TOP  := tb_bow_dphy_io_versal
+DPHYV_SRCS  = $(DPHYV_RTL) $(CURDIR)/$(DPHYV_TOP).sv
+DPHYV_CFGS ?= base rden0 envtc_late burstrst skew80 sweep contclk contclk_late glitch \
+              glitch_burstrst vtmode p1 p1_skew80 p1_contclk p1_glitch p2 p2_sweep p2_glitch \
+              p2_vtmode burstrst_on reinit_idle reinit_toggle reinit_cont p2_reinit_toggle
+DPHYV_GEN_base             :=
+DPHYV_GEN_rden0            := RdenReg=0
+DPHYV_GEN_envtc_late       := EnVtcEarly=0
+DPHYV_GEN_burstrst         := BurstRst=1
+DPHYV_GEN_skew80           := SkewPs=80
+DPHYV_GEN_sweep            := DlySweep=1 Bursts=2
+DPHYV_GEN_contclk          := ContClk=1
+DPHYV_GEN_contclk_late     := ContClk=2
+DPHYV_GEN_glitch           := GlitchClk=8 GlitchPs=400
+DPHYV_GEN_glitch_burstrst  := GlitchClk=8 GlitchPs=400 BurstRst=1
+DPHYV_GEN_vtmode           := DlyTest=0
+DPHYV_GEN_p1               := Plan=1
+DPHYV_GEN_p1_skew80        := Plan=1 SkewPs=80
+DPHYV_GEN_p1_contclk       := Plan=1 ContClk=1
+DPHYV_GEN_p1_glitch        := Plan=1 GlitchClk=8 GlitchPs=400
+DPHYV_GEN_p2               := Plan=2
+DPHYV_GEN_p2_sweep         := Plan=2 DlySweep=1 Bursts=2
+DPHYV_GEN_p2_glitch        := Plan=2 GlitchClk=8 GlitchPs=400 BurstRst=1
+DPHYV_GEN_p2_vtmode        := Plan=2 DlyTest=0
+DPHYV_GEN_burstrst_on      := GlitchClk=8 GlitchPs=400 BurstRstAt=1 Bursts=4
+DPHYV_GEN_reinit_idle      := Reinit=1 Bursts=4
+DPHYV_GEN_reinit_toggle    := Reinit=2 HsGate=0 Bursts=4
+DPHYV_GEN_reinit_cont      := Reinit=1 ContClk=1 Bursts=4
+DPHYV_GEN_p2_reinit_toggle := Plan=2 Reinit=2 HsGate=0 BurstRst=1 Bursts=4
+DPHYV_CFG ?= base
+dphyv_snap = $(DPHYV_DIR)/$(1)/xsim.dir/$(DPHYV_TOP)_sim/xsimk
+
+ifneq ($(filter run-dphy-versal,$(MAKECMDGOALS)),)
+  ifeq ($(origin DPHYV_GEN_$(DPHYV_CFG)),undefined)
+    $(error unknown DPHYV_CFG $(DPHYV_CFG): one of $(DPHYV_CFGS))
+  endif
+endif
+
+build: $(foreach c,$(DPHYV_CFGS),$(call dphyv_snap,$(c)))
+
+$(DPHYV_DIR)/%/xsim.dir/$(DPHYV_TOP)_sim/xsimk: $(DPHYV_SRCS) $(DPHYV_DIR)/%/debug_$(DEBUG)
+	cd $(DPHYV_DIR)/$* && $(XVLOG) -sv $(DPHYV_SRCS) > xvlog.log 2>&1 || \
+	  { tail -20 xvlog.log; exit 1; }
+	cd $(DPHYV_DIR)/$* && $(XVLOG) $(GLBL) > xvlog_glbl.log 2>&1 || \
+	  { tail -20 xvlog_glbl.log; exit 1; }
+	cd $(DPHYV_DIR)/$* && $(XELAB) $(XELAB_OPTS) $(addprefix -generic_top ,$(DPHYV_GEN_$*)) \
+	  -s $(DPHYV_TOP)_sim work.$(DPHYV_TOP) work.glbl > xelab.log 2>&1 || { tail -20 xelab.log; exit 1; }
+
+$(foreach c,$(sort $(DPHYV_CFGS) $(DPHYV_CFG)),$(DPHYV_DIR)/$(c)/debug_$(DEBUG)):
+	@mkdir -p $(@D)
+	rm -f $(@D)/debug_*
+	touch $@
+
+DPHYV_RUN = $(DPHYV_DIR)/$(DPHYV_CFG)/run
+run-dphy-versal: check-tools $(call dphyv_snap,$(DPHYV_CFG))
+	$(call xsim_run,$(DPHYV_DIR)/$(DPHYV_CFG),$(DPHYV_RUN),$(DPHYV_TOP),$(SEED))
+	@grep -q "^$(DPHYV_TOP): PASS" $(DPHYV_RUN)/sim.log || \
+	  { grep -E "ERROR|FAIL|Error" $(DPHYV_RUN)/sim.log | head -20; \
+	    echo "$(DPHYV_TOP) $(DPHYV_CFG): FAIL, see $(DPHYV_RUN)/sim.log"; exit 1; }
+	@echo "$(DPHYV_TOP) $(DPHYV_CFG): PASS"
+
+test-dphy-versal: check-tools $(foreach c,$(DPHYV_CFGS),$(call dphyv_snap,$(c)))
+	@set -e; for c in $(DPHYV_CFGS); do $(MAKE) --no-print-directory run-dphy-versal DPHYV_CFG=$$c; done
+
+.PHONY: run-dphy-versal test-dphy-versal
+
+test: test-dphy test-ddr-io test-ddr-clk test-hr-io test-vclk test-dphy-versal
 
 # Each mutant gets its own DDR_IO_DIR / DDR_CLK_DIR and RTL copy, then runs
 # run-ddr-io / run-ddr-clk of this Makefile (MUTANT_JOBS in parallel).

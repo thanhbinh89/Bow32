@@ -169,7 +169,7 @@ class HrBoard(Camera):
 
     def run(self, line, timeout=5.0):
         """Run one command: (ok, output); 'error' does not raise."""
-        self.ser.write(line.encode() + b"\r")
+        self.send_line(line)  # paced by the echo (bow32_cam.Camera.send_line)
         text = self._read_until(self.LINE_PROMPT, timeout).decode(errors="replace")
         lines = text.replace("\r", "").split("\n")
         if lines and lines[0].endswith(line):   # echo

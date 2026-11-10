@@ -2,8 +2,11 @@
  * Copyright Bow32 contributors.
  * SPDX-License-Identifier: Apache-2.0
  *
- * Test of the Bow32 MIPI CSI-2 receiver with the Raspberry Pi camera v2
- * (IMX219) and its test patterns, from a shell on UART0. Type `h` for help.
+ * Test of the Bow32 MIPI CSI-2 receiver with a camera sensor and its test
+ * patterns, from a shell on UART0. Type `h` for help. Sensors
+ * (cam_sensor.h, detected at start-up): Raspberry Pi camera v2 (IMX219,
+ * 2 lanes, KV260) and LI-IMX274MIPI-FMC (IMX274, 4 lanes x 1440 Mbit/s,
+ * Huins MFP-VP1902 camera build).
  *
  *   test          all checks on the board: 1080p30 and 720p60, calibration
  *                 step 8, 60 frames per check, timing against the sensor
@@ -14,11 +17,30 @@
  * leaves the stream running with cleared counters.
  *
  * The other commands drive the receiver by hand: stream start/stop, eye
- * calibration, packet log, raw PHY words, delay taps, status.
+ * calibration, packet log, raw PHY words, delay taps, status. With the
+ * Versal XPHY (INFO.DLY_VID, Huins camera build) also the PHY knobs on GPIO
+ * (`phy`: status, re-initialisation, RX FIFO reset per burst) and the sensor
+ * stream without the receiver (`sensor on`): when the PHY's self-calibration
+ * (BISC) needs a running clock lane, `sensor on`, `phy reinit`, then `start`.
  */
 #include "csi2_test.h"
 
-static const char help[] =
+/* Huins camera build (bow32_huins_vp1902_cam_top): knobs of the Versal
+ * XPHY, level = OUT & DIR of the pin, 0 after reset; raw XPHY status. */
+#define PHY_REINIT   GPIO_PIN(4) /* PA4: 1 = PHY in PLL reset; at 0 XPLL, BISC, VT again */
+#define PHY_BURSTRST GPIO_PIN(5) /* PA5: 1 = RX FIFO reset at every HS burst */
+#define PHY_NIB_RDY  GPIO_PIN(6) /* PB6: PHY_RDY of every nibble */
+#define PHY_NIB_DLY  GPIO_PIN(7) /* PB7: DLY_RDY of every nibble */
+#define PHY_RDY_MS   10u         /* `phy reinit`: wait for STATUS.PHY_RDY */
+/* PA5 that every receiver start writes (cam_rx_start) */
+#if CAM_BURST_RST
+#define CAM_BURST_RST_STR "1"
+#else
+#define CAM_BURST_RST_STR "0"
+#endif
+
+/* `h`: help_a, help_phy (Versal XPHY), mode/tp/fmt lines of the sensor, help_b */
+static const char help_a[] =
     "  test [quick]        run all checks (quick: 64x48 frames, for the simulation)\n"
     "  start | stop        stream from the sensor / stop it\n"
     "  stat                receiver status: link, counters, timing, PHY state\n"
@@ -26,14 +48,28 @@ static const char help[] =
     "  delay <lane> <tap>  set the delay tap (0..511) of a data lane\n"
     "  log [fs] [fe]       log of 64 packets: now, from the next FS, up to an FE\n"
     "  raw [now]           64 raw PHY words per lane from the next HS burst (or now)\n"
-    "  irq                 count FS interrupts during 4 frames\n"
+    "  irq                 count FS interrupts during 4 frames\n";
+static const char help_219[] =
     "  mode <w> <h> [fps] | 1080p | 720p   frame size (fps 0: shortest frame)\n"
     "  tp <n> [r gr b gb]  test pattern: 0 off 1 solid 2 bars 3 fade 4 PN9; solid colour\n"
-    "  fmt raw8|raw10      sensor output format\n"
+    "  fmt raw8|raw10      sensor output format\n";
+static const char help_274[] =
+    "  mode <w> <h> [fps] | 1080p | 720p | 4k   frame size (fps 0: shortest frame;\n"
+    "                      4k: needs a receiver FIFO of 1024 groups)\n"
+    "  tp <n>              test pattern: 0 off 1..4 solid 000/FFF/555/AAA 5..10 stripes\n"
+    "                      11 colour bars 12 horizontal bars\n"
+    "  simfast on|off      sensor start-up waits / 64 (simulation only)\n";
+static const char help_phy[] =
+    "  phy                 PHY_RDY, every nibble's PHY_RDY / DLY_RDY (PB6 / PB7), knobs\n"
+    "  phy reinit          XPLL lock + BISC again (PA4 pulse), VT tracking back on\n"
+    "  phy burstrst 0|1    RX FIFO reset at every HS burst (PA5; start sets " CAM_BURST_RST_STR ")\n"
+    "  sensor on|off       sensor stream without the receiver (BISC needs a clock?)\n";
+static const char help_b[] =
     "  rd <addr>  wr <addr> <val>   bus read / write (hex)\n";
 
 csi2_test_t ct = {
-    .w = 1920, .h = 1080, .fll = 1763,
+    .s = &cam_imx219,
+    .w = 1920, .h = 1080, .fps = 30,
     .tp = IMX219_TP_SOLID, .colour = {0x135, 0x2CA, 0x0F3, 0x2CA},
 };
 
@@ -98,26 +134,39 @@ static const char *match(const char *line, const char *cmd) {
 }
 
 /* ----------------------------------------------------------- stream control */
-uint32_t frame_ms(void) { return imx219_frame_us(ct.fll) / 1000u + 1u; }
+uint32_t frame_ms(void) { return cam_frame_us(ct.s) / 1000u + 1u; }
 
-uint32_t tap_timeout_ms(void) { return imx219_frame_us(ct.fll) * 12u / 10000u + 3u; }
+uint32_t tap_timeout_ms(void) { return cam_frame_us(ct.s) * 12u / 10000u + 3u; }
 
-static uint32_t stream_dt(void) { return imx219_format() == 8 ? CSI2_DT_RAW8 : CSI2_DT_RAW10; }
+int set_colour(const uint32_t c[4]) {
+  return sensor_imx274() ? I2C_OK : imx219_set_test_colour(c[0], c[1], c[2], c[3]);
+}
 
-int set_colour(const uint32_t c[4]) { return imx219_set_test_colour(c[0], c[1], c[2], c[3]); }
-
-bool stream_start(bool configure) {
+/* Sensor (configure: format, crop, exposure, flip, test pattern) and its
+ * stream on; the receiver is not touched. */
+static int sensor_start(bool configure) {
   int r = I2C_OK;
-  bow_csi2rx_start(2, stream_dt(), IMX219_LANE_RATE); /* before the sensor leaves LP-11 */
   if (configure) {
-    r = imx219_configure(ct.w, ct.h, ct.fll);
+    r = ct.s->configure();
     /* the power-on exposure (1000 lines) would stretch shorter frames */
-    if (r == I2C_OK) r = imx219_set_exposure(ct.fll - IMX219_EXP_OFFSET);
-    if (r == I2C_OK) r = imx219_set_orientation(false, false);
-    if (r == I2C_OK) r = imx219_set_test_pattern(ct.tp);
+    if (r == I2C_OK) r = ct.s->set_exposure(ct.s->exposure_max());
+    if (r == I2C_OK) r = ct.s->set_flip(false, false);
+    if (r == I2C_OK) r = ct.s->set_test_pattern(ct.tp);
     if (r == I2C_OK) r = set_colour(ct.colour);
   }
-  if (r == I2C_OK) r = imx219_stream(true);
+  if (r == I2C_OK) r = ct.s->start();
+  return r;
+}
+
+bool stream_start(bool configure) {
+  /* before the sensor leaves LP-11 (IMX274: LP-00 in standby); Versal XPHY:
+   * PA5 = CAM_BURST_RST (cam_sensor.h) */
+  if (cam_rx_start(ct.s, ct.s->dt()) != CSI2RX_OK) {
+    bow_printf("error: D-PHY not ready (CSI2RX STATUS.PHY_RDY = 0)\n");
+    if (ct.vid) bow_puts("  phy: nibble status; sensor on + phy reinit: BISC with a running clock\n");
+    return false;
+  }
+  int r = sensor_start(configure);
   if (r != I2C_OK) {
     bow_printf("error: I2C %d while starting the sensor\n", r);
     CSI2RX->CTRL = 0;
@@ -127,29 +176,55 @@ bool stream_start(bool configure) {
   return true;
 }
 
-void stream_stop(void) {
-  imx219_stream(false);
-  bow_csi2rx_stop(frame_ms() + 10u); /* the sensor finishes its frame first */
+static void stop_stream(uint32_t timeout_ms) {
+  cam_stream_stop(ct.s, timeout_ms); /* the IMX219 finishes its frame first */
   ct.streaming = false;
 }
 
+void stream_stop(void) { stop_stream(frame_ms() + 10u); }
+
+/* Receiver FIFO groups (4 pixels) a line of w pixels leaves at its end: the
+ * line burst writes lanes x lane rate / bits per pixel, the video clock reads
+ * one pixel per cycle (docs/ip/csi2rx.md). IMX274 RAW10 at 200 MHz: 0.163 W
+ * (1920: 313, 3840: 626). */
+static uint32_t fifo_peak(uint32_t w) {
+  uint32_t in = ct.s->lanes * ct.s->lane_rate_mbps; /* Mbit/s */
+  uint32_t out = CSI2RX_INFO_MHZ(CSI2RX->INFO) * (ct.s->dt() == CSI2_DT_RAW8 ? 8u : 10u);
+  return in > out ? w * (in - out) / (4u * in) : 0;
+}
+
 bool set_mode(uint32_t w, uint32_t h, uint32_t fps) {
-  if (w < 16 || h < 8 || w > IMX219_ACTIVE_W || h > IMX219_ACTIVE_H || (w & 3u) || (h & 1u)) {
-    bow_printf("error: width 16..%u (multiple of 4), height 8..%u (even)\n", IMX219_ACTIVE_W,
-               IMX219_ACTIVE_H);
+  if (w < 16 || h < 8 || w > ct.s->max_w || h > ct.s->max_h || (w & 3u) || (h & 1u)) {
+    bow_printf("error: width 16..%u (multiple of 4), height 8..%u (even)\n", ct.s->max_w,
+               ct.s->max_h);
+    return false;
+  }
+  /* every line would overflow the FIFO (OVF, pixels lost); +4 groups for
+   * the pointer synchronisers */
+  uint32_t peak = ct.phy ? fifo_peak(w) : 0, depth = ct.phy ? CSI2RX_INFO_FIFO(CSI2RX->INFO) : 0;
+  if (peak && peak + 4u > depth) {
+    bow_printf("error: a %u pixel line leaves ~%u groups in the receiver FIFO, it has %u "
+               "(4K: 1024 needed)\n", w, peak + 4u, depth);
     return false;
   }
   bool run = ct.streaming;
-  if (run) stream_stop();
+  uint32_t stop_ms = frame_ms() + 10u; /* of the running mode */
+  if (ct.s->mode(w, h, fps, false) != I2C_OK) return false;
+  if (run) stop_stream(stop_ms);
   ct.w = w;
   ct.h = h;
-  ct.fll = imx219_fll_for_fps(h, fps);
+  ct.fps = fps;
   return run ? stream_start(true) : true;
 }
 
-/* The sensor takes a new output format (0x018c, 0x0309) only in standby:
+/* The IMX219 takes a new output format (0x018c, 0x0309) only in standby:
  * changed while streaming, its output timing and pixels go wrong. */
 bool set_format(uint32_t bits) {
+  if (!ct.s->has_raw8) {
+    if (bits == 10) return true;
+    bow_printf("error: the %s has no RAW8 output\n", ct.s->name);
+    return false;
+  }
   bool run = ct.streaming;
   if (run) stream_stop();
   if (imx219_set_format(bits) != I2C_OK) return false;
@@ -186,13 +261,13 @@ uint32_t count_fs_irqs(uint32_t frames, uint32_t timeout_ms) {
 
 /* ------------------------------------------------------------- raw words */
 /* 8 bits of a lane's bit stream from bit b on (bit 0 of word 0 first). */
-static uint32_t raw_bits(const uint16_t *w, uint32_t lane, uint32_t b) {
+static uint32_t raw_bits(const uint32_t *w, uint32_t lane, uint32_t b) {
   uint32_t i = b / 8u, v = (w[i] >> (8u * lane)) & 0xFFu;
   if (i + 1u < CSI2RX_RAW_WORDS) v |= ((w[i + 1u] >> (8u * lane)) & 0xFFu) << 8;
   return (v >> (b % 8u)) & 0xFFu;
 }
 
-static void print_raw(const uint16_t *w) {
+static void print_raw(const uint32_t *w) {
   for (uint32_t l = 0; l < ct.lanes; l++) {
     bow_printf("lane %u:", l);
     for (uint32_t i = 0; i < CSI2RX_RAW_WORDS; i++) {
@@ -210,20 +285,140 @@ static void print_raw(const uint16_t *w) {
   }
 }
 
+/* -------------------------------------------------- Versal XPHY knobs (GPIO) */
+static uint32_t knob(uint32_t pin) { return (GPIOA->OUT & GPIOA->DIR & pin) ? 1u : 0u; }
+
+static void set_knob(uint32_t pin, bool on) {
+  if (on) {
+    bow_gpio_set(GPIOA, pin);
+    bow_gpio_output(GPIOA, pin);
+  } else {
+    bow_gpio_clear(GPIOA, pin);
+  }
+}
+
+static uint32_t phy_ready(void) { return (CSI2RX->STATUS & CSI2RX_ST_PHY_RDY) ? 1u : 0u; }
+
+/* "phy: STATUS.PHY_RDY 1, every nibble PHY_RDY 1 DLY_RDY 1 (PB6 PB7), ..."
+ * and the delays in use of every lane of the receiver */
+static void print_phy(void) {
+  uint32_t b = bow_gpio_read(GPIOB);
+  bow_printf("phy: STATUS.PHY_RDY %u, every nibble PHY_RDY %u DLY_RDY %u (PB6 PB7), "
+             "reinit %u burstrst %u (PA4 PA5)\n     delays in use",
+             phy_ready(), (b & PHY_NIB_RDY) ? 1u : 0u, (b & PHY_NIB_DLY) ? 1u : 0u,
+             knob(PHY_REINIT), knob(PHY_BURSTRST));
+  for (uint32_t l = 0; l < ct.lanes; l++) {
+    bow_printf("%c%u", l ? '/' : ' ', CSI2RX_DLY_OUT(bow_csi2rx_read_delay(l)));
+  }
+  bow_puts("\n");
+}
+
+/* PA4 pulse of >= 10 us: the PHY drops PHY_RDY and its loaded taps, then
+ * runs XPLL lock, BISC and VT tracking again. Waits up to 10 ms for
+ * STATUS.PHY_RDY and prints the time. */
+static bool phy_reinit(void) {
+  uint32_t mhz = bow_clk_hz() / 1000000u, before = phy_ready();
+  set_knob(PHY_REINIT, true);
+  bow_delay_us(10);
+  uint32_t held = phy_ready();
+  set_knob(PHY_REINIT, false);
+  if (before && held) {
+    bow_puts("error: PHY_RDY stayed 1 during the reinit pulse (no PA4 knob in this bitstream?)\n");
+    return false;
+  }
+  bow_csi2rx_forget_delays(); /* every lane on its new BISC delay */
+  uint32_t t0 = bow_cycles(), dt, rdy;
+  do {
+    rdy = phy_ready();
+    dt = bow_cycles() - t0;
+  } while (!rdy && dt <= PHY_RDY_MS * 1000u * mhz);
+  if (rdy) {
+    bow_printf("phy: PHY_RDY %u us after the reinit pulse\n", dt / mhz);
+  } else {
+    bow_printf("phy: PHY_RDY still 0 %u ms after the reinit pulse\n", PHY_RDY_MS);
+  }
+  print_phy();
+  if (CSI2RX->CTRL & CSI2RX_CTRL_RX_EN) bow_puts("phy: the receiver ran through it: start\n");
+  return rdy != 0;
+}
+
+/* `phy [reinit | burstrst 0|1]` (Versal XPHY) */
+static bool phy_cmd(const char *a) {
+  const char *s = skip_spaces(a);
+  uint32_t v;
+  if (*s == '\0') {
+    print_phy();
+    return true;
+  }
+  if (word_is(s, "reinit")) return phy_reinit();
+  if (!word_is(s, "burstrst")) return false;
+  if (!parse_num(s + 8, &v) || v > 1u) return false;
+  set_knob(PHY_BURSTRST, v != 0);
+  print_phy();
+  return true;
+}
+
+/* `sensor on|off` (Versal XPHY): the sensor streams with the receiver off,
+ * e.g. so that BISC (`phy reinit`) sees a running clock lane; `start` then
+ * restarts both in order. off: standby (`stop` order if the receiver runs). */
+static bool sensor_cmd(const char *a) {
+  bool on = word_is(a, "on");
+  int r;
+  if (!on && !word_is(a, "off")) return false;
+  if (!ct.sensor) {
+    bow_printf("error: no %s\n", ct.s->name);
+    return false;
+  }
+  if (on) {
+    if (ct.streaming) {
+      stream_stop();
+    } else {
+      bow_csi2rx_stop(0); /* receiver off */
+    }
+    r = sensor_start(true);
+  } else if (CSI2RX->CTRL & CSI2RX_CTRL_RX_EN) {
+    stream_stop();
+    return true;
+  } else {
+    r = ct.s->stop();
+  }
+  if (r != I2C_OK) {
+    bow_printf("error: I2C %d\n", r);
+    return false;
+  }
+  ct.streaming = on;
+  if (on) {
+    bow_printf("sensor: streaming %ux%u, receiver off (PHY_RDY %u)\n", ct.w, ct.h, phy_ready());
+  }
+  return true;
+}
+
 /* --------------------------------------------------------------- commands */
 static bool need_phy(void) {
-  if (!ct.phy) bow_printf("error: this bitstream has no D-PHY (use the kv260_cam build)\n");
+  if (!ct.phy) bow_printf("error: this bitstream has no D-PHY (use the %s build)\n", ct.s->build);
   return ct.phy;
+}
+
+/* false (with a message) after `sensor on`: the sensor streams, the receiver is off */
+static bool rx_running(void) {
+  if (ct.streaming && !(CSI2RX->CTRL & CSI2RX_CTRL_RX_EN)) {
+    bow_printf("error: receiver off (sensor on): start\n");
+    return false;
+  }
+  return true;
 }
 
 static bool execute(const char *line) {
   static uint32_t entries[CSI2RX_LOG_ENTRIES];
-  static uint16_t words[CSI2RX_RAW_WORDS];
+  static uint32_t words[CSI2RX_RAW_WORDS];
   const char *a;
   uint32_t v, v2;
 
   if ((a = match(line, "h")) || (a = match(line, "help"))) {
-    bow_puts(help);
+    bow_puts(help_a);
+    if (ct.vid) bow_puts(help_phy);
+    bow_puts(sensor_imx274() ? help_274 : help_219);
+    bow_puts(help_b);
     return true;
   }
   if ((a = match(line, "test"))) return run_tests(word_is(a, "quick"));
@@ -233,15 +428,20 @@ static bool execute(const char *line) {
   }
   if ((a = match(line, "start"))) {
     if (!ct.sensor) {
-      bow_printf("error: no IMX219\n");
+      bow_printf("error: no %s\n", ct.s->name);
       return false;
     }
     if (!need_phy()) return false;
+    if (ct.lanes < ct.s->lanes) {
+      bow_printf("error: the %s needs %u lanes, the receiver has %u\n", ct.s->name, ct.s->lanes,
+                 ct.lanes);
+      return false;
+    }
     if (ct.streaming) stream_stop();
     if (!stream_start(true)) return false;
-    bool ok = bow_csi2rx_link_check(64, 4u * tap_timeout_ms());
-    bow_printf("streaming %ux%u RAW%u, link check %s\n", ct.w, ct.h, imx219_format(),
-               ok ? "ok" : "failed (try cal)");
+    bool ok = bow_csi2rx_link_check(64, (4u + ct.s->start_frames) * tap_timeout_ms());
+    bow_printf("streaming %ux%u RAW%u, link check %s\n", ct.w, ct.h,
+               ct.s->dt() == CSI2_DT_RAW8 ? 8u : 10u, ok ? "ok" : "failed (try cal)");
     return true;
   }
   if ((a = match(line, "stop"))) {
@@ -257,12 +457,14 @@ static bool execute(const char *line) {
       bow_printf("error: not streaming (start)\n");
       return false;
     }
+    if (!rx_running()) return false;
     if (!bow_csi2rx_calibrate(v, tap_timeout_ms(), &cal, true)) {
       bow_printf("csi2rx: calibration failed\n");
       return false;
     }
-    bow_printf("csi2rx: calibrated taps %u/%u eye %u/%u\n", cal.tap[0], cal.tap[1], cal.width[0],
-               cal.width[1]);
+    bow_puts("csi2rx: calibrated ");
+    bow_csi2rx_print_cal(&cal);
+    bow_puts("\n");
     return true;
   }
   if ((a = match(line, "delay"))) {
@@ -277,7 +479,7 @@ static bool execute(const char *line) {
   if ((a = match(line, "log"))) {
     uint32_t mode = (has_word(a, "fs") ? CSI2RX_LOG_TRIG_FS : 0) |
                     (has_word(a, "fe") ? CSI2RX_LOG_STOP_FE : 0);
-    if (!need_phy()) return false;
+    if (!need_phy() || !rx_running()) return false;
     uint32_t n = bow_csi2rx_log(entries, mode, 3u * frame_ms() + 100u);
     if (n == 0) {
       bow_printf("error: no packets (streaming?)\n");
@@ -287,7 +489,7 @@ static bool execute(const char *line) {
     return true;
   }
   if ((a = match(line, "raw"))) {
-    if (!need_phy()) return false;
+    if (!need_phy() || !rx_running()) return false;
     if (!bow_csi2rx_raw(words, word_is(a, "now"), 3u * frame_ms() + 100u)) {
       bow_printf("error: no HS burst (streaming?)\n");
       return false;
@@ -307,18 +509,23 @@ static bool execute(const char *line) {
       w = 1920, h = 1080;
     } else if (word_is(a, "720p")) {
       w = 1280, h = 720, fps = 60;
+    } else if (sensor_imx274() && word_is(a, "4k")) {
+      w = 3840, h = 2160, fps = 10; /* receiver test only: FIFO >= 1024 groups needed */
     } else {
       if (!(a = parse_num(a, &w)) || !(a = parse_num(a, &h))) return false;
       parse_num(a, &fps);
     }
     if (!set_mode(w, h, fps)) return false;
-    bow_printf("mode %ux%u, FLL %u = frame %u us\n", ct.w, ct.h, ct.fll, imx219_frame_us(ct.fll));
+    bow_printf("mode %ux%u, ", ct.w, ct.h);
+    ct.s->print_timing(CAM_TIMING_SHORT);
+    bow_printf(" = frame %u us\n", cam_frame_us(ct.s));
     return true;
   }
   if ((a = match(line, "tp"))) {
     uint32_t c[4];
-    if (!(a = parse_num(a, &v)) || v > IMX219_TP_PN9) return false;
+    if (!(a = parse_num(a, &v)) || v > ct.s->tp_max) return false;
     if ((a = parse_num(a, &c[0]))) {
+      if (sensor_imx274()) return false; /* no programmable colour */
       for (int i = 1; i < 4; i++) {
         if (!(a = parse_num(a, &c[i]))) return false;
       }
@@ -329,7 +536,7 @@ static bool execute(const char *line) {
     }
     ct.tp = v;
     if (!ct.sensor) return true; /* takes effect at `start` */
-    int r = imx219_set_test_pattern(ct.tp);
+    int r = ct.s->set_test_pattern(ct.tp);
     if (r == I2C_OK) r = set_colour(ct.colour);
     return r == I2C_OK;
   }
@@ -343,6 +550,13 @@ static bool execute(const char *line) {
     }
     return set_format(v);
   }
+  if (sensor_imx274() && (a = match(line, "simfast"))) {
+    if (!word_is(a, "on") && !word_is(a, "off")) return false;
+    imx274_set_quick(word_is(a, "on"));
+    return true;
+  }
+  if (ct.vid && (a = match(line, "phy"))) return phy_cmd(a);
+  if (ct.vid && (a = match(line, "sensor"))) return sensor_cmd(a);
   if ((a = match(line, "rd"))) {
     if (!parse_int(a, &v, true)) return false;
     if (!bow_probe_read32(v & ~3u, &v2)) {
@@ -366,24 +580,35 @@ static bool execute(const char *line) {
 
 /* --------------------------------------------------------------------- main */
 static void probe_hardware(void) {
-  uint16_t id = 0;
+  cam_detect_t d;
   uint32_t lanes = 0;
   bool phy = false;
 
   bow_i2c_init(I2C0, 400000);
-  int r = imx219_probe(&id);
-  ct.sensor = (r == I2C_OK && id == IMX219_CHIP_ID);
+  cam_sensor_detect(&d);
+  ct.s = d.sensor;
+  ct.sensor = d.found;
   if (ct.sensor) {
-    bow_printf("camera: IMX219 found (id %04x)\n", id);
-  } else if (r == I2C_OK) {
-    bow_printf("camera: unknown sensor id %04x\n", id);
+    bow_printf("camera: %s found (id %04x)\n", ct.s->name, d.id);
   } else {
-    bow_printf("camera: no IMX219 on I2C (error %d)\n", r);
+    if (d.r219 == I2C_OK) {
+      bow_printf("camera: unknown sensor id %04x\n", d.id219);
+    } else {
+      bow_printf("camera: no IMX219 on I2C (error %d)\n", d.r219);
+    }
+    if (d.tried274 && d.r274 == I2C_OK) {
+      bow_printf("camera: unknown sensor at 0x1a (MDSEL %04x, IMX274 not reset?)\n", d.id274);
+    } else if (d.tried274) {
+      bow_printf("camera: no IMX274 on I2C (error %d)\n", d.r274);
+    }
   }
+  ct.tp = ct.s->tp_solid;
+  ct.s->mode(ct.w, ct.h, ct.fps, false); /* the default mode (1080p30) */
 
   bool csi = bow_csi2rx_probe(&lanes, &phy);
   ct.phy = csi && phy;
-  ct.lanes = lanes == 0 ? 1u : lanes > 2 ? 2u : lanes;
+  ct.vid = ct.phy && (CSI2RX->INFO & CSI2RX_INFO_DLY_VID) != 0;
+  ct.lanes = lanes == 0 ? 1u : lanes > CSI2RX_MAX_LANES ? CSI2RX_MAX_LANES : lanes;
   if (ct.phy) {
     bow_printf("csi2rx: Bow32 receiver, %u lanes, PHY clock %u MHz\n", lanes,
                CSI2RX_INFO_MHZ(CSI2RX->INFO));
@@ -392,6 +617,7 @@ static void probe_hardware(void) {
   } else {
     bow_printf("csi2rx: not present - ISP test pattern only\n");
   }
+  if (!ct.sensor) cam_print_prsnt(lanes);
 }
 
 int main(void) {

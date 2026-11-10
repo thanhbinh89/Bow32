@@ -249,17 +249,19 @@ class FakeVideoSerial:
         return out
 
     def write(self, data):
-        self.rx += data
-        while b"\r" in self.rx:
-            line, _, rest = bytes(self.rx).partition(b"\r")
-            self.rx = bytearray(rest)
-            self.line(line.decode())
+        for b in data:  # the app echoes every character it reads and runs the line at CR
+            if b != 0x0D:
+                self.rx.append(b)
+                self.tx.append(b)
+                continue
+            line, self.rx = self.rx.decode(), bytearray()
+            self.say("\n")
+            self.line(line)
 
     def say(self, s):
         self.tx += s.replace("\n", "\r\n").encode() if isinstance(s, str) else s
 
     def line(self, cmd):
-        self.say(cmd + "\n")
         if cmd.startswith("rec"):
             self.say("rec: 2 frames 48x32, 15/1 fps, QP 30, 1000 bytes per frame\n"
                      "frame 1: 500 bytes, 10 us\nframe 2: 520 bytes, 10 us\n"

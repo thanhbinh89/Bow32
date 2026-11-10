@@ -12,7 +12,12 @@ U1, its pins are the balls). The output goes to the build directory and must
 never be committed.
 
     python3 tools/huins_pins.py --netlist <xlsx> --pins <pins.txt> \\
-        [--site 10] [--clk ref200|site] -o <out.xdc>
+        [--card ram|cam] [--site 10] [--clk ref200|site] [--any-site] -o <out.xdc>
+
+pins.txt sections: [all] (every build), [card=<card>] (the top of that card;
+"[card=<card> sites=1,10]" also lists the only sites the card is verified on,
+another site needs --any-site), [clk=<clk>] (clock input). A file without any
+[card=...] section is a single-card map (the default card ram).
 
 Needs openpyxl (only for this target).
 """
@@ -23,28 +28,55 @@ import sys
 
 SHEET = "VP1902 Schematic Net List"
 FPGA_REF = "U1"
+DEFAULT_CARD = "ram"
+
+SECTION_RE = re.compile(
+    r"\[(?:(all)|clk=([a-z0-9_]+)|card=([a-z0-9_]+)(?:\s+sites=([0-9]+(?:,[0-9]+)*))?)\]")
 
 
-def parse_pins(path, site, clk):
-    """Return [(port, net)] of the [all] section and the [clk=<clk>] section."""
+def parse_pins(path, site, clk, card=DEFAULT_CARD, any_site=False):
+    """Return [(port, net)] of the [all], [card=<card>] and [clk=<clk>] sections.
+
+    Refuses a card without a section (except the default card of a map without
+    any card section) and a site the card's section does not list (unless
+    any_site)."""
     pins = []
     section = None
+    card_sites = {}   # card -> verified sites (None: any site)
     with open(path, encoding="utf-8") as fh:
         for lineno, raw in enumerate(fh, 1):
             line = raw.split("#", 1)[0].strip()
             if not line:
                 continue
-            m = re.fullmatch(r"\[(all|clk=([a-z0-9_]+))\]", line)
-            if m:
-                section = m.group(1)
+            if line.startswith("["):
+                m = SECTION_RE.fullmatch(line)
+                if not m:
+                    raise SystemExit(f"{path}:{lineno}: unknown section '{line}'")
+                if m.group(1):
+                    section = "all"
+                elif m.group(2):
+                    section = f"clk={m.group(2)}"
+                else:
+                    section = f"card={m.group(3)}"
+                    if m.group(3) in card_sites:
+                        raise SystemExit(f"{path}:{lineno}: second [card={m.group(3)}] section")
+                    card_sites[m.group(3)] = m.group(4).split(",") if m.group(4) else None
                 continue
             fields = line.split()
             if len(fields) != 2:
                 raise SystemExit(f"{path}:{lineno}: expected '<port> <net>', got '{line}'")
             if section is None:
                 raise SystemExit(f"{path}:{lineno}: pin line before the first [section]")
-            if section == "all" or section == f"clk={clk}":
+            if section in ("all", f"clk={clk}", f"card={card}"):
                 pins.append((fields[0], fields[1].replace("{site}", str(site))))
+    if card not in card_sites and (card_sites or card != DEFAULT_CARD):
+        raise SystemExit(f"{path}: no [card={card}] section (cards: "
+                         f"{', '.join(sorted(card_sites)) or 'none'})")
+    sites = card_sites.get(card)
+    if sites is not None and str(site) not in sites and not any_site:
+        raise SystemExit(f"{path}: card {card} is only verified on FMC+ site(s) "
+                         f"{', '.join(sites)}, not {site} (its top is site specific); "
+                         "--any-site writes the pins anyway")
     if not any(port == "clk_p_i" for port, _ in pins):
         raise SystemExit(f"{path}: no clock pins for CLK_SRC '{clk}'")
     return pins
@@ -79,14 +111,20 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
     ap.add_argument("--netlist", required=True, help="Huins netlist workbook (.xlsx)")
     ap.add_argument("--pins", required=True, help="port -> net map (constr/pins.txt)")
+    ap.add_argument("--card", default=DEFAULT_CARD,
+                    help=f"card section of pins.txt: ram, cam ({DEFAULT_CARD})")
     ap.add_argument("--site", default="10", help="FMC+ site number of the net names (10)")
     ap.add_argument("--clk", default="ref200", help="clock source section of pins.txt (ref200)")
+    ap.add_argument("--any-site", action="store_true",
+                    help="allow a site the card section does not list (unverified)")
     ap.add_argument("-o", "--output", required=True, help="XDC to write")
     args = ap.parse_args(argv)
 
     if not re.fullmatch(r"[1-4]0?", args.site):
         raise SystemExit(f"error: --site must be 1, 10, 2, 20, 3, 30, 4 or 40, not '{args.site}'")
-    pins = parse_pins(args.pins, args.site, args.clk)
+    if not re.fullmatch(r"[a-z0-9_]+", args.card):
+        raise SystemExit(f"error: --card must be a section name such as ram or cam, not '{args.card}'")
+    pins = parse_pins(args.pins, args.site, args.clk, args.card, args.any_site)
     balls = read_netlist(args.netlist)
 
     errors = []
@@ -95,7 +133,8 @@ def main(argv=None):
     for port, net in pins:
         found = balls.get(net, [])
         if len(found) != 1:
-            errors.append(f"{port}: net {net} has {len(found)} FPGA pins {found}")
+            # the count only: the balls are confidential, also on a terminal or in a log
+            errors.append(f"{port}: net {net} has {len(found)} FPGA pins")
             continue
         ball = found[0]
         if ball in used:
@@ -108,12 +147,14 @@ def main(argv=None):
             print(f"error: {e}", file=sys.stderr)
         raise SystemExit(1)
 
+    # (the header of the default card is the one of the single-card tool)
+    card = "" if args.card == DEFAULT_CARD else f"card {args.card}, "
     with open(args.output, "w", encoding="utf-8") as fh:
         fh.write("# GENERATED by tools/huins_pins.py from the confidential Huins netlist:\n"
                  "# contains FPGA ball numbers, never commit or publish this file.\n"
-                 f"# site FMC+{args.site}, clock source {args.clk}, {len(lines)} pins\n")
+                 f"# {card}site FMC+{args.site}, clock source {args.clk}, {len(lines)} pins\n")
         fh.write("\n".join(lines) + "\n")
-    print(f"huins_pins: {len(lines)} pins (site {args.site}, clock {args.clk}) -> {args.output}")
+    print(f"huins_pins: {len(lines)} pins ({card}site {args.site}, clock {args.clk}) -> {args.output}")
     return 0
 
 

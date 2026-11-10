@@ -40,6 +40,11 @@ VERSIONS = sorted(mkv_model.VERSIONS)
 class MkvBoard(Camera):
     """Shell of sw/apps/mkv (the prompt / command helpers of bow32_cam)."""
 
+    # Lines of up to ~140 hex digits (`key 512 ...`) and an app that never
+    # blocks on I2C: 8 characters per echo, at most 8 bytes in the 16 byte
+    # receive FIFO (1 per echo would make `verify` ~10 times slower).
+    ECHO_CHUNK = 8
+
     def sync(self, timeout=2.0):
         """USB serial adapters deliver late bytes: drain, then two round trips."""
         super().sync(timeout)

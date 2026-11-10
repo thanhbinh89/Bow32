@@ -17,11 +17,31 @@ hai cổng dịch pha như 2 MMCM, 672 bước mỗi CK), mô hình chân (`bow_
 loopback) và HyperRAM giả lập `bow_hyperram_dev` 1 MiB; clock HyperRAM chỉ chạy trong test
 `hyperram`.
 
+Testbench có **hai bản dựng** (tham số `Imx274` của `tb_bow32`; `sim/Makefile` chọn bản theo
+tên test): bản mặc định (`build/sim/obj`) là camera KV260 ở trên; bản `Imx274 = 1`
+(`build/sim/obj-imx274`) là camera của Huins MFP-VP1902 — module Leopard LI-IMX274MIPI-FMC
+qua Huins Camera Adaptor trên FMC+01 ([camera_huins.md](camera_huins.md)). Ở bản này bộ thu giống bản dựng camera Huins
+(`CsiLanes = 4`, `CsiFifoDepth = 512`, `CsiDlyVid = 1`, clock video 200 MHz),
+`csi2_tx_model` chạy 4 lane ở chế độ PHY Versal (byte clock 180 MHz = 1440 Mbit/s mỗi lane,
+`PHY_RDY`, trễ BISC, FIFO RX với `rx_valid`), một mô hình IMX274 thay cho TCA9546A + IMX219
+(mục "Mô hình IMX274 và PHY Versal" bên dưới) và PB5 (PRSNT_M2C_L) đọc 0. Hai núm run-time
+của PHY trong top camera đi vào mô hình PHY: PA4 (OUT & DIR) = `reinit_i`, PA5 =
+`burst_rst_en_i` (`BurstRxRst`), cả hai 0 sau reset (firmware đặt PA5 = 1 mỗi lần khởi động bộ
+thu); PB6 / PB7 (PHY_RDY / DLY_RDY của mọi
+nibble) đọc `PHY_RDY` của mô hình. Test `camera274`, `csi2_274`, `video274` (và `geo274` của
+`test-extra`) chạy trên bản này, các test khác trên bản mặc định (chạy nhầm bản thì
+testbench báo lỗi ngay).
+
 ```bash
 make sw            # firmware: build/sw/
-make test          # build mô hình + chạy mọi test
+make test          # build mô hình + chạy mọi test, tổng kết ở cuối (hỏng nếu có test hỏng)
 make run TEST=load # chạy một test, log ở build/sim/load.log
 make run TEST=load WAVES=1   # + build/sim/waves.fst  (gtkwave build/sim/waves.fst)
+make run TEST=camera274      # bản IMX274 (build/sim/obj-imx274), log ở build/sim/camera274.log
+make run TEST=csi2_274 PLUSARGS="+DPHY_CORNER=2" RUN_LOG=csi2_274_c2   # thêm plusarg, log riêng
+make -C sim run TEST=csi2_274 FW=brst0   # csi2_test build cho BurstRxRst = 0 + SETTLE 115 ns (bên dưới)
+make -C sim test-extra       # biến thể của test IMX274 không có trong make test / CI (bên dưới)
+make -C sim build JOBS=8     # dựng cả hai bản, tối đa 8 job C++ (mặc định 0: mọi core)
 make test-ip       # test riêng của ISP, bộ thu CSI-2, H.264, MKV, DDR, HyperRAM (bên dưới)
 make test-tools    # unit test của công cụ Python (gồm mô hình CSI-2, MKV, tool DDR, HyperRAM)
 ```
@@ -46,11 +66,18 @@ make test-tools    # unit test của công cụ Python (gồm mô hình CSI-2, M
 | `ddr` | ROM + `ddr` | `test quick` → `ddr: PASS (18/18)`: khởi tạo JEDEC DDR2 bằng chuỗi sinh từ LiteDRAM (qua DFII), hiệu chỉnh đọc (quét pha của mô hình MMCM, chụp thô, mắt, `RD_DLY`/`RD_SLIP`), bàn giao cho controller, cửa sổ CPU (walking 1/0, đường địa chỉ, đọc-sửa-ghi byte/halfword, xorshift), BIST của LiteDRAM và dữ liệu đọc qua cửa sổ = bản C của bộ sinh dữ liệu, refresh, giới hạn pha, ngắt `irq_fast[11]`; rồi `wr`/`rd` qua shell ở đầu và cuối 4 MiB; cuối cùng DRAM giả lập không được thấy vi phạm JEDEC nào (`DBG`). Một dòng `FAIL`/`error`/`[trap]` dừng mô phỏng ngay (~4,9 M chu kỳ, ~1 phút) |
 | `hyperram` | ROM + `hyperram` | `test quick` → `hyperram: PASS (19/19)`: IP có mặt, lệnh bị từ chối đúng luật, khởi tạo (RESET#, quét pha đọc của mô hình MMCM với chụp thô ID0, `RD_DLY`, CR0/CR1, mắt của mẫu, mở cửa sổ), thanh ghi thiết bị, cửa sổ CPU (walking 1/0, đường địa chỉ, ghi byte/halfword bằng mặt nạ RWDS, xorshift với ghi posted và không posted), read buffer (word cần trước, trúng, ghi xuyên), `RANGE`, BIST PRBS/đếm và dữ liệu đọc qua cửa sổ = bản C, latency biến đổi (trùng refresh 2×), hybrid sleep, deep power down, giới hạn pha, ngắt `irq_fast[12]`; rồi `wr`/`rd` qua shell ở đầu và cuối 1 MiB; cuối cùng HyperRAM giả lập không được thấy vi phạm giao thức nào (`DBG`) (~7,4 M chu kỳ) |
 | `csi2` | ROM + `csi2_test` | `test quick` → `csi2_test: PASS (11/11)` (eye mô hình: lane 0 tap 100…300, lane 1 180…400, tap reset 0 xấu; hiệu chỉnh phải ra ~208/288); rồi cài lỗi vào một frame đang chạy (lật 1 bit header → ECC sửa, lật 1 bit payload → CRC, byte sync sai trên lane 1 → SOT + skew) và `stat` phải in đúng `ecc 1/0 crc 1 trunc 0 sot 0/1 ovf 0`, `misc ≥ 1`; một dòng `[FAIL]` dừng mô phỏng ngay |
+| `camera274` | ROM + `camera`, bản IMX274 | dò IMX274 (reset bằng XCLR = PA7, chữ ký giá trị mặc định, I2C 100 kHz); `simfast on`; `sr 3004` → `03`; `mode 64 48 0` → ghi chú "simulation only" và `(HMAX 260 VMAX 139)`, 1992 fps; PHY chưa sẵn sàng: `csi` → `PHY not ready`, `cam` → `error: D-PHY not ready` sau 10 ms; `PHY_RDY` lên 1 ms sau lệnh `cam` kế tiếp, driver đợi rồi chạy: link sạch ở trễ BISC (nằm trong mọi eye) nên app giữ chúng (`link ok with the delays in use 97/112/88/120 (kept`, không nạp tap nào), `streaming 64x48 RGGB`; `cal` rồi đi từng lane từ trễ BISC (`taps 112/128/88/144 eye 144/144/128/144`); `stat` (ISP ra 64×48), `csi` → `link ok`, 48 dòng, WC 80, không lỗi; sọc màu của cảm biến → bộ thu → ISP → ảnh 64×4 qua UART (kiểm từng sọc), RGGB rồi GBRG sau `flip 0 1` (ghi dưới REGHOLD: không frame nào lẫn nửa cũ nửa mới); `flip 1 0` bị từ chối; AE (SHR) và AWB khoá trên cảnh; cửa sổ 1920×8 (mode 3, HMAX 384: burst 2400 byte ở 720 MB/s vào FIFO bộ thu, ISP 1 pixel/clock) → ISP ra 1920×8, `csi` không lỗi, không tràn; `tpg 0` dừng đúng thứ tự (bộ thu tắt trước khi cảm biến vào standby). Lane clock ở HS suốt frame, timing điển hình; `cam` đặt PA5 = 1 (`BurstRxRst`): FIFO của PHY tối đa 3 word, không quay vòng (biến thể `camera274 brst0` của `test-extra`: mô hình ép 0, trôi tới 8 word, quay vòng 5 lần mỗi lane). ~12,2 M chu kỳ, ~4,5 phút |
+| `video274` | ROM + `video`, bản IMX274 | dò IMX274, encoder và DMA; `ae off`, `awb off` (bật sẵn: trên test pattern AE không khoá và cứ 3 frame ghi cảm biến ở I2C 100 kHz, đủ lâu để mất byte của lệnh gõ vào FIFO UART 16 byte), `tp 11`, `qp 26`; `mode 64 48 2000` → `(HMAX 260 VMAX 139)`, `cam` với chuỗi thoát standby thật (app `video` không có `simfast`: chờ 11 + 8 ms), link sạch ở trễ BISC nên giữ chúng, `rec 3`, `send` → stream qua UART (CRC) → `build/sim/h264_274a.hex`; rồi `mode 1920 32 900` (stream chạy lại) → `(HMAX 672 VMAX 119)`: dòng dài mà app đặt cho bộ mã (0,35 · W), `rec 3`, `send` → `h264_274b.hex`; mỗi lần mô hình IMX274 phải chốt đúng kích thước, HMAX, VMAX app báo, `stat` phải có `record 3 frames`, và tải bộ mã tính từ chu kỳ engine đo được (392 chu kỳ mỗi macroblock) ≤ 100 % (6 % rồi 78 %); không có dòng `warning` (bộ mã bỏ pixel) hay `error`; `stop` (bộ thu tắt trước khi cảm biến vào standby). Sau mô phỏng `h264_model.py decode --bars` giải mã cả hai stream ra 3 frame có đủ 8 sọc màu. Lane clock ở HS suốt frame, timing D-PHY corner 2, `BurstRxRst` = 1 (PA5 của firmware): FIFO của PHY tối đa 3 word, không quay vòng. ~10,4 M chu kỳ, ~3,5 phút |
+| `csi2_274` | ROM + `csi2_test`, bản IMX274 | `simfast on`; núm của PHY: `phy` (PHY_RDY, PB6/PB7 = 1, knob 0, trễ BISC 97/112/88/120), `phy reinit` (một xung PA4: `PHY_RDY` về 0 rồi lên lại ~40 µs sau, trễ BISC trở lại); `test quick` → `csi2_test: PASS (10/10)` (phy-idle phải thấy LP-00: IMX274 ở standby; trễ BISC của lane 2 nằm ngoài eye nên firmware quét chung trước rồi đi từng lane, hiệu chỉnh phải ra ~192/224/272/256 eye 288/288/256/288; integrity với 555h/AAAh; packets FS, 1 dòng embedded, 4 dòng OB, 48 dòng, FE; 3 lần dừng/chạy lại với chuỗi thoát standby); sau đó PA5 = 1 và `rd 4000800c` → `051e0213` (SETTLE 95 ns): firmware đặt cả hai mỗi lần khởi động bộ thu (`FW=brst0`: PA5 = 0, `051e0217` = 115 ns); rồi cài lỗi như `csi2` (byte sync sai trên lane 1 trong 4 lane) và `stat` phải in `ecc 1/0 crc 1 trunc 0 sot 0/1/0/0 ovf 0`, `misc ≥ 1`; `raw` 4 lane; `mode 1920 8 0` (stream chạy lại), `stop`, `start` → `link check ok`, `irq`, `stat` không lỗi. Lane clock vào HS ở mỗi burst, timing D-PHY ở biên của chuẩn với HS-PREPARE dài nhất (corner 1), `BurstRxRst` = 1 (PA5 của firmware): FIFO của PHY bắt đầu lại mỗi burst, ~2000 byte clock không có word (tối đa một mỗi burst, `v_gap_pm` 2). ~18,2 M chu kỳ, ~6 phút |
 
-Một test PASS khi in `TEST PASSED`; lỗi dùng `$fatal` (mã thoát ≠ 0). Có
-watchdog `+TIMEOUT=<cycles>` (mặc định 20 M chu kỳ; `csi2` cần ~3,7 M).
-`camera` và `csi2` kết thúc bằng một kiểm tra PHY: cổng byte clock chỉ mở và
-đóng khi lane clock đứng yên ở HS-0, không có xung runt.
+Một test PASS khi in `TEST PASSED` (`h264`, `video274`: và stream H.264 giải mã đúng sau
+mô phỏng); lỗi dùng `$fatal` (mã thoát ≠ 0). Có watchdog `+TIMEOUT=<cycles>` (mặc định
+20 M chu kỳ, 40 M ở bản IMX274; `csi2` cần ~4,7 M, `camera274` ~12,2 M, `csi2_274`
+~18,2 M, `video274` ~10,4 M). `camera`, `csi2`, `camera274`, `csi2_274` và `video274` kết thúc bằng một kiểm tra
+PHY: cổng byte clock chỉ mở và đóng khi lane clock đứng yên ở HS-0, không có xung runt.
+`make test` chạy mọi test kể cả sau một test hỏng, in `PASS`/`FAIL` và thời gian của mỗi
+test, cuối cùng một dòng tổng kết (`make test: FAILED: ...` và mã thoát 1 nếu có test
+hỏng); cả 15 test ~28 phút (1700 s, chưa tính dựng hai mô hình; 2026-11-10).
 
 ### Mô hình IMX219 và D-PHY
 
@@ -74,16 +101,114 @@ pha bit ngẫu nhiên mỗi burst, IDELAY có mô hình eye (tap ngoài
 Clock video 9,3 ns (`VidClkHz = 107_526_882`): `INFO` báo 108 MHz, nên driver
 đặt `PHY_CFG` = 8/16/4 chu kỳ (SETTLE/CLK_SETTLE/CLK_MISS).
 
+### Mô hình IMX274 và PHY Versal (bản `Imx274 = 1`)
+
+Cảm biến IMX274 (`s274_*`, `f274_*` trong testbench), theo bảng thanh ghi của datasheet
+(thanh ghi nhiều byte: LSB ở địa chỉ thấp):
+
+- I2C 7 bit 0x1A, chỉ số 16 bit (MSB trước), dữ liệu tự tăng địa chỉ khi ghi và đọc; chỉ trả
+  lời khi XCLR (PA7 lái 1) đã lên ≥ 20 µs (truy cập sớm hơn là lỗi). XCLR = 0 đưa mọi thanh
+  ghi về mặc định, trong đó có chữ ký mà driver dò: MDSEL1..4 = 03 31 00 09, HMAX 0x0104,
+  VMAX 0x00905, BLKLEVEL 0x32 (đọc/ghi được).
+- Chuỗi thoát standby được kiểm tra: bước 1 `0x3000 = 0x12`, PLRD1..5, `0x310B = 0` (PLL
+  chạy); bước 2 `0x3000 = 0` ≥ 10 ms sau khi PLL chạy; bước 3 `0x30F4 = 0` (XMSTA) ≥ 7 ms sau
+  bước 2 thì bắt đầu stream, lúc đó PLRD phải là bộ INCK 24 MHz và `SYS_MODE (0x303E) = 2`.
+  `simfast on` làm driver chia các khoảng chờ cho 64, testbench chia ngưỡng tương ứng (testbench
+  gửi lệnh này nên biết). `0x3000` bit 0 = 1 (STANDBY) dừng stream ngay (frame đang dở bị cắt,
+  không có FE); lần chạy sau phải lặp lại bước 1. Dừng stream (standby hoặc reset) khi bộ thu
+  CSI-2 còn bật là lỗi: lane rơi xuống LP-00, bộ thu tính là lỗi LP — driver tắt bộ thu trước.
+- Lane: LP-00 khi reset và standby (cả trong bước 1), LP-11 từ bước 2 và giữa các burst.
+- Mỗi đầu frame cảm biến chốt định dạng và kiểm: mode đọc 1/3/5 (MDSEL1..3, kèm VCUTMODE,
+  MDSEL5, MDPLS17, PSMOVEN và MDSEL4 có/không cắt dọc), HTRIMMING (bội của bước 12 hoặc 24,
+  END ≤ 3864, rộng ≥ 144, chia hết cho hệ số binning; chiều rộng = (END − START) / binning, bội
+  của 4), cắt dọc VWIDCUT/VWINPOS (bù hai, âm khi lật dọc, nằm trong số dòng hiệu dụng của mode),
+  WRITE_VSIZE = Y_OUT_SIZE + số dòng OB (4 ở mode 5, 8 ở mode 1 và 3), HMAX ≥ mức tối thiểu,
+  VMAX ≥ 2 × (1 + WRITE_VSIZE) + 13, SHR trong [SHR_min, VMAX − 4], SVR = 0, PGC ≤ 1957,
+  DGAIN ≤ 6, thanh ghi test pattern. Sai lúc bắt đầu stream là lỗi. Trong lúc stream, đầu
+  frame rơi giữa hai lần ghi I2C của driver (ví dụ VWINPOS đã đổi dấu mà MDVREV chưa) thì
+  frame đó không được xuất (in ra và đếm), và chỉ được phép trong một cửa sổ quanh lệnh
+  `mode` của test (lúc chờ câu trả lời và 2 đầu frame sau); ngoài cửa sổ đó là lỗi. Driver
+  dựng lại stream cho mode mới và ghi lật dưới REGHOLD, nên không frame nào như vậy được
+  chờ đợi, và lệnh lật không có cửa sổ. REGHOLD = 1 ở đầu frame giữ định dạng cũ (các thanh
+  ghi đã ghi có hiệu lực cùng lúc ở đầu frame sau khi xoá REGHOLD); SHR có hiệu lực chậm hơn
+  các thanh ghi khác một frame. Đổi mode đọc, cắt dọc hoặc lật là chuyển mode: một frame
+  không xuất; frame đầu tiên sau khi bắt đầu cũng không xuất.
+- Thời gian thật theo HMAX/VMAX (72 MHz): mỗi packet một HS burst, VC 0; FS (số frame 1, 2,
+  …), rồi mỗi dòng CSI-2 một khe 2 HMAX, khe đầu bắt đầu 1 HMAX sau FS: 1 dòng embedded (DT
+  0x12, dài như dòng ảnh, đóng gói kiểu RAW10), các dòng OB (DT 0x37, giá trị BLKLEVEL), Y_OUT_SIZE
+  dòng RAW10 (DT 0x2B); FE ngay sau dòng cuối; FS sau cách FS trước HMAX × VMAX. Lane clock ở
+  HS từ FS tới FE (`camera274`, `video274`, như IMX219) hoặc vào HS ở mỗi burst (`csi2_274`).
+- Pixel: Bayer RGGB, lật dọc đảo thứ tự dòng (GBRG — đoán giống driver, chưa đo trên board).
+  Test pattern (`0x303C = 0x11`, mẫu = `0x303D` + 1 theo menu của driver Linux, giá trị 12 bit
+  dịch phải 2, không cộng BLKLEVEL): 1..4 đặc 000h/FFFh/555h/AAAh, 5..10 sọc 2 cột, 11 tám sọc
+  màu dọc (trắng vàng lục lam lục đỏ tươi đỏ lam đen, như mô hình IMX219), 12 tám sọc ngang;
+  tắt: cảnh mịn theo exposure (VMAX − SHR) × PGC × DGAIN, ám màu (R 5/8, B 13/16), cộng BLKLEVEL.
+  Giá trị thật của các mẫu trên IMX274 chưa ai đo: mô hình chỉ cần khớp với cách firmware kiểm
+  (`csi2_test` đo tổng pixel của 555h/AAAh, đếm màu của sọc).
+
+PHY Versal (`csi2_tx_model`, `versal = 1`): `PHY_RDY` lên 40 µs sau lúc bắt đầu (`camera274`:
+khi test cho phép) và 40 µs sau một lần khởi động lại (PA4), trễ BISC 97/112/88/120, nạp tap ở
+clock video, FIFO RX 8 word mỗi lane với `rx_valid` như XPHY: ghi mỗi cạnh strobe khi bộ thu HS
+của lane clock bật, đọc khi FIFO có hơn `vlat` word (0–2, chung cho mọi lane), nên word cũ của
+burst trước ra trước ở burst sau và trễ không bao giờ giảm. `BurstRxRst` theo PA5 (0 sau reset
+như bản camera, 1 từ lần đầu firmware khởi động bộ thu): với 0, 20 % lần mở cổng byte clock thêm một word glitch vào mọi FIFO
+(`+S274_GLITCH`), trễ trôi lên tới 8 word rồi FIFO quay vòng (bộ đọc nhảy qua 8 word cũ); với 1,
+FIFO bị giữ reset khi cổng đóng và mỗi burst bắt đầu lại. Chu kỳ không đọc (`csi2_274`) chỉ khi
+mọi FIFO ở trễ tối thiểu. Eye của 4 lane theo test (mục "IMX274 tests" trong testbench). Cuối
+mỗi test IMX274 testbench kiểm: frame được gửi đúng khe, hợp đồng nạp tap (xung 1 chu kỳ, tap ổn
+định quanh lần nạp, không nạp khi lần trước còn chờ, lane nào cũng được nạp khi test hiệu chỉnh),
+cổng byte clock; nó in số word glitch, lần quay vòng và trễ lớn nhất của FIFO (mất dữ liệu thật
+sẽ hiện ra ở bộ đếm lỗi). Clock video 5 ns: `INFO` báo 200 MHz, driver đặt `PHY_CFG` = 19/30/5 chu
+kỳ (SETTLE 95 ns vì `INFO.DLY_VID = 1`, CLK_SETTLE, CLK_MISS).
+
+Timing D-PHY: `camera274` dùng giá trị điển hình của `csi2_tx_model` (HS-PREPARE 60 ns,
+HS-ZERO ≥ 150 ns…), `csi2_274` biên của chuẩn với HS-PREPARE dài nhất (`+DPHY_CORNER=1`),
+`video274` với HS-PREPARE ngắn nhất và byte sync sớm nhất (`+DPHY_CORNER=2`). Mô phỏng này đã cho
+thấy `SETTLE` 70 ns không đủ cho PHY Versal: cửa sổ dò sync, lùi theo trễ FIFO, bắt đầu trong
+HS-PREPARE dài và thỉnh thoảng khớp sync giả (lỗi giả làm lệch kết quả hiệu chỉnh); driver dùng
+95 ns khi `INFO.DLY_VID = 1` (docs/ip/csi2rx.md). 95 ns giả định trễ FIFO tới ~4 word: với FIFO
+trôi tới 8 word (`BurstRxRst` = 0 có glitch) cửa sổ lại vào HS-PREPARE dài nhất, `csi2_274` mất
+dòng (integrity) và hiệu chỉnh lệch. Vì vậy trên bản Versal (`INFO.DLY_VID` = 1) firmware đặt PA5
+= 1 (`BurstRxRst`) mỗi lần khởi động bộ thu và giữ `SETTLE` 95 ns (`cam_rx_start()`,
+`sw/common/src/cam_sensor.c`); `csi2_274` kiểm cả hai sau `test quick` (`+S274_BURSTRST=0` ép mô
+hình về 0 để thấy lỗi ở corner 1). Cấu hình kia, `BurstRxRst` = 0 với `SETTLE` 115 ns, là bản
+firmware `FW=brst0`: `csi2_test` build với `-DCAM_BURST_RST=0 -DSETTLE_VID_NS=115` vào
+`build/sim/sw-brst0/` (`make -C sim run TEST=csi2_274 FW=brst0`, cũng trong `test-extra`;
+testbench kiểm PA5 = 0 và SETTLE 115 ns). Với `BurstRxRst` = 0, FIFO trôi và 95 ns,
+`camera274` ở corner 0 vẫn sạch (biến thể `camera274 brst0`), `csi2_274` không glitch cũng vậy
+(`csi2_274 noglitch`).
+
+Lane clock vào HS ở mỗi burst (`csi2_274`): `BYTECLK` chỉ đo đúng burst dài hơn ~2 × 256 chu kỳ
+CPU nên đọc thấp (~20–45 MHz với dòng 64 pixel, ~154 MHz với dòng 1920 pixel, thay vì
+180 MHz). Nếu IMX274 thật cũng vậy, kiểm tra `timing` của `csi2_test` bản đầy đủ (180 MHz
+± 3 %) sẽ báo lỗi giả; vì thế nó coi số đo là cận dưới khi lane clock vào HS hơn 2 lần mỗi
+frame (`[PASS] timing ... (lower bound: clock lane gated per packet)`).
+
 ## Plusargs
 
 | Plusarg | Ý nghĩa |
 |---------|---------|
-| `+TEST=<tên>` | chọn kịch bản |
+| `+TEST=<tên>` | chọn kịch bản (`camera274`, `csi2_274`, `video274`, `geo274`: chỉ bản IMX274) |
 | `+ROM=<vmem>` | ảnh boot ROM (bắt buộc) |
 | `+FLASH=<vmem>` | nạp sẵn flash (backdoor) |
 | `+IMAGE=<vmem>` | ảnh tải qua UART trong test `load` |
 | `+TIMEOUT=<n>` | giới hạn chu kỳ |
+| `+S274_CONTCLK=<0\|1>` | bản IMX274: lane clock ở HS từ FS tới FE (1) hay vào HS ở mỗi burst (0); mặc định 1 trong `camera274` và `video274`, 0 trong `csi2_274` |
+| `+DPHY_CORNER=<n>` | bản IMX274: timing D-PHY ở biên của chuẩn: 1 = HS-PREPARE dài nhất 88,9 ns, 2 = ngắn nhất 44,4 ns, cả hai với HS-PREPARE + HS-ZERO ngắn nhất 155,6 ns, T_LPX, HS-TRAIL, HS-EXIT, CLK-POST, CLK-TRAIL ngắn nhất, CLK-PREPARE dài nhất với CLK-PREPARE + CLK-ZERO = 300 ns; 0 = điển hình. Mặc định 1 trong `csi2_274`, 2 trong `video274`, 0 trong `camera274` |
+| `+S274_BURSTRST=<0\|1>` | bản IMX274: `BurstRxRst` của mô hình PHY là 0 / 1 bất kể PA5 (mặc định: theo PA5, 0 sau reset, 1 từ lần đầu firmware khởi động bộ thu) |
+| `+S274_PA5=<0\|1>`, `+S274_SETTLE=<ns>` | `csi2_274`: PA5 và `SETTLE` mà firmware phải đặt khi khởi động bộ thu (mặc định 1 và 95 ns; `FW=brst0` tự thêm 0 và 115) |
+| `+S274_GLITCH=<pct>` | bản IMX274: % lần mở cổng byte clock thêm một word glitch vào FIFO RX của mô hình PHY (mặc định 20) |
+| `+S274_GEO=<mode>` | `geo274`: mode của `csi2_test` để bắt đầu stream (mặc định `1080p`) |
 | `+WAVES` | ghi waveform (cần build với `WAVES=1`) |
+
+`make run ... PLUSARGS="..."` thêm plusarg vào dòng lệnh (biến cũng đi qua `make` ở thư mục
+gốc). `make -C sim test-extra` chạy các biến thể không có trong `make test` / CI, mỗi biến thể
+log riêng `build/sim/<test>_<tên>.log`: `csi2_274` với corner 2, với lane clock liên tục, với
+firmware `FW=brst0` (`BurstRxRst` = 0, `SETTLE` 115 ns, corner 1), với mô hình PHY ép
+`BurstRxRst` = 0 mà không có word glitch; `camera274` với corner 1 và lane clock theo burst, và
+với mô hình PHY ép `BurstRxRst` = 0 (FIFO trôi, corner 0); `video274` với corner 0 và lane clock
+theo burst; `geo274` với `1080p` và `720p` (driver bắt đầu stream ở mode đầy đủ, mô hình IMX274
+kiểm bộ thanh ghi lúc bắt đầu).
 
 ## Test riêng của IP
 
@@ -240,23 +365,31 @@ thích (`cfg.txt`, `stim.txt`); `tb_bow_csi2rx.sv` chơi chúng qua
 FRAME_SUM, FRAME/LINE_TIME, LOG và các bất biến PHY.
 
 ```bash
-make -C hw/ip/csi2rx/dv test                          # 30 case (~5 s)
+make -C hw/ip/csi2rx/dv test                          # 69 case, 1/2/4 lane (~17 s)
 make -C hw/ip/csi2rx/dv test SEEDS="1 2 3 4 5 6 7 8"
-make -C hw/ip/csi2rx/dv run SEED=7 LANES=1 ERRORS=1   # thêm DUT_LANES=1|2 RAW8=1 CONTCLK=1
+make -C hw/ip/csi2rx/dv run SEED=7 LANES=1 ERRORS=1   # thêm DUT_LANES=1|2|4 RAW8=1 CONTCLK=1
+make -C hw/ip/csi2rx/dv run SEED=3 LANES=4 ERRORS=1 BURSTRST=1   # PHY Versal với BurstRxRst = 1
 make -C hw/ip/csi2rx/dv run TEST=clk                  # một test directed
 ```
 
-- Random, mỗi seed 5 cấu hình: 2 lane có/không lỗi, 1 lane (`Lanes = 1`) có
-  lỗi, 1 lane trên bộ thu 2 lane có/không lỗi; RAW8 và clock liên tục xen kẽ.
-  Lỗi: lật bit header (1 và 2 bit), lật bit payload, sync sai, lệch lane, cắt
-  packet.
+- Random, mỗi seed 11 cấu hình: 2 lane có/không lỗi, 1 lane (`Lanes = 1`) có
+  lỗi, 1 lane trên bộ thu 2 lane có/không lỗi; trên bộ thu 4 lane (PHY Versal):
+  4 lane có/không lỗi với `BurstRxRst` = 0 và có lỗi với `BurstRxRst` = 1, 2 trên 4
+  có/không lỗi, 1 trên 4 có lỗi; RAW8 và clock liên tục xen kẽ. Lỗi: lật bit header
+  (1 và 2 bit), lật bit payload, sync sai, lệch lane, cắt packet.
 - Directed: `lp` (escape, LP-00 từ Stop, độ trễ LP-00 → `hs_en`), `watchdog`,
   `clk` (CE chỉ đổi ở HS-0, mất clock), `cmd` (lệnh LOG/RAW khi byte clock
   dừng), `ovf` (tràn FIFO), `stop` (dừng giữa burst rồi chạy lại), `byteclk`,
-  `eye` (nạp và đọc lại tap, mô hình eye); `cmd` và `stop` chạy thêm với 1 lane.
-- Mỗi case giữ file trong `build/csi2rx_dv/<case>/` (`sim.log` cho CI); một
-  binary Verilator cho mỗi giá trị `Lanes` (`build/csi2rx_dv/obj_l1`, `obj_l2`).
-- `make test-tools` chạy 19 unit test của mô hình (`tools/tests/test_csi2_model.py`).
+  `eye` (nạp và đọc lại tap, mô hình eye), `skew` (lệch lane ở biên của ghép
+  lane: 6 byte clock nhận, 7 trở lên SKEW và không ra gì); `cmd` và `stop` chạy thêm với
+  1 lane; trên 4 lane thêm `dly` (tap miền video, khởi động lại PHY).
+- PHY Versal của bộ thu 4 lane: FIFO RX như XPHY, `BurstRxRst` = 0 (trễ trôi theo word
+  glitch rồi quay vòng, như bản camera lúc khởi động) hoặc 1; xem [ip/csi2rx.md](ip/csi2rx.md)
+  mục *Kiểm chứng*.
+- Mỗi case giữ file trong `build/csi2rx_dv/<case>/` (`sim.log` cho CI, có dòng thống kê FIFO
+  của PHY Versal); một binary Verilator cho mỗi giá trị `Lanes` (`build/csi2rx_dv/obj_l1`,
+  `obj_l2`, `obj_l4`).
+- `make test-tools` chạy 26 unit test của mô hình (`tools/tests/test_csi2_model.py`).
 
 ### D-PHY I/O trên FPGA (xsim)
 
@@ -279,6 +412,13 @@ CNTVALUEOUT ở burst sau, pixel và thanh ghi của bộ thu. Cần Vivado nên
 chạy trong CI; pass/fail lấy từ dòng `tb_bow_dphy_io_xusp: PASS` (mã thoát của
 xsim không phản ánh kết quả). Eye không mô phỏng được: unisim không có lệch
 clock/data.
+
+Bản Versal (`bow_dphy_io_versal`, XPHY với model secureip của AMD) có testbench riêng
+`tb_bow_dphy_io_versal.sv`: 24 cấu hình trên 3 sơ đồ nibble tổng hợp, gồm cả hai núm lúc chạy
+(`burst_rst_en_i`, `reinit_i`), trong `make test-fpga-dv`; một mình:
+`make -C hw/fpga/common/dv test-dphy-versal`, một cấu hình:
+`make -C hw/fpga/common/dv run-dphy-versal DPHYV_CFG=reinit_idle WAVES=1`. Mô tả:
+[camera_huins.md](camera_huins.md) mục 9 và đầu `hw/fpga/common/dv/Makefile`.
 
 ### Chân và clock HyperRAM trên FPGA (xsim)
 
@@ -330,8 +470,13 @@ make -C hw/fpga/common/dv run-ddr-io IO_CFG=vcard SEED=1    # bản Huins của 
    `cam_frames`, kích thước frame ra của ISP `out_w`/`out_h`, nhận ảnh của lệnh
    `dump` bằng `receive_image()`; máy phát D-PHY `u_csi` (`push_short`,
    `push_long`, `idle`, `eye_lo`/`eye_hi`, cờ lỗi trong `csi2_flags()`, xem
-   header của `csi2_tx_model.sv`).
-3. Thêm tên test vào `TESTS` và biến `FLASH_<test>` trong `sim/Makefile`.
+   header của `csi2_tx_model.sv`). Bản IMX274: thanh ghi `s274_reg[]`, trạng thái
+   `s274_run`/`s274_starts`/`s274_stops`, định dạng frame đang gửi `f274_*`, `s274_frames`;
+   lệnh shell `send_cmd()` (trả về vị trí log để tìm câu trả lời), `check_cal274()`,
+   `check_counters274()`, `check_s274_end()`.
+3. Thêm tên test vào `TESTS` và biến `FLASH_<test>` trong `sim/Makefile` (test của bản
+   IMX274: thêm cả vào `TESTS_IMX274`, và vào phép kiểm bản dựng ở đầu `initial` chính;
+   stream H.264 cần giải mã sau mô phỏng: `H264_<test>`).
 
 ## Lưu ý khi viết testbench cho Verilator
 
@@ -346,6 +491,10 @@ make -C hw/fpga/common/dv run-ddr-io IO_CFG=vcard SEED=1    # bản Huins của 
   datapath và của ISERDES thấy một cạnh xuống.
 * Verilator 5.022: delay `#0`, hoặc delay biến có giá trị 0, làm hỏng bộ lập
   lịch timing (crash hoặc sai lặng lẽ): chặn mọi delay biến bằng 0.
+* Verilator 5.020, struct packed rộng hơn 64 bit: `if (q.size() != 0) s =
+  q.pop_front(); else s = ...;` bị gộp thành biểu thức điều kiện và
+  `pop_front()` chạy trước phép thử `size()` (phần tử cuối thành nhánh else).
+  Tính điều kiện vào một biến trước (`csi2_tx_model`, process phát).
 * Queue trong biến automatic giữ qua delay trong process `fork` bị hỏng: dùng
   buffer static.
 * `$realtime` dùng bên trong một biểu thức bị cắt về đơn vị thời gian (ví dụ

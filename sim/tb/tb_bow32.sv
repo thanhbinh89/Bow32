@@ -13,6 +13,23 @@
 // replaces the sensor and the receive I/O of the board) and a device on the
 // AXI4-Lite master port.
 //
+// Parameter Imx274 = 1 (sim/Makefile: model directory build/sim/obj-imx274)
+// turns the camera side into the Huins MFP-VP1902 camera build instead: the
+// Leopard LI-IMX274MIPI-FMC module on the Huins camera adapter. The SoC gets
+// the receiver of that build (CsiLanes = 4, CsiFifoDepth = 512, CsiDlyVid =
+// 1, video clock 200 MHz), csi2_tx_model runs with 4 lanes in its Versal
+// XPHY mode (byte clock 180 MHz = 1440 Mbit/s per lane, PHY_RDY, BISC
+// delays, RX FIFOs with rx_valid; BurstRxRst from PA5, which the firmware
+// sets to 1 at every receiver start; with BurstRxRst = 0 the FIFO latency
+// drifts with glitch words and wraps; one latency for all lanes) and an
+// IMX274 model (I2C 0x1A, XCLR on PA7, standby cancel
+// sequence, readout modes and crop, HMAX/VMAX line timing, REGHOLD, test
+// patterns; see "IMX274" below) replaces the TCA9546A + IMX219. PRSNT_M2C_L
+// of the camera site (PB5) reads 0; the run-time knobs of the camera top
+// drive the PHY model: PA4 its re-init (reinit_i), PA5 its BurstRxRst
+// (burst_rst_en_i), and PB6 / PB7 (PHY_RDY / DLY_RDY of every nibble) read
+// its PHY_RDY. The other tests run on the default build only.
+//
 // The SoC has its DDR2 memory system (DdrEn = 1, DdrMem = 2: LiteDRAM DDR2
 // controller + Bow32 PHY) wired like the MPS4 loopback build: DDR clock model
 // (hw/ip/ddr/dv/ddr_clk_model.sv: CK, the controller clock CK / 4 with its
@@ -33,17 +50,36 @@
 //
 // Plusargs:
 //   +TEST=<name>      boot | load | break | flash | irq | gpio | camera | csi2 | h264 | mkv | ddr |
-//                     hyperram
+//                     hyperram; camera274 | csi2_274 | video274 | geo274 (Imx274 = 1 build only)
 //                     (see run_test below)
 //   +ROM=<vmem>       boot ROM image (required)
 //   +FLASH=<vmem>     image preloaded into the flash (backdoor)
 //   +IMAGE=<vmem>     image downloaded over UART by the 'load' test
-//   +TIMEOUT=<cycles> abort after this many cycles (default 20M)
+//   +TIMEOUT=<cycles> abort after this many cycles (default 20M, 40M in the Imx274 build)
+//   +S274_CONTCLK=<0|1> IMX274 clock lane: 1 = HS from FS to FE, 0 = HS per
+//                     burst (default: 1 in camera274 and video274, 0 in csi2_274)
+//   +DPHY_CORNER=<n>  IMX274 build: D-PHY timing at the limits of the
+//                     specification (s274_dphy_corner): 1 = longest
+//                     HS-PREPARE (default in csi2_274), 2 = shortest (default
+//                     in video274); 0 = typical (camera274)
+//   +S274_BURSTRST=<0|1>  IMX274 build: BurstRxRst of the PHY model, whatever
+//                     PA5 says. Default: PA5 (0 after reset, 1 from the first
+//                     receiver start of the firmware)
+//   +S274_PA5=<0|1> +S274_SETTLE=<ns>  csi2_274: PA5 and data lane SETTLE
+//                     the firmware must have set at its receiver starts
+//                     (default 1 and 95 ns; sim/Makefile FW=brst0: 0, 115 ns)
+//   +S274_GLITCH=<pct> IMX274 build: % of byte clock gate openings that add a
+//                     glitch word to the PHY model's RX FIFOs (default 20)
+//   +S274_GEO=<mode>  geo274: csi2_test mode to start (default 1080p)
 //   +WAVES            dump waves to build/sim/waves.fst (needs WAVES=1 build)
 
 `timescale 1ns / 1ps
 
-module tb_bow32;
+module tb_bow32 #(
+  // camera build: 0 = KV260 (IMX219, 2 lanes, UltraScale+ D-PHY),
+  // 1 = Huins MFP-VP1902 (IMX274, 4 lanes, Versal XPHY)
+  parameter bit Imx274 = 1'b0
+);
   import csi2_tx_pkg::*;
 
   // ---------------------------------------------------------------- config
@@ -65,11 +101,17 @@ module tb_bow32;
   always #(ClkPeriodNs / 2) clk = ~clk;
 
   // Video clock of the ISP and of the CSI-2 receiver PHY logic, unrelated to
-  // the CPU clock (200 MHz on the KV260)
-  localparam real         VidPeriodNs = 9.3;
-  localparam int unsigned VidClkHz    = 107_526_882;        // 1 / 9.3 ns
+  // the CPU clock (200 MHz on the KV260 and the Huins board; slower in the
+  // KV260 simulation, 200 MHz in the IMX274 build, whose 180 MHz byte clock
+  // the clock lane miss detector of the receiver samples in this domain)
+  localparam real         VidPeriodNs = Imx274 ? 5.0 : 9.3;
+  localparam int unsigned VidClkHz    = Imx274 ? 200_000_000 : 107_526_882;  // 1 / 9.3 ns
   logic vclk = 1'b0;
   always #(VidPeriodNs / 2) vclk = ~vclk;
+
+  // CSI-2 receiver of the camera build
+  localparam int unsigned CsiLanes     = Imx274 ? 4 : 2;
+  localparam int unsigned CsiFifoDepth = Imx274 ? 512 : 256;
 
   longint unsigned cycle = 0;
   always @(posedge clk) cycle <= cycle + 1;
@@ -104,14 +146,20 @@ module tb_bow32;
   wire        i2c_scl = !(i2c_scl_oe || slv_scl_low);
   wire        i2c_sda = !(i2c_sda_oe || slv_sda_low);
 
-  // D-PHY receive I/O of the CSI-2 receiver (csi2_tx_model below) and ISP output
-  logic            dphy_byte_clk, dphy_byte_ce, dphy_byte_rst, dphy_clk_hs_en;
-  logic [1:0]      dphy_clk_lp, dphy_hs_en, dphy_dly_load;
-  logic [1:0][1:0] dphy_lp;
-  logic [1:0][7:0] dphy_rx_data;
-  logic [1:0][8:0] dphy_dly_tap, dphy_dly_tap_rb;
-  logic            isp_tvalid, isp_tuser, isp_tlast;
-  logic [23:0]     isp_tdata;
+  // D-PHY receive I/O of the CSI-2 receiver (csi2_tx_model below) and ISP
+  // output. rx_valid and phy_rdy come from the model in the IMX274 build
+  // (Versal PHY), else they are tied off like on the KV260.
+  logic                     dphy_byte_clk, dphy_byte_ce, dphy_byte_rst, dphy_clk_hs_en;
+  logic                     dphy_phy_rdy;
+  logic [1:0]               dphy_clk_lp;
+  logic [CsiLanes-1:0]      dphy_hs_en, dphy_dly_load, dphy_rx_valid;
+  logic [CsiLanes-1:0][1:0] dphy_lp;
+  logic [CsiLanes-1:0][7:0] dphy_rx_data;
+  logic [CsiLanes-1:0][8:0] dphy_dly_tap, dphy_dly_tap_rb;
+  wire  [CsiLanes-1:0]      dut_rx_valid = Imx274 ? dphy_rx_valid : '1;
+  wire                      dut_phy_rdy  = Imx274 ? dphy_phy_rdy : 1'b1;
+  logic                     isp_tvalid, isp_tuser, isp_tlast;
+  logic [23:0]              isp_tdata;
 
   // AXI4-Lite window
   logic [15:0] axil_awaddr, axil_araddr;
@@ -144,9 +192,11 @@ module tb_bow32;
     .BootBaud    (Baud),
     .BootWaitMs  (1),
     .BreakCycles (BreakCycles),
-    .CsiLanes    (2),
+    .CsiLanes    (CsiLanes),
     .CsiPhy      (1'b1),
     .VidClkHz    (VidClkHz),
+    .CsiFifoDepth (CsiFifoDepth),
+    .CsiDlyVid   (Imx274),
     .DdrEn       (1'b1),
     .DdrMem      (DdrMem),
     .DdrClkHz    (DdrClkHz),
@@ -190,6 +240,8 @@ module tb_bow32;
     .dphy_lp_i        (dphy_lp),
     .dphy_hs_en_o     (dphy_hs_en),
     .dphy_rx_data_i   (dphy_rx_data),
+    .dphy_rx_valid_i  (dut_rx_valid),
+    .dphy_phy_rdy_i   (dut_phy_rdy),
     .dphy_dly_tap_o   (dphy_dly_tap),
     .dphy_dly_load_o  (dphy_dly_load),
     .dphy_dly_tap_i   (dphy_dly_tap_rb),
@@ -448,13 +500,28 @@ module tb_bow32;
   string        log0 = "", log1 = "";
   string        line0 = "", line1 = "";
 
-  // csi2 test: a failed check of the firmware, or a command answered with
-  // "error" (every command of this test must succeed), stops the simulation
-  // at once
+  // csi2 / csi2_274 test: a failed check of the firmware, or a command
+  // answered with "error" (every command of this test must succeed), stops
+  // the simulation at once; camera274: an error message or a trap, except
+  // for the commands that must fail (err_ok)
+  bit err_ok = 1'b0;
+
   function automatic void check_line0(string line);
-    if (test == "csi2" && (contains(line, "[FAIL]") || contains(line, "csi2_test: FAIL") ||
-                           (line.len() >= 5 && line.substr(0, 4) == "error"))) begin
+    if ((test == "csi2" || test == "csi2_274") &&
+        (contains(line, "[FAIL]") || contains(line, "csi2_test: FAIL") ||
+         (line.len() >= 5 && line.substr(0, 4) == "error"))) begin
       $fatal(1, "csi2_test reported a failure: %s", line);
+    end
+    if (test == "camera274" && !err_ok &&
+        ((line.len() >= 5 && line.substr(0, 4) == "error") || contains(line, "[trap]") ||
+         contains(line, "calibration failed"))) begin
+      $fatal(1, "the camera app reported a failure: %s", line);
+    end
+    // video274: every command must succeed, the encoder must not drop pixels
+    if (test == "video274" &&
+        ((line.len() >= 5 && line.substr(0, 4) == "error") || contains(line, "[trap]") ||
+         contains(line, "warning") || contains(line, "calibration failed"))) begin
+      $fatal(1, "the video app reported a failure: %s", line);
     end
     if (test == "mkv" && (contains(line, " FAIL") || contains(line, "mkv: FAIL") ||
                           (line.len() >= 5 && line.substr(0, 4) == "error"))) begin
@@ -665,13 +732,201 @@ module tb_bow32;
 
 
   // ======================================================== camera board models
+  // ------------------------------------------------------ IMX274 registers
+  // Imx274 build: the Sony IMX274 of the LI-IMX274MIPI-FMC module, register
+  // map of the datasheet (multi-byte registers LSB first, at the lower
+  // address). XCLR = PA7 driven high: low puts every register back to its
+  // default (among them the probe signature of the driver: MDSEL1..4 = 03 31
+  // 00 09, HMAX 0x0104, VMAX 0x00905, BLKLEVEL 0x32) and holds the I2C
+  // interface; the first access must come >= 20 us after XCLR rises.
+  // Standby cancel sequence, checked:
+  //   step 1  0x3000 = 0x12, PLRD1..5, 0x310B = 0 (PLLs on, last)
+  //   step 2  0x3000 = 0x00 >= 10 ms after the PLL start (+ SYS_MODE 0x303E)
+  //   step 3  0x30F4 = 0 (XMSTA) >= 7 ms after step 2: the stream starts,
+  //           its first frame is not output
+  // 0x3000 bit 0 = 1 (STANDBY) stops the stream at once; the next start
+  // must replay step 1. The waits are checked divided by s274_tdiv (64 after
+  // `simfast on`, which divides the driver's waits by 64). The lanes are
+  // LP-00 in reset and standby (also during step 1), LP-11 from step 2 on
+  // (between bursts). Stopping the stream (standby, reset) while the CSI-2
+  // receiver is enabled is an error: the drop to LP-00 is an LP error there,
+  // the driver stops the receiver first.
+  logic [7:0]  s274_reg [65536];
+  logic [15:0] s274_ptr = '0;
+  int unsigned s274_tdiv = 1;
+  realtime     s274_t_xclr = 0.0;     // XCLR rising edge
+  realtime     s274_t_pll = -1.0;     // step 1: PLLs started (-1: not since the last stop)
+  realtime     s274_t_step2 = -1.0;   // step 2
+  bit          s274_run = 1'b0;       // streaming: step 3 done, no standby / reset since
+  int unsigned s274_starts = 0, s274_stops = 0;
+  wire         s274_xclr = gpioa_oe[7] && gpioa_o[7];
+
+  function automatic void s274_defaults();
+    for (int i = 0; i < 65536; i++) s274_reg[i] = 8'h00;
+    s274_reg[16'h3000] = 8'h13;   // STANDBY, STBLOGIC, STBDV
+    s274_reg[16'h3004] = 8'h03;   // MDSEL1..4 (readout mode 5, no crop)
+    s274_reg[16'h3005] = 8'h31;
+    s274_reg[16'h3007] = 8'h09;
+    s274_reg[16'h300C] = 8'h08;   // SHR
+    s274_reg[16'h3018] = 8'hA3;   // SYNCDRV
+    s274_reg[16'h303E] = 8'h02;   // SYS_MODE
+    s274_reg[16'h3045] = 8'h32;   // BLKLEVEL
+    s274_reg[16'h304C] = 8'h10;   // PLSTMG01
+    s274_reg[16'h306B] = 8'h07;   // MDPLS17
+    s274_reg[16'h30F4] = 8'h01;   // XMSTA
+    s274_reg[16'h30F6] = 8'h04;   // HMAX 0x0104
+    s274_reg[16'h30F7] = 8'h01;
+    s274_reg[16'h30F8] = 8'h05;   // VMAX 0x00905
+    s274_reg[16'h30F9] = 8'h09;
+    s274_reg[16'h310B] = 8'h11;   // STBPL_IF, STBPL_AD: PLLs off
+    s274_reg[16'h3120] = 8'h80;   // PLRD1..5
+    s274_reg[16'h3122] = 8'h03;
+    s274_reg[16'h3129] = 8'h0D;
+    s274_reg[16'h312D] = 8'h03;
+    s274_reg[16'h3130] = 8'hE2;   // WRITE_VSIZE 738
+    s274_reg[16'h3131] = 8'h02;
+    s274_reg[16'h3132] = 8'hDE;   // Y_OUT_SIZE 734
+    s274_reg[16'h3133] = 8'h02;
+    s274_reg[16'h3A41] = 8'h04;   // MDSEL5
+  endfunction
+
+  // n byte register at a, LSB first
+  function automatic int unsigned s274_le(int unsigned a, int unsigned n);
+    int unsigned v;
+    v = 0;
+    for (int i = int'(n) - 1; i >= 0; i--) v = (v << 8) | 32'(s274_reg[a + 32'(i)]);
+    return v;
+  endfunction
+
+  // lanes LP-11 between bursts (all standby bits clear), else LP-00
+  function automatic bit s274_lp11();
+    return s274_xclr && s274_reg[16'h3000] == 8'h00;
+  endfunction
+
+  function automatic void s274_stop(string why);
+    s274_run = 1'b0;
+    s274_stops++;
+    if (dut.u_csi2rx.cfg.phy_en) begin
+      $fatal(1, "IMX274: %s while the CSI-2 receiver is enabled (the lanes drop to LP-00: LP error)",
+             why);
+    end
+    $display("[%0t] tb   | IMX274 %s: stream stopped", $time, why);
+  endfunction
+
+  function automatic void s274_start();
+    if (s274_le(16'h3120, 2) != 32'h00F0 || s274_reg[16'h3122] != 8'h02 ||
+        s274_reg[16'h3129] != 8'h9C || s274_reg[16'h312A] != 8'h02 || s274_reg[16'h312D] != 8'h02) begin
+      $fatal(1, "IMX274: PLRD1..5 not set for INCK 24 MHz at the stream start");
+    end
+    if (s274_reg[16'h303E] != 8'h02) begin
+      $fatal(1, "IMX274: SYS_MODE (0x303E) = %0d, the lanes run at 1440 Mbit/s with 2",
+             s274_reg[16'h303E]);
+    end
+    s274_run = 1'b1;
+    s274_starts++;
+    $display("[%0t] tb   | IMX274 streaming (start %0d)", $time, s274_starts);
+  endfunction
+
+  function automatic void s274_write(logic [15:0] a, logic [7:0] v);
+    realtime now;
+    now = csi2_now();
+    s274_reg[a] = v;
+    case (a)
+      16'h3000: begin
+        if (v[0]) begin                                  // STANDBY: at once
+          if (s274_run) s274_stop("standby");
+          s274_t_pll   = -1.0;
+          s274_t_step2 = -1.0;
+        end else if (v == 8'h00) begin                   // step 2
+          if (s274_t_pll < 0.0) begin
+            $fatal(1, "IMX274: standby cancel step 2 (0x3000 = 0) without step 1 (PLLs off)");
+          end
+          if (now - s274_t_pll < 10.0e6 / real'(s274_tdiv)) begin
+            $fatal(1, "IMX274: step 2 %0.1f us after the PLL start, needs >= %0.1f us",
+                   (now - s274_t_pll) / 1000.0, 10.0e3 / real'(s274_tdiv));
+          end
+          if (s274_t_step2 < 0.0) s274_t_step2 = now;
+          $display("[%0t] tb   | IMX274 standby cancel step 2", $time);
+        end
+      end
+      16'h310B: begin                                    // PLLs on (step 1, after 0x3000 = 0x12)
+        if (v == 8'h00 && s274_reg[16'h3000] == 8'h12) s274_t_pll = now;
+      end
+      16'h30F4: begin                                    // XMSTA = 0: master start (step 3)
+        if (!v[0]) begin
+          if (s274_t_step2 < 0.0 || s274_reg[16'h3000] != 8'h00) begin
+            $fatal(1, "IMX274: step 3 (0x30F4 = 0) before step 2 (0x3000 = 0)");
+          end
+          if (now - s274_t_step2 < 7.0e6 / real'(s274_tdiv)) begin
+            $fatal(1, "IMX274: step 3 %0.1f us after step 2, needs >= %0.1f us",
+                   (now - s274_t_step2) / 1000.0, 7.0e3 / real'(s274_tdiv));
+          end
+          if (!s274_run) s274_start();
+        end
+      end
+      default: ;
+    endcase
+  endfunction
+
+  // XCLR high for 20 us: the I2C interface answers (an earlier access is a
+  // driver error)
+  function automatic bit s274_i2c_ready();
+    if (!s274_xclr) return 1'b0;
+    if (csi2_now() - s274_t_xclr < 20_000.0) begin
+      $fatal(1, "IMX274: I2C access %0.1f us after XCLR rose, needs >= 20 us",
+             (csi2_now() - s274_t_xclr) / 1000.0);
+    end
+    return 1'b1;
+  endfunction
+
+  // I2C bytes: 16 bit index (MSB first), then data with auto increment
+  function automatic logic [7:0] s274_read();
+    logic [7:0] b;
+    b = s274_reg[s274_ptr];
+    s274_ptr++;
+    return b;
+  endfunction
+
+  function automatic void s274_rx_byte(int unsigned n, logic [7:0] b);
+    if (n == 0) begin
+      s274_ptr[15:8] = b;
+    end else if (n == 1) begin
+      s274_ptr[7:0] = b;
+    end else begin
+      s274_write(s274_ptr, b);
+      s274_ptr++;
+    end
+  endfunction
+
+  initial if (Imx274) s274_defaults();
+
+  // XCLR: reset (stream cut, registers at their defaults) while low
+  bit s274_xclr_q = 1'b0;
+
+  always @(posedge clk) begin
+    if (Imx274 && s274_xclr != s274_xclr_q) begin
+      s274_xclr_q = s274_xclr;
+      if (s274_xclr) begin
+        s274_t_xclr = csi2_now();
+      end else begin
+        if (s274_run) s274_stop("reset (XCLR low)");
+        s274_defaults();
+        s274_t_pll   = -1.0;
+        s274_t_step2 = -1.0;
+      end
+    end
+  end
+
   // ------------------------------------------------------------- I2C devices
-  // TCA9546A switch at 0x74 (one control byte = channel enables) and, behind
-  // its channel 2, the IMX219 at 0x10: 16 bit register address, then data
-  // bytes with auto increment. The sensor only answers when it is powered
+  // KV260: TCA9546A switch at 0x74 (one control byte = channel enables) and,
+  // behind its channel 2, the IMX219 at 0x10: 16 bit register address, then
+  // data bytes with auto increment. The sensor only answers when it is powered
   // (PA7 = RPI_ENABLE driven high). The sensor stretches SCL now and then.
-  localparam logic [6:0] TcaAddr = 7'h74;
-  localparam logic [6:0] ImxAddr = 7'h10;
+  // Imx274 build: only the IMX274 at 0x1A (no switch), same protocol, while
+  // XCLR (PA7) has been high for 20 us (s274_* above).
+  localparam logic [6:0] TcaAddr  = 7'h74;
+  localparam logic [6:0] ImxAddr  = 7'h10;
+  localparam logic [6:0] S274Addr = 7'h1A;
 
   typedef enum int {I2cIdle, I2cAddr, I2cAckA, I2cRx, I2cAckRx, I2cTx, I2cAckTx} i2c_state_e;
 
@@ -696,6 +951,7 @@ module tb_bow32;
   function automatic logic [7:0] i2c_tx_byte();
     logic [7:0] b;
     if (i2c_dev == 1) return tca_ctrl;
+    if (i2c_dev == 3) return s274_read();
     b = imx_reg[imx_ptr];
     imx_ptr++;
     return b;
@@ -704,6 +960,8 @@ module tb_bow32;
   function automatic void i2c_rx_byte(logic [7:0] b);
     if (i2c_dev == 1) begin
       tca_ctrl = b;
+    end else if (i2c_dev == 3) begin
+      s274_rx_byte(i2c_nbytes, b);
     end else if (i2c_nbytes == 0) begin
       imx_ptr[15:8] = b;
     end else if (i2c_nbytes == 1) begin
@@ -752,8 +1010,12 @@ module tb_bow32;
       case (i2c_st)
         I2cAddr: if (i2c_bit == 8) begin
           i2c_rw  = i2c_sh[0];
-          i2c_dev = (i2c_sh[7:1] == TcaAddr) ? 1 :
-                    (i2c_sh[7:1] == ImxAddr && tca_ctrl[2] && cam_powered) ? 2 : 0;
+          if (!Imx274) begin
+            i2c_dev = (i2c_sh[7:1] == TcaAddr) ? 1 :
+                      (i2c_sh[7:1] == ImxAddr && tca_ctrl[2] && cam_powered) ? 2 : 0;
+          end else begin
+            i2c_dev = (i2c_sh[7:1] == S274Addr && s274_i2c_ready()) ? 3 : 0;
+          end
           if (i2c_dev != 0) begin
             slv_sda_low = 1'b1;                                   // ACK
             i2c_st      = I2cAckA;
@@ -897,7 +1159,8 @@ module tb_bow32;
   localparam int unsigned VblankNs = 20_000;
   localparam logic [7:0]  BadSync  = 8'hB9;      // sync byte with its first bit flipped
 
-  csi2_tx_model #(.Lanes(2)) u_csi (
+  // (Imx274 build: 4 lanes, Versal PHY mode, delays in the video clock domain)
+  csi2_tx_model #(.Lanes(CsiLanes)) u_csi (
     .byte_clk_o  (dphy_byte_clk),
     .byte_ce_i   (dphy_byte_ce),
     .byte_rst_i  (dphy_byte_rst),
@@ -906,9 +1169,12 @@ module tb_bow32;
     .lp_o        (dphy_lp),
     .hs_en_i     (dphy_hs_en),
     .rx_data_o   (dphy_rx_data),
+    .rx_valid_o  (dphy_rx_valid),
     .dly_tap_i   (dphy_dly_tap),
     .dly_load_i  (dphy_dly_load),
-    .dly_tap_o   (dphy_dly_tap_rb)
+    .dly_tap_o   (dphy_dly_tap_rb),
+    .ctrl_clk_i  (Imx274 ? vclk : 1'b0),
+    .phy_rdy_o   (dphy_phy_rdy)
   );
 
   // Frame format of the stream (stream-on) and of the frame (frame start)
@@ -975,14 +1241,15 @@ module tb_bow32;
   // Would the sync search of the receiver (a zero byte, then 0xB8, at any
   // bit offset; bow_dphy_align) lock on lane 1 of a burst with this packet
   // although the lane's sync byte is `sync`? Bits after the HS-zero: the
-  // sync byte, the odd packet bytes, then the HS-trail constant.
-  function automatic bit lane1_locks(csi2_bytes_t pkt, logic [7:0] sync);
+  // sync byte, the packet bytes of lane 1 (1, 1 + lanes, ...), then the
+  // HS-trail constant.
+  function automatic bit lane1_locks(csi2_bytes_t pkt, logic [7:0] sync, int unsigned lanes = 2);
     byte unsigned lane [$];
     logic [15:0]  w;
     logic         trail;
     lane.delete();
     lane.push_back(sync);
-    for (int unsigned k = 1; k < pkt.size(); k += 2) lane.push_back(pkt[k]);
+    for (int unsigned k = 1; k < pkt.size(); k += lanes) lane.push_back(pkt[k]);
     w = '0;
     foreach (lane[i]) begin
       for (int j = 0; j < 8; j++) begin
@@ -1089,7 +1356,7 @@ module tb_bow32;
   bit          imx_powered_up = 1'b0;
 
   initial begin : imx_stream
-    forever begin
+    if (!Imx274) forever begin
       while (!imx_streaming()) #1000;
       if (!imx_powered_up) begin
         u_csi.idle(1000);              // the lanes leave LP-00
@@ -1113,6 +1380,374 @@ module tb_bow32;
           #(VblankNs);
         end
       end
+    end
+  end
+
+  // ------------------------------------------------------ IMX274 CSI-2 stream
+  // Imx274 build: csi2_tx_model (4 lanes, Versal PHY mode) plays the sensor
+  // and the XPHY receive I/O; the lanes are LP-00 / LP-11 as above. While
+  // streaming, the sensor latches the frame format at every frame start
+  // (s274_latch: readout mode, crop, timing, controls; REGHOLD keeps the
+  // last; SHR takes effect one frame later than the others) and sends, one
+  // packet per HS burst, in real time: FS (frame number 1, 2, ...), then one
+  // CSI-2 line slot of 2 HMAX periods (72 MHz) per packet, starting 1 HMAX
+  // after the FS: the embedded data line (DT 0x12), WRITE_VSIZE - Y_OUT_SIZE
+  // optical black lines (DT 0x37, BLKLEVEL) and Y_OUT_SIZE RAW10 lines (DT
+  // 0x2B), FE after the last line; the next FS comes HMAX x VMAX after this
+  // one. A change of readout mode, vertical crop or flip (mode transition)
+  // and the first frame after a start are not output (blank frame period).
+  // The clock lane stays in HS from the FS to the FE (s274_contclk = 1, like
+  // the IMX219) or enters HS for every burst (0). A stop (standby, reset)
+  // lets the burst in progress end, cuts the frame (no FE), then the lanes
+  // drop to LP-00.
+  int unsigned f274_mode = 5, f274_hbin = 3, f274_w = 0, f274_h = 0, f274_ob = 0;
+  int unsigned f274_hmax = 260, f274_vmax = 2309, f274_tp = 0;
+  int unsigned f274_pgc = 0, f274_dgain = 0, f274_black = 50, f274_exp = 4, f274_exp_q = 4;
+  bit          f274_vflip = 1'b0;
+  logic [79:0] f274_sig = '0;          // registers of a mode transition, last frame
+  int unsigned f274_num = 0;           // FS frame number
+  int unsigned s274_frames = 0, s274_late = 0;
+  bit          s274_contclk = 1'b1;
+
+  localparam logic [9:0] S274On  = 10'h3C0;   // colour bars, as the IMX219 model
+  localparam logic [9:0] S274Off = 10'h040;
+
+  // Latch the frame format (frame start; first: the first frame after a
+  // start) and check that the driver programmed a consistent readout mode,
+  // crop and timing. Returns 1 when this frame is not output: a mode
+  // transition, or an inconsistent format while streaming (a frame start
+  // between two register writes of the driver; counted in s274_bad). An
+  // inconsistent format at the stream start is an error, and so is one
+  // while streaming outside a window around a `mode` command (s274_win_cmd
+  // while the test waits for its answer, then s274_win more frame starts).
+  // The driver restarts the stream for a new mode, and writes a flip under
+  // REGHOLD (held registers stay out of the frame format until it is
+  // cleared), so none is expected even there: flips get no window.
+  int unsigned s274_bad = 0, s274_win = 0, s274_latched = 0;   // latched: stream starts checked
+  bit          s274_win_cmd = 1'b0;
+
+  function automatic bit s274_latch(bit first);
+    int unsigned mode, hbin, hstep, veff, ob, base4, vcutm, md5, hmax_min, shr_min;
+    int unsigned x0, x1, w, vcut, kept, start, wsize, ysize, vmax_min, hmax, vmax, shr, pgc;
+    logic [11:0] pos;
+    logic [79:0] sig;
+    bit          hcrop, vcrop, vflip, trans, win;
+    string       err;
+    win = s274_win_cmd || s274_win != 0;
+    if (!first && !s274_win_cmd && s274_win != 0) s274_win--;
+    if (s274_reg[16'h302D][0] && !first) return 1'b0;               // REGHOLD
+    err  = "";
+    mode = 5; hbin = 3; hstep = 12; veff = 734; ob = 4; base4 = 'h09; vcutm = 3; md5 = 'h04;
+    hmax_min = 260; shr_min = 8;
+    case ({s274_reg[16'h3004], s274_reg[16'h3005], s274_reg[16'h3006]})
+      24'h033100: ;
+      24'h022100: begin mode = 3; hbin = 2; hstep = 24; veff = 1094; ob = 8; base4 = 'h11;
+                        vcutm = 2; md5 = 'h08; end
+      24'h010100: begin mode = 1; hbin = 1; hstep = 12; veff = 2174; ob = 8; base4 = 'h02;
+                        vcutm = 1; md5 = 'h08; hmax_min = 263; shr_min = 12; end
+      default: err = $sformatf("MDSEL1..3 = %02x %02x %02x is not readout mode 1, 3 or 5",
+                               s274_reg[16'h3004], s274_reg[16'h3005], s274_reg[16'h3006]);
+    endcase
+    if (err == "" && (s274_reg[16'h30E2] != 8'(vcutm) || s274_reg[16'h3A41] != 8'(md5) ||
+                      s274_reg[16'h306B] != 8'h05 || s274_reg[16'h30EE] != 8'h01)) begin
+      err = $sformatf("VCUTMODE / MDSEL5 / MDPLS17 / PSMOVEN %02x %02x %02x %02x do not match mode %0d",
+                      s274_reg[16'h30E2], s274_reg[16'h3A41], s274_reg[16'h306B], s274_reg[16'h30EE],
+                      mode);
+    end
+    // horizontal: HTRIMMING in pixels before binning, whole steps
+    hcrop = s274_reg[16'h3037][0];
+    x0    = s274_le(16'h3038, 2) & 32'h1FFF;
+    x1    = s274_le(16'h303A, 2) & 32'h1FFF;
+    if (err == "" && hcrop && (x0 % hstep != 0 || x1 % hstep != 0 || x1 > 3864 || x1 < x0 + 144 ||
+                               (x1 - x0) % hbin != 0)) begin
+      err = $sformatf("HTRIMMING %0d..%0d (mode %0d: steps of %0d, END <= 3864, >= 144 wide)", x0,
+                      x1, mode, hstep);
+    end
+    w = hcrop ? (x1 - x0) / hbin : 3864 / hbin;
+    if (err == "" && w % 4 != 0) err = $sformatf("%0d pixels per line, RAW10 needs a multiple of 4", w);
+    // vertical: VWIDCUT lines cut on both sides, window start 2 x VWINPOS
+    // (two's complement, negative with the vertical flip)
+    vflip = s274_reg[16'h301A][0];
+    vcrop = s274_reg[16'h30DD][0];
+    vcut  = s274_le(16'h30DE, 2) & 32'h7FF;
+    pos   = 12'(s274_le(16'h30E0, 2));
+    kept  = veff;
+    if (vcrop) begin
+      start = 2 * ((pos[11] ? 32'(-pos) : 32'(pos)) & 32'hFFF);
+      kept  = (2 * vcut < veff) ? veff - 2 * vcut : 0;
+      if (err == "" && (kept == 0 || start + kept > veff || (pos != 0 && pos[11] != vflip))) begin
+        err = $sformatf("vertical crop VWIDCUT %0d VWINPOS %03x (flip %0d) outside the %0d lines of mode %0d",
+                        vcut, pos, vflip, veff, mode);
+      end
+    end
+    if (err == "" && s274_reg[16'h3007] != 8'(base4 | (vcrop ? 'hA0 : 0))) begin
+      err = $sformatf("MDSEL4 = %02x, mode %0d %s crop needs %02x", s274_reg[16'h3007], mode,
+                      vcrop ? "with" : "without", base4 | (vcrop ? 'hA0 : 0));
+    end
+    wsize = s274_le(16'h3130, 2) & 32'h1FFF;
+    ysize = s274_le(16'h3132, 2) & 32'h1FFF;
+    if (err == "" && (ysize != kept || wsize != ysize + ob)) begin
+      err = $sformatf("WRITE_VSIZE %0d / Y_OUT_SIZE %0d, expected %0d / %0d (mode %0d, %0d OB lines)",
+                      wsize, ysize, kept + ob, kept, mode, ob);
+    end
+    // timing and controls
+    hmax = s274_le(16'h30F6, 2);
+    vmax = s274_le(16'h30F8, 3) & 32'hFFFFF;
+    if (mode == 1 && hcrop && (x1 - x0 + 15) / 16 + 22 > hmax_min) hmax_min = (x1 - x0 + 15) / 16 + 22;
+    vmax_min = 2 * (1 + wsize) + 13;
+    if (err == "" && (hmax < hmax_min || vmax < vmax_min)) begin
+      err = $sformatf("HMAX %0d / VMAX %0d below the minimum %0d / %0d", hmax, vmax, hmax_min,
+                      vmax_min);
+    end
+    shr = s274_le(16'h300C, 2);
+    if (err == "" && (shr < shr_min || shr + 4 > vmax || s274_le(16'h300E, 2) != 0)) begin
+      err = $sformatf("SHR %0d outside %0d..VMAX - 4 = %0d, or SVR %0d != 0", shr, shr_min, vmax - 4,
+                      s274_le(16'h300E, 2));
+    end
+    pgc = s274_le(16'h300A, 2) & 32'h7FF;
+    if (err == "" && (pgc > 1957 || s274_reg[16'h3012] > 8'd6)) begin
+      err = $sformatf("PGC %0d (max 1957) / DGAIN %0d (max 6)", pgc, s274_reg[16'h3012]);
+    end
+    if (err == "" && (!(s274_reg[16'h303C] inside {8'h00, 8'h11}) || s274_reg[16'h303D] > 8'd11)) begin
+      err = $sformatf("test pattern registers 0x303C/D = %02x %02x", s274_reg[16'h303C],
+                      s274_reg[16'h303D]);
+    end
+    if (err != "") begin
+      if (first) $fatal(1, "IMX274 at the stream start: %s", err);
+      if (!win) begin
+        $fatal(1, "IMX274: frame start between two register writes of the driver (outside a mode command; flips go under REGHOLD): %s",
+               err);
+      end
+      s274_bad++;
+      $display("[%0t] tb   | IMX274: frame not output: %s", $time, err);
+      return 1'b1;
+    end
+    sig   = {8'(mode), s274_reg[16'h3007], 7'(0), vflip, 7'(0), vcrop, 16'(vcut), 4'(0), pos,
+             16'(wsize)};
+    trans = !first && sig != f274_sig;
+    f274_sig   = sig;
+    f274_mode  = mode;
+    f274_hbin  = hbin;
+    f274_w     = w;
+    f274_h     = ysize;
+    f274_ob    = ob;
+    f274_hmax  = hmax;
+    f274_vmax  = vmax;
+    f274_vflip = vflip;
+    f274_tp    = (s274_reg[16'h303C] == 8'h11) ? 32'(s274_reg[16'h303D]) + 1 : 0;
+    f274_pgc   = pgc;
+    f274_dgain = s274_reg[16'h3012];
+    f274_black = s274_reg[16'h3045];
+    // SHR (frame latched *2): the value written in frame n counts from n + 2
+    f274_exp   = first ? vmax - shr : f274_exp_q;
+    f274_exp_q = vmax - shr;
+    if (first || trans) begin
+      $display("[%0t] tb   | IMX274 %s %0dx%0d RAW10, mode %0d, columns %0d..%0d, lines %0d (flip %0d), %0d OB lines, HMAX %0d VMAX %0d, test pattern %0d",
+               $time, first ? "stream" : "mode transition:", f274_w, f274_h, mode, hcrop ? x0 : 0,
+               hcrop ? x1 : 3864, kept, vflip, ob, hmax, vmax, f274_tp);
+    end
+    if (first) s274_latched++;
+    return trans;
+  endfunction
+
+  // RAW10 pixel x of line y. RGGB at the top left; the vertical flip mirrors
+  // the lines (line 0 shows sensor line H - 1: GBRG). Test patterns (0x303D +
+  // 1, the menu of the Linux driver, 12 bit values >> 2, no black level):
+  // 1..4 solid 000h/FFFh/555h/AAAh, 5..10 stripes of 2 columns (555h/AAAh,
+  // AAAh/555h, 000h/555h, 555h/000h, 000h/FFFh, FFFh/000h), 11 vertical and
+  // 12 horizontal colour bars (white yellow cyan green magenta red blue
+  // black). Off: a smooth scene whose level follows exposure x analog x
+  // digital gain, with a colour cast (R 5/8, B 13/16), on top of BLKLEVEL.
+  function automatic logic [9:0] s274_pixel(int unsigned x, int unsigned y);
+    int unsigned yy, c, bar;
+    longint unsigned lin, v;
+    bit on, odd;
+    yy  = f274_vflip ? f274_h - 1 - y : y;
+    c   = {yy[0], x[0]};                                   // 0 R, 1 Gr, 2 Gb, 3 B
+    odd = x[1];
+    case (f274_tp)
+      1: return 10'h000;
+      2: return 10'h3FF;
+      3: return 10'h155;
+      4: return 10'h2AA;
+      5: return odd ? 10'h2AA : 10'h155;
+      6: return odd ? 10'h155 : 10'h2AA;
+      7: return odd ? 10'h155 : 10'h000;
+      8: return odd ? 10'h000 : 10'h155;
+      9: return odd ? 10'h3FF : 10'h000;
+      10: return odd ? 10'h000 : 10'h3FF;
+      11, 12: begin
+        bar = (f274_tp == 11) ? (x * 8) / f274_w : (yy * 8) / f274_h;
+        on  = (c == 0) ? (bar inside {0, 1, 4, 5}) : (c == 3) ? (bar inside {0, 2, 4, 6}) : (bar < 4);
+        return on ? S274On : S274Off;
+      end
+      default: ;
+    endcase
+    lin = 32 + (x * 192) / f274_w + (yy * 32) / f274_h;
+    if (c == 0) lin = lin * 5 / 8;
+    if (c == 3) lin = lin * 13 / 16;
+    v = lin * f274_exp * (524288 / (2048 - f274_pgc)) * (64'd1 << f274_dgain) / (256 * 48);
+    if (v > 1023 - f274_black) v = 1023 - f274_black;
+    return 10'(f274_black + v);
+  endfunction
+
+  function automatic csi2_bytes_t s274_line(int unsigned y);
+    logic [9:0] px [$];
+    px.delete();
+    for (int unsigned x = 0; x < f274_w; x++) px.push_back(s274_pixel(x, y));
+    return csi2_raw10(px);
+  endfunction
+
+  // optical black line: BLKLEVEL everywhere
+  function automatic csi2_bytes_t s274_ob_line();
+    logic [9:0] px [$];
+    px.delete();
+    for (int unsigned x = 0; x < f274_w; x++) px.push_back(10'(f274_black));
+    return csi2_raw10(px);
+  endfunction
+
+  // embedded data line, as long as a pixel line, RAW10 packing (every 5th
+  // byte a 0x55 dummy): format code 0x0A, frame number, PGC, SHR, DGAIN,
+  // BLKLEVEL, end code 0x07, then 0x55 padding
+  function automatic csi2_bytes_t s274_emb_line();
+    csi2_bytes_t b;
+    byte unsigned e [$];
+    int unsigned  k;
+    b.delete();
+    e.delete();
+    e.push_back(8'h0A);
+    e.push_back(8'(f274_num));
+    e.push_back(8'(f274_pgc));
+    e.push_back(8'(f274_pgc >> 8));
+    e.push_back(8'(f274_vmax - f274_exp_q));
+    e.push_back(8'((f274_vmax - f274_exp_q) >> 8));
+    e.push_back(8'(f274_dgain));
+    e.push_back(8'(f274_black));
+    e.push_back(8'h07);
+    k = 0;
+    for (int unsigned i = 0; i < f274_w * 5 / 4; i++) begin
+      if (i % 5 == 4) begin
+        b.push_back(8'h55);
+      end else begin
+        b.push_back((k < e.size()) ? e[k] : 8'h55);
+        k++;
+      end
+    end
+    return b;
+  endfunction
+
+  initial begin : s274_stream
+    csi2_flags_t f, fl;
+    csi2_bytes_t pay, pkt;
+    realtime     t0, tw, hmax_ns;
+    int unsigned d, k, y, nslot;
+    bit          bad_done;
+    logic [15:0] crc;
+    if (Imx274) forever begin
+      // reset, standby, start sequence: LP-00 / LP-11, clock lane LP
+      while (!s274_run) begin
+        if (!u_csi.busy() && !u_csi.clk_running) u_csi.lp00 = !s274_lp11();
+        #1000;
+      end
+      void'(s274_latch(1'b1));
+      // the first frame after the start is not output
+      t0 = csi2_now();
+      tw = t0 + real'(f274_hmax) * real'(f274_vmax) * 1000.0 / 72.0;
+      while (s274_run && csi2_now() < tw) begin
+        d = int'(tw - csi2_now());
+        #((d > 1000) ? 1000 : (d == 0) ? 1 : d);
+      end
+      while (s274_run) begin
+        t0 = csi2_now();
+        if (!s274_latch(1'b0)) begin
+          hmax_ns   = real'(f274_hmax) * 1000.0 / 72.0;
+          f         = csi2_flags();
+          f274_num  = f274_num % 65535 + 1;
+          inj_frame = inj_req;
+          inj_req   = 1'b0;
+          bad_done  = 1'b0;
+          u_csi.contclk = s274_contclk;
+          u_csi.push_short(0, 8'h00, f274_num, f);                       // FS
+          nslot = 1 + f274_ob + f274_h;
+          k = 0;
+          while (k < nslot && s274_run) begin
+            tw = t0 + real'(2 * k + 1) * hmax_ns;                         // line slot
+            while (s274_run && csi2_now() < tw) begin
+              d = int'(tw - csi2_now());
+              #((d > 1000) ? 1000 : (d == 0) ? 1 : d);
+            end
+            if (!s274_run) break;
+            if (u_csi.busy()) s274_late++;
+            if (k == 0) begin
+              u_csi.push_long(0, 8'h12, s274_emb_line(), f);
+            end else if (k <= f274_ob) begin
+              u_csi.push_long(0, 8'h37, s274_ob_line(), f);
+            end else begin
+              // error injection as in the IMX219 model (csi2_274 test)
+              y   = k - 1 - f274_ob;
+              pay = s274_line(y);
+              fl  = f;
+              if (inj_frame && y == 8) fl.hdr_flip_a = 8'sd9;
+              if (inj_frame && y == 16) fl.pay_flip = 3;
+              if (inj_frame && y >= 24 && !bad_done) begin
+                pkt = csi2_header(0, 32'h2B, pay.size());
+                foreach (pay[i]) pkt.push_back(pay[i]);
+                crc = csi2_crc(pay);
+                pkt.push_back(crc[7:0]);
+                pkt.push_back(crc[15:8]);
+                if (!lane1_locks(pkt, BadSync, CsiLanes)) begin
+                  fl.sync[1] = BadSync;
+                  bad_done   = 1'b1;
+                end
+              end
+              u_csi.push_long(0, 8'h2B, pay, fl);
+            end
+            k++;
+          end
+          while (s274_run && u_csi.busy()) #100;
+          if (s274_run) begin
+            u_csi.push_short(0, 8'h01, f274_num, f);                     // FE
+            while (u_csi.busy()) #100;
+            s274_frames++;
+            if (inj_frame) begin
+              if (!bad_done) $fatal(1, "IMX274: no line for the bad sync byte");
+              inj_sent = 1'b1;
+            end
+          end
+          u_csi.contclk = 1'b0;                                          // LP in the blanking
+        end
+        tw = t0 + real'(f274_hmax) * real'(f274_vmax) * 1000.0 / 72.0;  // next FS
+        while (s274_run && csi2_now() < tw) begin
+          d = int'(tw - csi2_now());
+          #((d > 1000) ? 1000 : (d == 0) ? 1 : d);
+        end
+      end
+      // stopped: the burst in progress ends, the clock lane leaves HS, then
+      // the lanes drop to LP-00 (frame cut, no FE)
+      while (u_csi.busy()) #100;
+      u_csi.contclk = 1'b0;
+      #100;
+      while (u_csi.busy()) #100;
+    end
+  end
+
+  // Run-time knobs of the Versal PHY in the camera top
+  // (bow32_huins_vp1902_cam_top), driven into the PHY model: PA4 (OUT & DIR)
+  // = reinit_i, PA5 = burst_rst_en_i (BurstRxRst), both 0 after reset (the
+  // firmware sets PA5 = 1 at every receiver start); PB6 / PB7 read PHY_RDY /
+  // DLY_RDY of every nibble (both the PHY_RDY of the model).
+  // +S274_BURSTRST=<0|1>: BurstRxRst = 0 / 1 whatever PA5 says.
+  int          s274_brst_force = -1;      // -1: PA5
+  int unsigned s274_reinits = 0;          // PA4 pulses seen
+
+  always @(posedge clk) begin
+    if (Imx274) begin
+      if ((gpioa_oe[4] && gpioa_o[4]) && !u_csi.phy_reinit) s274_reinits++;
+      u_csi.phy_reinit  = gpioa_oe[4] && gpioa_o[4];
+      u_csi.v_burst_rst = (s274_brst_force >= 0) ? (s274_brst_force != 0)
+                                                 : (gpioa_oe[5] && gpioa_o[5]);
+      ext_b_val[6]      = dphy_phy_rdy;
+      ext_b_val[7]      = dphy_phy_rdy;
     end
   end
 
@@ -1418,14 +2053,16 @@ module tb_bow32;
   endtask
 
   // Stream transfer of `send`: "H264 <bytes> <crc> <frames> <w> <h> <num> <den>"
-  // line + raw bytes; written to build/sim/h264.hex for the decoder check of
-  // sim/Makefile (tools/h264/h264_model.py decode --bars).
-  task automatic receive_h264(output int unsigned frames);
+  // line + raw bytes, a stream of ew x eh; written to build/sim/<file> for the
+  // decoder check of sim/Makefile (tools/h264/h264_model.py decode --bars).
+  task automatic receive_h264(output int unsigned frames, input int unsigned ew = 64,
+                              input int unsigned eh = 48, input string file = "h264.hex");
     string        line;
     int unsigned  len, w, h, num, den, fd;
     logic [31:0]  crc;
     byte unsigned b, data[$];
     line = "";
+    data.delete();
     forever begin
       while (rxq0.size() == 0) @(posedge clk);
       b = rxq0.pop_front();
@@ -1444,13 +2081,120 @@ module tb_bow32;
       data.push_back(rxq0.pop_front());
     end
     if (crc32(data) != crc) $fatal(1, "H.264 stream CRC mismatch");
-    if (w != 64 || h != 48) $fatal(1, "H.264 stream of %0dx%0d, expected 64x48", w, h);
-    fd = $fopen("h264.hex", "w");
+    if (w != ew || h != eh) $fatal(1, "H.264 stream of %0dx%0d, expected %0dx%0d", w, h, ew, eh);
+    fd = $fopen(file, "w");
     foreach (data[i]) $fdisplay(fd, "%02x", data[i]);
     $fclose(fd);
-    $display("[%0t] tb   | received H.264 stream: %0d bytes, %0d frames %0dx%0d @ %0d/%0d fps, crc %08x ok",
-             $time, len, frames, w, h, num, den, crc);
+    $display("[%0t] tb   | received H.264 stream: %0d bytes, %0d frames %0dx%0d @ %0d/%0d fps, crc %08x ok%s",
+             $time, len, frames, w, h, num, den, crc, file == "h264.hex" ? "" : {" (", file, ")"});
   endtask
+
+  // ------------------------------------------------------- IMX274 tests
+  // Eyes of the data lanes (TX model delay taps, BISC 97/112/88/120):
+  //   camera274 (calibration step 16): every BISC delay inside its eye, so the
+  //     firmware walks each lane outward from it: taps 112/128/88/144, eyes
+  //     144/144/128/144;
+  //   csi2_274 (step 32): lane 2's BISC delay (88) outside its eye, so the
+  //     firmware first sweeps all lanes together (common eye 160..320, centre
+  //     240), then walks each lane: taps 192/224/272/256, eyes 288/288/256/288.
+  int unsigned eye274_lo [4], eye274_hi [4];
+
+  // Send one shell command; returns the log offset to look for its answer.
+  function automatic int unsigned send_cmd(string cmd);
+    int unsigned mark;
+    mark = log0.len();
+    rxq0.delete();
+    uart_send_str(0, {cmd, "\r"});
+    return mark;
+  endfunction
+
+  // "<prefix>t0/t1/t2/t3 eye w0/w1/w2/w3": every tap inside its eye, at most
+  // one step from its centre, every eye width the eye of the model +- 2 steps
+  function automatic void check_cal274(string prefix, int unsigned from, int unsigned step);
+    string       s;
+    int unsigned t [4], w [4], c, e;
+    s = log0_line(prefix, from);
+    if ($sscanf(s, "%d/%d/%d/%d eye %d/%d/%d/%d", t[0], t[1], t[2], t[3], w[0], w[1], w[2],
+                w[3]) != 8) begin
+      $fatal(1, "no 4 lane calibration result after '%s'", prefix);
+    end
+    for (int l = 0; l < 4; l++) begin
+      c = (eye274_lo[l] + eye274_hi[l]) / 2;
+      e = eye274_hi[l] - eye274_lo[l];
+      if (t[l] < eye274_lo[l] || t[l] > eye274_hi[l] || t[l] + step < c || t[l] > c + step ||
+          w[l] + 2 * step < e || w[l] > e + 2 * step) begin
+        $fatal(1, "lane %0d: calibrated tap %0d eye %0d, model eye %0d..%0d", l, t[l], w[l],
+               eye274_lo[l], eye274_hi[l]);
+      end
+    end
+    $display("[%0t] tb   | 4 lane calibration: taps %0d/%0d/%0d/%0d eye %0d/%0d/%0d/%0d ok", $time,
+             t[0], t[1], t[2], t[3], w[0], w[1], w[2], w[3]);
+  endfunction
+
+  // The 'stat' / 'csi' answer of a 4 lane stream: error counters, the ones
+  // of the injected errors (inj = 1) or none
+  function automatic void check_counters274(int unsigned from, bit inj);
+    string       s;
+    int unsigned ecc0, ecc1, crc, trunc, sot [4], drop, ovf, misc;
+    s = log0_line("  errors: ", from);
+    if ($sscanf(s, "ecc %d/%d crc %d trunc %d sot %d/%d/%d/%d drop %d ovf %d misc %d", ecc0, ecc1,
+                crc, trunc, sot[0], sot[1], sot[2], sot[3], drop, ovf, misc) != 11) begin
+      $fatal(1, "no 4 lane error counters in the answer: '%s'", s);
+    end
+    if (inj ? (ecc0 != 1 || ecc1 != 0 || crc != 1 || trunc != 0 || sot[0] != 0 || sot[1] != 1 ||
+               sot[2] != 0 || sot[3] != 0 || ovf != 0 || misc < 1)
+            : (ecc0 + ecc1 + crc + trunc + sot[0] + sot[1] + sot[2] + sot[3] + ovf + misc != 0)) begin
+      $fatal(1, "error counters '%s', expected %s", s,
+             inj ? "ecc 1/0 crc 1 trunc 0 sot 0/1/0/0 ovf 0 misc >= 1" : "no error");
+    end
+    $display("[%0t] tb   | error counters ok: %s", $time, s);
+  endfunction
+
+  // D-PHY timing of the IMX274 at the limits of the D-PHY specification at
+  // 1440 Mbit/s (UI 0.694 ns; the IMX274's own values are not documented),
+  // in whole byte clock periods (5.556 ns) at or just beyond each limit: the
+  // longest (corner 1: 85 ns + 6 UI = 88.9) or the shortest (corner 2: 40 ns
+  // + 4 UI = 44.4) HS-PREPARE with the shortest HS-PREPARE + HS-ZERO (145 ns
+  // + 10 UI: 155.6; the TX model adds 0..64 ns), the shortest T_LPX (50.0),
+  // HS-TRAIL (60 ns + 4 UI: 66.7), HS-EXIT (100.0), CLK-POST (60 ns + 52 UI:
+  // 100.0), CLK-TRAIL (61.1), the longest CLK-PREPARE (94.4) with the
+  // shortest CLK-PREPARE + CLK-ZERO (300.0)
+  function automatic void s274_dphy_corner(int unsigned corner);
+    u_csi.t_lpx         = 50;
+    u_csi.t_hs_prepare  = (corner == 2) ? 44 : 89;
+    u_csi.t_hs_zero     = (corner == 2) ? 111 : 65;
+    u_csi.t_hs_trail    = 64;
+    u_csi.t_hs_exit     = 100;
+    u_csi.t_clk_prepare = 95;
+    u_csi.t_clk_zero    = 205;
+    u_csi.t_clk_post    = 100;
+    u_csi.t_clk_trail   = 60;
+  endfunction
+
+  // End of an IMX274 test: frames sent on time, the delay load contract of
+  // the Versal PHY (one cycle pulses, stable taps, no load while one is
+  // pending; loads = 1: every lane calibrated), the byte clock gate. The
+  // RX FIFO figures of the PHY model (glitch words, wraps: 8 words lost
+  // each, all stale ones between bursts when the latency is the same on
+  // every lane) are reported; data lost to them would show in the counters.
+  function automatic void check_s274_end(bit loads = 1'b1);
+    $display("[%0t] tb   | IMX274: %0d starts, %0d stops, %0d frames (%0d not output: format between two register writes), ISP output frames %0d (%0dx%0d), D-PHY bursts %0d, late line slots %0d",
+             $time, s274_starts, s274_stops, s274_frames, s274_bad, out_frames, out_w, out_h,
+             u_csi.bursts_done, s274_late);
+    $display("[%0t] tb   | Versal PHY: delay loads %0d/%0d/%0d/%0d, bit flips outside the eye %0d; RX FIFOs (BurstRxRst %0d at the end): %0d glitch words, %0d read gaps, at most %0d words, wraps %0d/%0d/%0d/%0d",
+             $time, u_csi.dly_loads[0], u_csi.dly_loads[1], u_csi.dly_loads[2], u_csi.dly_loads[3],
+             u_csi.flips, u_csi.v_burst_rst, u_csi.v_glitches, u_csi.v_gaps, u_csi.v_occ_max,
+             u_csi.v_wraps[0], u_csi.v_wraps[1], u_csi.v_wraps[2], u_csi.v_wraps[3]);
+    if (s274_frames == 0 || s274_late != 0) $fatal(1, "IMX274: no frame, or line bursts late");
+    if (u_csi.dly_bad != 0 || u_csi.dly_drop != 0) begin
+      $fatal(1, "Versal PHY delay contract: %0d bad loads, %0d dropped loads", u_csi.dly_bad,
+             u_csi.dly_drop);
+    end
+    for (int l = 0; l < 4; l++) begin
+      if (loads && u_csi.dly_loads[l] == 0) $fatal(1, "Versal PHY: no delay load on lane %0d", l);
+    end
+    check_dphy_gate();
+  endfunction
 
   task automatic run_test();
     byte unsigned rsp[$], none[$];
@@ -1659,13 +2403,299 @@ module tb_bow32;
           $fatal(1, "HyperRAM emulator: DBG %08x (HyperBus rule errors)", hr_dbg);
         end
       end
+      // IMX274 camera path (Imx274 build) with sw/apps/camera: detection
+      // (XCLR reset, reset default signature, 100 kHz I2C), a start before
+      // the D-PHY is ready (gives up after 10 ms), then PHY_RDY 1 ms after
+      // the next start: the link is clean at the BISC delays (inside every
+      // eye), so the app keeps them (VT tracked); `cal` then walks the 4
+      // lanes outward from them. Sensor colour bars -> CSI-2 receiver -> ISP
+      // -> capture -> image over UART (RGGB, and GBRG after the vertical flip,
+      // written under REGHOLD: no frame with half of it), AE/AWB on the
+      // scene, a 1920 pixel wide window (readout mode 3 at HMAX 384: receiver
+      // FIFO and ISP at the line rate of the IMX274), stream stop with the
+      // receiver stopped before the sensor standby. Clock lane in HS for a
+      // whole frame.
+      "camera274": begin
+        expect_text(0, "Bow32 camera demo (ISP + IMX274), type h for help");
+        expect_text(0, "camera: IMX274 found (id 0274)");
+        expect_text(0, "csi2rx: Bow32 receiver, 4 lanes, PHY clock 200 MHz");
+        expect_text(0, "> ");
+        s274_tdiv = 64;
+        video_cmd("simfast on", "ok\n> ");
+        video_cmd("sr 3004", "sensor[3004] = 03\nok\n> ");
+        mark = send_cmd("mode 64 48 0");
+        expect_text(0, "note: 64x48 is below the IMX274 minimum window (simulation only)", mark);
+        expect_text(0, "mode 64x48 @1992 fps (HMAX 260 VMAX 139)\nok\n> ", mark);
+        video_cmd("tp 11", "ok\n> ");
+        // D-PHY not ready (XPLL lock + BISC still running)
+        video_cmd("csi", ", PHY not ready\nok\n> ");
+        err_ok = 1'b1;
+        video_cmd("cam", "error: D-PHY not ready (CSI2RX STATUS.PHY_RDY = 0)\nerror\n> ");
+        err_ok = 1'b0;
+        u_csi.t_phy_rdy = 32'(longint'(csi2_now())) + 1_000_000;
+        mark = send_cmd("cam");
+        expect_text(0, "streaming 64x48 RGGB\nok\n> ", mark);
+        expect_text(0, "csi2rx: link ok with the delays in use 97/112/88/120 (kept", mark);
+        if (u_csi.dly_loads[0] + u_csi.dly_loads[1] + u_csi.dly_loads[2] + u_csi.dly_loads[3] != 0) begin
+          $fatal(1, "Versal PHY: delays loaded although the link was clean at the BISC delays");
+        end
+        mark = send_cmd("cal");
+        expect_text(0, "ok\n> ", mark);
+        check_cal274("csi2rx: calibrated taps ", mark, 16);
+        mark = send_cmd("stat");
+        expect_text(0, "ok\n> ", mark);
+        if (log0_line("frame ", mark) == "" || out_w != 64 || out_h != 48) begin
+          $fatal(1, "ISP: no statistics, or output frame %0dx%0d, expected 64x48", out_w, out_h);
+        end
+        mark = send_cmd("csi");
+        expect_text(0, "csi2rx: link ok\n", mark);
+        expect_text(0, "lines/frame 48 wc 80 dt 2b", mark);
+        expect_text(0, "ok\n> ", mark);
+        check_counters274(mark, 1'b0);
+        video_cmd("sr 3045", "sensor[3045] = 32\nok\n> ");
+        // colour bars in the middle rows: RGGB, then GBRG with the vertical flip
+        for (int i = 0; i < 2; i++) begin
+          if (i == 1) video_cmd("flip 0 1", "ok\n> ");
+          video_cmd("cap 0 22 64 4 0", "captured 64x4 (scale 0)\nok\n> ");
+          if (f274_vflip != (i == 1)) $fatal(1, "IMX274: vertical flip %0d at the capture", f274_vflip);
+          mark = send_cmd("dump");
+          receive_image();
+          check_bars();
+          expect_text(0, "END\nok\n> ", mark);
+        end
+        err_ok = 1'b1;
+        video_cmd("flip 1 0", "error: the IMX274 has no horizontal mirror\nerror\n> ");
+        err_ok = 1'b0;
+        video_cmd("flip 0 0", "ok\n> ");
+        // scene: auto exposure (SHR) and gray world white balance
+        video_cmd("tp 0", "ok\n> ");
+        mark = log0.len();
+        video_cmd("ae on", "ok\n> ");
+        video_cmd("awb on", "ok\n> ");
+        expect_text(0, "ae: locked", mark);
+        expect_text(0, "awb: locked", mark);
+        mark = send_cmd("info");
+        expect_text(0, "mode   64x48, HMAX 260, VMAX 139 = 1992 fps", mark);
+        expect_text(0, "ok\n> ", mark);
+        video_cmd("awb off", "ok\n> ");
+        video_cmd("ae off", "ok\n> ");
+        // full width line of the 1080p mode: 2400 byte bursts at 720 MB/s
+        // into the receiver FIFO, 1 pixel per video clock out of it
+        s274_win_cmd = 1'b1;
+        mark = send_cmd("mode 1920 8 0");
+        expect_text(0, "note: 1920x8 is below the IMX274 minimum window (simulation only)", mark);
+        expect_text(0, "(HMAX 384 VMAX 67)", mark);
+        expect_text(0, "streaming 1920x8 RGGB\nok\n> ", mark);
+        s274_win     = 2;
+        s274_win_cmd = 1'b0;
+        mark = send_cmd("stat");
+        expect_text(0, "ok\n> ", mark);
+        if (log0_line("frame ", mark) == "" || out_w != 1920 || out_h != 8) begin
+          $fatal(1, "ISP: no statistics, or output frame %0dx%0d, expected 1920x8", out_w, out_h);
+        end
+        mark = send_cmd("csi");
+        expect_text(0, "csi2rx: link ok\n", mark);
+        expect_text(0, "lines/frame 8 wc 2400 dt 2b", mark);
+        expect_text(0, "ok\n> ", mark);
+        check_counters274(mark, 1'b0);
+        // stop: frame end, receiver off, sensor standby (s274_stop checks)
+        mark = s274_stops;
+        video_cmd("tpg 0", "tpg 0 1920x8\nok\n> ");
+        if (s274_stops != mark + 1 || s274_run) $fatal(1, "IMX274: not stopped by 'tpg 0'");
+        check_s274_end();
+      end
+      // MIPI CSI-2 receiver with sw/apps/csi2_test and the IMX274 (Imx274
+      // build): the PHY knobs of the camera top through `phy` (status with
+      // PB6 / PB7, a re-init on PA4: PHY_RDY drops and comes back with the
+      // BISC delays), then 'test quick' (every check on
+      // 64x48 frames: phy-idle in standby LP-00, link-up, calibration with a
+      // BISC delay outside the eye, integrity with solid 555h/AAAh, packets
+      // FS/EMB/OB/lines/FE, timing, ISP colour bars, VC filter, 3 restarts
+      // with the standby cancel sequence, FS interrupts), injected errors in
+      // the counters of 'stat', raw PHY words of the 4 lanes, then a 1920
+      // pixel wide window (stream restarted by 'mode', then 'stop' and
+      // 'start'). Clock lane in HS for every burst, D-PHY timing at the
+      // limits of the specification with the longest HS-PREPARE (corner 1),
+      // byte clocks without a FIFO read in the Versal PHY model. Every
+      // receiver start of the firmware sets PA5 = 1 (BurstRxRst) with SETTLE
+      // 95 ns, checked after 'test quick' (+S274_PA5, +S274_SETTLE): with
+      // BurstRxRst = 0 the glitch words let the FIFO latency drift up to 8
+      // words, which moves the sync search back into the longest HS-PREPARE
+      // at SETTLE 95 ns (false syncs, lost lines; +S274_BURSTRST=0 shows it).
+      // make -C sim test-extra also runs the firmware built for the other
+      // setting, BurstRxRst = 0 with SETTLE 115 ns (sim/Makefile FW=brst0).
+      "csi2_274": begin
+        int unsigned us, pa5, settle;
+        expect_text(0, "csi2_test: Bow32 MIPI CSI-2 receiver test");
+        expect_text(0, "camera: IMX274 found (id 0274)");
+        expect_text(0, "csi2rx: Bow32 receiver, 4 lanes, PHY clock 200 MHz");
+        expect_text(0, "type h for help\n> ");
+        s274_tdiv = 64;
+        video_cmd("simfast on", "ok\n> ");
+        mark = send_cmd("phy");
+        expect_text(0, "phy: STATUS.PHY_RDY 1, every nibble PHY_RDY 1 DLY_RDY 1 (PB6 PB7), reinit 0 burstrst 0 (PA4 PA5)",
+                    mark);
+        expect_text(0, "delays in use 97/112/88/120\nok\n> ", mark);
+        mark = send_cmd("phy reinit");
+        expect_text(0, "ok\n> ", mark);
+        if ($sscanf(log0_line("phy: PHY_RDY ", mark), "%d us after the reinit pulse", us) != 1 ||
+            s274_reinits != 1 || us + 2 < u_csi.t_reinit / 1000 || us > u_csi.t_reinit / 1000 + 50) begin
+          $fatal(1, "PHY re-init: %0d PA4 pulses, PHY_RDY after '%s'", s274_reinits,
+                 log0_line("phy: PHY_RDY ", mark));
+        end
+        expect_text(0, "delays in use 97/112/88/120", mark);
+        mark = send_cmd("test quick");
+        expect_text(0, "csi2_test: PASS (10/10)\nok\n> ", mark);
+        if (log0_line("[PASS] phy-idle all lanes LP-00", mark) == "") begin
+          $fatal(1, "phy-idle: the IMX274 lanes must be LP-00 in standby");
+        end
+        check_cal274("[PASS] calibrate taps ", mark, 32);
+        // the PHY setting of the firmware's receiver starts: PA5 (BurstRxRst)
+        // and SETTLE = PHY_CFG [7:0] in 5 ns cycles (0x4000_800C: CLK_MISS 5,
+        // CLK_SETTLE 30, LP_FILTER 2)
+        if (!$value$plusargs("S274_PA5=%d", pa5)) pa5 = 1;
+        if (!$value$plusargs("S274_SETTLE=%d", settle)) settle = 95;
+        if ((gpioa_oe[5] && gpioa_o[5]) != (pa5 != 0)) begin
+          $fatal(1, "csi2_test: PA5 %0d after the receiver starts, expected %0d",
+                 gpioa_oe[5] && gpioa_o[5], pa5);
+        end
+        mark = send_cmd("rd 4000800c");
+        expect_text(0, $sformatf("4000800c: 051e02%02x\nok\n> ", (settle * 200 + 500) / 1000), mark);
+        $display("[%0t] tb   | csi2_274: receiver starts with PA5 %0d, SETTLE %0d ns, PHY model BurstRxRst %0d",
+                 $time, pa5, settle, u_csi.v_burst_rst);
+        inject_errors();
+        mark = send_cmd("stat");
+        expect_text(0, "ok\n> ", mark);
+        check_counters274(mark, 1'b1);
+        mark = send_cmd("raw");
+        expect_text(0, "lane 3:", mark);
+        expect_text(0, "ok\n> ", mark);
+        s274_win_cmd = 1'b1;
+        mark = send_cmd("mode 1920 8 0");
+        expect_text(0, "mode 1920x8, HMAX 384 VMAX 67 = frame 357 us\nok\n> ", mark);
+        s274_win     = 2;
+        s274_win_cmd = 1'b0;
+        video_cmd("stop", "ok\n> ");
+        if (s274_run) $fatal(1, "IMX274: still streaming after 'stop'");
+        video_cmd("start", "streaming 1920x8 RAW10, link check ok\nok\n> ");
+        mark = send_cmd("irq");
+        expect_text(0, "FS interrupts in 4 frames\nok\n> ", mark);
+        mark = send_cmd("stat");
+        expect_text(0, "csi2rx: link ok\n", mark);
+        expect_text(0, "lines/frame 8 wc 2400 dt 2b", mark);
+        expect_text(0, "ok\n> ", mark);
+        check_counters274(mark, 1'b0);
+        check_s274_end();
+      end
+      // Video path with sw/apps/video on the IMX274 (Imx274 build): the
+      // camera start of the video app with the real standby cancel waits
+      // (the app has no `simfast`), the IMX274 timing it programs for the
+      // H.264 encoder, sensor colour bars -> CSI-2 receiver -> ISP (YUV) ->
+      // H.264 encoder at the 200 MHz video clock -> DMA -> video RAM ->
+      // stream over UART0, decoded by sim/Makefile (h264_274a.hex,
+      // h264_274b.hex: tools/h264/h264_model.py decode --bars). A 64x48
+      // window, then 1920x32 at the line length the app sets for the encoder
+      // (the stream restarts): no dropped pixel, 3 frames each, then `stop`
+      // (receiver off before the sensor standby). Clock lane in HS for a
+      // whole frame, D-PHY timing at the shortest HS-PREPARE (corner 2).
+      "video274": begin
+        int unsigned frames, coded, w, h, fps, hmax, vmax, load;
+        longint      mbc;
+        string       s;
+        expect_text(0, "camera: IMX274 found (id 0274)");
+        expect_text(0, "csi2rx: Bow32 receiver, 4 lanes, PHY clock 200 MHz");
+        expect_text(0, "h264: Bow32 encoder, max width 2048, 4 strips; DMA 2 channels; video RAM 1024 KiB");
+        expect_text(0, "> ");
+        // AE / AWB off (on by default): on the test pattern AE never locks and
+        // writes the sensor every 3 frames at 100 kHz, which keeps the CPU
+        // away from the shell long enough to lose bytes of a typed command
+        // in the 16 byte UART FIFO
+        video_cmd("ae off", "ok\n> ");
+        video_cmd("awb off", "ok\n> ");
+        video_cmd("tp 11", "ok\n> ");
+        video_cmd("qp 26", "ok\n> ");
+        for (int k = 0; k < 2; k++) begin
+          // 64x48 at the shortest frame (sensor minimum HMAX), then 1920x32
+          // at the encoder line length with a short frame (VMAX)
+          s274_win_cmd = 1'b1;
+          w    = (k == 0) ? 64 : 1920;
+          mark = send_cmd((k == 0) ? "mode 64 48 2000" : "mode 1920 32 900");
+          expect_text(0, "ok\n> ", mark);
+          s = log0_line($sformatf("mode %0dx", w), mark);      // (not the echo of the command)
+          if ($sscanf(s, "%d @%d fps (HMAX %d VMAX %d)", h, fps, hmax, vmax) != 4 ||
+              h != ((k == 0) ? 48 : 32)) begin
+            $fatal(1, "video app: 'mode' answered 'mode %0dx%s'", w, s);
+          end
+          if (k == 0) begin
+            mark = send_cmd("cam");
+            expect_text(0, "ok\n> ", mark);
+          end
+          if (log0_line($sformatf("streaming %0dx%0d @", w, h), mark) == "") begin
+            $fatal(1, "video app: no stream of %0dx%0d", w, h);
+          end
+          s274_win     = 2;
+          s274_win_cmd = 1'b0;
+          if (!s274_run || f274_w != w || f274_h != h || f274_hmax != hmax || f274_vmax != vmax) begin
+            $fatal(1, "IMX274: streaming %0d, %0dx%0d HMAX %0d VMAX %0d, the app said %0dx%0d HMAX %0d VMAX %0d",
+                   s274_run, f274_w, f274_h, f274_hmax, f274_vmax, w, h, hmax, vmax);
+          end
+          mark = send_cmd("rec 3");
+          expect_text(0, "rec: 3 frames, ", mark);
+          expect_text(0, "ok\n> ", mark);
+          rxq0.delete();
+          mark = send_cmd("send");
+          receive_h264(frames, w, h, (k == 0) ? "h264_274a.hex" : "h264_274b.hex");
+          expect_text(0, "END\nok\n> ", mark);
+          if (frames != 3) $fatal(1, "%0d frames in the stream, expected 3", frames);
+          // encoder load at this line length: a strip of 16 lines (32 HMAX at
+          // 72 MHz) against W / 16 macroblocks, at the cycles per macroblock
+          // the engine took (MB_CYCLES of the recording / coded macroblocks)
+          mark = send_cmd("stat");
+          expect_text(0, "record 3 frames", mark);
+          expect_text(0, "ok\n> ", mark);
+          if ($sscanf(log0_line(" frames ", mark), "%d", coded) != 1 || coded == 0 ||
+              $sscanf(log0_line("engine cycles ", mark), "%d", mbc) != 1 || mbc == 0) begin
+            $fatal(1, "video app: no frame count or engine cycles in 'stat'");
+          end
+          mbc  = mbc / (longint'(coded) * (w / 16) * (h / 16));
+          load = 32'((longint'(w / 16) * mbc * 72_000_000 * 100) / (longint'(VidClkHz) * 32 * hmax));
+          $display("[%0t] tb   | video274: %0dx%0d HMAX %0d VMAX %0d, %0d cycles per macroblock: H.264 load %0d %%",
+                   $time, w, h, hmax, vmax, mbc, load);
+          if (load > 100) $fatal(1, "video app: HMAX %0d is too short for the encoder (%0d %%)", hmax, load);
+        end
+        // stop: frame end, receiver off, sensor standby (s274_stop checks)
+        mark = s274_stops;
+        video_cmd("stop", "ok\n> ");
+        if (s274_stops != mark + 1 || s274_run) $fatal(1, "IMX274: not stopped by 'stop'");
+        check_s274_end(1'b0);
+      end
+      // Optional (sim/Makefile test-extra): csi2_test starts the IMX274 in a
+      // full size mode (+S274_GEO, default 1080p; 720p...): the sensor model
+      // checks the register set of the driver when it latches the format at
+      // the stream start (readout mode, crop, timing). Ends there.
+      "geo274": begin
+        string md;
+        if (!$value$plusargs("S274_GEO=%s", md)) md = "1080p";
+        expect_text(0, "type h for help\n> ");
+        s274_tdiv = 64;
+        video_cmd("simfast on", "ok\n> ");
+        mark = send_cmd({"mode ", md});
+        expect_text(0, "ok\n> ", mark);
+        mark = s274_latched;
+        void'(send_cmd("start"));
+        while (s274_latched == mark) @(posedge clk);
+        $display("[%0t] tb   | geo274 %s: %0dx%0d, readout mode %0d (binning %0d), %0d OB lines, HMAX %0d VMAX %0d",
+                 $time, md, f274_w, f274_h, f274_mode, f274_hbin, f274_ob, f274_hmax, f274_vmax);
+      end
       default: $fatal(1, "unknown +TEST=%s", test);
     endcase
   endtask
 
   // ------------------------------------------------------------------ main
   initial begin
-    longint unsigned timeout = 20_000_000;
+    longint unsigned timeout = Imx274 ? 40_000_000 : 20_000_000;
+    int unsigned     contclk;
+    int unsigned     corner;
     if (!$value$plusargs("TEST=%s", test)) test = "boot";
     if (!$value$plusargs("ROM=%s", rom_file)) $fatal(1, "+ROM=<vmem> required");
     void'($value$plusargs("TIMEOUT=%d", timeout));
@@ -1674,11 +2704,59 @@ module tb_bow32;
       $dumpvars(0, tb_bow32);
     end
 
+    // camera274, csi2_274, video274 and geo274 need the IMX274 build, the
+    // other tests the default one
+    if (Imx274 != (test == "camera274" || test == "csi2_274" || test == "video274" ||
+                   test == "geo274")) begin
+      $fatal(1, "test '%s' runs on the %s build of the testbench (sim/Makefile picks it)", test,
+             Imx274 ? "default (Imx274 = 0)" : "IMX274 (Imx274 = 1)");
+    end
+
     // Eye of the data lanes (IDELAY taps): every tap good, except in the
     // csi2 test (and there the reset tap 0 is bad on both lanes)
     if (test == "csi2") begin
-      u_csi.eye_lo = '{100, 180};
-      u_csi.eye_hi = '{300, 400};
+      u_csi.eye_lo[0] = 100;
+      u_csi.eye_lo[1] = 180;
+      u_csi.eye_hi[0] = 300;
+      u_csi.eye_hi[1] = 400;
+    end
+
+    // IMX274 build: Versal PHY mode of the TX model (set at time 0; its RX
+    // FIFOs as in the shipped build: BurstRxRst from PA5, one latency for all
+    // lanes, 20 % glitch words per HS entry of the clock lane), byte clock
+    // 180 MHz (1440 Mbit/s per lane), PHY_RDY 40 us after the start and 40 us
+    // after a re-init (camera274: only when the test says so), eyes of the 4
+    // lanes (see "IMX274 tests"), clock lane mode, D-PHY corner,
+    // PRSNT_M2C_L (PB5) = 0: module fitted, PB6 / PB7 = PHY_RDY
+    if (Imx274) begin
+      u_csi.versal       = 1'b1;
+      u_csi.byte_ns      = 1.0e3 / 180.0;
+      u_csi.t_phy_rdy    = (test == "camera274") ? 32'hFFFF_FFFF : 40_000;
+      u_csi.t_reinit     = 40_000;
+      u_csi.v_glitch_pct = 20;
+      if (test == "camera274" || test == "video274") begin
+        eye274_lo = '{40, 60, 30, 70};
+        eye274_hi = '{180, 200, 150, 220};
+        s274_contclk = 1'b1;
+      end else begin
+        eye274_lo = '{64, 96, 160, 128};
+        eye274_hi = '{320, 352, 400, 384};
+        s274_contclk = 1'b0;
+        u_csi.v_gap_pm = 2;
+      end
+      if ($value$plusargs("S274_CONTCLK=%d", contclk)) s274_contclk = contclk != 0;
+      if ($value$plusargs("S274_BURSTRST=%d", contclk)) s274_brst_force = (contclk != 0) ? 1 : 0;
+      if ($value$plusargs("S274_GLITCH=%d", contclk)) u_csi.v_glitch_pct = contclk;
+      corner = (test == "csi2_274") ? 1 : (test == "video274") ? 2 : 0;
+      void'($value$plusargs("DPHY_CORNER=%d", corner));
+      if (corner != 0) s274_dphy_corner(corner);
+      for (int l = 0; l < 4; l++) begin
+        u_csi.eye_lo[l] = eye274_lo[l];
+        u_csi.eye_hi[l] = eye274_hi[l];
+      end
+      ext_b_en[5]    = 1'b1;
+      ext_b_val[5]   = 1'b0;
+      ext_b_en[7:6]  = 2'b11;
     end
 
     fork

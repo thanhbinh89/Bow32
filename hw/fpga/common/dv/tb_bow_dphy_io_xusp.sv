@@ -301,6 +301,8 @@ module tb_bow_dphy_io_xusp;
     .lp_i            (lp),
     .hs_en_o         (hs_en),
     .rx_data_i       (rx_data),
+    .rx_valid_i      ('1),
+    .phy_rdy_i       (1'b1),
     .dly_tap_o       (dly_tap),
     .dly_load_o      (dly_load),
     .dly_tap_i       (dly_tap_out)

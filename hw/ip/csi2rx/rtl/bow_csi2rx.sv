@@ -5,23 +5,29 @@
 // gating, sync detection and byte alignment) and CSI-2 protocol layer, with
 // a RAW10 AXI4-Stream output (1 pixel/clock) for the ISP. The D-PHY I/O
 // (LP / HS receivers, deserialisers, input delays) is outside, e.g.
-// hw/fpga/common/rtl/bow_dphy_io_xusp.sv on the KV260.
+// hw/fpga/common/rtl/bow_dphy_io_xusp.sv on the KV260 or
+// hw/fpga/common/rtl/bow_dphy_io_versal.sv (XPHY) on Versal.
 //
 //   lp pins ----------------------------> bow_dphy_lp x (1 + Lanes) --> hs_en, byte_ce
 //                                               | hs_active
 //   rx_data -> bow_dphy_align x Lanes -> bow_csi2_lane_merge -> bow_csi2_packet -> bow_csi2_unpack
-//                                                                                       |
+//   rx_valid -----^                                                                     |
 //   m_axis <- bow_csi2rx_out <-------------- bow_fifo_async (byte -> video clock) <-----+
+//
+// Lanes = 1, 2 or 4 data lanes (CTRL.LANES / LANES4 select 1, 2 or 4 of
+// them at run time): the byte domain takes 8 * Lanes bits per byte clock.
 //
 // Clock domains:
 //   clk_i       CPU: registers, counters, LOG/RAW read (bow_csi2rx_regs)
-//   vid_clk_i   video: LP state machines, PHY control, pixel output
+//   vid_clk_i   video: LP state machines, PHY control, pixel output and, with
+//               DlyVid = 1, the input delay control (dly_*)
 //   byte_clk_i  byte clock = HS clock / 4, runs only while byte_ce_o = 1 and
 //               the clock lane toggles (non-continuous clock: HS bursts only)
 // Resets (asynchronous assertion, synchronous release):
 //   vrst_n      video hard reset (vid_rst_ni & rst_ni)
 //   brst_n      byte hard reset: event toggles, command handshakes, LOG/RAW
-//               capture, byte clock meter, IDELAY load, clock toggle
+//               capture, byte clock meter, IDELAY load (DlyVid = 0), clock
+//               toggle, rx_data / rx_valid registers
 //   drst_n      byte datapath (aligners .. FIFO write side) and
 //   vdrst_n     video datapath (FIFO read side, output): asserted while RX
 //               is off (rx_on = CTRL.PHY_EN & RX_EN, a CPU flop), so a stop
@@ -32,14 +38,44 @@
 // Clock domain crossings: configuration through one bow_sync per bit
 // (quasi-static), events through one bow_cdc_pulse per kind, commands to
 // the byte domain as gray request / ack counters, pixels through
-// bow_fifo_async, gray coded byte clock meter. See bow_csi2rx_regs for the
-// register map.
+// bow_fifo_async, gray coded byte clock meter, input delay load requests as
+// 2 bit gray counters (DlyVid = 1). See bow_csi2rx_regs for the register
+// map.
+//
+// PHY contract (besides the ports of bow_dphy_io_xusp):
+//   rx_valid_i  byte domain, per lane: rx_data_i[l] is a new word. The
+//               aligner of a lane only advances on valid words (a PHY with
+//               FIFOs, e.g. the Versal XPHY, has no word in some cycles at
+//               the start of a burst and hands out the words left over from
+//               the previous burst first: they come before the HS-zero and
+//               the sync byte, so they only fill the aligner history). A PHY
+//               with a word in every cycle (bow_dphy_io_xusp) ties it to '1.
+//   phy_rdy_i   asynchronous level, the PHY is ready (Versal: XPLL locked,
+//               BISC done): STATUS.PHY_RDY. 1'b1 if the PHY has no such state.
+//   dly_*       DlyVid = 0 (UltraScale+ IDELAYE3, CLK = byte clock): byte
+//               domain; a tap is loaded (dly_tap_o + one cycle dly_load_o)
+//               when its synchronised value was the same in two consecutive
+//               cycles and differs from the last loaded one, the first value
+//               after a reset is always loaded; only while the byte clock runs.
+//               DlyVid = 1 (Versal XPHY, CTRL_CLK = vid_clk_i): video domain,
+//               no load after a reset (the PHY keeps its BISC delay, readable
+//               in DLYn[24:16]); every CPU write to DLYn gives exactly one
+//               load of lane n with the written tap: dly_load_o[n] high for
+//               one cycle, dly_tap_o[n] set the cycle before and held until
+//               the next load, loads of a lane at least 16 cycles apart
+//               (requests closer than that are merged into one load of the
+//               newest tap). Works without a byte clock.
+//
+// xsim 2025.2 (hw/fpga/common/dv) mis-simulates "q[l] <= 0; if (c) q[l] <= 1;"
+// in a loop of an always_ff and indices from constant functions: new
+// per-lane state here is computed in always_comb and registered whole.
 
 module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
-  parameter int unsigned Lanes     = 2,            // physical data lanes: 1 or 2
+  parameter int unsigned Lanes     = 2,            // physical data lanes: 1, 2 or 4
   parameter int unsigned PhyClkHz  = 200_000_000,  // vid_clk_i frequency (INFO)
   parameter bit          HasPhy    = 1'b1,         // INFO.PHY: a D-PHY is connected
-  parameter int unsigned FifoDepth = 256           // pixel FIFO entries (4 px each), power of 2
+  parameter int unsigned FifoDepth = 256,          // pixel FIFO entries (4 px each), power of 2
+  parameter bit          DlyVid    = 1'b0          // dly_* in the video domain (Versal XPHY)
 ) (
   input  logic                  clk_i,
   input  logic                  rst_ni,
@@ -61,10 +97,16 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
   input  logic [Lanes-1:0][1:0] lp_i,
   output logic [Lanes-1:0]      hs_en_o,          // video domain flops of the FSMs, no extra stage
   input  logic [Lanes-1:0][7:0] rx_data_i,        // registered once on byte_clk_i before use
-  output logic [Lanes-1:0][8:0] dly_tap_o,        // byte domain
-  output logic [Lanes-1:0]      dly_load_o,       // byte domain
-  input  logic [Lanes-1:0][8:0] dly_tap_i         // byte domain (CNTVALUEOUT)
+  input  logic [Lanes-1:0]      rx_valid_i,       // byte domain: rx_data_i[l] is a new word
+  input  logic                  phy_rdy_i,        // asynchronous: PHY ready (STATUS.PHY_RDY)
+  output logic [Lanes-1:0][8:0] dly_tap_o,        // byte domain (DlyVid = 0) / video domain (1)
+  output logic [Lanes-1:0]      dly_load_o,       // same domain as dly_tap_o
+  input  logic [Lanes-1:0][8:0] dly_tap_i         // CNTVALUEOUT, same domain as dly_tap_o
 );
+
+  if ((Lanes != 1) && (Lanes != 2) && (Lanes != 4)) begin : g_bad_lanes
+    $error("bow_csi2rx: Lanes must be 1, 2 or 4, not %0d", Lanes);
+  end
 
   localparam int unsigned NumPktEv = $bits(csi2_pkt_ev_t);
   localparam int unsigned NumBEv   = NumPktEv + 1 + Lanes;   // packet, skew, sot per lane
@@ -117,6 +159,7 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
   csi2_ev_t              ev_sys;
   logic [Lanes:0]        lane_en_sys;
   logic [Lanes-1:0][8:0] dly_sys, dly_out_sys;
+  logic [Lanes-1:0][1:0] dly_req_sys;
   logic [3:0]            log_req_sys, log_ack, log_ack_sys, raw_req_sys, raw_ack, raw_ack_sys;
   logic                  log_trig_sys, log_stop_sys, raw_now_sys;
   logic [5:0]            log_wptr, log_wptr_sys, ram_addr;
@@ -129,14 +172,15 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
   logic [1:0]            line_vc;
   logic [Lanes:0][1:0]   lp_sys;
   logic [Lanes:0]        hs_en_sys;
-  logic                  ce_sys, in_frame, in_frame_sys;
+  logic                  ce_sys, in_frame, in_frame_sys, phy_rdy_sys;
   logic [19:0]           meter_gray_q, meter_sys;
 
   bow_csi2rx_regs #(
     .Lanes     (Lanes),
     .PhyClkHz  (PhyClkHz),
     .HasPhy    (HasPhy),
-    .FifoDepth (FifoDepth)
+    .FifoDepth (FifoDepth),
+    .DlyVid    (DlyVid)
   ) u_regs (
     .clk_i,
     .rst_ni,
@@ -147,6 +191,7 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
     .rx_on_o       (rx_on),
     .lane_en_o     (lane_en_sys),
     .dly_tap_o     (dly_sys),
+    .dly_req_o     (dly_req_sys),
     .log_req_o     (log_req_sys),
     .log_trig_fs_o (log_trig_sys),
     .log_stop_fe_o (log_stop_sys),
@@ -171,8 +216,16 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
     .hs_en_i       (hs_en_sys),
     .ce_i          (ce_sys),
     .in_frame_i    (in_frame_sys),
+    .phy_rdy_i     (phy_rdy_sys),
     .meter_i       (meter_sys),
     .dly_tap_i     (dly_out_sys)
+  );
+
+  bow_sync u_sync_phy_rdy (
+    .clk_i,
+    .rst_ni,
+    .d_i (phy_rdy_i),
+    .q_o (phy_rdy_sys)
   );
 
   // =========================================================================
@@ -240,7 +293,9 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
   assign hs_en_o     = hs_en[Lanes:1];
 
   // Clock lane activity: a byte clock flop toggling on every edge, seen from
-  // the video domain (clock miss detection of the clock lane FSM)
+  // the video domain (clock miss detection of the clock lane FSM). Every
+  // byte clock edge counts, with or without a valid word: the byte clock
+  // itself only runs while the clock lane toggles.
   logic clk_tog_q, clk_tog_s, clk_tog_last_q;
 
   always_ff @(posedge byte_clk_i or negedge brst_n) begin
@@ -308,23 +363,28 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
   // Byte domain: deserialised words -> packets -> pixel groups
   // =========================================================================
   logic [Lanes-1:0][7:0] rx_q;
-  logic [Lanes-1:0]      arm;
-  logic                  lanes2, vc_any;
+  logic [Lanes-1:0]      rxv_q, arm;
+  logic                  lanes2, lanes4, vc_any;
   logic [1:0]            vc;
   logic [5:0]            dt;
 
   always_ff @(posedge byte_clk_i or negedge brst_n) begin
-    if (!brst_n) rx_q <= '0;
-    else         rx_q <= rx_data_i;
+    if (!brst_n) begin
+      rx_q  <= '0;
+      rxv_q <= '0;
+    end else begin
+      rx_q  <= rx_data_i;
+      rxv_q <= rx_valid_i;
+    end
   end
 
   bow_csi2_sync #(
-    .Width (10)
+    .Width (11)
   ) u_sync_bcfg (
     .clk_i  (byte_clk_i),
     .rst_ni (brst_n),
-    .d_i    ({cfg.lanes2, cfg.vc_any, cfg.vc, cfg.dt}),
-    .q_o    ({lanes2, vc_any, vc, dt})
+    .d_i    ({cfg.lanes2, cfg.lanes4, cfg.vc_any, cfg.vc, cfg.dt}),
+    .q_o    ({lanes2, lanes4, vc_any, vc, dt})
   );
 
   bow_csi2_sync #(
@@ -344,6 +404,7 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
       .clk_i         (byte_clk_i),
       .rst_ni        (drst_n),
       .arm_i         (arm[l]),
+      .vld_i         (rxv_q[l]),
       .rx_i          (rx_q[l]),
       .valid_o       (al_valid[l]),
       .data_o        (al_data[l]),
@@ -353,9 +414,9 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
     );
   end
 
-  logic        lm_valid, lm_sop, lm_eob, lm_skew;
-  logic [15:0] lm_data;
-  logic [1:0]  lm_nbytes;
+  logic                  lm_valid, lm_sop, lm_eob, lm_skew;
+  logic [Lanes-1:0][7:0] lm_data;
+  logic [2:0]            lm_nbytes;
 
   bow_csi2_lane_merge #(
     .Lanes (Lanes)
@@ -363,6 +424,7 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
     .clk_i     (byte_clk_i),
     .rst_ni    (drst_n),
     .lanes2_i  (lanes2),
+    .lanes4_i  (lanes4),
     .arm_i     (arm),
     .valid_i   (al_valid),
     .data_i    (al_data),
@@ -375,14 +437,16 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
     .ev_skew_o (lm_skew)
   );
 
-  csi2_pkt_ev_t pkt_ev;
-  logic         px_sol, px_raw10, px_eol, px_ovf, fs, fe;
-  logic [1:0]   px_valid;
-  logic [15:0]  px_data;
-  logic         log_we, log_fs, log_fe;
-  logic [29:0]  log_entry;
+  csi2_pkt_ev_t          pkt_ev;
+  logic                  px_sol, px_raw10, px_eol, px_ovf, fs, fe;
+  logic [Lanes-1:0]      px_valid;
+  logic [Lanes-1:0][7:0] px_data;
+  logic                  log_we, log_fs, log_fe;
+  logic [29:0]           log_entry;
 
-  bow_csi2_packet u_packet (
+  bow_csi2_packet #(
+    .Bytes (Lanes)
+  ) u_packet (
     .clk_i         (byte_clk_i),
     .rst_ni        (drst_n),
     .vc_i          (vc),
@@ -417,7 +481,9 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
   logic              grp_push, fifo_full, fifo_empty, fifo_pop;
   logic [GroupW-1:0] grp_wdata, grp_rdata;
 
-  bow_csi2_unpack u_unpack (
+  bow_csi2_unpack #(
+    .Bytes (Lanes)
+  ) u_unpack (
     .clk_i       (byte_clk_i),
     .rst_ni      (drst_n),
     .sol_i       (px_sol),
@@ -500,43 +566,133 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
   end
 
   // =========================================================================
-  // Byte domain: IDELAY taps, byte clock meter, LOG / RAW capture
+  // Input delay taps (DlyVid = 0: byte domain, IDELAYE3; 1: video domain, XPHY)
   // =========================================================================
-  // A tap is loaded (CNTVALUEIN + one cycle LOAD) when its synchronised value
-  // was the same in two consecutive cycles and differs from the last loaded
-  // one (the first value after a reset is always loaded). This only happens
-  // while the byte clock runs, i.e. in the next burst.
-  logic [Lanes-1:0][8:0] tap_s, tap_last_q, tap_ld_q;
-  logic [Lanes-1:0]      tap_ld_v_q;
+  if (!DlyVid) begin : g_dly_byte
+    // A tap is loaded (CNTVALUEIN + one cycle LOAD) when its synchronised
+    // value was the same in two consecutive cycles and differs from the last
+    // loaded one (the first value after a reset is always loaded). This only
+    // happens while the byte clock runs, i.e. in the next burst.
+    logic [Lanes-1:0][8:0] tap_s, tap_last_q, tap_ld_q;
+    logic [Lanes-1:0]      tap_ld_v_q;
 
-  bow_csi2_sync #(
-    .Width (9 * Lanes)
-  ) u_sync_tap (
-    .clk_i  (byte_clk_i),
-    .rst_ni (brst_n),
-    .d_i    (dly_sys),
-    .q_o    (tap_s)
-  );
+    bow_csi2_sync #(
+      .Width (9 * Lanes)
+    ) u_sync_tap (
+      .clk_i  (byte_clk_i),
+      .rst_ni (brst_n),
+      .d_i    (dly_sys),
+      .q_o    (tap_s)
+    );
 
-  always_ff @(posedge byte_clk_i or negedge brst_n) begin
-    if (!brst_n) begin
-      tap_last_q <= '0;
-      tap_ld_q   <= '0;
-      tap_ld_v_q <= '0;
-      dly_tap_o  <= '0;
-      dly_load_o <= '0;
-    end else begin
-      tap_last_q <= tap_s;
-      dly_load_o <= '0;
-      for (int unsigned l = 0; l < Lanes; l++) begin
-        if ((tap_s[l] == tap_last_q[l]) && (!tap_ld_v_q[l] || (tap_s[l] != tap_ld_q[l]))) begin
-          tap_ld_q[l]   <= tap_s[l];
-          tap_ld_v_q[l] <= 1'b1;
-          dly_tap_o[l]  <= tap_s[l];
-          dly_load_o[l] <= 1'b1;
+    always_ff @(posedge byte_clk_i or negedge brst_n) begin
+      if (!brst_n) begin
+        tap_last_q <= '0;
+        tap_ld_q   <= '0;
+        tap_ld_v_q <= '0;
+        dly_tap_o  <= '0;
+        dly_load_o <= '0;
+      end else begin
+        tap_last_q <= tap_s;
+        dly_load_o <= '0;
+        for (int unsigned l = 0; l < Lanes; l++) begin
+          if ((tap_s[l] == tap_last_q[l]) && (!tap_ld_v_q[l] || (tap_s[l] != tap_ld_q[l]))) begin
+            tap_ld_q[l]   <= tap_s[l];
+            tap_ld_v_q[l] <= 1'b1;
+            dly_tap_o[l]  <= tap_s[l];
+            dly_load_o[l] <= 1'b1;
+          end
         end
       end
     end
+
+    logic unused_req;
+    assign unused_req = ^dly_req_sys;
+  end else begin : g_dly_vid
+    // Per lane: the 2 bit gray request counter of the CPU (+1 per DLYn
+    // write) and the taps come through one synchroniser per bit. A change of
+    // the counter starts a request; the tap bus, written in the same CPU
+    // cycle as the counter, is taken 2 cycles after the last change was
+    // seen (dly_tap_o), the one cycle load pulse follows one cycle later.
+    // The next tap update of the lane waits until 16 cycles after the last
+    // one; requests until then are merged (the newest tap is loaded).
+    // During the first cycles after the reset the last seen counter value
+    // follows the synchroniser: no load after a reset.
+    logic [Lanes-1:0][8:0] vtap_s;
+    logic [Lanes-1:0][1:0] req_s, req_last_q, req_last_d;
+    logic [Lanes-1:0][1:0] settle_q, settle_d;
+    logic [Lanes-1:0][3:0] gap_q, gap_d;
+    logic [Lanes-1:0]      pend_q, pend_d, ld1_q, ld1_d;
+    logic [Lanes-1:0][8:0] vtap_q, vtap_d;
+    logic [2:0]            init_q;
+
+    bow_csi2_sync #(
+      .Width (9 * Lanes)
+    ) u_sync_tap (
+      .clk_i  (vid_clk_i),
+      .rst_ni (vrst_n),
+      .d_i    (dly_sys),
+      .q_o    (vtap_s)
+    );
+
+    bow_csi2_sync #(
+      .Width (2 * Lanes)
+    ) u_sync_req (
+      .clk_i  (vid_clk_i),
+      .rst_ni (vrst_n),
+      .d_i    (dly_req_sys),
+      .q_o    (req_s)
+    );
+
+    always_comb begin
+      req_last_d = req_last_q;
+      settle_d   = settle_q;
+      gap_d      = gap_q;
+      pend_d     = pend_q;
+      ld1_d      = '0;
+      vtap_d     = vtap_q;
+      for (int unsigned l = 0; l < Lanes; l++) begin
+        if (gap_q[l] != 4'd0) gap_d[l] = gap_q[l] - 4'd1;
+        if (init_q != 3'd7) begin
+          req_last_d[l] = req_s[l];
+        end else if (req_s[l] != req_last_q[l]) begin
+          req_last_d[l] = req_s[l];
+          pend_d[l]     = 1'b1;
+          settle_d[l]   = 2'd2;
+        end else if (settle_q[l] != 2'd0) begin
+          settle_d[l] = settle_q[l] - 2'd1;
+        end else if (pend_q[l] && (gap_q[l] == 4'd0)) begin
+          vtap_d[l] = vtap_s[l];
+          pend_d[l] = 1'b0;
+          ld1_d[l]  = 1'b1;
+          gap_d[l]  = 4'd15;
+        end
+      end
+    end
+
+    always_ff @(posedge vid_clk_i or negedge vrst_n) begin
+      if (!vrst_n) begin
+        init_q     <= '0;
+        req_last_q <= '0;
+        settle_q   <= '0;
+        gap_q      <= '0;
+        pend_q     <= '0;
+        ld1_q      <= '0;
+        vtap_q     <= '0;
+        dly_load_o <= '0;
+      end else begin
+        if (init_q != 3'd7) init_q <= init_q + 3'd1;
+        req_last_q <= req_last_d;
+        settle_q   <= settle_d;
+        gap_q      <= gap_d;
+        pend_q     <= pend_d;
+        ld1_q      <= ld1_d;
+        vtap_q     <= vtap_d;
+        dly_load_o <= ld1_q;
+      end
+    end
+
+    assign dly_tap_o = vtap_q;
   end
 
   bow_csi2_sync #(
@@ -548,6 +704,9 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
     .q_o (dly_out_sys)
   );
 
+  // =========================================================================
+  // Byte domain: byte clock meter, LOG / RAW capture
+  // =========================================================================
   // Byte clock meter: free running gray counter
   logic [19:0] meter_q;
 
@@ -620,6 +779,7 @@ module bow_csi2rx import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
     .raw_now_i     (raw_now),
     .raw_ack_o     (raw_ack),
     .arm0_i        (arm[0]),
+    .rx_vld0_i     (rxv_q[0]),
     .rx_i          (rx_q),
     .rclk_i        (clk_i),
     .log_re_i      (log_re),

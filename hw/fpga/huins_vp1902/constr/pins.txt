@@ -1,19 +1,30 @@
 # Copyright Bow32 contributors.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Ports of bow32_huins_vp1902_top -> nets of the Huins MFP-VP1902-S board.
-# tools/huins_pins.py looks every net up in the board netlist (the user's
-# local copy in docs/fpga/Huins_MFP-VP1902/, confidential, gitignored) and
-# writes the PACKAGE_PIN lines into the build directory: no FPGA ball number
-# is in the repo.
+# Ports of the Huins MFP-VP1902-S tops -> nets of the board. tools/huins_pins.py
+# looks every net up in the board netlist (the user's local copy in
+# docs/fpga/Huins_MFP-VP1902/, confidential, gitignored) and writes the
+# PACKAGE_PIN lines into the build directory: no FPGA ball number is in the repo.
 #
 #   <port>   <net>        {site} = the FMC+ site number of the net names
 #                         (FMC_SITE: 1, 10, 2, 20, 3, 30, 4, 40 for the silk
-#                         FMC+01, FMC+10, ...; default 10)
-#   [all]    lines for every build
-#   [clk=x]  lines for CLK_SRC = x only
-# Card ports: FMC signal names (VITA 57.4) of the FMC+_DDR2_HyperRam card
-# (docs/fpga/ram_extension/, the same pins as hw/fpga/mps4/constr/*_card.xdc).
+#                         FMC+01, FMC+10, ...)
+#   [all]                 lines for every build
+#   [card=x]              lines for CARD = x only (the top of that card)
+#   [card=x sites=a,b]    the same, and the card is only verified on these sites:
+#                         tools/huins_pins.py refuses another site without --any-site
+#   [clk=x]               lines for CLK_SRC = x only
+# Cards (Makefile CARD):
+#   ram  bow32_huins_vp1902_top, the FMC+_DDR2_HyperRam card (default FMC_SITE 10).
+#        Card ports: FMC signal names (VITA 57.4) of the card (docs/fpga/ram_extension/,
+#        the same pins as hw/fpga/mps4/constr/*_card.xdc).
+#   cam  bow32_huins_vp1902_cam_top, the LI-IMX274MIPI-FMC camera module on the Huins
+#        camera adapter (FMC_SITE 1). The adapter remaps the module's MIPI pins (clock
+#        lane -> CLK0_M2C, lane 1 -> CLK1_M2C, lane 3 -> LA06) so that all five pairs and
+#        the control pins land in one XPIO bank on FMC+01 (bank 705): the XPHY strobe
+#        never leaves a bank. The XPHY nibble plan of the top follows from these pins at
+#        build time (tcl/cam_plan.tcl, from the generated pin XDC; checked again by
+#        tcl/cam_xphy.tcl). Other sites split the pairs over two or three banks: refused.
 
 [all]
 # ---- board: reset, UARTs (CP2102N "UART0" / "UART1", bank 408) --------------------------
@@ -41,7 +52,8 @@ pb_i[1]              F_PB2
 pb_i[2]              F_PB3
 fmc_prsnt_n_i        F_FMC{site}_PRSNT_N
 
-# ---- card: DDR2 CK, DQS, DQ ---------------------------------------------------------------
+# ---- card ram: DDR2 CK, DQS, DQ ------------------------------------------------------------
+[card=ram]
 ddr_ck_p_o           F_FMC{site}_LA17_P_CC
 ddr_ck_n_o           F_FMC{site}_LA17_N_CC
 ddr_dqs_p_io         F_FMC{site}_HB17_P_CC
@@ -55,12 +67,12 @@ ddr_dq_io[5]         F_FMC{site}_HB11_N
 ddr_dq_io[6]         F_FMC{site}_HB13_P
 ddr_dq_io[7]         F_FMC{site}_HB13_N
 
-# ---- card: DDR2 level shifter control (DIR = H: DRAM -> FPGA) -----------------------------
+# ---- card ram: DDR2 level shifter control (DIR = H: DRAM -> FPGA) -----------------------------
 ddr_ls_dir_dq_o      F_FMC{site}_LA05_P
 ddr_ls_dir_dqs_o     F_FMC{site}_LA05_N
 ddr_ls_oe_n_o        F_FMC{site}_LA10_P
 
-# ---- card: DDR2 command / address ---------------------------------------------------------
+# ---- card ram: DDR2 command / address-----------------------------------------------------
 ddr_cke_o            F_FMC{site}_LA02_P
 ddr_cs_n_o           F_FMC{site}_LA03_P
 ddr_ras_n_o          F_FMC{site}_LA04_P
@@ -84,7 +96,7 @@ ddr_a_o[11]          F_FMC{site}_LA32_P
 ddr_a_o[12]          F_FMC{site}_LA33_P
 ddr_a_o[13]          F_FMC{site}_LA13_N
 
-# ---- card: HyperRAM -------------------------------------------------------------------------
+# ---- card ram: HyperRAM---------------------------------------------------------------------
 hr_dq_io[0]          F_FMC{site}_HB01_N
 hr_dq_io[1]          F_FMC{site}_HB01_P
 hr_dq_io[2]          F_FMC{site}_HB02_P
@@ -101,6 +113,31 @@ hr_rst_n_o           F_FMC{site}_HB21_P
 hr_ls_dir_dq_o       F_FMC{site}_LA08_P
 hr_ls_oe_n_o         F_FMC{site}_LA08_N
 hr_ls_dir_rwds_o     F_FMC{site}_LA14_N
+
+# ---- card cam: MIPI CSI-2 D-PHY of the camera, sensor control ----------------------------------
+# Huins camera adapter on FMC+01: every pair and control pin in XPIO bank 705 (the nibble
+# and slice of each pin are board data: tcl/cam_plan.tcl reads them from the package pin
+# functions at build time); no series part, termination or shifter between the FMC pin
+# and the FPGA.
+[card=cam sites=1]
+mipi_clk_p_i         F_FMC{site}_CLK0_M2C_P   # clock lane: XPHY strobe
+mipi_clk_n_i         F_FMC{site}_CLK0_M2C_N
+mipi_data_p_i[0]     F_FMC{site}_LA10_P       # data lane 0
+mipi_data_n_i[0]     F_FMC{site}_LA10_N
+mipi_data_p_i[1]     F_FMC{site}_CLK1_M2C_P   # data lane 1
+mipi_data_n_i[1]     F_FMC{site}_CLK1_M2C_N
+mipi_data_p_i[2]     F_FMC{site}_LA08_P       # data lane 2
+mipi_data_n_i[2]     F_FMC{site}_LA08_N
+mipi_data_p_i[3]     F_FMC{site}_LA06_P       # data lane 3
+mipi_data_n_i[3]     F_FMC{site}_LA06_N
+cam_scl_io           F_FMC{site}_LA26_P       # module FMC_SCL: sensor I2C (0x1A)
+cam_sda_io           F_FMC{site}_LA26_N       # module FMC_SDA
+cam_xclr_o           F_FMC{site}_LA22_N       # module FMC_RST -> sensor XCLR (0 = reset)
+cam_xce_o            F_FMC{site}_LA27_P       # module FMC_SPI_CS_N -> sensor XCE (1)
+cam_flash_o          F_FMC{site}_LA16_N       # module FMC_FLASH (1)
+# Not used, left unconstrained (inputs of the module or unknown): LA22_P (FMC_CLK), LA29
+# (XVS / XHS), LA24 (LED_EN / PWM), LA28 (IR-cut filter coil: never drive it), the
+# Sub-LVDS and DSI pins of the module.
 
 # ---- clock input (CLK_SRC) -------------------------------------------------------------------
 [clk=ref200]

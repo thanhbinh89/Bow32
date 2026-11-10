@@ -123,6 +123,11 @@ DROP để xả encoder và bản quay giữ nguyên các frame đã đủ (`PKT
 - **Thông lượng encoder**: 392 chu kỳ/MB ở 200 MHz. Camera 1080p30 của IMX219
   đưa 120 macroblock mỗi 16 dòng × 18,9 µs = 302 µs; encoder cần 235 µs: kịp.
   Khi không kịp (ví dụ cảnh rất chi tiết ở QP thấp làm CAVLC chậm), encoder bỏ
-  pixel (`ERR_OVF`, ứng dụng báo `warning`) nhưng stream vẫn hợp lệ.
+  pixel (`ERR_OVF`, ứng dụng báo `warning`) nhưng stream vẫn hợp lệ. Tải này
+  (235 / 302 = 78 %) là mốc cho IMX274 trên Huins MFP-VP1902: ứng dụng `video`
+  chọn độ dài dòng của cảm biến để tải ~78 % (1080p30: HMAX 672, 720p30: 448;
+  [camera_huins.md](camera_huins.md) mục 6.5).
+- **Gửi lệnh**: FIFO nhận của UART0 chỉ có 16 byte; `bow32_video.py` gửi mỗi
+  lệnh từng ký tự và chờ echo.
 - **Màu**: ISP xuất BT.709 video range (Y 16…235), SPS báo đúng (VUI), mọi
   trình phát hiển thị đúng màu.
