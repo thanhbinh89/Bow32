@@ -145,6 +145,9 @@ static void isp_setup(uint32_t bayer) {
 
 static uint32_t frame_ms(void) { return cam_frame_us(sen) / 1000u + 1u; }
 
+/* Timeout of one tap (calibration, margin check): 1.2 frames + 3 ms */
+static uint32_t tap_ms(void) { return cam_frame_us(sen) * 12u / 10000u + 3u; }
+
 static void stop_all(void) {
   /* the IMX219 finishes its frame, the IMX274 is stopped after a frame end */
   if (st.cam) cam_stream_stop(st.sensor ? sen : NULL, frame_ms() + 10u);
@@ -189,10 +192,12 @@ static int sensor_apply_ctrl(void) {
   return r;
 }
 
+/* Eye calibration, then a short margin check (8 frames per point, k = eye /
+ * 4): a low margin is reported, the calibrated taps stay. */
 static bool calibrate(void) {
   bow_csi2rx_cal_t cal;
-  uint32_t tap_ms = cam_frame_us(sen) * 12u / 10000u + 3u;
-  if (!bow_csi2rx_calibrate(16, tap_ms, &cal, false)) {
+  bow_csi2rx_margin_t m;
+  if (!bow_csi2rx_calibrate(16, tap_ms(), &cal, false)) {
     bow_printf("csi2rx: calibration failed\n");
     return false;
   }
@@ -200,7 +205,36 @@ static bool calibrate(void) {
   bow_csi2rx_print_cal(&cal);
   bow_puts("\n");
   st.calibrated = true;
+  int r = bow_csi2rx_margin(&cal, 0, 8, tap_ms(), &m, false);
+  bow_printf("csi2rx: margin %s", r > 0 ? "ok " : r == 0 ? "low " : "");
+  bow_csi2rx_print_margin(&m, r);
+  bow_puts("\n");
   return true;
+}
+
+/* Calibrate at the first start (calibrated: the taps, or the Versal XPHY's
+ * BISC delays, are to be checked first); later, when the link check with
+ * the kept taps fails with errors a new tap can fix (ERR_STATUS &
+ * CSI2RX_ERR_TAP), or with no error at all: fewer than 64 packets in 2 x
+ * tap_ms() (2.4 frames + 6 ms: the first frame start is up to a frame away,
+ * 64 packets take at most ~1.3 frames; + the frames the sensor does not
+ * output after its start, IMX274), so no data or a very slow link; without
+ * a byte clock the calibration fails cleanly. Other link errors (EXTRA,
+ * FORMAT, FRAME, OVF) are not a sampling problem: the taps are kept. */
+static bool need_calibration(bool calibrated) {
+  if (!calibrated) return true;
+  uint32_t ms = 2u * tap_ms() + sen->start_frames * frame_ms();
+  if (bow_csi2rx_link_check(64, ms)) return false;
+  bow_csi2rx_cnt_t c;
+  bow_csi2rx_counters(&c);
+  uint32_t err = CSI2RX->ERR_STATUS;
+  if (bow_csi2rx_link_errors(&c) == 0) {
+    bow_printf("csi2rx: %u packets in %u ms, no link error: calibrating\n", c.packets, ms);
+    return true;
+  }
+  if (err & CSI2RX_ERR_TAP) return true;
+  bow_printf("csi2rx: link errors (ERR_STATUS %03x), not a sampling problem: taps kept\n", err);
+  return false;
 }
 
 static bool start_cam(void) {
@@ -250,13 +284,16 @@ static bool start_cam(void) {
   /* as sw/apps/camera: the Versal XPHY (DLY_VID) keeps the delays of its
    * self-calibration (VT tracked) while the link check passes */
   bool bisc = (CSI2RX->INFO & CSI2RX_INFO_DLY_VID) != 0;
-  if ((!st.calibrated && !bisc) ||
-      !bow_csi2rx_link_check(64, 200u + sen->start_frames * frame_ms())) {
+  if (need_calibration(st.calibrated || bisc)) {
     if (!calibrate()) return false;
     bow_csi2rx_wait_frame(2u * frame_ms());
     ISP->STATUS = ISP_ST_ERRORS;
   } else if (!st.calibrated) {
-    bow_puts("csi2rx: link ok with the delays in use ");
+    /* link check passed, or failed with errors that are no tap problem */
+    bow_csi2rx_cnt_t c;
+    bow_csi2rx_counters(&c);
+    bow_puts(bow_csi2rx_link_errors(&c) ? "csi2rx: keeping the delays in use "
+                                        : "csi2rx: link ok with the delays in use ");
     bow_csi2rx_print_delays();
     bow_puts(" (kept)\n");
     st.calibrated = true;

@@ -10,6 +10,11 @@
 // Typical use: "start" commands from the CPU domain into a video domain and
 // "done" events back. Multi-bit data that goes with the event must be held
 // stable by the sender until the receiver has taken it (quasi-static data).
+//
+// Simulation only, `define BOW_CDC_JITTER: the first flop resolves a new
+// toggle one cycle late at random (as a metastable flop may), so pulses sent
+// in the same source cycle through two synchronisers can arrive one
+// destination cycle apart, in either order.
 
 module bow_cdc_pulse (
   input  logic src_clk_i,
@@ -34,6 +39,7 @@ module bow_cdc_pulse (
   (* ASYNC_REG = "TRUE" *) logic [1:0] sync_q;
   logic                               last_q;
 
+`ifndef BOW_CDC_JITTER
   always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
     if (!dst_rst_ni) begin
       sync_q <= '0;
@@ -43,6 +49,25 @@ module bow_cdc_pulse (
       last_q <= sync_q[1];
     end
   end
+`else
+  logic late_q;
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      sync_q <= '0;
+      last_q <= 1'b0;
+      late_q <= 1'b0;
+    end else begin
+      if ((src_toggle_q != sync_q[0]) && !late_q && ($urandom_range(0, 1) == 1)) begin
+        sync_q <= {sync_q[0], sync_q[0]};   // resolves one cycle late
+        late_q <= 1'b1;
+      end else begin
+        sync_q <= {sync_q[0], src_toggle_q};
+        late_q <= 1'b0;
+      end
+      last_q <= sync_q[1];
+    end
+  end
+`endif
 
   assign dst_pulse_o = sync_q[1] ^ last_q;
 

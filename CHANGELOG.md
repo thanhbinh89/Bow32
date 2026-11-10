@@ -17,8 +17,23 @@
     `CsiDlyVid`, cổng `dphy_rx_valid_i`, `dphy_phy_rdy_i` (các top không có PHY Versal nối 1).
   - Thanh ghi CSI2RX (`ID` giữ `0x43533201`, firmware cũ vẫn nhận bitstream mới): `INFO[5]`
     DLY_VID; `CTRL[7]` LANES4; `STATUS` thêm LP / HS của lane 2, 3 và `[14]` PHY_RDY (KV260 nối
-    1: lúc nghỉ đọc `0x403F` thay cho `0x003F`); `CNT_SOT23` (`0x048`), `CNT_BURST23` (`0x04C`),
-    `CNT_CLR` xoá tới `0x04C`; `DLY2`, `DLY3`; `RAW` 8 bit mỗi lane ([docs/ip/csi2rx.md](docs/ip/csi2rx.md)).
+    1: lúc nghỉ đọc `0x403F` thay cho `0x003F`); `CNT_SOT23` (`0x068`), `CNT_BURST23` (`0x06C`),
+    `CNT_CLR` xoá cả hai; `DLY2`, `DLY3`; `RAW` 8 bit mỗi lane ([docs/ip/csi2rx.md](docs/ip/csi2rx.md)).
+    `0x048`/`0x04C` là `CNT_EXT`/`FRAME_ERR` của PR #17: nhánh này lúc đầu đặt `CNT_SOT23`/
+    `CNT_BURST23` ở đó, khi gộp với main chúng dời sang hai ô trống `0x068`/`0x06C`.
+  - Các sửa lỗi của PR #17 (review bộ thu) chạy cả với 4 lane: lớp packet 1–4 byte mỗi word có
+    `px_err` (cả khi `px_eol` trễ một chu kỳ), FORMAT với WC 0, đếm byte sau packet (cả phần
+    sau CRC trong word cuối; với 4 lane P3 của short packet trùng word `sop`); unpack tới 4
+    byte mỗi chu kỳ giữ khung dòng khi FIFO tràn (Cut/Lost, `afull`), `err`, `drop_i`, SKIP;
+    aligner nhận deskew và theo dõi HS-zero chỉ trên word `rx_valid` (khoảng trống và word cũ
+    của FIFO XPHY không đổi kết quả); byte enable cho `DLY0`…`DLY3` (ghi không có byte 0/1
+    không đổi tap, không nạp với `DlyVid` = 1). Driver: `bow_csi2rx_margin` cho 1, 2 hoặc 4
+    lane (`tap`, `k`, `side` 4 phần tử), `CTRL.EXTRA` theo số lane đang dùng (+8 byte mỗi lane
+    với PHY Versal: 192 ở 4 × 1440 Mbit/s), `SETTLE` theo tốc độ lane của PR #17 trên
+    UltraScale+, 95 ns giữ nguyên trên Versal; `print_errors` in `sot` 4 lane khi dùng 4 lane.
+    `csi2_test` `margin` trên IMX274 dùng mẫu AAAh (không có PN9). DV 4 lane chạy mọi test
+    directed mới (`deskew`, `extra`, `loss`, `ovf2`, `ovf8`, `be`), unit test aligner thêm 3
+    lượt có khoảng trống `rx_valid` (301 case).
   - `bow_dphy_io_versal` (`hw/fpga/common/rtl`): D-PHY RX trên XPIO của Versal, không dùng IP
     của AMD: `IBUFDS_DPHY`, XPHY chế độ native với lane clock làm strobe, XPLL 1500 MHz, BISC,
     byte clock qua BUFGCE. Sơ đồ nibble là tham số (mặc định: một sơ đồ tổng hợp, không phải
@@ -250,6 +265,68 @@
 - Đánh giá khả năng làm DDR trên Bow32 và bo RAM mở rộng `FMC_DDR2_HyperRam`: chỉ hợp
   với Arm MPS4 (VEK280 chỉ nối chân LA của FMC+, KV260 không có FMC), góp ý schematic và
   đề xuất sơ đồ chân chỉ dùng LA ([docs/ddr_board_review.md](docs/ddr_board_review.md)).
+- Đánh giá bộ thu CSI-2 cho camera công nghiệp và SoC camera AI: 12 phát hiện có vị trí
+  mã (tràn FIFO làm hỏng khung AXI4-Stream — tái hiện bằng mô phỏng, lỗi CRC không đi
+  theo luồng ảnh, deskew, eye không bù nhiệt, packet sau trong cùng burst bị bỏ không báo
+  lỗi...), bảng khoảng cách theo use case, kiến trúc PPI / nhiều luồng và lộ trình đề xuất
+  ([docs/csi2rx_review.md](docs/csi2rx_review.md)). F1 (nhiều packet trong một burst) đã
+  được sửa lại thành P2: CSI-2 v1.x bắt buộc LP-11 giữa các packet, chỉ máy phát sai chuẩn
+  hay LRTE của v2.0+ mới gửi như vậy.
+- Bộ thu CSI-2, giai đoạn 0 của review ([docs/csi2rx_review.md](docs/csi2rx_review.md)
+  mục 10), chạy trên KV260 (`csi2_test` 18/18):
+  - `m_axis_tuser_o` 2 bit: [1] = dòng lỗi cùng `tlast` (CRC, FORMAT, bị cắt trong payload,
+    Cut khi tràn FIFO, hoặc một dòng trước đó của frame bị mất: FIFO đầy, không có nhóm
+    pixel, burst mất trước unpack vì header không sửa được / lỗi sync / SKEW / EXTRA /
+    packet bị cắt không phải dòng / vào HS bị từ chối ở mức LP). Nhóm FIFO 45 bit.
+  - `tuser[0]` chỉ ở pixel (0, 0): nhóm `sof` không ghi được (FIFO đầy), dòng đầu không có
+    nhóm pixel nào, hoặc một burst mất trước dòng đầu thì cả frame bị bỏ tới FS/FE sau,
+    `ERR_STATUS.SKIP` [11] (đếm trong `CNT_MISC[31:24]`). Dòng mất chỉ được ghi nhận trong
+    frame: dòng ngoài frame không mang `sof`/`err`.
+  - Thanh ghi `FRAME_ERR` (`0x04C`): các bit `ERR_STATUS` của từng frame (từ FE trước tới FE
+    của nó), chốt ở FE, sự kiện tới trong 2 chu kỳ sau FE vẫn thuộc frame vừa kết thúc;
+    thấy được cả dòng mất ở đuôi frame mà luồng ảnh không báo được.
+  - FORMAT: dòng accepted có WC = 0 (cả RAW10), hoặc RAW10 có WC % 5 ≠ 0.
+  - Tràn FIFO giữ khung dòng: dòng đã bắt đầu luôn có `tlast` (nhờ `afull_o` mới của
+    `bow_fifo_async`), FIFO đầy thì bỏ cả dòng.
+  - Burst deskew (HS-zero rồi sync `FFFFh`) không còn là lỗi SOT, nhưng chỉ được nhận ở
+    chỗ HS-zero kết thúc và với đủ 16 bit 1: byte sync hỏng vẫn là lỗi SOT dù dữ liệu sau đó
+    chứa `0x00 0xFF`, hay sync hỏng thành `0xFC`/`0xFE`/`0xFF` trước DI `0x2B`.
+    `CNT_EXT` (`0x048`): [15:0] burst có byte sau packet vượt `CTRL.EXTRA` ([23:16], reset
+    64, `ERR_STATUS.EXTRA` [10]), [31:16] burst deskew.
+  - Ghi thanh ghi theo byte enable.
+  - Tham số `CpuClkHz` của `bow_csi2rx`: elaborate báo lỗi khi `vid_clk_i` > 16/3 × `clk_i`
+    (`bow32_top` truyền `ClkFreqHz`; `make lint` có case âm 50/300 MHz; mô phỏng dừng bằng
+    `$fatal` cả khi Verilator build với `-Wno-fatal`).
+  - Driver: `SETTLE` đặt bit cũ nhất aligner xét (nó nhìn lùi 2 word ISERDES) vào giữa
+    85 ns + 6 UI … 145 ns + 2 UI (22 ở 912 Mbit/s và 200 MHz; IMX219 trên board chạy sạch ở
+    6…30); `CTRL.EXTRA` theo tốc độ lane; `extra` trong bộ đếm và
+    `bow_csi2rx_link_errors()`; `CSI2RX_ERR_TAP`, `CSI2RX_ERR_SKIP`, `FRAME_ERR`,
+    `bow_csi2rx_print_errors()`; kiểm tra lề sau hiệu chỉnh `bow_csi2rx_margin()` (tâm và
+    tâm ± eye/4 mỗi lane, chỉ báo, BER theo số bit đã kiểm; sau một điểm sạch xoá bộ đếm
+    trước khi ghi tap, timer khởi động lại ở FS nên frame mất FS không làm điểm sau "not
+    measured", lỗi đã thấy vẫn là kết quả).
+  - `csi2_test`: check `margin` (dữ liệu PN9, 60 frame mỗi điểm), lệnh `margin [k]
+    [frames]`, mỗi frame được kiểm cũng phải có `FRAME_ERR` = 0, dòng lỗi in đủ các bộ đếm
+    (cả `extra`); `start` báo "no data" khi không có packet. `camera`, `video`: kiểm tra lề 8
+    frame mỗi điểm sau mỗi lần hiệu chỉnh; chỉ hiệu chỉnh lại khi link check (2,4 frame +
+    6 ms) lỗi do tap hoặc không có dữ liệu (khi đó `cam` báo `calibration failed`, `error`),
+    lỗi khác giữ tap; `camera` có lệnh `margin`.
+  - DV: case `ovf` so từng pixel khi tràn FIFO; case mới `deskew`, `extra`, `loss`, `ovf2`,
+    `ovf8`, `be` và unit test aligner `tb_dphy_align.sv` (53 case, nhiều case chạy cả với 1
+    lane, 1 trên 2 lane và clock liên tục); lệnh `wrbe`, byte sau packet và burst thô (skew
+    calibration) trong `stim.txt`; cột `tuser[1]` trong `out.txt`, `FRAME_ERR` trong bản
+    ghi `fe`; mô hình tính đầu ra giữ 3 nhóm khi nhóm đầu có 1 pixel; `BOW_CDC_JITTER`
+    (chỉ mô phỏng) cho `bow_cdc_pulse` nhận toggle muộn một chu kỳ ngẫu nhiên; 57 mutant
+    RTL đều bị bắt; 29 unit test.
+  - Test mức chân xsim: giá trị của driver, burst skew calibration, T_EOT max, T_HS-PREPARE
+    min/max với HS-ZERO đúng tối thiểu trên mọi lane và sync giả ở cuối HS-PREPARE; kiểm
+    white-box cửa sổ dò đầu tiên bắt đầu trong HS-zero; quét `+SETTLE=`: 20…28 đạt.
+  - SoC sim `camera`: `cam` lại với tap giữ nguyên, lỗi FRAME (`taps kept`), cảm biến im
+    lặng (`error`). SoC sim `csi2`: margin khi eye trôi với thời gian frame như cảm biến
+    thật và điểm lỗi không phải điểm cuối.
+  - `kv260_cam`: `phys_opt_design` sau route (đường macroblock H.264 ở 200 MHz thiếu
+    26 ps sau thay đổi này); WNS +0,005 ns, bus skew đạt. KV260: `csi2_test` 18/18,
+    `camera` và `video` chạy đúng.
 - Review IP DDR theo mục tiêu công nghiệp và SoC camera AI: băng thông (cửa sổ 32 bit
   5 / 3,6 MB/s, DRAM 267 MB/s, cần ≈ 1–2 GB/s), refresh 3,9 µs khi Tc > 85 °C, ECC, bám pha
   theo nhiệt, QoS, DFI chuẩn cho PHY ASIC; lộ trình P0–P3
@@ -462,6 +539,10 @@
   nó (`sw/apps/camera/csi2rx.c/.h`).
 
 ### Fixed
+- Unit test aligner (`hw/ip/csi2rx/dv/tb_dphy_align.sv`): với Verilator 5.020 queue cục bộ của
+  hàm `pack()`/`mk()` giữ nội dung của lần gọi trước cùng chỗ gọi, nên case "pha k" phát lại
+  burst của pha 0…k−1 trước (deskew pha 1–7 thật ra được nhận ở burst pha 0); nay xoá queue
+  đầu mỗi lần gọi, mọi pha được thử riêng.
 - Bộ thu CSI-2 (`bow_csi2_lane_merge`): lệch đúng 7 byte clock giữa các lane cho SKEW kèm packet
   bị cắt (TRUNC) vì word vẫn được lấy ra trong chu kỳ tràn; giờ chu kỳ đó không lấy word nào:
   0–6 byte clock nhận đúng, từ 7 chỉ SKEW, không ra gì (test `skew` của `hw/ip/csi2rx/dv`).

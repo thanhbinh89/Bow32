@@ -48,9 +48,12 @@ theo [adding_an_ip.md](adding_an_ip.md) và kiểm chứng bằng test mô phỏ
       D-PHY RX trên `IBUFDS_DPHY`/`IDELAYE3`/`ISERDESE3`/`BUFGCE_DIV`, máy trạng
       thái LP, phát hiện SoT, căn byte, ghép lane, lớp packet (header, ECC,
       CRC-16), unpack RAW10/RAW8, eye hiệu chỉnh bằng phần mềm; `csi2_test`
-      PASS 16/16 trên KV260.
-- [ ] Bộ thu CSI-2 nâng cao: 4 lane (2 pixel/clock), RAW12, nhiều packet trong
-      một burst, tự hiệu chỉnh lại eye khi có lỗi, deskew, ULPS.
+      PASS 18/18 trên KV260. Giai đoạn 0 của review công nghiệp: giữ khung
+      dòng/frame khi tràn FIFO, `tuser[1]` dòng lỗi, `FRAME_ERR` mỗi frame,
+      deskew, cờ EXTRA, `SETTLE` theo tốc độ lane, kiểm tra lề sau hiệu chỉnh.
+- [ ] Bộ thu CSI-2 nâng cao: 4 lane (2 pixel/clock), RAW12, LRTE (nhiều packet
+      trong một burst, CSI-2 v2.0+), bám eye và hiệu chỉnh theo nhiệt, ULPS
+      ([csi2rx_review.md](csi2rx_review.md) mục 7).
 - [x] **Bộ mã hoá H.264** ([ip/h264.md](ip/h264.md)): intra only, `I_16x16`,
       CAVLC; camera → ISP → H.264 → DMA → video RAM → MP4 ([video_kv260.md](video_kv260.md)).
 - [ ] H.264 nâng cao: Intra 4x4, frame P (`P_Skip` + tìm chuyển động, cần frame

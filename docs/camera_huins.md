@@ -373,8 +373,8 @@ csi2rx: no data
 streaming 1920x1080 RAW10, link check ok
 > stat
 csi2rx: link ok
-  frames 31 lines/frame 1080 wc 2400 dt 2b sum ........
-  errors: ecc 0/0 crc 0 trunc 0 sot 0/0/0/0 drop 279 ovf 0 misc 0
+  frames 31 lines/frame 1080 wc 2400 dt 2b sum ........ frame errors 000
+  errors: ecc 0/0 crc 0 trunc 0 sot 0/0/0/0 ovf 0 misc 0 extra 0 (dropped by DT/VC 279)
   timing: frame 33333 us, line 11111 ns, byte clock 180000 kHz
   phy: lp clk .. d0 .. d1 .. d2 .. d3 .., bursts n/n/n/n clk n, delay a/b/c/d
 > log fs                  # 64 packet từ FS: FS, EMB (dt 12), 8 x OB (dt 37), RAW10 (dt 2b, wc 2400)
@@ -386,7 +386,7 @@ lane 2 tap 150: in use
 > tp 11                   # sọc màu của cảm biến; tp 0: cảnh thật
 > test                    # mọi check: 1080p30 rồi 720p60 (HMAX 300 / VMAX 4000)
 ...
-csi2_test: PASS (15/15)
+csi2_test: PASS (17/17)
 ```
 
 `start` in `link check failed (try cal)` khi 64 packet đầu có lỗi ở trễ BISC: `cal 8`, rồi
@@ -476,8 +476,11 @@ error: size must be even, 16..2048 x 8..2174
 `cam`: cấu hình ISP → `bow_csi2rx_start(4, RAW10, 1440 Mbit/s)` khi IMX274 còn ở standby
 (LP-00; hàm chờ `PHY_RDY`) → bước 1 của chuỗi thoát standby qua I2C 100 kHz (~26 ms) → ISP →
 stream (chờ 11 + 8 ms; frame đầu không được xuất) → link check. Trên bản Versal app **giữ trễ
-BISC** khi 64 packet đầu sạch (theo dõi VT của XPHY vẫn chạy) và chỉ hiệu chỉnh khi có lỗi
-(`csi2rx: calibrated taps ...`); KV260 thì luôn hiệu chỉnh ở `cam` đầu. `cal` nạp tap: lane đó
+BISC** khi 64 packet đầu sạch (theo dõi VT của XPHY vẫn chạy) và chỉ hiệu chỉnh khi lỗi là lỗi
+lấy mẫu (`CSI2RX_ERR_TAP`) hay không có dữ liệu (`csi2rx: calibrated taps ...`, rồi kiểm tra lề
+`csi2rx: margin ok +-k/... taps` 8 frame mỗi điểm); lỗi khác (EXTRA, FORMAT, FRAME, OVF) giữ
+trễ (`csi2rx: keeping the delays in use ...` ở `cam` đầu, `taps kept` về sau); KV260 thì luôn
+hiệu chỉnh ở `cam` đầu. `cal` nạp tap: lane đó
 thôi theo dõi VT (mục 9), nên sau khi bo nóng lên hãy xem lại `csi`. `stop`, `mode`, `tpg`:
 IMX274 vào standby là cắt ngang frame, nên app chờ hết frame, tắt bộ thu rồi mới đưa cảm biến
 về standby. AE/AWB ghi cảm biến tối đa một lần mỗi frame.

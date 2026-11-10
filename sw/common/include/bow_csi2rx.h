@@ -6,9 +6,12 @@
  *
  * The receiver decodes the packets of a CSI-2 camera (1, 2 or 4 data lanes,
  * RAW8 / RAW10) and streams the pixels of one virtual channel and data type
- * into the ISP. The sampling point of every data lane is an input delay tap
- * that software finds at run time (bow_csi2rx_calibrate): the capture has no
- * static timing.
+ * into the ISP (AXI4-Stream, tuser[0] = start of frame, tuser[1] = line
+ * error with tlast; a frame whose first line cannot be output is skipped,
+ * FRAME_ERR holds the errors of each frame). The sampling point of every
+ * data lane is an input delay tap that software finds at run time
+ * (bow_csi2rx_calibrate, then bow_csi2rx_margin): the capture has no static
+ * timing.
  *
  * Two kinds of delay line (INFO.DLY_VID):
  *   0  UltraScale+ IDELAYE3 (KV260): a tap written to DLYn is applied at the
@@ -21,7 +24,8 @@
  *      BISC is done; only this PHY has the bit.
  *
  * The hardware takes the configuration without handshake, so:
- *   - change CTRL.LANES / LANES4 / VC / VC_ANY / DT only while CTRL.RX_EN = 0,
+ *   - change CTRL.LANES / LANES4 / VC / VC_ANY / DT / EXTRA only while
+ *     CTRL.RX_EN = 0,
  *   - change PHY_CFG and CTRL.CLK_FORCE only while CTRL.PHY_EN = 0,
  *   - start the receiver before the sensor streams (it must see LP-11 first)
  *     and stop it after the sensor has finished its last frame.
@@ -54,16 +58,19 @@ typedef struct {
   volatile uint32_t CNT_DROP;    /* 0x03C R   [15:0] VC/DT filter [31:16] FIFO overflow */
   volatile uint32_t CNT_BURST;   /* 0x040 R   HS entries [15:0] lane 0 [31:16] lane 1 */
   volatile uint32_t CNT_MISC;    /* 0x044 R   [15:0] clock lane HS entries [23:16] LP errors
-                                  *           [31:24] skew + format + frame errors */
-  volatile uint32_t CNT_SOT23;   /* 0x048 R   sync errors [15:0] lane 2 [31:16] lane 3 */
-  volatile uint32_t CNT_BURST23; /* 0x04C R   HS entries [15:0] lane 2 [31:16] lane 3 */
+                                  *           [31:24] skew + format + frame errors + skips */
+  volatile uint32_t CNT_EXT;     /* 0x048 R   [15:0] bursts with more than CTRL.EXTRA bytes
+                                  *           after the packet [31:16] deskew bursts */
+  volatile uint32_t FRAME_ERR;   /* 0x04C R   CSI2RX_ERR_* of the last complete frame (from
+                                  *           the FE before it), latched at its FE */
   volatile uint32_t FRAME_INFO;  /* 0x050 R   last complete frame: [15:0] lines [31:16] number */
   volatile uint32_t LINE_INFO;   /* 0x054 R   last accepted line: [15:0] WC [21:16] DT [23:22] VC */
   volatile uint32_t FRAME_SUM;   /* 0x058 R   sum of the pixel values of the last frame */
   volatile uint32_t FRAME_TIME;  /* 0x05C R   CPU cycles between the last two FS */
   volatile uint32_t LINE_TIME;   /* 0x060 R   CPU cycles between two line ends of a frame */
   volatile uint32_t BYTECLK;     /* 0x064 R   [19:0] byte clocks per 65536 CPU cycles */
-  uint32_t reserved1[2];         /* 0x068 */
+  volatile uint32_t CNT_SOT23;   /* 0x068 R   sync errors [15:0] lane 2 [31:16] lane 3 */
+  volatile uint32_t CNT_BURST23; /* 0x06C R   HS entries [15:0] lane 2 [31:16] lane 3 */
   volatile uint32_t DLY[4];      /* 0x070 RW  W [8:0] tap, R [8:0] written [24:16] in use;
                                   *           lanes the receiver does not have: RAZ/WI */
   volatile uint32_t LOG_CTRL;    /* 0x080 RW  CSI2RX_LOG_* */
@@ -75,7 +82,9 @@ typedef struct {
 } bow_csi2rx_regs_t;
 
 _Static_assert(__builtin_offsetof(bow_csi2rx_regs_t, CNT_MISC) == 0x044, "CSI2RX CNT offset");
-_Static_assert(__builtin_offsetof(bow_csi2rx_regs_t, CNT_SOT23) == 0x048, "CSI2RX CNT23 offset");
+_Static_assert(__builtin_offsetof(bow_csi2rx_regs_t, CNT_EXT) == 0x048, "CSI2RX CNT_EXT offset");
+_Static_assert(__builtin_offsetof(bow_csi2rx_regs_t, FRAME_ERR) == 0x04C, "CSI2RX FRAME_ERR offset");
+_Static_assert(__builtin_offsetof(bow_csi2rx_regs_t, CNT_SOT23) == 0x068, "CSI2RX CNT23 offset");
 _Static_assert(__builtin_offsetof(bow_csi2rx_regs_t, FRAME_INFO) == 0x050, "CSI2RX INFO offset");
 _Static_assert(__builtin_offsetof(bow_csi2rx_regs_t, DLY) == 0x070, "CSI2RX DLY offset");
 _Static_assert(__builtin_offsetof(bow_csi2rx_regs_t, LOG_CTRL) == 0x080, "CSI2RX LOG_CTRL offset");
@@ -104,6 +113,11 @@ _Static_assert(__builtin_offsetof(bow_csi2rx_regs_t, RAW) == 0x800, "CSI2RX RAW 
 #define CSI2RX_CTRL_LANES4    (1u << 7) /* 4 data lanes (wins over LANES2) */
 #define CSI2RX_CTRL_DT(d)     (((uint32_t)(d) & 0x3Fu) << 8)
 #define CSI2RX_CTRL_DT_MASK   (0x3Fu << 8)
+/* More than EXTRA bytes after a packet in its HS burst: ERR_STATUS.EXTRA (the
+ * burst most likely carries further packets, which are dropped). 0 = off,
+ * reset 64; must be above the trail bytes (bow_csi2rx_start sets it). */
+#define CSI2RX_CTRL_EXTRA(n)   (((uint32_t)(n) & 0xFFu) << 16)
+#define CSI2RX_CTRL_EXTRA_MASK (0xFFu << 16)
 
 #define CSI2RX_PHY_SETTLE(n)     ((uint32_t)(n) & 0xFFu)
 #define CSI2RX_PHY_LP_FILTER(n)  (((uint32_t)(n) & 0xFu) << 8)
@@ -140,7 +154,14 @@ _Static_assert(__builtin_offsetof(bow_csi2rx_regs_t, RAW) == 0x800, "CSI2RX RAW 
 #define CSI2RX_ERR_FORMAT   (1u << 7)
 #define CSI2RX_ERR_FRAME    (1u << 8)
 #define CSI2RX_ERR_LP       (1u << 9)
-#define CSI2RX_ERR_ALL      0x3FFu
+#define CSI2RX_ERR_EXTRA    (1u << 10) /* bytes after a packet in its burst (CTRL.EXTRA) */
+#define CSI2RX_ERR_SKIP     (1u << 11) /* a frame was skipped: its first line could not be output */
+#define CSI2RX_ERR_ALL      0xFFFu
+/* Errors that a bad IDELAY sampling point causes (calibration, margin check,
+ * the cause of a failed link check that a new calibration can fix). */
+#define CSI2RX_ERR_TAP                                                                          \
+  (CSI2RX_ERR_SOT | CSI2RX_ERR_ECC_CORR | CSI2RX_ERR_ECC | CSI2RX_ERR_CRC | CSI2RX_ERR_TRUNC | \
+   CSI2RX_ERR_SKEW)
 
 #define CSI2RX_FRAME_LINES(f) ((f) & 0xFFFFu)
 #define CSI2RX_FRAME_NUM(f)   ((f) >> 16)
@@ -198,13 +219,37 @@ _Static_assert(__builtin_offsetof(bow_csi2rx_regs_t, RAW) == 0x800, "CSI2RX RAW 
 
 typedef struct {
   uint32_t frames, packets, lines, ecc_corr, ecc_err, crc, trunc, sot[4], drop, ovf, burst[4],
-      clk_burst, lp_err, misc_err;
+      clk_burst, lp_err, misc_err, extra, deskew;
 } bow_csi2rx_cnt_t;
 
 typedef struct {
   uint32_t tap[4], width[4]; /* chosen tap and eye width (taps) per data lane */
   uint32_t lanes;            /* data lanes calibrated */
 } bow_csi2rx_cal_t;
+
+/* One point of bow_csi2rx_margin(). Sampling errors are those a bad input
+ * delay tap causes: CNT_SOT and CNT_SOT23 (every lane) + CNT_ECC (corrected
+ * and not) + CNT_CRC (CRC and truncated), + 1 if ERR_STATUS.SKEW (CNT_MISC
+ * also counts format and frame errors). err = ERR_STATUS at the end: OVF,
+ * FORMAT, FRAME, LP, EXTRA and SKIP are shown there but are not sampling
+ * errors. */
+typedef struct {
+  uint32_t tap[4];  /* DLYn during the point (the DLY registers written, else 0) */
+  uint32_t frames;  /* frame ends seen */
+  uint32_t lines;   /* accepted lines (CNT_LINE) */
+  uint64_t bits;    /* packet bits per data lane: lines x (WC + 6) x 8 / lanes */
+  uint32_t errors;  /* sampling errors */
+  uint32_t err;     /* ERR_STATUS */
+  int32_t result;   /* 1 clean, 0 errors, -1 not measured (or not reached) */
+} bow_csi2rx_mpoint_t;
+
+typedef struct {
+  uint32_t k[4];                  /* taps from the centre to a side point, per lane (0: not used) */
+  bow_csi2rx_mpoint_t centre;     /* every lane at its calibrated tap */
+  bow_csi2rx_mpoint_t side[4][2]; /* [lane][0: tap - k, 1: tap + k], other lanes at their tap */
+} bow_csi2rx_margin_t;
+
+#define CSI2RX_MARGIN_MIN 40u /* smallest automatic k (taps) */
 
 /* ID check; *lanes = data lanes, *phy = a D-PHY is connected (either may be
  * NULL). false: no Bow32 CSI-2 receiver at BOW32_CSI2RX_BASE. */
@@ -218,14 +263,21 @@ uint32_t bow_csi2rx_lanes(void);
  * UltraScale+ PHY has no start-up calibration, its PHY_RDY is not checked
  * (bitstreams built before the bit read 0 there). PHY_CFG for the video
  * clock of INFO and the lane rate (bit/s per lane, e.g. IMX219_LANE_RATE):
- * SETTLE 70 ns (95 ns with INFO.DLY_VID: the Versal XPHY FIFO delays the
- * sync search), CLK_SETTLE 150 ns, LP_FILTER 2 and CLK_MISS = one byte clock
- * period (8 UI) + 3 video cycles, since the clock lane activity is seen as
- * byte clock edges. CTRL = PHY_EN | RX_EN | lanes (1, 2 or 4: LANES2 for 2
- * and more, LANES4 too for 4) | dt (VC 0); counters, ERR_STATUS and
- * IRQ_STATUS cleared. Call BEFORE the sensor starts streaming: the receiver
- * must see LP-11 first. Lane rates below ~350 Mbit/s are not supported
- * (docs/ip/csi2rx.md). Returns CSI2RX_OK or CSI2RX_ENOTRDY. */
+ * SETTLE puts the oldest bit the sync search looks at (the aligner also sees
+ * the 2 ISERDES words before hs_active, 16..24 UI) in the middle of
+ * 85 ns + 6 UI (T_HS-PREPARE max) ... 145 ns + 2 UI (the zero byte before
+ * the earliest sync) after LP-00 at the pin, ~20 ns from either end at
+ * 912 Mbit/s (70 ns if lane_rate is 0); with INFO.DLY_VID 95 ns (the Versal
+ * XPHY FIFO delays the sync search further, see SETTLE_VID_NS), CLK_SETTLE
+ * 150 ns, LP_FILTER 2 and CLK_MISS = one byte clock period (8 UI) + 3 video
+ * cycles, since the clock lane activity is seen as byte clock edges. CTRL =
+ * PHY_EN | RX_EN | lanes (1, 2 or 4: LANES2 for 2 and more, LANES4 too for
+ * 4) | dt (VC 0) | EXTRA above the trail bytes of the lane rate on the lanes
+ * in use (T_HS-TRAIL max + LP-11 detection, + the XPHY FIFO with
+ * INFO.DLY_VID); counters, ERR_STATUS and IRQ_STATUS cleared. Call BEFORE
+ * the sensor starts streaming: the receiver must see LP-11 first. Lane rates
+ * below ~350 Mbit/s are not supported (docs/ip/csi2rx.md). Returns CSI2RX_OK
+ * or CSI2RX_ENOTRDY. */
 int bow_csi2rx_start(uint32_t lanes, uint32_t dt, uint32_t lane_rate);
 
 /* Call AFTER the sensor stream-off: waits until the current frame has ended
@@ -241,11 +293,20 @@ void bow_csi2rx_set_rx(bool on);
 void bow_csi2rx_clear(void);
 
 void bow_csi2rx_counters(bow_csi2rx_cnt_t *c);
-/* ecc_corr + ecc_err + crc + trunc + sot + ovf + misc_err (0 = clean link). */
+/* ecc_corr + ecc_err + crc + trunc + sot (4 lanes) + ovf + misc_err + extra
+ * (0 = clean link). Deskew bursts are not errors. */
 uint32_t bow_csi2rx_link_errors(const bow_csi2rx_cnt_t *c);
+/* "ecc 0/0 crc 0 trunc 0 sot 0/0 ovf 0 misc 0 extra 0": every term of
+ * bow_csi2rx_link_errors() (no newline); sot has 4 values while 4 lanes are
+ * in use. */
+void bow_csi2rx_print_errors(const bow_csi2rx_cnt_t *c);
 
 /* Clear the counters, then true once `packets` packets arrived without a
- * link error; false at the first error or after timeout_ms. */
+ * link error; false at the first error or after timeout_ms. After false:
+ * bow_csi2rx_link_errors() == 0 means the timeout, fewer packets (no data, or
+ * a slow link; ERR_STATUS may still hold LP, which is not counted);
+ * otherwise ERR_STATUS tells the cause: a new calibration only helps when it
+ * holds CSI2RX_ERR_TAP bits (EXTRA, FORMAT, FRAME, OVF are not tap problems). */
 bool bow_csi2rx_link_check(uint32_t packets, uint32_t timeout_ms);
 
 /* Wait for the next frame end of the selected VC (IRQ_STATUS.FE is cleared
@@ -291,6 +352,28 @@ bool bow_csi2rx_calibrate(uint32_t step, uint32_t tap_timeout_ms, bow_csi2rx_cal
 /* "taps 208/200 eye 272/256": 2 values for 1 or 2 lanes, else one per lane. */
 void bow_csi2rx_print_cal(const bow_csi2rx_cal_t *cal);
 
+/* Margin check after bow_csi2rx_calibrate(), while the sensor streams:
+ * `frames` frame ends with every lane at its calibrated tap, then for each
+ * data lane in use (1, 2 or 4) `frames` frame ends at tap - k and at tap + k
+ * (the other lanes at their tap). k = 0: width / 4 per lane, at least
+ * CSI2RX_MARGIN_MIN. The DLY registers written are those of the
+ * calibration (the lanes in use, at least 2 with DLY_VID 0).
+ * A point stops at its first sampling error. After a clean point the
+ * counters are cleared before the next taps are written: a frame start lost
+ * at the new taps is an error of that point. Returns 1: no sampling error at
+ * any point; 0: errors (m says where, also when a later point was not
+ * measured); -1: not measured (tap not applied, or no frame start or end
+ * within tap_timeout_ms: is the sensor streaming?). Then the calibrated
+ * taps, one frame end, counters and ERR_STATUS cleared. The taps are never
+ * moved: a low margin is only reported. Polls and clears IRQ_STATUS.FS and
+ * FE (IRQ_EN must not include them). verbose: one line per measured point,
+ * after all points (printing would move tap changes into frames). */
+int bow_csi2rx_margin(const bow_csi2rx_cal_t *cal, uint32_t k, uint32_t frames,
+                      uint32_t tap_timeout_ms, bow_csi2rx_margin_t *m, bool verbose);
+/* "+-68/+-66 taps: 0 errors in 5 x 60 frames, BER < 4.9e-9" (one k per
+ * lane in use) or the first point with errors (no newline). */
+void bow_csi2rx_print_margin(const bow_csi2rx_margin_t *m, int result);
+
 /* Packet log: mode = 0 (next 64 packets) or CSI2RX_LOG_TRIG_FS and/or
  * CSI2RX_LOG_STOP_FE. e[64] receives the entries in time order. Returns the
  * number of entries (STOP_FE: the last one is the FE), 0 on timeout. */
@@ -306,8 +389,8 @@ bool bow_csi2rx_raw(uint32_t *w, bool now, uint32_t timeout_ms);
 uint32_t bow_csi2rx_byteclk_hz(uint32_t timeout_ms);
 
 /* Link verdict ("csi2rx: link ok", "link errors", "no data", or "no lines":
- * frames without an accepted line), counters,
- * frame/line info, timing and PHY state. The byte clock is measured over
+ * frames without an accepted line), counters, frame/line info (FRAME_ERR
+ * of the last frame), timing and PHY state. The byte clock is measured over
  * one frame period + 2 ms (a non-continuous clock may stop for the whole
  * vertical blanking). The per lane lists (sot, LP state, bursts, delay)
  * have 4 values while 4 lanes are in use (CTRL.LANES4), else 2 as before.

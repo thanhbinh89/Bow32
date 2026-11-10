@@ -86,6 +86,9 @@ lint: deps
 	@# of its source (the strobe never reaches it)
 	@! $(DPHY_LINT) -GNibPhys=16\'h2764 > /dev/null 2>&1 || \
 	  { echo "lint: bow_dphy_io_versal accepted a nibble plan the strobe cannot reach"; exit 1; }
+	@# bow_csi2rx: LP event pulses need vid_clk_i <= 16/3 x clk_i
+	@! $(LINT_CMD) -GVidClkHz=300000000 > /dev/null 2>&1 || \
+	  { echo "lint: bow_csi2rx accepted a 300 MHz video clock with a 50 MHz CPU clock"; exit 1; }
 	@echo "lint OK"
 
 sim: deps

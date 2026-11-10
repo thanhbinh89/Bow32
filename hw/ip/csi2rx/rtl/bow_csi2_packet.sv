@@ -35,6 +35,15 @@
 // * px_eol_o comes in a cycle without payload bytes: after the last body
 //   word, or one cycle later when that word also carries payload bytes
 //   (possible with 4 bytes per word: CRC in bytes 1-2 or 2-3).
+// * px_err_o comes with px_eol_o: the line has a CRC error, a format error
+//   or was truncated (m_axis tuser[1] at tlast).
+// * Bytes that follow a complete packet (short or long) in the same burst
+//   are counted until eob (also the bytes after the CRC in the last word of
+//   a long packet); more than extra_i (CTRL.EXTRA, 0 = off) is ev_extra,
+//   once per burst: the burst most likely holds further packets, which this
+//   layer drops. The trail of the burst also gives some bytes (up to ~30
+//   per lane at 1 Gbit/s, times the active lanes), so extra_i must be above
+//   that.
 // * One LOG entry per packet with a decoded header, written when it ends.
 //   For long packets it is written 3 cycles after px_eol_o so that the
 //   FIFO overflow flag of the unpacker (px_ovf_i) includes the last group:
@@ -53,6 +62,7 @@ module bow_csi2_packet import bow_csi2rx_pkg::*; #(
   input  logic [1:0]            vc_i,            // configuration (static while RX is on)
   input  logic                  vc_any_i,
   input  logic [5:0]            dt_i,
+  input  logic [7:0]            extra_i,         // CTRL.EXTRA (static while RX is on)
 
   input  logic                  valid_i,         // from the lane merge
   input  logic [Bytes-1:0][7:0] data_i,          // byte k in [k]
@@ -65,6 +75,7 @@ module bow_csi2_packet import bow_csi2rx_pkg::*; #(
   output logic [Bytes-1:0]      px_valid_o,      // payload bytes: [k] byte k (only with [k-1])
   output logic [Bytes-1:0][7:0] px_data_o,
   output logic                  px_eol_o,        // end of the line (in a cycle without bytes)
+  output logic                  px_err_o,        // with px_eol_o: CRC / format error or truncated
   input  logic                  px_ovf_i,        // unpacker: a group of the line was dropped
 
   output logic                  fs_o,            // FS of the selected VC (frame sum = 0, sof pending)
@@ -172,7 +183,7 @@ module bow_csi2_packet import bow_csi2rx_pkg::*; #(
   assign accept    = long_pkt && vc_hit && (di[5:0] == dt_i) &&
                      ((di[5:0] == DtRaw8) || (di[5:0] == DtRaw10));
   assign raw10     = (di[5:0] == DtRaw10);
-  assign fmt       = accept && (raw10 ? !mod5_zero(wc) : (wc == '0));
+  assign fmt       = accept && ((wc == '0) || (raw10 && !mod5_zero(wc)));
 
   // =========================================================================
   // Stage D: packet body
@@ -192,7 +203,7 @@ module bow_csi2_packet import bow_csi2rx_pkg::*; #(
   logic [Bytes-1:0][7:0]      sdat;
   logic [16:0]                rem_q;           // body bytes (payload + CRC) still to come
   logic [15:0]                crc_q, crc_n, crc_c;
-  logic                       acc_q;           // the long packet is accepted
+  logic                       acc_q, fmt_q;    // the long packet is accepted / has a format error
   logic [Bytes-1:0]           pay;             // payload bytes of the word
   logic                       body, last, lpay, hdr4, trunc;
 
@@ -226,6 +237,16 @@ module bow_csi2_packet import bow_csi2rx_pkg::*; #(
     end
   end
 
+  // Bytes after a complete packet, until eob (the stage D stream): the
+  // words of an ended packet, and the bytes after the CRC in its last word
+  logic       ended_q, xev_q;
+  logic [8:0] xcnt_q, xcnt_n, xlast;
+  logic [2:0] xtail;                    // bytes of the word after the body (last word)
+
+  assign xtail  = snb - nbody;
+  assign xcnt_n = xcnt_q + ((sv && !ssop && (dst_q == Idle) && ended_q) ? 9'(snb) : 9'd0);
+  assign xlast  = last ? {6'd0, xtail} : 9'd0;
+
   // =========================================================================
   // Frame state, events, LOG entries
   // =========================================================================
@@ -233,6 +254,7 @@ module bow_csi2_packet import bow_csi2rx_pkg::*; #(
   logic [15:0] lines_q, fnum_q;
   logic        done_q;                  // cycle after the last body byte: CRC result in crc_q
   logic        eol_dly_q;               // the line ends after a last word with payload bytes
+  logic        err_dly_q;               //   with px_err_o
   logic [2:0]  lend_q;                  // a long packet ended (delay for px_ovf_i)
   logic        crc_err_q, trunc_q;
 
@@ -247,6 +269,11 @@ module bow_csi2_packet import bow_csi2rx_pkg::*; #(
       rem_q         <= '0;
       crc_q         <= 16'hFFFF;
       acc_q         <= 1'b0;
+      fmt_q         <= 1'b0;
+      ended_q       <= 1'b0;
+      xev_q         <= 1'b0;
+      xcnt_q        <= '0;
+      px_err_o      <= 1'b0;
       px_raw10_o    <= 1'b0;
       px_sol_o      <= 1'b0;
       px_valid_o    <= '0;
@@ -265,6 +292,7 @@ module bow_csi2_packet import bow_csi2rx_pkg::*; #(
       line_vc_o     <= '0;
       done_q        <= 1'b0;
       eol_dly_q     <= 1'b0;
+      err_dly_q     <= 1'b0;
       lend_q        <= '0;
       crc_err_q     <= 1'b0;
       trunc_q       <= 1'b0;
@@ -278,6 +306,7 @@ module bow_csi2_packet import bow_csi2rx_pkg::*; #(
       px_sol_o   <= 1'b0;
       px_valid_o <= '0;
       px_eol_o   <= 1'b0;
+      px_err_o   <= 1'b0;
       fs_o       <= 1'b0;
       fe_o       <= 1'b0;
       log_we_o   <= 1'b0;
@@ -320,6 +349,7 @@ module bow_csi2_packet import bow_csi2rx_pkg::*; #(
         end
         if (!long_pkt) begin
           // short packet or uncorrectable header: the packet ends here
+          ended_q     <= ok;
           log_we_o    <= 1'b1;
           log_entry_o <= {4'b0000, ecc_q, wc, di};
           log_fs_o    <= is_fs;
@@ -329,6 +359,7 @@ module bow_csi2_packet import bow_csi2rx_pkg::*; #(
           dst_q      <= long_pkt ? Body : Idle;
           rem_q      <= {1'b0, wc} + 17'd2;
           acc_q      <= accept;
+          fmt_q      <= fmt;
           px_raw10_o <= raw10;
           px_sol_o   <= accept;
         end
@@ -341,19 +372,24 @@ module bow_csi2_packet import bow_csi2rx_pkg::*; #(
         px_valid_o <= pay & {Bytes{acc_q}};
         px_data_o  <= sdat;
       end
+      // crc_n of the last word covers the received CRC: 0 when it matches
       if (last) begin
         dst_q   <= Idle;
         done_q  <= 1'b1;
         trunc_q <= 1'b0;
+        ended_q <= 1'b1;
         if (lpay) begin
           eol_dly_q <= 1'b1;
+          err_dly_q <= acc_q && ((crc_n != '0) || fmt_q);
         end else begin
           px_eol_o  <= acc_q;
+          px_err_o  <= acc_q && ((crc_n != '0) || fmt_q);
           lend_q[0] <= 1'b1;
         end
       end
       if (eol_dly_q) begin
         px_eol_o  <= acc_q;
+        px_err_o  <= err_dly_q;
         lend_q[0] <= 1'b1;
       end
       if (trunc) begin
@@ -361,6 +397,7 @@ module bow_csi2_packet import bow_csi2rx_pkg::*; #(
         dst_q      <= Idle;
         if (dst_q == Body) begin
           px_eol_o  <= acc_q;
+          px_err_o  <= acc_q;
           lend_q[0] <= 1'b1;
           trunc_q   <= 1'b1;
           crc_err_q <= 1'b0;
@@ -374,9 +411,24 @@ module bow_csi2_packet import bow_csi2rx_pkg::*; #(
           dst_q      <= long_pkt ? Body : Idle;
           rem_q      <= {1'b0, wc} + 17'd2;
           acc_q      <= accept;
+          fmt_q      <= fmt;
           px_raw10_o <= raw10;
           px_sol_o   <= accept;
         end
+      end
+
+      // ---- bytes after a complete packet (several packets in one burst),
+      // saturating at 256. A sop (new burst) or eob restarts the count; with
+      // 4 bytes per word the P3 of a short packet comes with its sop word.
+      xcnt_q <= (xcnt_n[8] ? 9'h100 : xcnt_n) + xlast;
+      if ((extra_i != '0) && !xev_q && (xcnt_q > {1'b0, extra_i})) begin
+        ev_o.extra <= 1'b1;
+        xev_q      <= 1'b1;
+      end
+      if (seob || ssop) begin
+        ended_q <= hdr4 && p2_q && !long_pkt && ok;
+        xev_q   <= 1'b0;
+        xcnt_q  <= '0;
       end
 
       // ---- complete long packet: CRC result

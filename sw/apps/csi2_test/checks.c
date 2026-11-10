@@ -7,7 +7,11 @@
  *   phy-idle   sensor in standby, PHY on: every lane in LP-11, no HS
  *   link-up    stream on: HS bursts on every data lane and the clock lane
  *   calibrate  eye found on every lane, then a clean link check
- *   integrity  RAW10 solid colour: lines, word count, pixel sum of frames
+ *   margin     PN9 data (IMX274: solid AAAh): no sampling error at the
+ *              calibrated taps and at tap - k / tap + k of every lane
+ *              (k = eye / 4), `frames per check` frames at each point; the
+ *              taps stay where they are
+ *   integrity  RAW10 solid colour: lines, word count, pixel sum, FRAME_ERR 0
  *   packets    packet log: FS, embedded data, lines, FE; frame numbers
  *   timing     frame period, line time, byte clock
  *   isp        sensor colour bars through the ISP, checked in a capture
@@ -17,7 +21,10 @@
  *   irq        FS interrupts on irq_fast[7]
  * quick: 64x48 frames with the shortest vertical blanking (simulation),
  * timing only checked for consistency. Full: link-up .. timing at 1080p30
- * and again at 720p60, timing against the sensor configuration.
+ * and again at 720p60, timing against the sensor configuration. integrity,
+ * raw8 and restart (check_frames) also need FRAME_ERR = 0 in every frame
+ * they read; margin counts only sampling errors; the other checks do not
+ * look at FRAME_ERR.
  *
  * With the IMX274 (4 lanes, test patterns of fixed undocumented values):
  *   phy-idle   every lane LP-00 (standby, datasheet) or every lane LP-11
@@ -100,16 +107,6 @@ static uint32_t rnd(void) {
   return rnd_state >> 8;
 }
 
-/* "a/b/c/d" */
-static void put_list(const uint32_t *v, uint32_t n) {
-  bow_printf("%u", v[0]);
-  for (uint32_t i = 1; i < n; i++) bow_printf("/%u", v[i]);
-}
-
-/* Per lane lists in messages: 4 values with a 4 lane stream, else 2 (as
- * bow_csi2rx_print_status). */
-static uint32_t list_lanes(void) { return stream_lanes() > 2u ? 4u : 2u; }
-
 /* FRAME_SUM of a solid colour frame: every 2x2 block holds R, Gr, Gb, B
  * (RAW8: the receiver makes the 10 bit value byte << 2). */
 static uint32_t solid_sum(const uint32_t c[4], bool raw8) {
@@ -118,13 +115,24 @@ static uint32_t solid_sum(const uint32_t c[4], bool raw8) {
   return (ct.w / 2u) * (ct.h / 2u) * s;
 }
 
-static bool fail_link(const bow_csi2rx_cnt_t *c, uint32_t frame) {
-  bow_printf("[FAIL] %s: frame %u: link errors: ecc %u/%u crc %u trunc %u sot ", check_name, frame,
-             c->ecc_corr, c->ecc_err, c->crc, c->trunc);
-  put_list(c->sot, list_lanes());
-  bow_printf(" ovf %u misc %u\n", c->ovf, c->misc_err);
+/* "[FAIL] <check>: <fmt ...>: ecc 0/0 crc 0 ... extra 0 (ERR_STATUS 040)" */
+static bool fail_errors(const char *fmt, ...) {
+  va_list ap;
+  bow_csi2rx_cnt_t c;
+  uint32_t err = CSI2RX->ERR_STATUS;
+  bow_csi2rx_counters(&c);
+  bow_printf("[FAIL] %s: ", check_name);
+  va_start(ap, fmt);
+  bow_vprintf(fmt, ap);
+  va_end(ap);
+  bow_puts(": ");
+  bow_csi2rx_print_errors(&c);
+  bow_printf(" (ERR_STATUS %03x)\n", err);
+  if (err & CSI2RX_ERR_EXTRA) bow_puts("  no LP-11 between packets: a calibration does not help\n");
   return false;
 }
+
+static bool fail_link(uint32_t frame) { return fail_errors("frame %u: link errors", frame); }
 
 /* Skip the frame in progress (FE within first_ms), clear the counters, then
  * n frames read at their FE: H lines, line word count and data type, pixel
@@ -145,8 +153,10 @@ static bool check_frames(const suite_t *s, uint32_t first_ms, uint32_t n, uint32
                   CSI2RX_LINE_DT(li), wc, dt);
     }
     if (fs != sum) return fail("frame %u: pixel sum %08x, expected %08x", i, fs, sum);
+    uint32_t fe = CSI2RX->FRAME_ERR;
+    if (fe) return fail("frame %u: FRAME_ERR %03x", i, fe);
     bow_csi2rx_counters(&c);
-    if (bow_csi2rx_link_errors(&c)) return fail_link(&c, i);
+    if (bow_csi2rx_link_errors(&c)) return fail_link(i);
   }
   return true;
 }
@@ -261,11 +271,14 @@ static bool check_calibrate(const suite_t *s) {
     }
   }
   if (!bow_csi2rx_link_check(64, 4u * s->tap_ms)) {
-    bow_printf("[FAIL] %s: link check with taps ", check_name);
-    put_list(cal.tap, cal.lanes < 2u ? 2u : cal.lanes);
-    bow_puts("\n");
-    return false;
+    if (cal.lanes > 2u) {
+      return fail_errors("link check with taps %u/%u/%u/%u", cal.tap[0], cal.tap[1], cal.tap[2],
+                         cal.tap[3]);
+    }
+    return fail_errors("link check with taps %u/%u", cal.tap[0], cal.tap[1]);
   }
+  ct.cal = cal;
+  ct.calibrated = true;
   bow_printf("[PASS] %s ", check_name);
   bow_csi2rx_print_cal(&cal);
   bow_puts("\n");
@@ -302,6 +315,37 @@ static bool integrity_274(const suite_t *s, uint32_t wc) {
   ref_sum = sum[1];
   return pass("2 x %u frames %ux%u RAW10: wc %u, sum %08x (555h, mean %u) %08x (AAAh, mean %u)",
               s->frames, ct.w, ct.h, wc, sum[0], sum[0] / px, sum[1], sum[1] / px);
+}
+
+/* Random data during the margin check (IMX219: PN9; the IMX274 has no
+ * random pattern: solid AAAh, every bit toggles), then the solid colour of
+ * the checks again; the sensor takes a test pattern at a frame start. */
+static bool test_pattern(const suite_t *s, uint32_t tp) {
+  if (ct.s->set_test_pattern(tp) != I2C_OK) return false;
+  return bow_csi2rx_wait_frame(s->wait_ms) && bow_csi2rx_wait_frame(s->wait_ms);
+}
+
+static bool check_margin(const suite_t *s) {
+  bow_csi2rx_margin_t m;
+  bool i274 = sensor_imx274();
+  if (!ct.calibrated) return fail("not calibrated");
+  if (!test_pattern(s, i274 ? IMX274_TP_ALL_AAA : IMX219_TP_PN9)) {
+    return fail("no %s test pattern", i274 ? "AAAh" : "PN9");
+  }
+  int r = bow_csi2rx_margin(&ct.cal, 0, s->frames, s->tap_ms, &m, true);
+  bool back = test_pattern(s, ct.tp);
+  bow_csi2rx_clear();
+  if (r <= 0) {
+    bow_printf("[FAIL] %s: ", check_name);
+    bow_csi2rx_print_margin(&m, r);
+    bow_puts("\n");
+    return false;
+  }
+  if (!back) return fail("solid colour does not come back");
+  bow_printf("[PASS] %s ", check_name);
+  bow_csi2rx_print_margin(&m, r);
+  bow_puts("\n");
+  return true;
 }
 
 static bool check_integrity(const suite_t *s) {
@@ -661,10 +705,10 @@ typedef struct {
   bool (*fn)(const suite_t *s);
 } check_t;
 
-/* checks 2-6 run once per mode */
+/* checks 2-7 run once per mode */
 static const check_t link_checks[] = {
-    {"link-up", check_link_up},     {"calibrate", check_calibrate}, {"integrity", check_integrity},
-    {"packets", check_packets},     {"timing", check_timing},
+    {"link-up", check_link_up},     {"calibrate", check_calibrate}, {"margin", check_margin},
+    {"integrity", check_integrity}, {"packets", check_packets},     {"timing", check_timing},
 };
 static const check_t stream_checks[] = {
     {"isp", check_isp},         {"raw8", check_raw8}, {"filter", check_filter},

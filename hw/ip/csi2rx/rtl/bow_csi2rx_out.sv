@@ -6,10 +6,11 @@
 //
 // Two group registers: `cur` (being sent, pixel index idx) and `next`. The
 // FIFO is popped whenever `next` is empty, independent of tready; tready only
-// moves the output flops, idx and cur. tuser = first pixel of a sof group,
-// tlast = last pixel of an eol group. All m_axis signals come from flops;
-// groups of 4 pixels give 1 pixel per clock sustained. The reset (RX off)
-// drops everything, also a line in the middle.
+// moves the output flops, idx and cur. tuser[0] = first pixel of a sof group,
+// tlast = last pixel of an eol group, tuser[1] = err of an eol group (with
+// tlast only: the line is bad, see bow_csi2_unpack). All m_axis signals come
+// from flops; groups of 4 pixels give 1 pixel per clock sustained. The
+// reset (RX off) drops everything, also a line in the middle.
 
 module bow_csi2rx_out import bow_csi2rx_pkg::*; (
   input  logic              clk_i,
@@ -20,7 +21,7 @@ module bow_csi2rx_out import bow_csi2rx_pkg::*; (
   output logic              tvalid_o,
   input  logic              tready_i,
   output logic [9:0]        tdata_o,
-  output logic              tuser_o,
+  output logic [1:0]        tuser_o,      // [0] start of frame, [1] line error (with tlast)
   output logic              tlast_o
 );
 
@@ -44,7 +45,7 @@ module bow_csi2rx_out import bow_csi2rx_pkg::*; (
       idx_q    <= '0;
       tvalid_o <= 1'b0;
       tdata_o  <= '0;
-      tuser_o  <= 1'b0;
+      tuser_o  <= '0;
       tlast_o  <= 1'b0;
     end else begin
       if (pop_o) begin
@@ -57,7 +58,8 @@ module bow_csi2rx_out import bow_csi2rx_pkg::*; (
       if (adv) begin
         tvalid_o <= cur_v_q;
         tdata_o  <= cur_q[10*idx_q +: 10];
-        tuser_o  <= cur_v_q && cur_q[43] && (idx_q == 2'd0);
+        tuser_o  <= {cur_v_q && cur_q[44] && cur_q[42] && cur_last,
+                     cur_v_q && cur_q[43] && (idx_q == 2'd0)};
         tlast_o  <= cur_v_q && cur_q[42] && cur_last;
       end
 
