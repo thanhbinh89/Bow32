@@ -46,8 +46,10 @@
 #                   only assert the reset early, the release is synchronised); the
 #                   H.264 STATUS.BUSY synchroniser input is an OR of video domain flops
 #                   (pre-existing, hw/ip/h264: a glitch can make one read show idle)
-#   CDC-11          the CSI-2 lane enables 0 and 1 (always equal: synthesis merges the
-#                   two flops, so one flop feeds two synchronisers; quasi-static)
+#   CDC-11          CSI-2 lane enables that are always equal (lanes 0 and 1; lanes 2
+#                   and 3 with 4 lanes): synthesis merges their flops, so one lane_en_q
+#                   flop feeds two synchronisers; quasi-static (they change only while
+#                   the receiver is disabled)
 #   CDC-13          the byte clock gate: BUFGCE CE from the clock lane state machine
 #                   (clk_vid), changes only while the clock lane is static (false path)
 proc bow32_huins_cam_cdc_known {id from to} {
@@ -66,9 +68,9 @@ proc bow32_huins_cam_cdc_known {id from to} {
       }
     }
     CDC-11 {
-      if {[regexp {^u_soc/u_csi2rx/u_regs/lane_en_q_reg\[0\]/C$} $from] &&
+      if {[regexp {^u_soc/u_csi2rx/u_regs/lane_en_q_reg\[\d+\]/C$} $from] &&
           [regexp {^u_soc/u_csi2rx/u_sync_vcfg/g_bit\[\d+\]\.u_sync/sync_q_reg\[0\]/D$} $to]} {
-        return "CDC-11 CSI-2 lane enables 0/1 (merged flop, quasi-static)"
+        return "CDC-11 CSI-2 lane enables (merged flop of equal enables, quasi-static)"
       }
     }
     CDC-13 - CDC-14 {

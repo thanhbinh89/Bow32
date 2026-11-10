@@ -29,11 +29,12 @@ trên KV260 ([camera_kv260.md](camera_kv260.md), [video_kv260.md](video_kv260.md
 > (`clk_vid`), byte clock 180 MHz +1,946 ns / +0,025 ns, `clk_sys` +3,719 ns / +0,016 ns; bus skew
 > 11/11 đạt (slack +3,893 … +5,004 ns); Vivado không báo critical warning nào; `methodology.rpt`
 > như lần 1; sơ đồ nibble và `pre_opt_cam` đạt; 16 cổng trên VCCIO của FMC+01. Kiểm tra CDC của
-> chính build (mục 4) in 3 dòng `CRITICAL WARNING`: hai mục CDC-11 từ
+> chính build (mục 4) đã in 3 dòng `CRITICAL WARNING`: hai mục CDC-11 từ
 > `u_soc/u_csi2rx/u_regs/lane_en_q_reg[4]` tới bộ đồng bộ enable của data lane 2 và 3 (hai enable
-> luôn bằng nhau, lần build này synthesis gộp chúng thành một flop) và dòng tổng `2 clock / CDC
-> checks failed`. Cùng loại với mục lane 0/1 đã duyệt (flop gộp, gần tĩnh: chỉ đổi khi bộ thu
-> tắt), không ảnh hưởng ảnh; danh sách duyệt (`tcl/timing_checks_cam.tcl`) chưa có mục này.
+> luôn bằng nhau, synthesis gộp chúng thành một flop) và dòng tổng. Cùng loại với mục lane 0/1
+> đã duyệt (flop gộp, gần tĩnh: chỉ đổi khi bộ thu tắt), không ảnh hưởng ảnh. Mục này đã được
+> thêm vào danh sách duyệt (`tcl/timing_checks_cam.tcl`); chạy lại các kiểm tra của build trên
+> checkpoint đã route của PDI này: 0 lỗi, không còn `CRITICAL WARNING`.
 >
 > PDI của lần 1 (`aaf7ed4`, cùng máy, 25 phút): WNS +0,180 ns, WHS +0,018 ns (`clk_vid`), byte
 > clock +1,623 ns / +0,026 ns, `clk_sys` +3,484 ns / +0,037 ns, bus skew 11/11 (+3,781 … +5,016
@@ -223,7 +224,7 @@ kiểm tra và in `CRITICAL WARNING` khi:
 | XPHY | `io_sites.rpt`, log | trước place: `INFO: pre_opt_cam: 4 XPHYs placed at their pins, nibble plan fits bank 705`; sau route: 4 XPHY đúng các nibble của sơ đồ, lane clock ở slice 0 của XPHY strobe, luật chuyển strobe của AM010 đúng (`tcl/cam_xphy.tcl`) |
 | chân | `io_sites.rpt` | 4 `ODDRE1` của I2C (I và T, DRC PDCN-2749) trong `XPIOLOGIC`; 40 flop bắt dữ liệu có `BLI` trong site BLI |
 | VCCIO của khe | `io_sites.rpt`, log | 16 cổng ở bank 703..706 (cùng nguồn SW192): 10 chân `MIPI_DPHY` và 5 chân `LVCMOS12` ở bank 705, `PRSNT_M2C_L` ở bank 703, không cổng nào dùng chuẩn khác; `INFO: I/O banks used: ... (16 ports on the FMC+01 site VCCIO, 1.2 V)`. Chỉ kiểm ràng buộc: **không thấy SW192**, switch chỉ kiểm được bằng LED "1.2" và TP29 (mục 2) |
-| CDC | `cdc.rpt`, log | mọi mục nghiêm trọng của `report_cdc` (CDC-1, -4, -7, -10 … -14) thuộc các loại đã duyệt ở lần build đầy đủ đầu tiên (`bow32_huins_cam_cdc_known` trong `tcl/timing_checks_cam.tcl`: cấu hình ISP / H.264 gần tĩnh, chân CLR của bộ đồng bộ reset, enable lane của bộ thu, cổng byte clock); mục khác là crossing mới phải xem lại; số mục mỗi loại in ở dòng `INFO: report_cdc ...`. PDI của bản cuối: 2 mục CDC-11 từ `u_soc/u_csi2rx/u_regs/lane_en_q_reg[4]` (enable của data lane 2 và 3, gộp một flop như lane 0/1) chưa có trong danh sách, nên build in 3 dòng `CRITICAL WARNING` (trạng thái ở đầu tài liệu, mục 8) |
+| CDC | `cdc.rpt`, log | mọi mục nghiêm trọng của `report_cdc` (CDC-1, -4, -7, -10 … -14) thuộc các loại đã duyệt ở lần build đầy đủ đầu tiên (`bow32_huins_cam_cdc_known` trong `tcl/timing_checks_cam.tcl`: cấu hình ISP / H.264 gần tĩnh, chân CLR của bộ đồng bộ reset, enable lane của bộ thu: các enable luôn bằng nhau mà synthesis gộp flop, lane 0/1 và lane 2/3, cổng byte clock); mục khác là crossing mới phải xem lại; số mục mỗi loại in ở dòng `INFO: report_cdc ...` |
 
 Trước place, `tcl/pre_opt_cam.tcl` gán LOC cho từng XPHY theo chân của nó (Vivado không tự đặt
 XPHY ngoài IP của AMD: DRC AVAL-314) và kiểm lại, độc lập, sơ đồ của netlist với chân thật,
@@ -793,7 +794,7 @@ khỏi lỗi của PHY Bow32. KV260 (không phải bo này): `kv260_cam` với R
 | Vivado: `[Place 30-728]` / `[Place 30-1960]` (luật clock của placer) | clock vào và XPLL khác SLR: xem log `pre_place_cam` (`CLOCK_DEDICATED_ROUTE` trên 3 net của `u_clk`) |
 | Vivado: `CRITICAL WARNING` về bus skew | tên thanh ghi / cell trong `constr/huins_vp1902_cam.xdc` không còn khớp RTL (phải đủ 11) |
 | Vivado: `CRITICAL WARNING: port ... (FMC+01 site VCCIO, SW192 = 1.2 V) has IOSTANDARD ...` | một cổng của bank 703..706 không phải `MIPI_DPHY` / `LVCMOS12`: sửa XDC |
-| Vivado: `CRITICAL WARNING: CDC-<n> from ... to ... is not a reviewed crossing` | crossing mới giữa các miền clock: xem `cdc.rpt`, sửa RTL hoặc duyệt rồi thêm vào `tcl/timing_checks_cam.tcl`. PDI của bản cuối (2026-11-10): `CDC-11 from u_soc/u_csi2rx/u_regs/lane_en_q_reg[4]/C to u_soc/u_csi2rx/u_sync_vcfg/g_bit[31]...` (và `g_bit[32]`) là enable của data lane 2 và 3, gộp một flop như lane 0/1: lành tính (trạng thái ở đầu tài liệu), chưa có trong danh sách |
+| Vivado: `CRITICAL WARNING: CDC-<n> from ... to ... is not a reviewed crossing` | crossing mới giữa các miền clock: xem `cdc.rpt`, sửa RTL hoặc duyệt rồi thêm vào `tcl/timing_checks_cam.tcl`. |
 | `make jtag`: `jtag: refused: ...` | bo / switch theo bảng ở mục 2; PDI không có `pdi_site.txt` (dựng trước khi có khoá) hoặc mới hơn nó (build không qua `make pdi`): build lại bằng `make pdi` hoặc `CONFIRM=1` sau khi kiểm |
 | LED12 tắt | không có clock 200 MHz: SW12 phải OFF |
 | LED7 tắt (LED12 sáng) | XPLL của bank 705 không khoá: clock 200 MHz qua SLR, xem `clock_utilization.rpt` |

@@ -36,9 +36,9 @@
     1–2 lane trên UltraScale+ như stimulus của main; tài liệu: 17 check, `dropped by DT/VC`,
     FIFO 512 × 45 bit.
   - Timing với RTL đã gộp main (2026-11-10): PDI camera của Huins WNS +0,780 ns, WHS
-    +0,014 ns, bus skew 11/11; Vivado không báo critical warning, nhưng kiểm tra CDC của build
-    in 2 mục CDC-11 chưa có trong danh sách duyệt (`lane_en_q_reg[4]`: enable của data lane 2
-    và 3 luôn bằng nhau, synthesis gộp thành một flop như lane 0/1). `kv260_cam`: WNS
+    +0,014 ns, bus skew 11/11; Vivado không báo critical warning; kiểm tra CDC của build thêm
+    vào danh sách duyệt mục CDC-11 của enable data lane 2 và 3 (luôn bằng nhau, synthesis gộp
+    thành một flop như lane 0/1), chạy lại trên checkpoint đã route: 0 lỗi. `kv260_cam`: WNS
     +0,074 ns (đường găng vẫn ở `u_mb` của H.264), WHS +0,010 ns, bus skew 9/9, không có
     critical warning; chưa nạp lên KV260.
   - Bộ thu CSI-2 4 lane (`Lanes` 1, 2 hoặc 4): ghép lane 1/2/4 byte mỗi word, CRC 1–4 byte mỗi
