@@ -10,7 +10,8 @@ không dùng IP của AMD) và một **bộ mã hoá H.264** tự viết cùng *
 phần cứng liền mạch, ra file **MP4** trên PC. Chạy thử với Raspberry Pi camera
 v2 (IMX219) của KV260 ở **1080p30** hoặc **720p60**. Bộ thu còn có bản **4 lane ×
 1440 Mbit/s** cho Sony IMX274 trên bo **Huins MFP-VP1902** (AMD Versal Premium; D-PHY
-trên XPHY của Versal, cũng không dùng IP; chưa chạy trên bo). Bow32 còn có khối tăng tốc
+trên XPHY của Versal, cũng không dùng IP; chạy trên bo lần đầu 2026-11-10: 1080p30 / 720p60,
+H.264 1080p). Bow32 còn có khối tăng tốc
 **mã khối MKV** theo TCVN 14263:2024 (MKV-128 / MKV-256, đủ 6 phiên bản khoá),
 kiểm chứng với Phụ lục A của chuẩn, **SDRAM DDR2/DDR3**:
 controller **LiteDRAM** (sinh từ Python) trên PHY riêng của Bow32 (`ODDRE1`/`IDDRE1` +
@@ -69,7 +70,7 @@ nguồn), cả hai chạy trên bo **Arm MPS4** (Virtex UltraScale+) và Huins M
 | GPIO (IOPAD) ×2 | 2 port × 8 chân: hướng, push-pull/open-drain, set/clear/toggle nguyên tử, ngắt theo cạnh, **chức năng thay thế** (UART1 trên PB0/PB1); 6 chân ra PMOD của KV260 |
 | SYSCTRL | Chip ID, tần số clock, nguyên nhân reset, soft reset, **UART BREAK → reset vào bootloader** |
 | **ISP** | RAW10 Bayer → RGB888 / YUV444, 1 pixel/clock (200 MHz trên KV260): BLC, DPC, white balance, demosaic, CCM, gamma, CSC; thống kê AE/AWB/AF + histogram; capture có lọc thu nhỏ; test pattern; 2 miền clock ([docs/ip/isp.md](docs/ip/isp.md)) |
-| **Bộ thu MIPI CSI-2** | CSI-2 RX 1, 2 hoặc 4 lane: máy trạng thái LP, tìm sync, ghép lane, ECC, CRC-16, lọc VC/DT, RAW10/RAW8 → AXI4-Stream 1 pixel/clock; D-PHY RX không dùng IP AMD: primitive I/O của UltraScale+ (`IBUFDS_DPHY`, `IDELAYE3`, `ISERDESE3`, `BUFGCE_DIV`; KV260) hoặc XPHY chế độ native của Versal (`bow_dphy_io_versal`: `IBUFDS_DPHY`, XPHY, XPLL, BISC; Huins MFP-VP1902); eye hiệu chỉnh bằng phần mềm; bộ đếm lỗi, log packet, word thô của PHY; 2 × 912 Mbit/s với IMX219 (KV260), 4 × 1440 Mbit/s với IMX274 (Huins, mô phỏng, chưa chạy trên bo) ([docs/ip/csi2rx.md](docs/ip/csi2rx.md)) |
+| **Bộ thu MIPI CSI-2** | CSI-2 RX 1, 2 hoặc 4 lane: máy trạng thái LP, tìm sync, ghép lane, ECC, CRC-16, lọc VC/DT, RAW10/RAW8 → AXI4-Stream 1 pixel/clock; D-PHY RX không dùng IP AMD: primitive I/O của UltraScale+ (`IBUFDS_DPHY`, `IDELAYE3`, `ISERDESE3`, `BUFGCE_DIV`; KV260) hoặc XPHY chế độ native của Versal (`bow_dphy_io_versal`: `IBUFDS_DPHY`, XPHY, XPLL, BISC; Huins MFP-VP1902); eye hiệu chỉnh bằng phần mềm; bộ đếm lỗi, log packet, word thô của PHY; 2 × 912 Mbit/s với IMX219 (KV260), 4 × 1440 Mbit/s với IMX274 (Huins, chạy trên bo lần đầu 2026-11-10) ([docs/ip/csi2rx.md](docs/ip/csi2rx.md)) |
 | **Bộ mã hoá H.264** | Constrained Baseline, intra only (IDR mỗi frame, `I_16x16` đủ 4 mode luma + 4 mode chroma, chọn mode theo SAD), CAVLC, 4:2:0, QP 10…51 mỗi frame, cờ deblocking; 392 chu kỳ/macroblock ở 200 MHz (1080p tới ~62 fps); stream Annex B chuẩn, bit-exact với mô hình Python, giải mã bằng FFmpeg trùng từng pixel ([docs/ip/h264.md](docs/ip/h264.md)) |
 | **DMA** | 2 kênh, bus master thứ ba của main crossbar: memory→memory, stream→memory (tuyến tính / vòng / bỏ), đếm packet (frame), lỗi bus, ngắt ([docs/ip/dma.md](docs/ip/dma.md)) |
 | **Video RAM** | 1 MiB (UltraRAM), 0 wait-state, cổng crossbar riêng cho buffer DMA / stream video |

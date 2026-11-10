@@ -8,10 +8,15 @@
 ### Added
 - **Camera Sony IMX274 trên Huins MFP-VP1902**: module Leopard LI-IMX274MIPI-FMC qua bo chuyển
   camera của Huins ở khe FMC+01 (một bank XPIO, 705), 4 lane × 1440 Mbit/s, RAW10
-  (`make fpga BOARD=huins_vp1902 CARD=cam`, [docs/camera_huins.md](docs/camera_huins.md)). Chạy
-  trên bo lần 1 (2026-11-10, trước khi gộp main): `csi2_test` PASS 15/15 sau hiệu chỉnh, 1080p30
-  và 720p60 không lỗi, sọc màu và cảnh thật đúng màu, H.264 1080p giải mã được; bản gộp main
-  cùng các sửa dưới đây chưa chạy lại trên bo.
+  (`make fpga BOARD=huins_vp1902 CARD=cam`, [docs/camera_huins.md](docs/camera_huins.md)).
+  - Kiểm chứng trên bo (lần chạy bo 1, 2026-11-10, PDI và firmware trước khi gộp main):
+    IMX274 4 lane × 1440 Mbit/s (byte clock 180,078 MHz), 1080p30 và 720p60 không lỗi (hơn
+    18 000 frame với tap đã hiệu chỉnh), `csi2_test` PASS 15/15 sau hiệu chỉnh, sọc màu đúng
+    thứ tự, cảnh thật màu tự nhiên, H.264 1080p30 giải mã không lỗi (20 frame: video RAM đầy với
+    rate control cũ). Đo thêm: `SETTLE` sạch 65–170 ns với PA5 = 1, PA5 = 0 hỏng sau lần bật
+    lại bộ thu, trễ BISC ở mép sớm của eye, mỗi burst một packet. Kết quả từng bước và danh
+    sách kiểm: docs/camera_huins.md mục 6, 7. Bản gộp main cùng các sửa dưới đây đã kiểm trong
+    mô phỏng, chưa chạy lại trên bo (lần chạy bo 2).
   - Sửa theo lần chạy bo 1: `imx274_probe()` nhận VMAX sau reset 0x906 (cảm biến trên bo) và
     0x905 (datasheet), MDSEL / HMAX / đọc lại BLKLEVEL vẫn phải khớp; khi không khớp các app in
     giá trị đã đọc (`cam_print_not_found()`) thay cho gợi ý XCLR sai. `imx274_bayer()` trả RGGB
@@ -30,6 +35,12 @@
     (`bow_csi2rx_get_delays()`; `DLY_VID`: `[24:16]`); `csi2_model.py` `extra_thr()` giữ 64 cho
     1–2 lane trên UltraScale+ như stimulus của main; tài liệu: 17 check, `dropped by DT/VC`,
     FIFO 512 × 45 bit.
+  - Timing với RTL đã gộp main (2026-11-10): PDI camera của Huins WNS +0,780 ns, WHS
+    +0,014 ns, bus skew 11/11; Vivado không báo critical warning, nhưng kiểm tra CDC của build
+    in 2 mục CDC-11 chưa có trong danh sách duyệt (`lane_en_q_reg[4]`: enable của data lane 2
+    và 3 luôn bằng nhau, synthesis gộp thành một flop như lane 0/1). `kv260_cam`: WNS
+    +0,074 ns (đường găng vẫn ở `u_mb` của H.264), WHS +0,010 ns, bus skew 9/9, không có
+    critical warning; chưa nạp lên KV260.
   - Bộ thu CSI-2 4 lane (`Lanes` 1, 2 hoặc 4): ghép lane 1/2/4 byte mỗi word, CRC 1–4 byte mỗi
     chu kỳ, `rx_valid_i` (word mới của từng lane), `phy_rdy_i`; nạp tap ở clock video
     (`DlyVid = 1`: không nạp sau reset, mỗi lần ghi `DLYn` đúng một lần nạp); độ sâu FIFO pixel

@@ -911,6 +911,26 @@ Trên KV260 + Raspberry Pi camera v2 (J9), 2026-11-09/10 (bitstream sau giai
   `video`: hiệu chỉnh + margin, ghi H.264 720p (30 frame, CRC đúng, mô hình
   `h264_model.py` giải mã đủ 30 frame, ảnh đúng).
 
+Trên Huins MFP-VP1902 + LI-IMX274MIPI-FMC, lần chạy bo 1 (2026-11-10, PDI và firmware
+của nhánh IMX274 trước khi gộp PR #17, nên chưa có `margin`, `FRAME_ERR`, EXTRA;
+[../camera_huins.md](../camera_huins.md) mục 6, 7):
+
+- `csi2_test`, lệnh `test`: `csi2_test: PASS (15/15)`; calibrate tap 300/184/264/228,
+  eye 352/360/360/352 tap (trễ BISC 122/75/118/130 ở mép sớm của eye: ~11 % dòng
+  lỗi CRC trước `cal`); integrity `2a257400` (555h) / `544ae800` (AAAh) ở 1080p,
+  đúng từng bit; timing frame 33333 µs (1080p30) và 16666 µs (720p60), byte clock
+  180,078 MHz; packets: FS, 1 dòng embedded (DT 0x12, WC 175), 8 dòng OB (DT 0x37;
+  720p: 4), mỗi burst một packet.
+- 4 lane × 1440 Mbit/s: `b8` ngay sau HS-zero trên mọi lane, lệch giữa các lane 1
+  bit và không đổi trong 2 phút; 0 lỗi ECC/CRC/SOT trong hơn 18 000 frame với
+  tap đã hiệu chỉnh (~15 phút qua `csi2_test`, `camera`, `video`).
+- `BurstRxRst` = 1: `SETTLE` sạch 65–170 ns (mục *Bốn lane, PHY Versal và IMX274*).
+- Ứng dụng `camera`: 1080p30 và 720p60, sọc màu và cảnh thật đúng màu. Ứng dụng
+  `video`: H.264 1080p30 giải mã không lỗi (20 frame: rate control cũ làm đầy video
+  RAM).
+
+Bản gộp PR #17 cùng các sửa sau lần 1 chưa chạy trên bo này (lần chạy bo 2).
+
 ## Tài nguyên (`kv260_cam`, Vivado 2025.2)
 
 | Khối | LUT | FF | Khác |
@@ -955,8 +975,11 @@ nằm trên đường găng, nên không cần thêm tầng pipeline.
   sau bị bỏ; quá `CTRL.EXTRA` byte được báo (`ERR_STATUS.EXTRA`), short packet và
   long packet nhỏ theo sau thường nằm dưới ngưỡng (không bị báo). Ngưỡng tính
   theo byte của mọi lane đang dùng: với 4 lane (trail ~160–192 byte) chỉ packet
-  sau dài hơn ~200 byte được báo. Với IMX274 việc về LP-11 sau mỗi packet chưa
-  đo trên board (đếm `CNT_PKT` mỗi frame, `extra` của `stat`).
+  sau dài hơn ~200 byte được báo. IMX274 trên bo Huins (lần chạy bo 1): mỗi burst
+  đúng một packet (1091 burst mỗi frame 1080p = FS + 1 dòng embedded + 8 dòng OB +
+  1080 dòng + FE, 727 ở 720p), tức cảm biến về LP-11 sau mỗi packet; trail thật so
+  với ngưỡng 192 chưa đo (firmware của lần 1 có trước `CTRL.EXTRA`: `extra` của
+  `stat`, `CNT_EXT`).
 - 1, 2 hoặc 4 lane (không có 3), VC 2 bit (CSI-2 v1.x, không có VCX của v2.0),
   một VC/DT tại một thời điểm, ISP chỉ nhận RAW8/RAW10.
 - 1 pixel/clock: RAW8 liền nhau ở 2 × 912 Mbit/s (228 Mpx/s) nhanh hơn

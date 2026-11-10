@@ -85,7 +85,7 @@ là 99,999 MHz nên ra 199,998 / 49,9995 MHz) và 2 `proc_sys_reset`. Ràng bu�
 
 | File | Phải thấy |
 |------|-----------|
-| `timing_summary.rpt` | WNS ≥ 0 và WHS ≥ 0 (PR #17: +0,005 ns / +0,010 ns; bộ thu 4 lane: +0,025 ns; đường găng ở bộ macroblock H.264, `tcl/build.tcl` dùng directive Explore và bật `phys_opt_design` sau route cho nó; bản gộp hai thay đổi chưa build lại) |
+| `timing_summary.rpt` | WNS ≥ 0 và WHS ≥ 0 (PR #17: +0,005 ns / +0,010 ns; bộ thu 4 lane: +0,025 ns; bản gộp hai thay đổi, 2026-11-10: +0,074 ns / +0,010 ns; đường găng ở bộ macroblock H.264, `tcl/build.tcl` dùng directive Explore và bật `phys_opt_design` sau route cho nó) |
 | `bus_skew.rpt` | 9 ràng buộc `set_bus_skew` (7 của bộ thu, 2 của FIFO ra H.264), cả 9 `Slack (MET)` |
 | `clockInfo.txt` | `The following 2 clock nets belong to CLOCK_DELAY_GROUP bow_dphy_rx_clk`: `u_dphy/dphy_byte_clk`, `u_dphy/hs_clk` |
 | `drc.rpt` | không có lỗi (nhất là REQP-1742: `CLK` của IDELAYE3 phải là `CLKDIV` của ISERDESE3) |
@@ -97,8 +97,11 @@ không đủ 9 ràng buộc, hoặc khi `CLOCK_DELAY_GROUP` không đủ 2 net (
 đổi tên instance trong RTL mà XDC còn dùng tên cũ). Clock video 200 MHz chỉ dư
 vài chục ps sau route (phép tính macroblock của H.264): với RTL bộ thu 4 lane
 (2026-11-10) directive mặc định còn −0,040 ns, nên `build.tcl` dùng directive
-`Explore` cho place, phys_opt và route (+0,065 ns với cùng netlist; RTL cuối của
-nhánh IMX274, build 2026-11-10: WNS +0,025 ns, WHS +0,010 ns, bus skew 9/9). Cảnh báo
+`Explore` cho place, phys_opt và route (+0,065 ns với cùng netlist; RTL của nhánh
+IMX274 trước khi gộp main: WNS +0,025 ns, WHS +0,010 ns, bus skew 9/9; sau khi gộp main PR #17,
+build 2026-11-10: WNS +0,074 ns, WHS +0,010 ns, WPWS +0,376 ns, bus skew 9/9, không có
+critical warning, `phys_opt_design` sau route không còn gì để sửa; 36 296 LUT, 24 375 FF, đường
+găng vẫn ở `u_mb` của H.264, 17 mức logic; chưa nạp lên KV260). Cảnh báo
 bình thường:
 
 - 12 × `[Constraints 18-5254]`: Vivado đổi `DIFF_TERM` mặc định của
