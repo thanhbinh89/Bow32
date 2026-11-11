@@ -548,8 +548,10 @@ CNT_MAX = {"frame": 0xFFFFFFFF, "pkt": 0xFFFFFFFF, "line": 0xFFFFFFFF, "lp": 255
 
 
 class Receiver:
-    """Behaviour of bow_csi2rx as seen from its ports, step by step over the
-    commands of stim.txt (the testbench executes the same commands)."""
+    """Behaviour of the receiver bow_mipi_rx (the D-PHY bow_dphy_rx and the
+    CSI-2 controller bow_csi2rx; bow_csi2rx alone before step 2 of
+    docs/ip/mipi_rx_arch.md section 10) as seen from its ports, step by step
+    over the commands of stim.txt (the testbench executes the same commands)."""
 
     def __init__(self, cfg):
         self.cfg = cfg

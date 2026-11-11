@@ -365,7 +365,8 @@ quan: cả 18 phải FAIL.
 
 ### Bộ thu CSI-2
 
-`hw/ip/csi2rx/dv/` so bộ thu với mô hình Python `tools/csi2/csi2_model.py`, được
+`hw/ip/csi2rx/dv/` so bộ thu (`bow_mipi_rx`: `bow_dphy_rx` và controller `bow_csi2rx` nối
+bằng PPI) với mô hình Python `tools/csi2/csi2_model.py`, được
 viết từ đặc tả và quy tắc MIPI chứ không từ RTL. Mô hình sinh cấu hình và kích
 thích (`cfg.txt`, `stim.txt`); `tb_bow_csi2rx.sv` chơi chúng qua
 `csi2_tx_model.sv` với `tready` ngẫu nhiên, ghi pixel (`out.txt`) và thanh ghi
@@ -438,7 +439,7 @@ make -C hw/ip/csi2rx/dv run TEST=clk                  # một test directed
 
 ### D-PHY I/O trên FPGA (xsim)
 
-`hw/fpga/common/dv/` mô phỏng `bow_dphy_io_xusp` + `bow_csi2rx` với model
+`hw/fpga/common/dv/` mô phỏng `bow_dphy_io_xusp` + `bow_mipi_rx` với model
 unisim của Vivado (`IBUFDS_DPHY`, `IDELAYE3`, `ISERDESE3`, `BUFGCE_DIV`). Máy
 phát trong testbench lái chân P/N từng bit ở 912 Mbit/s: clock không liên tục,
 HS-ZERO dài ngẫu nhiên (pha bit của byte sync), lệch nhỏ giữa hai lane (trừ frame

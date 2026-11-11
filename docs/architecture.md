@@ -38,7 +38,7 @@
    main xbar ──> bow_ddr (cửa sổ 0x8000_0000) ──> LiteDRAM ──DFI──> PHY ──> ddr_io_* ──> pad wrapper
    main xbar ──> bow_hyperram (cửa sổ 0x6000_0000) ──> controller ──> PHY ──> hr_io_* ──> pad wrapper
                                                      │  │
-   dphy_* (D-PHY I/O) ──> bow_csi2rx ────────────────┼──┘  │  │
+   dphy_* (D-PHY I/O) ──> bow_mipi_rx ───────────────┼──┘  │  │
                               │ RAW10 (m_axis)       │     │  │
                               └──> bow_isp ──────────┴──> isp_* (RGB888 / YUV444, vid_clk_i)
                                       │ YUV 4:4:4          │  │
@@ -63,8 +63,9 @@ bus), `DdrMem` chọn lõi DDR2 (bo RAM) hay DDR3. **HyperRAM** (`bow_hyperram`,
 buffer, BIST, PHY `ODDRE1`/`IDDRE1` + 2 MMCM): cửa sổ 256 MiB ở `0x6000_0000` (device thứ 9
 của main crossbar, 32 MiB có thiết bị), thanh ghi ở `0x4000_F000`, ngắt `irq_fast[12]`;
 `HrEn` chọn IP thật hay stub như `DdrEn`.
-Bộ thu MIPI CSI-2 (`bow_csi2rx`) nhận các tín hiệu D-PHY `dphy_*` (trên KV260
-từ `bow_dphy_io_xusp` ở board top) và đưa RAW10 vào ISP. Đặc tả:
+Bộ thu MIPI CSI-2 (`bow_mipi_rx`: phần số của D-PHY `bow_dphy_rx` và controller
+`bow_csi2rx` nối bằng PPI) nhận các tín hiệu D-PHY `dphy_*` (trên KV260 từ
+`bow_dphy_io_xusp` ở board top) và đưa RAW10 vào ISP. Đặc tả:
 [ip/isp.md](ip/isp.md), [ip/csi2rx.md](ip/csi2rx.md), [ip/i2c.md](ip/i2c.md),
 [ip/axil_bridge.md](ip/axil_bridge.md).
 

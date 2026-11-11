@@ -4,7 +4,7 @@
 # Pin level tests of the UltraScale+ I/O and clock wrappers in the Vivado
 # simulator with the unisim models (each testbench describes its stimulus and
 # its checks):
-#   tb_bow_dphy_io_xusp   KV260 D-PHY receive I/O (bow_dphy_io_xusp) + bow_csi2rx
+#   tb_bow_dphy_io_xusp   KV260 D-PHY receive I/O (bow_dphy_io_xusp) + bow_mipi_rx
 #   tb_bow_ddr_io_xilinx  DDR2/DDR3 pads (bow_ddr_io_xilinx) on bow_ddr_clk_xusp,
 #                         configurations DDR_IO_CFGS (below)
 #   tb_bow_ddr_clk_xusp   DDR clocks (bow_ddr_clk_xusp: three MMCME4_ADV, fine

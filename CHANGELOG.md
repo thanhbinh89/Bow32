@@ -507,6 +507,26 @@
   144 chu kỳ, không giới hạn số lần thử.
 
 ### Changed
+- Bộ thu CSI-2, bước 2 của kế hoạch chuyển MIPI RX ([docs/ip/mipi_rx_arch.md](docs/ip/mipi_rx_arch.md)
+  mục 5.3, 10): `bow_mipi_rx` (`hw/ip/csi2rx/rtl/`, cổng và tham số như `bow_csi2rx` trước đây,
+  instance vẫn tên `u_csi2rx` trong `bow32_top`) ghép `bow_dphy_rx` (`u_dphy_rx`) và controller
+  CSI-2 `bow_csi2rx` (`u_csi2rx`) bằng PPI v1 (`bow_ppi_pkg`, 8 bit mỗi lane: `ppi_hs_t` miền byte,
+  `ppi_lp_t` / `ppi_lp_clk_t` miền lp, `RxByteClkHS`, `Enable`) cộng một dải phụ tạm thời (cổng
+  `band_*`: reset, `CLK_FORCE`, `PHY_CFG`, `DLYn`, trạng thái PHY, xung vào HS, word thô cho RAW),
+  mỗi tín hiệu ghi bước 4 hay 5 bỏ nó. `ErrControl` / `ErrControlClk` là xung cùng clock
+  (`PpiLpClkHz` của controller phải bằng `PhyClkHz`, kiểm khi elaborate); luật đánh dấu burst mất
+  về controller, `ev_lp_loss_o` bỏ; reset aligner `drst_n` qua dải phụ. Cổng, thanh ghi, XDC và
+  hành vi không đổi: Formality `make -C hw/ip/dphy_rx/fm equiv STEP=2` (luật đổi tên theo bước,
+  top `bow_mipi_rx` phía implementation) tương đương 5/5 cấu hình với `3a1e780` và với `35ef151`,
+  mọi cặp cùng tên; DV `csi2rx` và log của các test camera trong `make test` giống bước 1. `make
+  lint` lint thêm `bow_mipi_rx` và controller một mình; luật CDC-11 của bản camera Huins cắt đường
+  ở bộ thu `u_csi2rx` đầu tiên (`make -C hw/fpga/huins_vp1902 test-cdc`); `sim/tb/tb_bow32.sv` đọc
+  `dut.u_csi2rx.u_csi2rx.cfg.phy_en`. Sau review: `bow_ppi_pkg` chuyển vào `hw/ip/common`
+  (`common.f`), controller không cần nguồn của D-PHY; `PpiLpClkHz` không còn mặc định (mọi
+  instance phải nêu clock lp của PHY); luồng Formality chỉ đổi tên phía implementation và kiểm
+  từng cell nằm đúng khối D-PHY / controller (`partition.rpt`); bộ kiểm `bow_ppi_chk`
+  (`hw/ip/dphy_rx/dv`, bind vào `bow_dphy_rx` trong DV `csi2rx` và `sim`) kiểm các đầu ra PPI v1
+  mà controller chưa dùng.
 - Bộ thu CSI-2, bước 1 của kế hoạch chuyển MIPI RX ([docs/ip/mipi_rx_arch.md](docs/ip/mipi_rx_arch.md)
   mục 10): phần số của D-PHY (máy LP, phát hiện cạnh byte clock, `byte_rst`, flop word, đồng
   bộ `arm`, aligner, nạp tap, đồng hồ đo byte clock và các bộ đồng bộ của chúng) tách thành
@@ -515,7 +535,7 @@
   `bow_dphy_align` chuyển sang `hw/ip/dphy_rx/rtl/`, `bow_csi2_sync` thành `bow_sync_bus`
   (`hw/ip/common/rtl/`, tên instance và `g_bit` giữ nguyên). Tương đương hình thức với `main`
   trước bước 1 (`3a1e780`): Synopsys Formality, RTL với RTL, 5 cấu hình (`make -C
-  hw/ip/dphy_rx/fm equiv`; thay cho Yosys eqy của D8, chờ duyệt), đạt khi mọi compare point
+  hw/ip/dphy_rx/fm equiv`; thay cho Yosys eqy, D8 sửa đổi đã duyệt ngày 2026-11-11), đạt khi mọi compare point
   tương đương và mọi cặp khớp có tên giống hệt sau luật đổi tên `u_dphy_rx/` → rỗng; `REF` có
   thể là commit từ bước 1 trở đi; `make lint` lint thêm `bow_dphy_rx` một mình; `make -C
   hw/fpga/common/dv` bỏ qua file không còn tồn tại trong `build/fpga_dv/files.txt` cũ (thư mục

@@ -3,7 +3,7 @@
 //
 // MIPI D-PHY receive I/O on AMD Versal XPIO banks: the Versal twin of
 // bow_dphy_io_xusp, the board level half of the Bow32 CSI-2 receiver
-// (bow_csi2rx with DlyVid = 1). No vendor D-PHY or Advanced I/O Wizard IP:
+// (bow_mipi_rx with DlyVid = 1). No vendor D-PHY or Advanced I/O Wizard IP:
 // the IBUFDS_DPHY, XPHY (native mode), XPLL and BUFGCE primitives are
 // instantiated here. Used by the Huins MFP-VP1902 camera build (IMX274,
 // 4 lanes x 1440 Mbit/s, hw/fpga/huins_vp1902, docs/camera_huins.md).
@@ -35,7 +35,7 @@
 //   * byte_rst_i is not used (no ISERDES to align): see burst_rst_en_i.
 //   * rx_data_o[l]: byte_clk_o domain, bit 0 = first bit on the wire (D-PHY sends the
 //     LSB first: an aligned word is the byte); rx_valid_o[l] = 1: a new FIFO word this
-//     cycle (bow_csi2rx advances the lane aligner only on valid words). FIFO latency 2-3
+//     cycle (bow_mipi_rx advances the lane aligner only on valid words). FIFO latency 2-3
 //     byte clocks; when the strobe stops the FIFOs keep their last words, which come out
 //     first in the next burst, long before the SoT (harmless for the aligner).
 //   * clk_q_o: deserialised clock lane samples (diagnostics: 55 / aa while it toggles).
@@ -44,10 +44,10 @@
 //     LOCKED_FB, XPLL LOCKED}, synchronised to ctrl_clk_i.
 //   * dly_tap_i / dly_load_i / dly_tap_o are in the ctrl_clk_i domain (the XPHY loads and
 //     reads its delays on CTRL_CLK) and work without a byte clock. In the Huins camera top
-//     ctrl_clk_i = the SoC video clock, so bow_csi2rx runs its tap logic with DlyVid = 1.
+//     ctrl_clk_i = the SoC video clock, so bow_mipi_rx runs its tap logic with DlyVid = 1.
 //   * reinit_i / burst_rst_en_i: run-time knobs, see "Run-time knobs" below.
 //
-// Input delays (bow_csi2rx DlyVid = 1 contract):
+// Input delays (bow_mipi_rx DlyVid = 1 contract):
 //   * The tap is the TOTAL input delay of the data P slice, including the alignment delay
 //     BISC added at init. After phy_rdy_o, dly_tap_o shows the BISC result (kept over
 //     voltage and temperature by VT tracking): software starts its eye sweep there and never

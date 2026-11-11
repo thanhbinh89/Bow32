@@ -74,6 +74,8 @@
 //   +S274_GLITCH=<pct> IMX274 build: % of byte clock gate openings that add a
 //                     glitch word to the PHY model's RX FIFOs (default 20)
 //   +S274_GEO=<mode>  geo274: csi2_test mode to start (default 1080p)
+//   +ppi_chk_report   print the counts of the PPI v1 checker of the receiver's
+//                     D-PHY at the end (bow_ppi_chk; it checks in every test)
 //   +WAVES            dump waves to build/sim/waves.fst (needs WAVES=1 build)
 
 `timescale 1ns / 1ps
@@ -816,7 +818,7 @@ module tb_bow32 #(
   function automatic void s274_stop(string why);
     s274_run = 1'b0;
     s274_stops++;
-    if (dut.u_csi2rx.cfg.phy_en) begin
+    if (dut.u_csi2rx.u_csi2rx.cfg.phy_en) begin
       $fatal(1, "IMX274: %s while the CSI-2 receiver is enabled (the lanes drop to LP-00: LP error)",
              why);
     end
@@ -1188,6 +1190,23 @@ module tb_bow32 #(
     .dly_tap_o   (dphy_dly_tap_rb),
     .ctrl_clk_i  (Imx274 ? vclk : 1'b0),
     .phy_rdy_o   (dphy_phy_rdy)
+  );
+
+  // The PPI v1 outputs of the receiver's D-PHY that its controller does not use, checked on
+  // every lp clock edge (hw/ip/dphy_rx/dv/bow_ppi_chk.sv): silent unless one fails, which
+  // stops the test; +ppi_chk_report prints the counts at the end
+  bind bow_dphy_rx bow_ppi_chk #(.Lanes (Lanes)) u_ppi_chk (
+    .lp_clk_i     (lp_clk_i),
+    .lp_rst_ni    (lrst_n),
+    .byte_clk_i   (byte_clk_i),
+    .byte_rst_ni  (brst_n),
+    .ppi_hs_i     (ppi_hs_o),
+    .ppi_lp_i     (ppi_lp_o),
+    .ppi_lp_clk_i (ppi_lp_clk_o),
+    .lane_en_i    (lane_en),
+    .lp_i         (lp_st),
+    .clk_force_i  (clk_force),
+    .byte_ce_i    (byte_ce)
   );
 
   // Frame format of the stream (stream-on) and of the frame (frame start)

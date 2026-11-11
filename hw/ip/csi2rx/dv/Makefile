@@ -61,6 +61,8 @@ GENOPT_4   = --versal --fifo-depth 512 --burst-rst $(BURSTRST)
 sim_bin  = $(BUILD)/obj_l$(1)/Vtb_bow_csi2rx
 FLISTS  := -F $(REPO)/hw/ip/common/common.f -F $(REPO)/hw/ip/bus/bus.f \
            -F $(REPO)/hw/ip/dphy_rx/dphy_rx.f -F $(REPO)/hw/ip/csi2rx/csi2rx.f
+# PPI v1 checker, bound into bow_dphy_rx by the testbench
+PPI_CHK := $(REPO)/hw/ip/dphy_rx/dv/bow_ppi_chk.sv
 SRCS    := $(shell find $(REPO)/hw/ip/csi2rx $(REPO)/hw/ip/dphy_rx $(REPO)/hw/ip/common \
                     $(REPO)/hw/ip/bus -name '*.sv' -o -name '*.f')
 
@@ -83,7 +85,7 @@ $(BUILD)/obj_l%/Vtb_bow_csi2rx: $(SRCS)
 	$(VERILATOR) --binary --timing -j $(JOBS) -O2 -Wno-fatal -Wno-lint -Wno-style -Wno-TIMESCALEMOD \
 	  +define+BOW_CDC_JITTER \
 	  --top-module tb_bow_csi2rx $(PARAMS_$*) -Mdir $(BUILD)/obj_l$* -o Vtb_bow_csi2rx \
-	  $(FLISTS) csi2_tx_model.sv tb_bow_csi2rx.sv
+	  $(FLISTS) csi2_tx_model.sv $(PPI_CHK) tb_bow_csi2rx.sv
 
 # One case: generate, simulate, compare
 flag = $(if $(filter 1,$($(1))),$(2))

@@ -28,7 +28,7 @@
 //                                                    +--> DDR PHY registers         |
 //                                                    +--> HyperRAM registers        |
 //                                                                           | |    |
-//   dphy_* (D-PHY I/O) --> CSI-2 RX (bow_csi2rx) --RAW10--> ISP (bow_isp) <-+-+----+
+//   dphy_* (D-PHY I/O) -> CSI-2 RX (bow_mipi_rx) --RAW10--> ISP (bow_isp) <-+-+----+
 //                                             +--> isp_* (RGB888/YUV444 AXI4-Stream)
 //                                             +--> H.264 encoder (YUV444) --stream--> DMA channel 0
 //
@@ -463,7 +463,9 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
   logic [1:0] cam_tuser;
   logic [9:0] cam_tdata;
 
-  bow_csi2rx #(
+  // bow_mipi_rx = digital D-PHY (u_csi2rx/u_dphy_rx) + CSI-2 controller (u_csi2rx/u_csi2rx)
+  // joined by the PPI; the instance keeps the name u_csi2rx of the FPGA constraints
+  bow_mipi_rx #(
     .Lanes     (CsiLanes),
     .PhyClkHz  (VidClkHz),
     .CpuClkHz  (ClkFreqHz),

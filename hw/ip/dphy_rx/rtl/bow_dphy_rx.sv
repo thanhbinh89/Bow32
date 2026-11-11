@@ -1,137 +1,174 @@
 // Copyright Bow32 contributors.
 // SPDX-License-Identifier: Apache-2.0
 //
-// Bow32 MIPI D-PHY receiver, digital part: the D-PHY functions of the CSI-2
-// receiver, split out of bow_csi2rx without changing them (step 1 of the
-// migration plan in docs/ip/mipi_rx_arch.md, section 10). bow_csi2rx
-// instantiates it (u_dphy_rx) between its PHY ports and its CSI-2 protocol
-// layer; its ports and register map are unchanged.
+// Bow32 MIPI D-PHY receiver, digital part, split out of the CSI-2 receiver without
+// changing its function (docs/ip/mipi_rx_arch.md, section 10: step 1 moved it out of
+// bow_csi2rx, step 2 put it next to the controller in bow_mipi_rx). Towards the CSI-2
+// controller it speaks the PPI of bow_ppi_pkg, plus a temporary band of configuration,
+// status, events, resets and raw words that the controller's register file still holds
+// (listed below; it goes away in steps 4 and 5).
 //
 //   clk_lp_i, lp_i --> bow_dphy_lp x (1 + Lanes) --> clk_hs_en_o, hs_en_o, byte_ce_o
-//      (video domain)        | hs_active                  clk_tog (byte clock edges)
-//   rx_data_i, rx_valid_i --> word flops --> bow_dphy_align x Lanes --> rx_*_hs_o (byte)
-//                                  +--> raw_data_o, raw_valid_o (RAW capture of bow_csi2_capture)
-//   dly_i, dly_req_i (CPU) --> tap loads (DlyVid 0: byte, 1: video domain) --> dly_tap_o, dly_load_o
-//   dly_tap_i, byte clock meter, LP levels, HS / gate state, phy_rdy_i --> *_sys_o (CPU)
+//      (lp domain)        | hs_active                  clk_tog (byte clock edges)
+//   rx_data_i, rx_valid_i --> word flops --> bow_dphy_align x Lanes --> ppi_hs_o (byte domain)
+//                                  +--> band_raw_* (RAW capture of the controller)
+//   LP state machines --> ppi_lp_o, ppi_lp_clk_o (lp domain)
+//   band_dly_* (CPU) --> tap loads (DlyVid 0: byte, 1: lp domain) --> dly_tap_o, dly_load_o
+//   dly_tap_i, byte clock meter, LP levels, HS / gate state, phy_rdy_i --> band_*_sys_o (CPU)
 //
-// Contents (all moved from bow_csi2rx unchanged; instance and register names
-// kept, the FPGA constraints select them by name):
-//   * the LP state machines (u_lp_clk, g_lp[l].u_lp) and their configuration
-//     synchronisers (u_sync_vcfg: CTRL.CLK_FORCE, the lane enables,
-//     PHY_CFG), the LP / HS / gate status towards the CPU (u_sync_vst) and
-//     the phy_rdy_i synchroniser;
-//   * clock lane activity: a byte clock flop toggling on every edge, seen from
-//     the video domain (clk_tog: clock miss detection of the clock lane FSM);
-//   * byte_rst_o, the ISERDES reset: asserted while the byte clock gate is
-//     closed, released 2 byte clocks after the clock restarts (u_iserdes_rst);
-//   * the rx_data / rx_valid word flops, the hs_active synchroniser into the
-//     byte domain (u_sync_arm) and the aligners (g_align[l].u_align);
-//   * the input delay tap loads (g_dly_byte / g_dly_vid) and the tap readback
-//     synchroniser (u_sync_tap_out);
+// Contents (moved from bow_csi2rx in step 1; instance and register names kept, the FPGA
+// constraints select them by name):
+//   * the LP state machines (u_lp_clk, g_lp[l].u_lp) and the synchroniser of their
+//     configuration (u_sync_vcfg: the PPI enables, CLK_FORCE, PHY_CFG), the LP / HS / gate
+//     status towards the CPU (u_sync_vst) and the phy_rdy_i synchroniser;
+//   * clock lane activity: a byte clock flop toggling on every edge, seen from the lp
+//     domain (clk_tog: clock miss detection of the clock lane state machine);
+//   * byte_rst_o, the ISERDES reset: asserted while the byte clock gate is closed, released
+//     2 byte clocks after the clock restarts (u_iserdes_rst);
+//   * the rx_data / rx_valid word flops, the hs_active synchroniser into the byte domain
+//     (u_sync_arm) and the aligners (g_align[l].u_align);
+//   * the input delay tap loads (g_dly_byte / g_dly_vid) and the tap readback synchroniser
+//     (u_sync_tap_out);
 //   * the byte clock meter (meter_gray_q, u_sync_meter).
-// The byte domain outputs per lane are the later PPI signals (RxActiveHS,
-// RxValidHS, RxDataHS, RxSyncHS, ErrSotSyncHS, RxSkewCalHS); the RAW capture
-// stays in bow_csi2_capture, which gets the registered PHY words.
 //
-// Clocks: clk_i (CPU), vid_clk_i (video: LP state machines, tap loads with
-// DlyVid = 1), byte_clk_i (byte clock, runs only while byte_ce_o = 1 and the
-// clock lane toggles). The resets come from bow_csi2rx, synchronised there
-// (asynchronous assertion, synchronous release): vrst_ni (video), brst_ni
-// (byte, hard), drst_ni (byte datapath: the aligners, also held while RX is
-// off); rst_src_ni is their asynchronous source, for the ISERDES reset
-// synchroniser. The PHY contract (rx_valid_i, phy_rdy_i, dly_*) is the one of
-// bow_csi2rx (see there).
+// PPI (bow_ppi_pkg, v1):
+//   rx_byte_clk_hs_o  RxByteClkHS = byte_clk_i
+//   ppi_hs_o[l]       RxActiveHS (hs_active of the lane, synchronised: arm), RxValidHS,
+//                     RxDataHS, RxSyncHS, ErrSotSyncHS, RxSkewCalHS of the aligner; ErrSotHS 0
+//   ppi_lp_o[l]       Stopstate, ErrControl (LP error pulse of the lane state machine, on
+//                     bit 0); ULPS / escape signals idle
+//   ppi_lp_clk_o      StopstateClk, RxClkActiveHS (the clock lane's hs_active: gate open),
+//                     ErrControlClk (LP error pulse of the clock lane); ULPS idle
+//   enable_i[l], enable_clk_i  Enable[l], EnableClk (CPU domain flops of the controller,
+//                     synchronised here with the rest of the configuration)
+// The ErrControl pulses are not gated: the controller marks the lost bursts (lane enables,
+// CLK_FORCE). They are pulses of lp_clk_i, which the controller must run on, as must the lp
+// domain signals of the band below (FPGA: lp_clk = vid_clk, the connection in bow_mipi_rx;
+// bow_csi2rx checks the frequency it is given as PpiLpClkHz).
+//
+// Temporary band (band_*, bow_mipi_rx; docs/ip/mipi_rx_arch.md section 10, step 2), with the
+// step that removes each part:
+//   in   band_lp_rst_ni, band_brst_ni, band_drst_ni   the controller's synchronised resets
+//                     (lp_clk_i = vid_clk_i, byte hard, byte datapath = aligners, also held
+//                     while RX is off): step 4 (resets of the D-PHY itself, section 4.11)
+//   in   band_rst_src_ni  their asynchronous source, for the ISERDES reset: step 5 (des_rst
+//                     of the AFE interface)
+//   in   band_clk_force_i, band_settle_i, band_lp_filter_i, band_clk_settle_i,
+//        band_clk_miss_i  CTRL.CLK_FORCE, PHY_CFG (CPU domain, quasi-static): step 4
+//                     (D-PHY CTRL.CLK_CONT, TIM0)
+//   in   band_dly_i, band_dly_req_i  DLYn taps and write counters (CPU domain): step 4
+//                     (D-PHY DLYn), the load protocol moves to the AFE adapter in step 5
+//   out  band_lp_sys_o, band_hs_en_sys_o, band_ce_sys_o, band_phy_rdy_sys_o, band_meter_sys_o,
+//        band_dly_sys_o  STATUS, BYTECLK and DLYn readback (CPU domain): step 4 (D-PHY
+//                     LANE_LP, LANE_HS, AFE_STATUS, BYTECLK, DLYn)
+//   out  band_ev_hs_o  HS entry pulses (lp domain) for CNT_BURST*, CNT_MISC[15:0]: step 4
+//                     (D-PHY CNT_BURSTn, CNT_CLK)
+//   out  band_lane_en_lp_o, band_clk_force_lp_o  the lane enables and CLK_FORCE of
+//                     u_sync_vcfg (lp domain) for the controller's lost burst marking: step 4
+//                     (CLK_FORCE becomes the D-PHY's CTRL.CLK_CONT; section 10, step 2 notes)
+//   out  band_raw_data_o, band_raw_valid_o  registered PHY words for RAW (byte domain):
+//                     step 4 (RAW in the D-PHY, bow_dphy_raw)
+//
+// Clocks: clk_i (CPU: status synchronisers), lp_clk_i (LP state machines, tap loads with
+// DlyVid = 1; bow_mipi_rx: vid_clk_i), byte_clk_i (byte clock of the PHY I/O, runs only
+// while byte_ce_o = 1 and the clock lane toggles). The PHY I/O contract (rx_valid_i,
+// phy_rdy_i, dly_*) is described in bow_mipi_rx.
 
-module bow_dphy_rx #(
+module bow_dphy_rx import bow_ppi_pkg::*; #(
   parameter int unsigned Lanes  = 2,         // data lanes: 1, 2 or 4
-  parameter bit          DlyVid = 1'b0       // dly_* in the video domain (Versal XPHY)
+  parameter bit          DlyVid = 1'b0       // dly_* in the lp clock domain (Versal XPHY)
 ) (
-  input  logic                  clk_i,              // CPU clock
-  input  logic                  rst_ni,             // CPU domain reset
-  input  logic                  vid_clk_i,          // video clock
-  input  logic                  vrst_ni,            // video domain reset (synchronised)
-  input  logic                  byte_clk_i,         // byte clock (gated)
-  input  logic                  brst_ni,            // byte domain hard reset (synchronised)
-  input  logic                  drst_ni,            // byte datapath reset (synchronised)
-  input  logic                  rst_src_ni,         // asynchronous source of the resets
+  input  logic                  clk_i,               // CPU clock
+  input  logic                  rst_ni,              // CPU domain reset
+  input  logic                  lp_clk_i,            // lp clock (bow_mipi_rx: video clock)
+  input  logic                  byte_clk_i,          // byte clock of the PHY I/O (gated)
 
-  // CPU domain: configuration (quasi-static: changed only while PHY_EN = 0)
-  input  logic [Lanes:0]        lane_en_i,          // [0] clock lane, [1 + l] data lane l
-  input  logic                  clk_force_i,        // CTRL.CLK_FORCE
-  input  logic [7:0]            settle_i,           // PHY_CFG.SETTLE
-  input  logic [3:0]            lp_filter_i,        // PHY_CFG.LP_FILTER
-  input  logic [7:0]            clk_settle_i,       // PHY_CFG.CLK_SETTLE
-  input  logic [7:0]            clk_miss_i,         // PHY_CFG.CLK_MISS
-  input  logic [Lanes-1:0][8:0] dly_i,              // DLYn taps
-  input  logic [Lanes-1:0][1:0] dly_req_i,          // DLYn write counters (gray, DlyVid = 1)
+  // PPI (bow_ppi_pkg)
+  input  logic [Lanes-1:0]      enable_i,            // Enable[l], any domain
+  input  logic                  enable_clk_i,        // EnableClk, any domain
+  output logic                  rx_byte_clk_hs_o,    // RxByteClkHS
+  output ppi_hs_t [Lanes-1:0]   ppi_hs_o,            // byte domain
+  output ppi_lp_t [Lanes-1:0]   ppi_lp_o,            // lp domain
+  output ppi_lp_clk_t           ppi_lp_clk_o,        // lp domain
 
-  // CPU domain: status (synchronised)
-  output logic [Lanes:0][1:0]   lp_sys_o,           // filtered LP {P, N}, same lane order
-  output logic [Lanes:0]        hs_en_sys_o,        // HS receivers on
-  output logic                  ce_sys_o,           // byte clock gate open
-  output logic                  phy_rdy_sys_o,      // phy_rdy_i
-  output logic [19:0]           meter_sys_o,        // byte clock cycle counter, gray
-  output logic [Lanes-1:0][8:0] dly_sys_o,          // dly_tap_i (CNTVALUEOUT)
+  // Temporary band (see above): resets and configuration from the controller
+  input  logic                  band_lp_rst_ni,      // lp domain reset (synchronised)
+  input  logic                  band_brst_ni,        // byte domain hard reset (synchronised)
+  input  logic                  band_drst_ni,        // byte datapath reset (synchronised)
+  input  logic                  band_rst_src_ni,     // asynchronous source of the resets
+  input  logic                  band_clk_force_i,    // CTRL.CLK_FORCE (CPU domain, quasi-static:
+  input  logic [7:0]            band_settle_i,       // PHY_CFG.SETTLE      changed only while
+  input  logic [3:0]            band_lp_filter_i,    // PHY_CFG.LP_FILTER   PHY_EN = 0)
+  input  logic [7:0]            band_clk_settle_i,   // PHY_CFG.CLK_SETTLE
+  input  logic [7:0]            band_clk_miss_i,     // PHY_CFG.CLK_MISS
+  input  logic [Lanes-1:0][8:0] band_dly_i,          // DLYn taps (CPU domain)
+  input  logic [Lanes-1:0][1:0] band_dly_req_i,      // DLYn write counters (gray, DlyVid = 1)
 
-  // video domain: events of the LP state machines (one cycle pulses)
-  output logic [Lanes:0]        ev_hs_o,            // HS entry, [0] clock lane, [1 + l] data lane l
-  output logic [Lanes:0]        ev_lp_err_o,        // unexpected LP sequence / watchdog
-  output logic                  ev_lp_loss_o,       // an HS entry refused at the LP level: LP
-                                                    // error of an enabled data lane, or of
-                                                    // the clock lane without CLK_FORCE
+  // Temporary band: status, events and raw words to the controller
+  output logic [Lanes:0][1:0]   band_lp_sys_o,       // filtered LP {P, N}, [0] clock lane, [1 + l]
+                                                     // data lane l (CPU domain)
+  output logic [Lanes:0]        band_hs_en_sys_o,    // HS receivers on, same order (CPU)
+  output logic                  band_ce_sys_o,       // byte clock gate open (CPU)
+  output logic                  band_phy_rdy_sys_o,  // phy_rdy_i (CPU)
+  output logic [19:0]           band_meter_sys_o,    // byte clock cycle counter, gray (CPU)
+  output logic [Lanes-1:0][8:0] band_dly_sys_o,      // dly_tap_i, CNTVALUEOUT (CPU)
+  output logic [Lanes:0]        band_ev_hs_o,        // HS entry pulses, same order (lp domain)
+  output logic [Lanes-1:0]      band_lane_en_lp_o,   // data lane enables (lp domain)
+  output logic                  band_clk_force_lp_o, // CLK_FORCE (lp domain)
+  output logic [Lanes-1:0][7:0] band_raw_data_o,     // registered PHY words (byte domain)
+  output logic [Lanes-1:0]      band_raw_valid_o,    // registered rx_valid_i (byte domain)
 
-  // byte domain, per data lane
-  output logic [Lanes-1:0]      rx_active_hs_o,     // hs_active of the lane FSM, synchronised
-  output logic [Lanes-1:0]      rx_valid_hs_o,      // aligned byte
-  output logic [Lanes-1:0][7:0] rx_data_hs_o,       // LSB = first bit on the wire
-  output logic [Lanes-1:0]      rx_sync_hs_o,       // with the first byte after the sync byte
-  output logic [Lanes-1:0]      err_sot_sync_hs_o,  // pulse: the burst ended without a sync
-  output logic [Lanes-1:0]      rx_skew_cal_hs_o,   // pulse: deskew burst
-  output logic [Lanes-1:0][7:0] raw_data_o,         // registered PHY words (RAW capture)
-  output logic [Lanes-1:0]      raw_valid_o,        // registered rx_valid_i
-
-  // PHY (bow_dphy_io_xusp, bow_dphy_io_versal): the PHY ports of bow_csi2rx
-  output logic                  byte_ce_o,          // video domain flop (clock lane FSM)
-  output logic                  byte_rst_o,         // ISERDES RST
+  // PHY I/O (bow_dphy_io_xusp, bow_dphy_io_versal): the PHY ports of bow_mipi_rx
+  output logic                  byte_ce_o,           // lp domain flop (clock lane FSM)
+  output logic                  byte_rst_o,          // ISERDES RST
   input  logic [1:0]            clk_lp_i,
-  output logic                  clk_hs_en_o,        // video domain flop of the FSM, no extra stage
+  output logic                  clk_hs_en_o,         // lp domain flop of the FSM, no extra stage
   input  logic [Lanes-1:0][1:0] lp_i,
-  output logic [Lanes-1:0]      hs_en_o,            // video domain flops of the FSMs, no extra stage
-  input  logic [Lanes-1:0][7:0] rx_data_i,          // registered once on byte_clk_i before use
-  input  logic [Lanes-1:0]      rx_valid_i,         // byte domain: rx_data_i[l] is a new word
-  input  logic                  phy_rdy_i,          // asynchronous: PHY ready
-  output logic [Lanes-1:0][8:0] dly_tap_o,          // byte domain (DlyVid = 0) / video domain (1)
-  output logic [Lanes-1:0]      dly_load_o,         // same domain as dly_tap_o
-  input  logic [Lanes-1:0][8:0] dly_tap_i           // CNTVALUEOUT, same domain as dly_tap_o
+  output logic [Lanes-1:0]      hs_en_o,             // lp domain flops of the FSMs, no extra stage
+  input  logic [Lanes-1:0][7:0] rx_data_i,           // registered once on byte_clk_i before use
+  input  logic [Lanes-1:0]      rx_valid_i,          // byte domain: rx_data_i[l] is a new word
+  input  logic                  phy_rdy_i,           // asynchronous: PHY ready
+  output logic [Lanes-1:0][8:0] dly_tap_o,           // byte domain (DlyVid = 0) / lp domain (1)
+  output logic [Lanes-1:0]      dly_load_o,          // same domain as dly_tap_o
+  input  logic [Lanes-1:0][8:0] dly_tap_i            // CNTVALUEOUT, same domain as dly_tap_o
 );
 
   if ((Lanes != 1) && (Lanes != 2) && (Lanes != 4)) begin : g_bad_lanes
     $error("bow_dphy_rx: Lanes must be 1, 2 or 4, not %0d", Lanes);
   end
 
+  // Resets of the band (step 4: synchronisers of the D-PHY itself)
+  logic lrst_n, brst_n, drst_n;
+
+  assign lrst_n = band_lp_rst_ni;
+  assign brst_n = band_brst_ni;
+  assign drst_n = band_drst_ni;
+
   // =========================================================================
-  // Video domain: LP state machines
+  // lp domain: LP state machines
   // =========================================================================
-  logic [Lanes:0]      lane_en, hs_en, hs_act, ev_hs, ev_lp_err;
+  logic [Lanes:0]      lane_en, hs_en, hs_act, ev_hs, ev_lp_err, stop;
   logic [Lanes:0][1:0] lp_st;
   logic                clk_force, clk_edge, byte_ce;
   logic [7:0]          settle, clk_settle, clk_miss;
   logic [3:0]          lp_filter;
 
+  // the PPI enables in the bit order of step 1: [0] clock lane, [1 + l] data lane l
   bow_sync_bus #(
     .Width (Lanes + 30)
   ) u_sync_vcfg (
-    .clk_i  (vid_clk_i),
-    .rst_ni (vrst_ni),
-    .d_i    ({clk_force_i, lane_en_i, settle_i, lp_filter_i, clk_settle_i, clk_miss_i}),
+    .clk_i  (lp_clk_i),
+    .rst_ni (lrst_n),
+    .d_i    ({band_clk_force_i, enable_i, enable_clk_i, band_settle_i, band_lp_filter_i,
+              band_clk_settle_i, band_clk_miss_i}),
     .q_o    ({clk_force, lane_en, settle, lp_filter, clk_settle, clk_miss})
   );
 
   bow_dphy_lp #(
     .ClockLane (1'b1)
   ) u_lp_clk (
-    .clk_i       (vid_clk_i),
-    .rst_ni      (vrst_ni),
+    .clk_i       (lp_clk_i),
+    .rst_ni      (lrst_n),
     .en_i        (lane_en[0]),
     .force_hs_i  (clk_force),
     .settle_i    (clk_settle),
@@ -144,15 +181,16 @@ module bow_dphy_rx #(
     .hs_active_o (hs_act[0]),
     .ce_o        (byte_ce),
     .ev_hs_o     (ev_hs[0]),
-    .ev_err_o    (ev_lp_err[0])
+    .ev_err_o    (ev_lp_err[0]),
+    .stop_o      (stop[0])
   );
 
   for (genvar l = 0; l < Lanes; l++) begin : g_lp
     bow_dphy_lp #(
       .ClockLane (1'b0)
     ) u_lp (
-      .clk_i       (vid_clk_i),
-      .rst_ni      (vrst_ni),
+      .clk_i       (lp_clk_i),
+      .rst_ni      (lrst_n),
       .en_i        (lane_en[1 + l]),
       .force_hs_i  (1'b0),
       .settle_i    (settle),
@@ -165,42 +203,59 @@ module bow_dphy_rx #(
       .hs_active_o (hs_act[1 + l]),
       .ce_o        (),
       .ev_hs_o     (ev_hs[1 + l]),
-      .ev_err_o    (ev_lp_err[1 + l])
+      .ev_err_o    (ev_lp_err[1 + l]),
+      .stop_o      (stop[1 + l])
     );
   end
 
   assign byte_ce_o   = byte_ce;
   assign clk_hs_en_o = hs_en[0];
   assign hs_en_o     = hs_en[Lanes:1];
-  assign ev_hs_o     = ev_hs;
-  assign ev_lp_err_o = ev_lp_err;
 
-  // HS entries refused at the LP level (LP error of an enabled data lane, or
-  // of the clock lane when the byte clock is gated) lose a burst that the
-  // packet layer never sees: bow_csi2rx marks it (lpl_*).
-  assign ev_lp_loss_o = (|(ev_lp_err[Lanes:1] & lane_en[Lanes:1])) || (ev_lp_err[0] && !clk_force);
+  // PPI, lp domain: the LP errors as they come from the state machines (one cycle pulses,
+  // not gated); ULPS and escape idle (v1)
+  for (genvar l = 0; l < Lanes; l++) begin : g_ppi_lp
+    assign ppi_lp_o[l].stopstate       = stop[1 + l];
+    assign ppi_lp_o[l].ulps_active_not = 1'b1;
+    assign ppi_lp_o[l].rx_ulps_esc     = 1'b0;
+    assign ppi_lp_o[l].err_control     = {1'b0, ev_lp_err[1 + l]};
+    assign ppi_lp_o[l].err_esc         = 2'b00;
+    assign ppi_lp_o[l].err_sync_esc    = 2'b00;
+  end
+
+  assign ppi_lp_clk_o.stopstate        = stop[0];
+  assign ppi_lp_clk_o.rx_clk_active_hs = hs_act[0];
+  assign ppi_lp_clk_o.ulps_active_not  = 1'b1;
+  assign ppi_lp_clk_o.rx_ulps_clk_not  = 1'b1;
+  assign ppi_lp_clk_o.err_control      = {1'b0, ev_lp_err[0]};
+
+  // Band: HS entries for the controller's counters, the synchronised lane enables and
+  // CLK_FORCE for its lost burst marking
+  assign band_ev_hs_o        = ev_hs;
+  assign band_lane_en_lp_o   = lane_en[Lanes:1];
+  assign band_clk_force_lp_o = clk_force;
 
   // Clock lane activity: a byte clock flop toggling on every edge, seen from
-  // the video domain (clock miss detection of the clock lane FSM). Every
+  // the lp domain (clock miss detection of the clock lane FSM). Every
   // byte clock edge counts, with or without a valid word: the byte clock
   // itself only runs while the clock lane toggles.
   logic clk_tog_q, clk_tog_s, clk_tog_last_q;
 
-  always_ff @(posedge byte_clk_i or negedge brst_ni) begin
-    if (!brst_ni) clk_tog_q <= 1'b0;
-    else          clk_tog_q <= ~clk_tog_q;
+  always_ff @(posedge byte_clk_i or negedge brst_n) begin
+    if (!brst_n) clk_tog_q <= 1'b0;
+    else         clk_tog_q <= ~clk_tog_q;
   end
 
   bow_sync u_sync_tog (
-    .clk_i  (vid_clk_i),
-    .rst_ni (vrst_ni),
+    .clk_i  (lp_clk_i),
+    .rst_ni (lrst_n),
     .d_i    (clk_tog_q),
     .q_o    (clk_tog_s)
   );
 
-  always_ff @(posedge vid_clk_i or negedge vrst_ni) begin
-    if (!vrst_ni) clk_tog_last_q <= 1'b0;
-    else          clk_tog_last_q <= clk_tog_s;
+  always_ff @(posedge lp_clk_i or negedge lrst_n) begin
+    if (!lrst_n) clk_tog_last_q <= 1'b0;
+    else         clk_tog_last_q <= clk_tog_s;
   end
 
   assign clk_edge = clk_tog_s ^ clk_tog_last_q;
@@ -211,7 +266,7 @@ module bow_dphy_rx #(
 
   bow_rst_sync u_iserdes_rst (
     .clk_i  (byte_clk_i),
-    .rst_ni (rst_src_ni & byte_ce),
+    .rst_ni (band_rst_src_ni & byte_ce),
     .rst_no (iserdes_rst_n)
   );
 
@@ -225,24 +280,24 @@ module bow_dphy_rx #(
     .clk_i,
     .rst_ni,
     .d_i ({byte_ce, hs_en, lp_st}),
-    .q_o ({ce_sys_o, hs_en_sys_o, lp_sys_o})
+    .q_o ({band_ce_sys_o, band_hs_en_sys_o, band_lp_sys_o})
   );
 
   bow_sync u_sync_phy_rdy (
     .clk_i,
     .rst_ni,
     .d_i (phy_rdy_i),
-    .q_o (phy_rdy_sys_o)
+    .q_o (band_phy_rdy_sys_o)
   );
 
   // =========================================================================
   // Byte domain: word flops, sync search and byte alignment
   // =========================================================================
-  logic [Lanes-1:0][7:0] rx_q;
-  logic [Lanes-1:0]      rxv_q, arm;
+  logic [Lanes-1:0][7:0] rx_q, al_data;
+  logic [Lanes-1:0]      rxv_q, arm, al_valid, al_sot, al_sync_err, al_deskew;
 
-  always_ff @(posedge byte_clk_i or negedge brst_ni) begin
-    if (!brst_ni) begin
+  always_ff @(posedge byte_clk_i or negedge brst_n) begin
+    if (!brst_n) begin
       rx_q  <= '0;
       rxv_q <= '0;
     end else begin
@@ -255,7 +310,7 @@ module bow_dphy_rx #(
     .Width (Lanes)
   ) u_sync_arm (
     .clk_i  (byte_clk_i),
-    .rst_ni (brst_ni),
+    .rst_ni (brst_n),
     .d_i    (hs_act[Lanes:1]),
     .q_o    (arm)
   );
@@ -263,25 +318,37 @@ module bow_dphy_rx #(
   for (genvar l = 0; l < Lanes; l++) begin : g_align
     bow_dphy_align u_align (
       .clk_i         (byte_clk_i),
-      .rst_ni        (drst_ni),
+      .rst_ni        (drst_n),
       .arm_i         (arm[l]),
       .vld_i         (rxv_q[l]),
       .rx_i          (rx_q[l]),
-      .valid_o       (rx_valid_hs_o[l]),
-      .data_o        (rx_data_hs_o[l]),
-      .sot_o         (rx_sync_hs_o[l]),
+      .valid_o       (al_valid[l]),
+      .data_o        (al_data[l]),
+      .sot_o         (al_sot[l]),
       .locked_o      (),
-      .ev_sync_err_o (err_sot_sync_hs_o[l]),
-      .ev_deskew_o   (rx_skew_cal_hs_o[l])
+      .ev_sync_err_o (al_sync_err[l]),
+      .ev_deskew_o   (al_deskew[l])
     );
   end
 
-  assign rx_active_hs_o = arm;
-  assign raw_data_o     = rx_q;
-  assign raw_valid_o    = rxv_q;
+  // PPI, byte domain
+  assign rx_byte_clk_hs_o = byte_clk_i;
+
+  for (genvar l = 0; l < Lanes; l++) begin : g_ppi_hs
+    assign ppi_hs_o[l].rx_active_hs    = arm[l];
+    assign ppi_hs_o[l].rx_valid_hs     = al_valid[l];
+    assign ppi_hs_o[l].rx_data_hs      = al_data[l];
+    assign ppi_hs_o[l].rx_sync_hs      = al_sot[l];
+    assign ppi_hs_o[l].rx_skew_cal_hs  = al_deskew[l];
+    assign ppi_hs_o[l].err_sot_hs      = 1'b0;
+    assign ppi_hs_o[l].err_sot_sync_hs = al_sync_err[l];
+  end
+
+  assign band_raw_data_o  = rx_q;
+  assign band_raw_valid_o = rxv_q;
 
   // =========================================================================
-  // Input delay taps (DlyVid = 0: byte domain, IDELAYE3; 1: video domain, XPHY)
+  // Input delay taps (DlyVid = 0: byte domain, IDELAYE3; 1: lp domain, XPHY)
   // =========================================================================
   if (!DlyVid) begin : g_dly_byte
     // A tap is loaded (CNTVALUEIN + one cycle LOAD) when its synchronised
@@ -295,13 +362,13 @@ module bow_dphy_rx #(
       .Width (9 * Lanes)
     ) u_sync_tap (
       .clk_i  (byte_clk_i),
-      .rst_ni (brst_ni),
-      .d_i    (dly_i),
+      .rst_ni (brst_n),
+      .d_i    (band_dly_i),
       .q_o    (tap_s)
     );
 
-    always_ff @(posedge byte_clk_i or negedge brst_ni) begin
-      if (!brst_ni) begin
+    always_ff @(posedge byte_clk_i or negedge brst_n) begin
+      if (!brst_n) begin
         tap_last_q <= '0;
         tap_ld_q   <= '0;
         tap_ld_v_q <= '0;
@@ -322,7 +389,7 @@ module bow_dphy_rx #(
     end
 
     logic unused_req;
-    assign unused_req = ^dly_req_i;
+    assign unused_req = ^band_dly_req_i;
   end else begin : g_dly_vid
     // Per lane: the 2 bit gray request counter of the CPU (+1 per DLYn
     // write) and the taps come through one synchroniser per bit. A change of
@@ -344,18 +411,18 @@ module bow_dphy_rx #(
     bow_sync_bus #(
       .Width (9 * Lanes)
     ) u_sync_tap (
-      .clk_i  (vid_clk_i),
-      .rst_ni (vrst_ni),
-      .d_i    (dly_i),
+      .clk_i  (lp_clk_i),
+      .rst_ni (lrst_n),
+      .d_i    (band_dly_i),
       .q_o    (vtap_s)
     );
 
     bow_sync_bus #(
       .Width (2 * Lanes)
     ) u_sync_req (
-      .clk_i  (vid_clk_i),
-      .rst_ni (vrst_ni),
-      .d_i    (dly_req_i),
+      .clk_i  (lp_clk_i),
+      .rst_ni (lrst_n),
+      .d_i    (band_dly_req_i),
       .q_o    (req_s)
     );
 
@@ -385,8 +452,8 @@ module bow_dphy_rx #(
       end
     end
 
-    always_ff @(posedge vid_clk_i or negedge vrst_ni) begin
-      if (!vrst_ni) begin
+    always_ff @(posedge lp_clk_i or negedge lrst_n) begin
+      if (!lrst_n) begin
         init_q     <= '0;
         req_last_q <= '0;
         settle_q   <= '0;
@@ -416,7 +483,7 @@ module bow_dphy_rx #(
     .clk_i,
     .rst_ni,
     .d_i (dly_tap_i),
-    .q_o (dly_sys_o)
+    .q_o (band_dly_sys_o)
   );
 
   // =========================================================================
@@ -424,8 +491,8 @@ module bow_dphy_rx #(
   // =========================================================================
   logic [19:0] meter_q, meter_gray_q;
 
-  always_ff @(posedge byte_clk_i or negedge brst_ni) begin
-    if (!brst_ni) begin
+  always_ff @(posedge byte_clk_i or negedge brst_n) begin
+    if (!brst_n) begin
       meter_q      <= '0;
       meter_gray_q <= '0;
     end else begin
@@ -440,10 +507,7 @@ module bow_dphy_rx #(
     .clk_i,
     .rst_ni,
     .d_i (meter_gray_q),
-    .q_o (meter_sys_o)
+    .q_o (band_meter_sys_o)
   );
-
-  logic unused;
-  assign unused = hs_act[0];
 
 endmodule

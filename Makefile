@@ -51,10 +51,14 @@ sw:
 # with 4 lanes as on the Huins camera build (FIFO 512, input delays in the
 # video clock domain, 200 MHz) and with 1 lane, then two CKs that bow_ddr's
 # elaboration checks must refuse (refresh interval, CK above the core's) and
-# a lane count bow_csi2rx must refuse. The digital D-PHY of the receiver on
-# its own (bow_dphy_rx: 1, 2 and 4 lanes, input delay taps in the byte or the
-# video clock domain; a lane count it must refuse). Then the Versal board level
-# RTL against port-only stubs of the AMD primitives
+# a lane count bow_mipi_rx must refuse. The receiver on its own (bow_mipi_rx:
+# 2, 1 and 4 lanes as on the KV260, Huins and 1 lane builds, without a PHY),
+# its CSI-2 controller on its own with the PPI ports (bow_csi2rx: the same
+# configurations, each stating the PHY's lp clock; no lp clock, or one other
+# than its video clock, it must refuse, with its own message) and its digital
+# D-PHY on its own (bow_dphy_rx: 1, 2 and 4 lanes, input delay
+# taps in the byte or the lp clock domain; a lane count it must refuse). Then
+# the Versal board level RTL against port-only stubs of the AMD primitives
 # (hw/lint/xilinx_versal_stubs.sv): the D-PHY with its synthetic default
 # nibble plan, with plan 2 of its xsim test (inter-byte chains, 6 -> 8) and
 # with 2 lanes on 2 nibbles, the Huins camera top with its clock module, and a
@@ -63,6 +67,16 @@ LINT_CMD = $(VERILATOR) --lint-only -Wall hw/lint/verilator_waivers.vlt \
 	  -F hw/top/bow32_top.f -F hw/vendor/lowrisc_ibex_prim_generic.f --top-module bow32_top
 DPHYRX_LINT = $(VERILATOR) --lint-only -Wall hw/lint/verilator_waivers.vlt \
 	  -F hw/ip/common/common.f -F hw/ip/dphy_rx/dphy_rx.f --top-module bow_dphy_rx
+RX_LINT = $(VERILATOR) --lint-only -Wall hw/lint/verilator_waivers.vlt -F hw/ip/common/common.f \
+	  -F hw/ip/bus/bus.f -F hw/ip/dphy_rx/dphy_rx.f -F hw/ip/csi2rx/csi2rx.f
+RX_CFGS = "" "-GLanes=1" "-GLanes=4 -GDlyVid=1'b1 -GFifoDepth=512" \
+	  "-GHasPhy=1'b0 -GPhyClkHz=50000000"
+# the controller alone: the same, with the PHY's lp clock = vid_clk_i (PhyClkHz, 200 MHz default)
+CTRL_CFGS = "-GPpiLpClkHz=200000000" "-GLanes=1 -GPpiLpClkHz=200000000" \
+	  "-GLanes=4 -GDlyVid=1'b1 -GFifoDepth=512 -GPpiLpClkHz=200000000" \
+	  "-GHasPhy=1'b0 -GPhyClkHz=50000000 -GPpiLpClkHz=50000000"
+# arguments for bow_csi2rx alone that it must refuse, and the message it must refuse them with
+CTRL_BAD = "|PpiLpClkHz not set" "-GPpiLpClkHz=250000000|PPI lp clock 250000000 Hz != vid_clk_i"
 VLINT_CMD = $(VERILATOR) --lint-only -Wall hw/lint/verilator_waivers.vlt hw/lint/xilinx_versal_stubs.sv
 DPHY_LINT = $(VLINT_CMD) hw/fpga/common/rtl/bow_dphy_io_versal.sv --top-module bow_dphy_io_versal
 
@@ -79,9 +93,20 @@ lint: deps
 	  { echo "lint: bow_ddr accepted the DDR2 core at 132 MHz (tREFI > 7.8 us)"; exit 1; }
 	@! $(LINT_CMD) -GDdrEn=1\'b1 -GDdrMem=3 -GDdrClkHz=133333333 > /dev/null 2>&1 || \
 	  { echo "lint: bow_ddr accepted the DDR3 core (125 MHz) at 133 MHz"; exit 1; }
-	@# bow_csi2rx takes 1, 2 or 4 data lanes
+	@# bow_mipi_rx takes 1, 2 or 4 data lanes
 	@! $(LINT_CMD) -GCsiLanes=3 > /dev/null 2>&1 || \
-	  { echo "lint: bow_csi2rx accepted 3 data lanes"; exit 1; }
+	  { echo "lint: bow_mipi_rx accepted 3 data lanes"; exit 1; }
+	@for g in $(RX_CFGS); do echo "$(RX_LINT) --top-module bow_mipi_rx $$g"; \
+	  $(RX_LINT) --top-module bow_mipi_rx $$g || exit 1; done
+	@for g in $(CTRL_CFGS); do echo "$(RX_LINT) --top-module bow_csi2rx $$g"; \
+	  $(RX_LINT) --top-module bow_csi2rx $$g || exit 1; done
+	@# bow_csi2rx: the v1 PPI lp errors are pulses of its own video clock, and every
+	@# instantiation states the PHY's lp clock (PpiLpClkHz has no default)
+	@for c in $(CTRL_BAD); do g="$${c%%|*}"; m="$${c#*|}"; \
+	  if out="$$($(RX_LINT) --top-module bow_csi2rx $$g 2>&1)"; then \
+	    echo "lint: bow_csi2rx accepted '$$g' (expected: $$m)"; exit 1; fi; \
+	  echo "$$out" | grep -q "$$m" || { echo "lint: bow_csi2rx refused '$$g' without '$$m':"; \
+	    echo "$$out" | head -5; exit 1; }; done
 	$(DPHYRX_LINT)
 	$(DPHYRX_LINT) -GLanes=1
 	$(DPHYRX_LINT) -GLanes=4 -GDlyVid=1\'b1
@@ -97,7 +122,7 @@ lint: deps
 	@# of its source (the strobe never reaches it)
 	@! $(DPHY_LINT) -GNibPhys=16\'h2764 > /dev/null 2>&1 || \
 	  { echo "lint: bow_dphy_io_versal accepted a nibble plan the strobe cannot reach"; exit 1; }
-	@# bow_csi2rx: LP event pulses need vid_clk_i <= 16/3 x clk_i
+	@# bow_csi2rx (in bow_mipi_rx): LP event pulses need vid_clk_i <= 16/3 x clk_i
 	@! $(LINT_CMD) -GVidClkHz=300000000 > /dev/null 2>&1 || \
 	  { echo "lint: bow_csi2rx accepted a 300 MHz video clock with a 50 MHz CPU clock"; exit 1; }
 	@echo "lint OK"
