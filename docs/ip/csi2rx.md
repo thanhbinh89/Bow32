@@ -806,6 +806,7 @@ bow_csi2rx_stop(34 + 10);                   /* SAU stream-off: chờ hết frame
 | `bow_csi2rx_clear()` | xoá bộ đếm và `ERR_STATUS` |
 | `bow_csi2rx_counters(&c)`, `bow_csi2rx_link_errors(&c)`, `bow_csi2rx_print_errors(&c)` | đọc bộ đếm; tổng lỗi link; in đúng các số hạng của tổng (`ecc a/b crc … extra n`) |
 | `bow_csi2rx_link_check(n, ms)` | xoá bộ đếm, `true` khi có `n` packet không lỗi; khi `false`: `bow_csi2rx_link_errors()` = 0 là hết giờ (ít packet hơn: không có dữ liệu hay link rất chậm; `ERR_STATUS` vẫn có thể có LP, không được đếm), còn lại `ERR_STATUS & CSI2RX_ERR_TAP` cho biết hiệu chỉnh lại có giúp được không |
+| `bow_csi2rx_link_check_frames(n, ms, &done)` | như trên nhưng qua `n` frame nguyên của VC được chọn: xoá bộ đếm, `true` khi `n` frame bắt đầu (FS) sau lúc xoá đã kết thúc (FE) mà không có lỗi link; `done`: số frame đã xong. Lỗi hiếm (một lỗi CRC mỗi vài frame) chỉ thấy được qua nhiều frame: `start` của `csi2_test` dùng 16 frame |
 | `bow_csi2rx_wait_frame(ms)` | chờ FE kế tiếp của VC được chọn |
 | `bow_csi2rx_set_delay(lane, tap)`, `bow_csi2rx_wait_delay(ms)` | ghi tap; chờ tới khi mọi lane dùng tap đã ghi (cần một burst) |
 | `bow_csi2rx_calibrate(step, tap_ms, &cal, verbose)` | hiệu chỉnh eye; `verbose` in một dòng bản đồ mỗi lần quét |
@@ -949,7 +950,10 @@ Lần chạy bo 2 (2026-11-11, bản gộp PR #17 cùng các sửa sau lần 1: 
   Lệnh `margin` đo quanh tap đang dùng của cả 4 lane, kể cả tap đặt bằng `delay`.
 - Ở trễ BISC (123/76/119/129) còn 0,2–1,5 dòng lỗi CRC mỗi frame 1080p (lần 1:
   ~11 %), đủ ít để link check 64 packet của `start` in `link check ok`; sau `cal` 0
-  lỗi.
+  lỗi. Sau lần 2, `start` của `csi2_test` kiểm 16 frame nguyên
+  (`bow_csi2rx_link_check_frames()`: chỉ đếm frame có FS sau khi xoá bộ đếm, dừng ở
+  lỗi đầu tiên; 0,2 lỗi mỗi frame bị thấy 96 % số lần) và khi lỗi do tap in `try
+  cal` kèm gợi ý về trễ BISC (chưa chạy trên bo).
 - `extra 0`, `CNT_EXT` 0 và `ERR_STATUS` 0 với `CTRL.EXTRA` 192 ở 720p60, 1080p30
   và 9012 frame liên tục; trail đo được 49–52 byte trên 4 lane (mục *Lớp packet*).
   `SETTLE`: cùng cửa sổ 65–170 ns với `BurstRxRst` = 1.

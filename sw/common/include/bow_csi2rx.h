@@ -311,6 +311,13 @@ void bow_csi2rx_print_errors(const bow_csi2rx_cnt_t *c);
  * otherwise ERR_STATUS tells the cause: a new calibration only helps when it
  * holds CSI2RX_ERR_TAP bits (EXTRA, FORMAT, FRAME, OVF are not tap problems). */
 bool bow_csi2rx_link_check(uint32_t packets, uint32_t timeout_ms);
+/* The same over whole frames of the selected VC: clear the counters, then
+ * true once `frames` frames that started after the clear (FS) have ended
+ * (FE) without a link error; false at the first error or after timeout_ms
+ * (as bow_csi2rx_link_check; *done, if not NULL: the frames that ended).
+ * A rare error (e.g. one CRC error every few frames) needs many frames to be
+ * seen at all. */
+bool bow_csi2rx_link_check_frames(uint32_t frames, uint32_t timeout_ms, uint32_t *done);
 
 /* Wait for the next frame end of the selected VC (IRQ_STATUS.FE is cleared
  * first); false on timeout. */

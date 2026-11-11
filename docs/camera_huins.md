@@ -19,8 +19,10 @@ trên KV260 ([camera_kv260.md](camera_kv260.md), [video_kv260.md](video_kv260.md
 > H.264 1080p30 ghi đủ 30 / 30 frame (QP 37–38), 720p30 45 / 45, giải mã không lỗi (6.5). Đo thêm:
 > cửa sổ `SETTLE` như lần 1 (65–170 ns), trail sau packet 49–52 byte trên 4 lane (`CTRL.EXTRA` 192
 > của driver dư 140 byte), tâm eye sau hiệu chỉnh cao hơn trễ BISC +99…+177 tap như lần 1. Đầu ra
-> thật ở mục 5 và 6, số đo ở mục 7, việc còn mở ở cuối mục 7 (sau lần 2 firmware chỉ đổi chữ của
-> một thông báo của `margin`).
+> thật ở mục 5 và 6, số đo ở mục 7, việc còn mở ở cuối mục 7 (sau lần 2 firmware đổi chữ của một
+> thông báo của `margin`, rồi sửa ba việc phần mềm của lần 2, chưa chạy trên bo: link check của
+> `start` trong `csi2_test` qua 16 frame nguyên, QP đầu của `rec` theo mode, gợi ý của `make jtag`
+> khi hw_server cũ hơn Vivado).
 >
 > Lần chạy bo 1 (2026-11-10, PDI và firmware của commit trước khi gộp main, `aaf7ed4`): camera
 > chạy, 4 lane × 1440 Mbit/s (byte clock 180,078 MHz), `csi2_test` PASS 15/15 sau `cal`, 1080p30 và
@@ -320,8 +322,13 @@ VIVADO=/opt/xilinx/2025.1/Vivado/bin/vivado make -C hw/fpga/huins_vp1902 CARD=ca
 
 in `Successfully programmed PDI file` và `DONE bit: HIGH` như trên. Đừng nạp khi người khác đang
 dùng JTAG với bo, và không bao giờ dừng hw_server, cs_server hay xsdb của người khác (lần 2: các
-tiến trình của đội kia chạy tiếp, không đổi). `tcl/jtag.tcl` chưa gợi ý gì khi hw_server cũ hơn
-(việc còn mở, cuối mục 7).
+tiến trình của đội kia chạy tiếp, không đổi). Từ sau lần 2, khi gặp lỗi này `make jtag`
+(`tcl/jtag.tcl`) in thêm các dòng `jtag: the hw_server at localhost:3121 is of an older Vivado than
+this one (2025.2) ...`: hw_server nào (người dùng, pid, đường dẫn, phiên bản) đang giữ cổng đó trên
+máy này, `VIVADO=<vivado cùng phiên bản>` (ví dụ `/opt/xilinx/2025.1/Vivado/bin/vivado`) để nạp như
+một client, hoặc `HW_SERVER=<host:port>` của một hw_server cùng phiên bản với Vivado, và nhắc không
+dừng tiến trình của người khác; chưa nạp gì, `make` vẫn lỗi (đã thử với lệnh giả lập, chưa gặp lại
+trên bo).
 
 Khi bị từ chối nó in `jtag: refused: <lý do>.` và `jtag: check the fitted cards and switches,
 then: make jtag CONFIRM=1 CARD=cam`. PDI dựng trước khi có khoá (bản đầu của 2026-11-10) không
@@ -470,7 +477,7 @@ csi2rx: no data
   timing: frame 0 us, line 0 ns, byte clock 0 kHz
   phy: lp clk 00 d0 00 d1 00 d2 00 d3 00, bursts 0/0/0/0 clk 0, delay 123/76/119/129
 > start                   # bộ thu (PA5 = 1, SETTLE 95 ns) rồi cảm biến, ở trễ BISC; không hiệu chỉnh
-streaming 1920x1080 RAW10, link check ok
+streaming 1920x1080 RAW10, link check ok      # firmware của lần 2: link check 64 packet (đoạn dưới)
 > stat                    # 64 frame ở trễ BISC: vẫn có lỗi CRC mà link check 64 packet không thấy
 csi2rx: link errors
   frames 64 lines/frame 1080 wc 2400 dt 2b sum 2a257400 frame errors 000
@@ -534,9 +541,14 @@ dòng mỗi frame 1080p (ECC, SOT, `extra` 0); lần 1: ~11 % số dòng (119–
 in `link check failed (try cal)`). Link check của `start` chỉ đếm 64 packet (~6 % một frame 1080p),
 nên ở lần 2 nó hai lần in `link check ok`, và `cal` bắt đầu bằng `delays in use ...: link ok` rồi
 bỏ lượt quét chung `lanes |...|` (lần 1: `link errors`, `tap 244 width 240`): **`link check ok` ở
-trễ BISC không có nghĩa là trễ BISC tốt**. Trễ BISC nằm ở mép sớm của eye trên mọi lane (mục 9):
-luôn `cal 8` sau `start` đầu (sau khi nạp PDI hay `phy reinit`), rồi `stat` (cả hai lần: 0 lỗi
-sau `cal`); tap và eye của `cal 8` ở lần 2 đúng như lần 1. Tổng 555h / AAAh đúng từng bit như lần
+trễ BISC không có nghĩa là trễ BISC tốt**. Firmware sau lần 2 kiểm 16 frame nguyên
+(`bow_csi2rx_link_check_frames()`, ~0,55 s ở 1080p30; 0,2 lỗi mỗi frame bị thấy 96 % số lần): khi
+có lỗi do tap, `start` in `link check failed (ERR_STATUS 008), try cal`, và trên bản Versal thêm
+`errors in frame k of 16 at the delays in use a/b/c/d: after a PDI load or phy reinit these are
+the BISC delays, early in the eye; cal loads the eye centres` (mô phỏng `csi2_274`: một lỗi CRC ở
+frame 6, sau 64 packet đầu; chưa chạy trên bo). Trễ BISC nằm ở mép sớm của eye trên mọi lane (mục
+9): luôn `cal 8` sau `start` đầu (sau khi nạp PDI hay `phy reinit`), rồi `stat` (cả hai lần: 0
+lỗi sau `cal`); tap và eye của `cal 8` ở lần 2 đúng như lần 1. Tổng 555h / AAAh đúng từng bit như lần
 1 (0x155 / 0x2AA × 2 073 600 pixel: không cộng BLKLEVEL); `tp 11` qua ISP ở 720p chỉ thấy 6 trong
 8 sọc (mục 6.4). `raw` của lần 2 bắt được burst của short packet FS (sau byte sync mỗi lane một
 byte của packet, rồi trail); lần 1 bắt được một dòng 555h (`aa` / `55`). Lệch giữa các lane như
@@ -549,7 +561,8 @@ số packet bị bộ lọc DT bỏ tăng 9 mỗi frame ở 1080p (1 dòng embed
 thu tắt (`stop`, `sensor on`) `stat` liệt kê cả 4 lane của bản build (khối trên; firmware của lần 1
 chỉ in 2: `sot 0/0`, `d0 .. d1 ..`, `bursts a/b`, `delay a/b`, vì đọc số lane từ `CTRL` đã xoá).
 Khi link check thấy lỗi, `start` in `streaming 1920x1080 RAW10, link check failed (ERR_STATUS
-008), try cal` (bit 3: CRC; định dạng của PR #17; lần 2 không gặp). `test` chạy phy-idle; link-up,
+008), try cal` (bit 3: CRC; định dạng của PR #17; lần 2 không gặp; firmware sau lần 2 thêm hai
+dòng gợi ý trên bản Versal, đoạn trên). `test` chạy phy-idle; link-up,
 calibrate, margin (AAAh: IMX274 không có PN9), integrity (555h rồi AAAh), packets, timing ở 1080p30
 rồi 720p60; isp, filter, restart, irq: 17 check (IMX274 không có RAW8); firmware của lần 1 chưa có
 check `margin`: 15/15 trong 9,9 s. Lệnh `margin [k] [frames]` (cần một lần `cal` trước) đo quanh
@@ -858,8 +871,11 @@ QP 37 (frame 43: 20040 byte ở QP 38), 9093 µs mỗi frame; `rec: 45 frames, 1
 largest 33600)`, còn 5956 byte của 1 MiB. `stat`: `status 06`, `frames 45`; ffprobe 45 frame
 1280×720, giải mã không lỗi. QP đầu tự chọn ở 720p thấp hơn ~4 bước: mô hình QP đầu tính theo số
 pixel, mà mode 720p của IMX274 phủ cùng góc nhìn với 1080p (ảnh cảnh thật của hai mode như nhau),
-có lẽ vì vậy nhiều chi tiết hơn mỗi pixel (việc còn mở, cuối mục 7). Bộ thu đo dòng 12460 ns, frame
-33332 µs ở HMAX 448.
+nên nhiều chi tiết hơn mỗi pixel: ở QP 37 frame 1080p 37,5 KB, frame 720p 23,0 KB, tỉ lệ 1,63 thay
+cho 2,25 của số pixel, tức kích thước tăng theo (số pixel)^0,6. Firmware sau lần 2 chọn QP đầu theo
+mô hình đó (`bow_h264_rc_init()`, đoạn dưới): 37 cho 45 frame 720p (~23,0 KB, đích 23145), 38 cho
+30 frame 1080p (~32,8 KB, đích 34669); chưa chạy trên bo. Bộ thu đo dòng 12460 ns, frame 33332 µs
+ở HMAX 448.
 
 `rec` chỉ gửi `mode` khi có `--mode`: không có thì board giữ mode đang dùng. `cam` đầu của `video`
 luôn hiệu chỉnh như app `camera` (khối trên: `calibrated taps`, `margin ok`, không có dòng `kept`
@@ -873,11 +889,16 @@ us`). Lần 1 (rate control cũ: QP đầu 30, mỗi frame ±1) bắt đầu b�
 tới frame 8 mới lên QP 37 và video RAM đầy sau 20 trong 30 frame. Rate control mới chọn QP đầu 37
 ở 1080p, 30 frame, như test host `tools/tests/test_h264_model.py` (với kích thước frame của lần 1
 và frame của mô hình H.264) dự đoán, và ở lần 2 ghi đủ 30 / 30 frame trong 1 MiB (khối trên; test
-hệ thống `h264` có một bản quay rate control). Ở 1080p50 / 1080p60 (`mode 1920 1080 60`) frame
-rate không còn chỗ cho dòng dài: app in `note: H.264 load 97 % (HMAX 542): detailed scenes at a
-low QP may drop pixels, a lower frame rate gives longer lines`. Khi encoder bỏ pixel, `rec` in
-`warning: the encoder dropped pixels (H.264 load 78 %: raise qp or give rec fewer kbytes per
-frame)` (trên 80 % thêm `lower the frame rate for longer lines, `).
+hệ thống `h264` có một bản quay rate control). Sau lần 2, QP đầu = 37 + 6 · log2(S / đích), S =
+37,5 KB · (W · H / (1920 · 1080))^0,6 là kích thước một frame của cảnh văn phòng ở QP 37: 1080p,
+30 frame: 38; 720p, 45 frame: 37; 720p, 30 frame: 33. Test host có kích thước và QP của từng frame
+của lần 2 ở cả hai mode (`test_board_run2`): đưa kích thước đo được theo thứ tự vào rate control
+(build cho host) thì ra đúng QP của mọi frame trên bo (720p: 33, 36, rồi 37, frame 43 ở 38); với QP
+đầu mới, frame của cảnh đó nằm trong 10 % dưới đích ở cả hai mode. Ở 1080p50 / 1080p60 (`mode
+1920 1080 60`) frame rate không còn chỗ cho dòng dài: app in `note: H.264 load 97 % (HMAX 542):
+detailed scenes at a low QP may drop pixels, a lower frame rate gives longer lines`. Khi encoder
+bỏ pixel, `rec` in `warning: the encoder dropped pixels (H.264 load 78 %: raise qp or give rec
+fewer kbytes per frame)` (trên 80 % thêm `lower the frame rate for longer lines, `).
 
 ### 6.6 Chế độ của cảm biến
 
@@ -951,23 +972,28 @@ Cần RTL và PDI mới:
   hỏi là vì sao BISC ở chế độ native strobe lấy mẫu sớm khoảng 1/4 UI. Độ lệch của lần 2 như lần 1
   và khác nhau giữa các lane (+99…+177 tap), nên một độ lệch cố định chung không đủ.
 
-Phần mềm và công cụ (không cần RTL hay PDI):
-
-- `csi2_test` `start`: link check 64 packet (~6 % một frame 1080p) có thể in `link check ok` ở trễ
-  BISC trong khi sau đó có 0,2–1,5 dòng lỗi CRC mỗi frame (mục 6.3). Cách sửa: kiểm ít nhất 2
-  frame, hoặc sau khi nạp PDI / `phy reinit` nhắc rằng trễ đang là của BISC và cần `cal`.
-- `video` `rec` ở 720p: QP đầu tự chọn là 33, thấp hơn ~4 bước (frame đầu 33600 byte so với đích
-  23145; từ frame 3 QP 37, ~22,9 KB); 45 frame vẫn vừa (mục 6.5). Cách sửa: thêm số đo của lần 2
-  vào `tools/tests/test_h264_model.py` (720p: 33600 byte ở QP 33, ~22,9 KB ở QP 37; 1080p: ~37,5 KB
-  ở QP 37, ~32,8 KB ở QP 38), rồi chỉnh mô hình QP đầu của `bow_h264_rc_init()` theo mode của cảm
-  biến.
-- `tcl/jtag.tcl`: khi `connect_hw_server` lỗi vì hw_server cũ hơn Vivado (`Labtools 27-3366`, mục
-  5), in gợi ý (hw_server của người dùng khác, `VIVADO` cùng phiên bản) thay cho chỉ lỗi của Vivado.
+Phần mềm và công cụ: ba việc còn mở sau lần 2 đã sửa (đoạn dưới), mới kiểm trong mô phỏng và test
+host; cần một lần chạy bo để xác nhận.
 
 Đã sửa sau lần 2 (chỉ chữ in ra và chú thích): khi điểm tâm có lỗi, `margin` in `errors at the
 taps in use` thay cho `errors at the calibrated taps` (tâm là tap đang dùng, có thể là trễ BISC hay
 tap đặt bằng tay, mục 9); chú thích `CTRL.EXTRA` trong `bow_csi2rx.h` / `bow_csi2rx.c` ghi trail
 đã đo.
+
+Đã sửa sau lần 2 (phần mềm, chưa chạy trên bo):
+
+- `csi2_test` `start`: link check 64 packet (~6 % một frame 1080p) in `link check ok` ở trễ BISC dù
+  sau đó có 0,2–1,5 dòng lỗi CRC mỗi frame (mục 6.3). Nay kiểm 16 frame nguyên
+  (`bow_csi2rx_link_check_frames()`), khi lỗi do tap in `try cal` và, trên bản Versal, hai dòng gợi
+  ý về trễ BISC; đầu ra trên KV260 giữ nguyên. Mô phỏng `csi2_274`: lỗi CRC ở frame 6 bị bắt, link
+  check sạch chỉ in `ok` sau 16 frame. Trên bo: `start` sau khi nạp PDI phải in `link check failed`.
+- `video` `rec` ở 720p: QP đầu tự chọn là 33, thấp hơn ~4 bước (frame đầu 33600 byte so với đích
+  23145; từ frame 3 QP 37, ~22,9 KB). Nay QP đầu theo (số pixel)^0,6 (mục 6.5): 37 ở 720p (45
+  frame), 38 ở 1080p (30 frame); kích thước và QP từng frame của lần 2 nằm trong
+  `tools/tests/test_h264_model.py`. Trên bo: `rec` 720p phải in `QP 37 (auto)`, 1080p `QP 38 (auto)`.
+- `tcl/jtag.tcl`: khi `connect_hw_server` lỗi vì hw_server cũ hơn Vivado (`Labtools 27-3366`), nay
+  in gợi ý (mục 5): hw_server nào đang giữ cổng, `VIVADO=` cùng phiên bản hoặc `HW_SERVER=`, không
+  dừng tiến trình của người khác. Đã thử trong Vivado 2025.2 với `connect_hw_server` giả lập.
 
 Trên bo, cần người ở bo: mục 1, 2, 4, 5, LED của mục 3 và sườn lên I2C của mục 6; chạy lâu hơn 5
 phút, nóng / nguội (mục 19); `rec` ở QP 18–23 trên cảnh nhiều chi tiết (mục 20). KV260: nạp
@@ -987,7 +1013,7 @@ phút, nóng / nguội (mục 19); `rec` ở QP 18–23 trên cảnh nhiều chi
 | Vivado: `CRITICAL WARNING: port ... (FMC+01 site VCCIO, SW192 = 1.2 V) has IOSTANDARD ...` | một cổng của bank 703..706 không phải `MIPI_DPHY` / `LVCMOS12`: sửa XDC |
 | Vivado: `CRITICAL WARNING: CDC-<n> from ... to ... is not a reviewed crossing` | crossing mới giữa các miền clock: xem `cdc.rpt`, sửa RTL hoặc duyệt rồi thêm vào `tcl/timing_checks_cam.tcl`. |
 | `make jtag`: `jtag: refused: ...` | bo / switch theo bảng ở mục 2; PDI không có `pdi_site.txt` (dựng trước khi có khoá) hoặc mới hơn nó (build không qua `make pdi`): build lại bằng `make pdi` hoặc `CONFIRM=1` sau khi kiểm |
-| `make jtag`: `ERROR: [Labtools 27-3366] Cannot support older hw_server version ...` | hw_server ở `localhost:3121` của một Vivado cũ hơn, thường của người dùng khác; chưa nạp gì. Chờ nó thoát, hoặc khi chủ bo xác nhận bo rảnh, nạp bằng Vivado cùng phiên bản với hw_server (`VIVADO=...`, mục 5); không dừng tiến trình của người khác |
+| `make jtag`: `ERROR: [Labtools 27-3366] Cannot support older hw_server version ...` (sau lần 2 kèm các dòng `jtag: the hw_server at ... is of an older Vivado ...`) | hw_server ở `localhost:3121` của một Vivado cũ hơn, thường của người dùng khác; chưa nạp gì. Các dòng `jtag:` nói hw_server nào (người dùng, pid, phiên bản) và Vivado nào khớp. Chờ nó thoát, hoặc khi chủ bo xác nhận bo rảnh, nạp bằng Vivado cùng phiên bản với hw_server (`VIVADO=...`, mục 5), hoặc `HW_SERVER=<host:port>` của một hw_server cùng phiên bản với Vivado; không dừng tiến trình của người khác |
 | LED12 tắt | không có clock 200 MHz: SW12 phải OFF |
 | LED7 tắt (LED12 sáng) | XPLL của bank 705 không khoá: clock 200 MHz qua SLR, xem `clock_utilization.rpt` |
 | LED7 sáng, LED10 tắt | BISC không xong: VCCIO của FMC+01 (SW192 phải 1,2 V, LED "1.2", TP29); thử lại BISC với lane clock chạy (`sensor on`, `phy reinit`, mục 6.3) |
@@ -996,7 +1022,7 @@ phút, nóng / nguội (mục 19); `rec` ở QP 18–23 trên cảnh nhiều chi
 | I2C không có ACK ở 0x1A | PA7 (XCLR) phải là output 1 (LED8); SW192 = 1,2 V; module cắm chặt trên bo chuyển |
 | LED5 không bao giờ sáng | cảm biến chưa stream (lane clock không vào HS) |
 | lỗi ECC/CRC/SoT | `cal` (trễ BISC nằm ở mép sớm của eye: `cam` đầu luôn hiệu chỉnh, `csi2_test` cần `cal` sau `start`); PA5 phải là 1 (`phy`: `burstrst 1`), `SETTLE` (mục 6.3); SW192; bo chuyển |
-| `csi2_test`: `start` in `link check ok` nhưng `stat` sau đó có `crc` > 0 | trễ BISC (sau khi nạp PDI hay `phy reinit`): link check chỉ 64 packet; `cal 8` (mục 6.3) |
+| `csi2_test`: `start` in `link check failed (ERR_STATUS 008), try cal` (bản Versal: thêm `errors in frame k of 16 at the delays in use ...`); firmware của lần 2: `link check ok` nhưng `stat` sau đó có `crc` > 0 | trễ BISC (sau khi nạp PDI hay `phy reinit`); link check của firmware lần 2 chỉ 64 packet, nay 16 frame; `cal 8` (mục 6.3) |
 | `stat`: `extra` rất lớn, `frame errors c00`, `sum 00000000`, `no LP-11 between packets?` | `CTRL.EXTRA` thấp hơn trail (49–52 byte trên 4 lane): mọi frame bị bỏ; `start` ghi lại 192 của driver (mục 6.3) |
 | `csi`: `dropped by DT/VC` tăng 9 mỗi frame (720p: 5) | bình thường: dòng embedded và optical black bị bộ lọc DT bỏ (bộ đếm dừng ở 65535) |
 | `video`: `warning: the encoder dropped pixels (H.264 load ...)` | tăng `qp` hoặc giảm kbytes của `rec`; trên 80 % hạ frame rate (dòng dài hơn) |

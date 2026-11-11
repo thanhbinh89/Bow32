@@ -65,9 +65,9 @@ video.mp4: 45 frames 1280x720 @ 15.00 fps, 979164 bytes (12.4 s transfer), also 
 dòng camera mất 13,6 ms, encoder theo kịp từng strip.
 
 Ví dụ trên chạy với rate control cũ (QP đầu 30, mỗi frame ±1). Firmware hiện tại
-chọn QP đầu theo kích thước frame (`QP 33 (auto)` cho 45 frame 720p), mỗi frame
-nhắm phần chỗ trống còn lại chia cho số frame còn lại và in thêm QP của frame
-(`frame <k>: <bytes> bytes, QP <qp>, <us> us`); mục 3.
+chọn QP đầu theo kích thước frame (`QP 37 (auto)` cho 45 frame 720p, `QP 38 (auto)`
+cho 30 frame 1080p), mỗi frame nhắm phần chỗ trống còn lại chia cho số frame còn
+lại và in thêm QP của frame (`frame <k>: <bytes> bytes, QP <qp>, <us> us`); mục 3.
 
 Ứng dụng in khi khởi động:
 
@@ -124,9 +124,13 @@ encoder (`FRAMES = n`, `SKIP`), rồi theo dõi từng frame (`FRAME_CNT`,
   frame, trong 10…51; encoder nhận QP mới ở đầu frame kế tiếp (vertical blanking
   hoặc các frame bị bỏ bởi `skip` cho đủ thời gian);
 - QP đầu: `qp <n>`, hoặc `qp auto` (mặc định): QP mà một cảnh nhiều chi tiết cho
-  đúng đích đầu, 30 + 6 · log2(W · H / 27 / đích) (cảnh văn phòng của lần chạy bo
-  Huins: 77 KB ở 1080p và QP 30); cảnh ít chi tiết hơn thì frame đầu nhỏ hơn đích
-  và QP giảm ở frame sau;
+  đúng đích đầu, 37 + 6 · log2(S / đích), S = 37,5 KB · (W · H / (1920 · 1080))^0,6
+  là kích thước một frame của cảnh đó ở QP 37 (cảnh văn phòng của lần chạy bo Huins
+  2: 37,5 KB ở 1080p, 23,0 KB ở 720p; mode 720p của IMX274 phủ cùng góc nhìn với
+  1080p nên nhiều chi tiết hơn mỗi pixel). 1 MiB: 30 frame 1080p → 38, 45 frame
+  720p → 37. Trên KV260 các mode của IMX219 là cửa sổ cắt (không binning), nên ở
+  720p QP đầu có thể cao hơn cần một chút; cảnh ít chi tiết hơn thì frame đầu nhỏ
+  hơn đích và QP giảm ở frame sau;
 - khi frame kế tiếp (ước theo frame vừa xong và QP mới) + 1/8 + 1 KiB không còn
   vừa, nó ra lệnh STOP (`video RAM full`). Nếu bộ nhớ vẫn đầy (cảnh đổi đột
   ngột), DMA chuyển sang DROP để xả encoder và bản quay giữ nguyên các frame đã
@@ -134,7 +138,9 @@ encoder (`FRAMES = n`, `SKIP`), rồi theo dõi từng frame (`FRAME_CNT`,
 
 Lần chạy bo Huins đầu (2026-11-10, QP đầu 30, mỗi frame ±1) chỉ ghi được 20 trong
 30 frame 1080p; với rate control này 30 frame 1080p vừa 1 MiB (QP 37–39 với kích
-thước frame đo được, kiểm trong `tools/tests/test_h264_model.py`).
+thước frame đo được, kiểm trong `tools/tests/test_h264_model.py`). Lần 2
+(2026-11-11): 30 / 30 frame 1080p và 45 / 45 frame 720p; kích thước và QP từng frame
+của lần này cũng nằm trong test đó.
 
 ## 4. Giới hạn và lựa chọn
 

@@ -28,6 +28,19 @@
     `CTRL.EXTRA` ghi trail đã đo; tài liệu: kết quả lần 2, trail `CTRL.EXTRA`, nạp PDI khi
     hw_server của người khác cũ hơn, việc còn mở (docs/camera_huins.md mục 5–9,
     docs/ip/csi2rx.md).
+  - Sửa theo lần chạy bo 2 (phần mềm và công cụ; mô phỏng và test host, chưa chạy trên bo):
+    `start` của `csi2_test` kiểm 16 frame nguyên thay cho 64 packet
+    (`bow_csi2rx_link_check_frames()`; ở trễ BISC có 0,2–1,5 lỗi CRC mỗi frame 1080p mà 64 packet
+    không thấy), lỗi do tap in `try cal` và trên bản Versal thêm hai dòng gợi ý về trễ BISC, đầu ra
+    trên KV260 giữ nguyên; mô phỏng `csi2_274` cài một lỗi CRC ở frame 6 và đếm frame của link
+    check sạch. QP đầu của `rec` (`bow_h264_rc_init()`) theo (số pixel)^0,6 thay cho tỉ lệ thuận
+    với số pixel: hai mode của IMX274 phủ cùng góc nhìn, ở QP 37 frame 1080p 37,5 KB và 720p
+    23,0 KB; 720p 45 frame nay QP 37 (trước 33: frame đầu +45 % so với đích), 1080p 30 frame
+    QP 38; kích thước và QP từng frame của lần 2 vào `tools/tests/test_h264_model.py` (rate control
+    build cho host ra đúng QP từng frame của bo). `make jtag` của Huins (`tcl/jtag.tcl`): khi
+    hw_server cũ hơn Vivado (`Labtools 27-3366`) in hw_server nào giữ cổng (người dùng, pid, phiên
+    bản), `VIVADO=` của Vivado cùng phiên bản hoặc `HW_SERVER=`, và không dừng tiến trình của
+    người khác.
   - Sửa theo lần chạy bo 1: `imx274_probe()` nhận VMAX sau reset 0x906 (cảm biến trên bo) và
     0x905 (datasheet), MDSEL / HMAX / đọc lại BLKLEVEL vẫn phải khớp; khi không khớp các app in
     giá trị đã đọc (`cam_print_not_found()`) thay cho gợi ý XCLR sai. `imx274_bayer()` trả RGGB

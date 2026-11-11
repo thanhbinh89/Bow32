@@ -274,7 +274,7 @@ kiện mới). Lệnh khác:
 
 | Lệnh | Việc |
 |------|------|
-| `start`, `stop` | stream (kèm kiểm tra 64 packet, không tự hiệu chỉnh; lỗi thì in `ERR_STATUS` và `try cal` nếu là lỗi do tap) / dừng stream |
+| `start`, `stop` | stream (kèm kiểm tra 16 frame nguyên, ~0,55 s ở 1080p30, không tự hiệu chỉnh; lỗi thì in `ERR_STATUS` và `try cal` nếu là lỗi do tap) / dừng stream |
 | `stat` | như `csi` của ứng dụng `camera` |
 | `cal [step]` | hiệu chỉnh eye (mặc định bước 16), in bản đồ |
 | `margin [k] [frames]` | lề quanh tap đang dùng: tâm và tâm ± k mỗi lane (k 0: eye / 4 của lần hiệu chỉnh cuối), mặc định 60 frame mỗi điểm; `margin 0 1800` ở 720p60 ≈ 2,5 phút, BER < 3,6×10^-10 mỗi điểm |

@@ -396,6 +396,45 @@ static bool sensor_cmd(const char *a) {
 }
 
 /* --------------------------------------------------------------- commands */
+/* Link check of `start` over whole frames. On the Huins board (run 2) the
+ * BISC delays, which every lane of the Versal XPHY uses after a PDI load or
+ * `phy reinit`, gave 0.2-1.5 CRC errors per 1080p frame, and the check of 64
+ * packets (6 % of a frame) used before passed there. 16 frames see a rate of
+ * 0.2 errors per frame 96 % of the time (1 - e^-3.2); ~0.55 s at 1080p30. */
+#define START_FRAMES 16u
+
+static void start_check(void) {
+  /* the first frame start comes after the frames the sensor does not output
+   * after its start (IMX274), then up to a frame later */
+  uint32_t ms = (START_FRAMES + 2u + ct.s->start_frames) * tap_timeout_ms(), done;
+  bool ok = bow_csi2rx_link_check_frames(START_FRAMES, ms, &done);
+  bow_csi2rx_cnt_t c;
+  bow_csi2rx_counters(&c);
+  uint32_t err = CSI2RX->ERR_STATUS;
+  bow_printf("streaming %ux%u RAW%u, link check %s", ct.w, ct.h,
+             ct.s->dt() == CSI2_DT_RAW8 ? 8u : 10u, ok ? "ok\n" : "failed");
+  if (ok) return;
+  if (bow_csi2rx_link_errors(&c) == 0) {
+    if (c.packets == 0) {
+      bow_printf(": no data (0 packets in %u ms, stat)\n", ms);
+    } else {
+      bow_printf(": %u of %u frames in %u ms (%u packets, stat)\n", done, START_FRAMES, ms,
+                 c.packets);
+    }
+    return;
+  }
+  bow_printf(" (ERR_STATUS %03x)%s\n", err,
+             (err & CSI2RX_ERR_TAP) ? ", try cal" : ", not a sampling problem (stat)");
+  if ((err & CSI2RX_ERR_TAP) && ct.vid) {
+    /* Versal XPHY: the BISC delays sit at the early edge of every eye
+     * (docs/camera_huins.md 6.3, 9) */
+    bow_printf("  errors in frame %u of %u at the delays in use ", done + 1u, START_FRAMES);
+    bow_csi2rx_print_delays();
+    bow_puts(": after a PDI load or\n"
+             "  phy reinit these are the BISC delays, early in the eye; cal loads the eye centres\n");
+  }
+}
+
 static bool need_phy(void) {
   if (!ct.phy) bow_printf("error: this bitstream has no D-PHY (use the %s build)\n", ct.s->build);
   return ct.phy;
@@ -441,19 +480,7 @@ static bool execute(const char *line) {
     }
     if (ct.streaming) stream_stop();
     if (!stream_start(true)) return false;
-    uint32_t ms = (4u + ct.s->start_frames) * tap_timeout_ms();
-    bool ok = bow_csi2rx_link_check(64, ms);
-    bow_csi2rx_cnt_t c;
-    bow_csi2rx_counters(&c);
-    uint32_t err = CSI2RX->ERR_STATUS;
-    bow_printf("streaming %ux%u RAW%u, link check %s", ct.w, ct.h,
-               ct.s->dt() == CSI2_DT_RAW8 ? 8u : 10u, ok ? "ok\n" : "failed");
-    if (!ok && bow_csi2rx_link_errors(&c) == 0) {
-      bow_printf(": no data (%u packets in %u ms, stat)\n", c.packets, ms);
-    } else if (!ok) {
-      bow_printf(" (ERR_STATUS %03x)%s\n", err,
-                 (err & CSI2RX_ERR_TAP) ? ", try cal" : ", not a sampling problem (stat)");
-    }
+    start_check();
     return true;
   }
   if ((a = match(line, "stop"))) {

@@ -290,6 +290,33 @@ bool bow_csi2rx_link_check(uint32_t packets, uint32_t timeout_ms) {
   }
 }
 
+bool bow_csi2rx_link_check_frames(uint32_t frames, uint32_t timeout_ms, uint32_t *done) {
+  uint32_t start = bow_cycles(), limit = ms_cycles(timeout_ms), n = 0;
+  bool whole = false; /* a frame start seen since the clear: the next FE ends a whole frame */
+  bool ok = false;
+  bow_csi2rx_cnt_t c;
+  bow_csi2rx_clear();
+  CSI2RX->IRQ_STATUS = CSI2RX_IRQ_FS | CSI2RX_IRQ_FE;
+  for (;;) {
+    uint32_t irq = CSI2RX->IRQ_STATUS & (CSI2RX_IRQ_FS | CSI2RX_IRQ_FE);
+    if (irq) CSI2RX->IRQ_STATUS = irq;
+    /* an FE and the next FS in one read: the FE ends the frame before */
+    if ((irq & CSI2RX_IRQ_FE) && whole) n++;
+    if (irq & CSI2RX_IRQ_FS) whole = true;
+    /* the counters after the status: they hold every error of the frames
+     * counted (their packets come before their FE) */
+    bow_csi2rx_counters(&c);
+    if (bow_csi2rx_link_errors(&c)) break;
+    if (n >= frames) {
+      ok = true;
+      break;
+    }
+    if (expired(start, limit)) break;
+  }
+  if (done) *done = n;
+  return ok;
+}
+
 bool bow_csi2rx_wait_frame(uint32_t timeout_ms) {
   uint32_t start = bow_cycles(), limit = ms_cycles(timeout_ms);
   CSI2RX->IRQ_STATUS = CSI2RX_IRQ_FE;
