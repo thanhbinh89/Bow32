@@ -507,6 +507,21 @@
   144 chu kỳ, không giới hạn số lần thử.
 
 ### Changed
+- Bộ thu CSI-2, bước 2 của kế hoạch chuyển MIPI RX ([docs/ip/mipi_rx_arch.md](docs/ip/mipi_rx_arch.md)
+  mục 5.3, 10): `bow_mipi_rx` (`hw/ip/csi2rx/rtl/`, cổng và tham số như `bow_csi2rx` trước đây,
+  instance vẫn tên `u_csi2rx` trong `bow32_top`) ghép `bow_dphy_rx` (`u_dphy_rx`) và controller
+  CSI-2 `bow_csi2rx` (`u_csi2rx`) bằng PPI v1 (`bow_ppi_pkg`, 8 bit mỗi lane: `ppi_hs_t` miền byte,
+  `ppi_lp_t` / `ppi_lp_clk_t` miền lp, `RxByteClkHS`, `Enable`) cộng một dải phụ tạm thời (cổng
+  `band_*`: reset, `CLK_FORCE`, `PHY_CFG`, `DLYn`, trạng thái PHY, xung vào HS, word thô cho RAW),
+  mỗi tín hiệu ghi bước 4 hay 5 bỏ nó. `ErrControl` / `ErrControlClk` là xung cùng clock
+  (`PpiLpClkHz` của controller phải bằng `PhyClkHz`, kiểm khi elaborate); luật đánh dấu burst mất
+  về controller, `ev_lp_loss_o` bỏ; reset aligner `drst_n` qua dải phụ. Cổng, thanh ghi, XDC và
+  hành vi không đổi: Formality `make -C hw/ip/dphy_rx/fm equiv STEP=2` (luật đổi tên theo bước,
+  top `bow_mipi_rx` phía implementation) tương đương 5/5 cấu hình với `3a1e780` và với `35ef151`,
+  mọi cặp cùng tên; DV `csi2rx` và log của các test camera trong `make test` giống bước 1. `make
+  lint` lint thêm `bow_mipi_rx` và controller một mình; luật CDC-11 của bản camera Huins cắt đường
+  ở bộ thu `u_csi2rx` đầu tiên (`make -C hw/fpga/huins_vp1902 test-cdc`); `sim/tb/tb_bow32.sv` đọc
+  `dut.u_csi2rx.u_csi2rx.cfg.phy_en`.
 - Bộ thu CSI-2, bước 1 của kế hoạch chuyển MIPI RX ([docs/ip/mipi_rx_arch.md](docs/ip/mipi_rx_arch.md)
   mục 10): phần số của D-PHY (máy LP, phát hiện cạnh byte clock, `byte_rst`, flop word, đồng
   bộ `arm`, aligner, nạp tap, đồng hồ đo byte clock và các bộ đồng bộ của chúng) tách thành

@@ -195,8 +195,9 @@ Bow32/
 │   │   ├── uart/                 #   UART
 │   │   ├── gpio/                 #   GPIO / IOPAD (2 port, chức năng thay thế)
 │   │   ├── isp/                  #   ISP: rtl/ + dv/ (test bit-exact với mô hình)
-│   │   ├── csi2rx/               #   bộ thu MIPI CSI-2: rtl/ + dv/ (mô hình máy phát D-PHY)
-│   │   ├── dphy_rx/              #   phần số của D-PHY thu (bow_dphy_rx, bên trong bộ thu CSI-2): rtl/,
+│   │   ├── csi2rx/               #   bộ thu MIPI CSI-2 (bow_mipi_rx, controller bow_csi2rx): rtl/ + dv/
+│   │   │                         #   (mô hình máy phát D-PHY)
+│   │   ├── dphy_rx/              #   phần số của D-PHY thu (bow_dphy_rx) và PPI (bow_ppi_pkg): rtl/,
 │   │   │                         #   fm/ (tương đương hình thức với Formality)
 │   │   ├── h264/                 #   bộ mã hoá H.264: rtl/ + dv/ (test bit-exact với mô hình)
 │   │   ├── dma/                  #   DMA 2 kênh (bus master)
@@ -244,7 +245,7 @@ Bow32/
 | [docs/ip/isp.md](docs/ip/isp.md) | ISP: pipeline, công thức từng stage, thống kê, capture, thanh ghi |
 | [docs/ip/csi2rx.md](docs/ip/csi2rx.md) | Bộ thu MIPI CSI-2: D-PHY, I/O UltraScale+ và XPHY của Versal, 4 lane, CDC, packet, thanh ghi, hiệu chỉnh eye, ràng buộc |
 | [docs/csi2rx_review.md](docs/csi2rx_review.md) | Đánh giá bộ thu CSI-2 cho camera công nghiệp và SoC camera AI: phát hiện, khoảng cách, kiến trúc và lộ trình đề xuất |
-| [docs/ip/mipi_rx_arch.md](docs/ip/mipi_rx_arch.md) | Kiến trúc bộ thu MIPI cho ASIC (đặc tả, chưa có RTL): giao diện AFE của D-PHY analog, D-PHY số `bow_dphy_rx`, PPI, bộ điều khiển CSI-2 sau khi tách, thanh ghi, hiệu chỉnh, kiểm chứng, cổng sẵn sàng ASIC, kế hoạch chuyển từng bước |
+| [docs/ip/mipi_rx_arch.md](docs/ip/mipi_rx_arch.md) | Kiến trúc bộ thu MIPI cho ASIC (đặc tả; RTL tới bước 2 của kế hoạch chuyển): giao diện AFE của D-PHY analog, D-PHY số `bow_dphy_rx`, PPI, bộ điều khiển CSI-2 sau khi tách, thanh ghi, hiệu chỉnh, kiểm chứng, cổng sẵn sàng ASIC, kế hoạch chuyển từng bước |
 | [docs/camera_kv260.md](docs/camera_kv260.md) | Chạy camera trên KV260: bitstream, ứng dụng `camera` và `csi2_test`, chụp ảnh về PC |
 | [docs/camera_huins.md](docs/camera_huins.md) | Camera IMX274 (4 lane) trên Huins MFP-VP1902: VCCIO và bo nào ở khe nào, build `CARD=cam`, khoá ở `make jtag`, `csi2_test`, `camera`, `video`, danh sách kiểm khi bring-up, D-PHY trên XPHY của Versal |
 | [docs/ip/h264.md](docs/ip/h264.md) | Bộ mã hoá H.264: kiến trúc, các khối, quyết định của encoder, stream, thanh ghi, kiểm chứng |
