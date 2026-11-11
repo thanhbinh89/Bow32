@@ -133,6 +133,7 @@ if {$card eq "ram"} {
   source [file join $script_dir timing_checks.tcl]
 } else {
   source [file join $script_dir timing_checks_cam.tcl]
+  source [file join $repo_root hw fpga common tcl bus_skew_checks.tcl]
   source [file join $script_dir cam_xphy.tcl]
 }
 
@@ -241,6 +242,15 @@ close $fh
 set skew_met [regexp -all {Slack \(MET\)} $skew]
 if {[regexp {Slack \(VIOLATED\)} $skew] || $skew_met != $bus_skew_count} {
   puts "CRITICAL WARNING: bus skew violated or not constrained ($skew_met of $bus_skew_count met), see bus_skew.rpt"
+}
+if {$card eq "cam"} {
+  # The cells of every constraint (hw/fpga/common/tcl/bus_skew_checks.tcl): the CSI-2
+  # receiver's selectors match on the tail of cell names (constr/huins_vp1902_cam.xdc)
+  set skew_bad [bow32_bus_skew_checks $skew {u_soc/u_csi2rx/ u_soc/u_h264/u_out/ u_dphy/}]
+  foreach p $skew_bad {
+    puts "CRITICAL WARNING: bus skew $p"
+  }
+  puts "INFO: bus skew cells: [llength $skew_bad] problems in $skew_met constraints"
 }
 
 # Pads in their I/O sites: every ODDRE1 (data and T) and IDDRE1 placed in the

@@ -51,13 +51,18 @@ sw:
 # with 4 lanes as on the Huins camera build (FIFO 512, input delays in the
 # video clock domain, 200 MHz) and with 1 lane, then two CKs that bow_ddr's
 # elaboration checks must refuse (refresh interval, CK above the core's) and
-# a lane count bow_csi2rx must refuse. Then the Versal board level RTL against
-# port-only stubs of the AMD primitives (hw/lint/xilinx_versal_stubs.sv): the
-# D-PHY with its synthetic default nibble plan, with plan 2 of its xsim test
-# (inter-byte chains, 6 -> 8) and with 2 lanes on 2 nibbles, the Huins camera
-# top with its clock module, and a nibble plan bow_dphy_io_versal must refuse.
+# a lane count bow_csi2rx must refuse. The digital D-PHY of the receiver on
+# its own (bow_dphy_rx: 1, 2 and 4 lanes, input delay taps in the byte or the
+# video clock domain; a lane count it must refuse). Then the Versal board level
+# RTL against port-only stubs of the AMD primitives
+# (hw/lint/xilinx_versal_stubs.sv): the D-PHY with its synthetic default
+# nibble plan, with plan 2 of its xsim test (inter-byte chains, 6 -> 8) and
+# with 2 lanes on 2 nibbles, the Huins camera top with its clock module, and a
+# nibble plan bow_dphy_io_versal must refuse.
 LINT_CMD = $(VERILATOR) --lint-only -Wall hw/lint/verilator_waivers.vlt \
 	  -F hw/top/bow32_top.f -F hw/vendor/lowrisc_ibex_prim_generic.f --top-module bow32_top
+DPHYRX_LINT = $(VERILATOR) --lint-only -Wall hw/lint/verilator_waivers.vlt \
+	  -F hw/ip/common/common.f -F hw/ip/dphy_rx/dphy_rx.f --top-module bow_dphy_rx
 VLINT_CMD = $(VERILATOR) --lint-only -Wall hw/lint/verilator_waivers.vlt hw/lint/xilinx_versal_stubs.sv
 DPHY_LINT = $(VLINT_CMD) hw/fpga/common/rtl/bow_dphy_io_versal.sv --top-module bow_dphy_io_versal
 
@@ -77,6 +82,12 @@ lint: deps
 	@# bow_csi2rx takes 1, 2 or 4 data lanes
 	@! $(LINT_CMD) -GCsiLanes=3 > /dev/null 2>&1 || \
 	  { echo "lint: bow_csi2rx accepted 3 data lanes"; exit 1; }
+	$(DPHYRX_LINT)
+	$(DPHYRX_LINT) -GLanes=1
+	$(DPHYRX_LINT) -GLanes=4 -GDlyVid=1\'b1
+	$(DPHYRX_LINT) -GLanes=2 -GDlyVid=1\'b1
+	@! $(DPHYRX_LINT) -GLanes=3 > /dev/null 2>&1 || \
+	  { echo "lint: bow_dphy_rx accepted 3 data lanes"; exit 1; }
 	$(DPHY_LINT)
 	$(DPHY_LINT) -GNibPhys=16\'h6784 -GNibSrc=8\'h3c -GLaneNib=8\'h39 -GLaneSlice=12\'h910
 	$(DPHY_LINT) -GLanes=2 -GNumNib=2 -GNibPhys=16\'h0067 -GNibRole=8\'h04 -GLaneNib=8\'h01 \

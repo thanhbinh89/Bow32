@@ -9,8 +9,10 @@ pins, an unknown card or section), whose messages never name a ball. Also:
 hw/fpga/huins_vp1902/constr/pins.txt covers every port of each board top
 (card ram: the RAM card top, card cam: the camera top), and the XPHY nibble
 plan rules of the camera build (hw/fpga/huins_vp1902/tcl/cam_plan_test.tcl,
-synthetic pin sets, skipped without tclsh). Skipped without openpyxl (only the
-Huins target needs it). Run: python3 -m unittest discover -s tools/tests
+synthetic pin sets) and its reviewed CDC list
+(hw/fpga/huins_vp1902/tcl/timing_checks_cam_test.tcl, synthetic report rows), both
+skipped without tclsh. Skipped without openpyxl (only the Huins target needs it).
+Run: python3 -m unittest discover -s tools/tests
 """
 
 import contextlib
@@ -265,6 +267,19 @@ class CamPlanTest(unittest.TestCase):
                            check=False)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("cam_plan_test: PASS", r.stdout)
+
+
+@unittest.skipIf(shutil.which("tclsh") is None, "tclsh not installed")
+class CamCdcListTest(unittest.TestCase):
+    def test_cdc_list(self):
+        """The reviewed CDC rows of the camera build (tcl/timing_checks_cam.tcl): the
+        receiver's rows match on path tails, with the D-PHY cells before and after the
+        split of bow_dphy_rx, and nothing else."""
+        script = REPO / "hw/fpga/huins_vp1902/tcl/timing_checks_cam_test.tcl"
+        r = subprocess.run(["tclsh", str(script)], capture_output=True, text=True, timeout=60,
+                           check=False)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("timing_checks_cam_test: PASS", r.stdout)
 
 
 if __name__ == "__main__":

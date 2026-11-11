@@ -61,24 +61,36 @@ set_property CLOCK_DELAY_GROUP bow_dphy_rx_clk \
 # source clock period (byte clock = 4 x dphy_hs_period, clk_vid 5 ns); the
 # CPU <-> byte command counters change rarely and get 5 ns. Destinations are
 # the first synchroniser flops. Check report_bus_skew: 7 constraints, all met.
+# The cells are selected by the tail of their hierarchical name, not by their
+# full path, so that a constraint follows its flops when the receiver's
+# hierarchy changes (docs/ip/mipi_rx_arch.md, section 10, step 1): cells with
+# names of their own (byte clock meter, synchronisers) by those names, the
+# pixel FIFO, register file and capture flops by their path below u_csi2rx.
+# Each tail selects the same cells as the full path it replaced. tcl/build.tcl
+# also checks the cells of every constraint
+# (hw/fpga/common/tcl/bus_skew_checks.tcl): all in u_soc/u_csi2rx or
+# u_soc/u_h264/u_out, every destination reached from the sources, as many
+# source as destination flops.
 set dphy_byte_skew [expr {4 * $dphy_hs_period - 0.07}]
 # pixel FIFO (bow_fifo_async): write pointer byte -> vid, read pointer vid -> byte
-set_bus_skew -from [get_cells {u_soc/u_csi2rx/u_fifo/wgray_q_reg[*]}] \
-             -to   [get_cells {u_soc/u_csi2rx/u_fifo/wgray_r1_q_reg[*]}] $dphy_byte_skew
-set_bus_skew -from [get_cells {u_soc/u_csi2rx/u_fifo/rgray_q_reg[*]}] \
-             -to   [get_cells {u_soc/u_csi2rx/u_fifo/rgray_w1_q_reg[*]}] 5.0
+set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_fifo/wgray_q_reg[*]}] \
+             -to   [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_fifo/wgray_r1_q_reg[*]}] \
+             $dphy_byte_skew
+set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_fifo/rgray_q_reg[*]}] \
+             -to   [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_fifo/rgray_w1_q_reg[*]}] 5.0
 # byte clock meter, byte -> CPU
-set_bus_skew -from [get_cells {u_soc/u_csi2rx/meter_gray_q_reg[*]}] \
-             -to   [get_cells {u_soc/u_csi2rx/u_sync_meter/g_bit[*].u_sync/sync_q_reg[0]}] $dphy_byte_skew
+set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */meter_gray_q_reg[*]}] \
+             -to   [get_cells -hierarchical -filter {NAME =~ */u_sync_meter/g_bit[*].u_sync/sync_q_reg[0]}] \
+             $dphy_byte_skew
 # LOG / RAW capture requests (CPU -> byte) and acknowledges (byte -> CPU)
-set_bus_skew -from [get_cells {u_soc/u_csi2rx/u_regs/log_req_q_reg[*]}] \
-             -to   [get_cells {u_soc/u_csi2rx/u_sync_log_req/g_bit[*].u_sync/sync_q_reg[0]}] 5.0
-set_bus_skew -from [get_cells {u_soc/u_csi2rx/u_regs/raw_req_q_reg[*]}] \
-             -to   [get_cells {u_soc/u_csi2rx/u_sync_raw_req/g_bit[*].u_sync/sync_q_reg[0]}] 5.0
-set_bus_skew -from [get_cells {u_soc/u_csi2rx/u_capture/log_ack_o_reg[*]}] \
-             -to   [get_cells {u_soc/u_csi2rx/u_sync_log_ack/g_bit[*].u_sync/sync_q_reg[0]}] 5.0
-set_bus_skew -from [get_cells {u_soc/u_csi2rx/u_capture/raw_ack_o_reg[*]}] \
-             -to   [get_cells {u_soc/u_csi2rx/u_sync_raw_ack/g_bit[*].u_sync/sync_q_reg[0]}] 5.0
+set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_regs/log_req_q_reg[*]}] \
+             -to   [get_cells -hierarchical -filter {NAME =~ */u_sync_log_req/g_bit[*].u_sync/sync_q_reg[0]}] 5.0
+set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_regs/raw_req_q_reg[*]}] \
+             -to   [get_cells -hierarchical -filter {NAME =~ */u_sync_raw_req/g_bit[*].u_sync/sync_q_reg[0]}] 5.0
+set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_capture/log_ack_o_reg[*]}] \
+             -to   [get_cells -hierarchical -filter {NAME =~ */u_sync_log_ack/g_bit[*].u_sync/sync_q_reg[0]}] 5.0
+set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_capture/raw_ack_o_reg[*]}] \
+             -to   [get_cells -hierarchical -filter {NAME =~ */u_sync_raw_ack/g_bit[*].u_sync/sync_q_reg[0]}] 5.0
 
 # ---- H.264 encoder output FIFO (u_soc/u_h264/u_out, bow_fifo_async) -----------------
 # write pointer clk_vid -> clk_sys, read pointer clk_sys -> clk_vid. 9 constraints in

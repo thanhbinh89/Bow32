@@ -46,10 +46,51 @@
 //    after the HS-PREPARE noise (its oldest ISERDES word is HS-zero). The
 //    false 0x00 0xB8 alone only shows a window reaching 16 UI into the noise.
 //    The model has no LP receiver delay (~8 ns on the device): its windows
-//    are ~1.6 video cycles earlier than on the KV260.
+//    are ~1.6 video cycles earlier than on the KV260. The probe is bound into
+//    every bow_dphy_align (tb_dphy_align_probe), wherever the receiver puts it.
 // The test prints "tb_bow_dphy_io_xusp: PASS" or "... FAIL (<n> errors)".
 
 `timescale 1ps / 1ps
+
+// White box probe of an aligner (bow_dphy_align), bound into every instance by the
+// testbench, so it does not depend on the receiver's hierarchy: in the first cycle of
+// every sync search (arm rises) the oldest word of the search window must be HS-zero,
+// i.e. SETTLE placed the window after the HS-PREPARE noise (and before the sync byte).
+// Each probe counts its searches in tb_dphy_align_probe_pkg; the testbench checks them.
+package tb_dphy_align_probe_pkg;
+  string       name     [$];    // instance path of each probe
+  int unsigned n_search [$];    // sync searches seen by each probe
+  int unsigned errors = 0;
+
+  function automatic int unsigned add_probe(input string path);
+    name.push_back(path);
+    n_search.push_back(0);
+    return name.size() - 1;
+  endfunction
+endpackage
+
+module tb_dphy_align_probe (
+  input logic       clk_i,
+  input logic       arm_i,
+  input logic       arm_q,
+  input logic [7:0] q2_q
+);
+  import tb_dphy_align_probe_pkg::*;
+
+  int unsigned idx;
+  initial idx = add_probe($sformatf("%m"));
+
+  always @(posedge clk_i) begin
+    if (arm_i && !arm_q) begin
+      n_search[idx]++;
+      if (q2_q !== 8'h00) begin
+        errors++;
+        $display("%t ERROR: %m: the first search window does not start in HS-zero (%02h)",
+                 $time, q2_q);
+      end
+    end
+  end
+endmodule
 
 module tb_bow_dphy_io_xusp;
   import bow_bus_pkg::*;
@@ -105,21 +146,13 @@ module tb_bow_dphy_io_xusp;
     $display("%t ERROR: %s", $time, msg);
   endfunction
 
-  // White box: in the first cycle of every sync search (arm rises), the
-  // oldest word of the aligner window must be HS-zero, i.e. SETTLE placed the
-  // window after the HS-PREPARE noise (and before the sync byte).
-  int unsigned n_search [Lanes];
-  for (genvar l = 0; l < Lanes; l++) begin : g_win
-    always @(posedge u_rx.g_align[l].u_align.clk_i) begin
-      if (u_rx.g_align[l].u_align.arm_i && !u_rx.g_align[l].u_align.arm_q) begin
-        n_search[l]++;
-        if (u_rx.g_align[l].u_align.q2_q !== 8'h00) begin
-          err($sformatf("lane %0d: the first search window does not start in HS-zero (%02h)",
-                        l, u_rx.g_align[l].u_align.q2_q));
-        end
-      end
-    end
-  end
+  // White box: the first search window of every aligner (tb_dphy_align_probe above)
+  bind bow_dphy_align tb_dphy_align_probe u_probe (
+    .clk_i (clk_i),
+    .arm_i (arm_i),
+    .arm_q (arm_q),
+    .q2_q  (q2_q)
+  );
 
   // ------------------------------------------------------- D-PHY transmitter
   // Index Lanes is the clock lane. The pull driver always drives the HS level,
@@ -809,11 +842,17 @@ module tb_bow_dphy_io_xusp;
     if (n_rst_rel != n_bursts) begin
       err($sformatf("ISERDESE3 RST released %0d times for %0d bursts", n_rst_rel, n_bursts));
     end
-    for (int l = 0; l < Lanes; l++) begin
-      if (n_search[l] != n_bursts) begin
-        err($sformatf("lane %0d: %0d sync searches for %0d bursts", l, n_search[l], n_bursts));
+    if (tb_dphy_align_probe_pkg::name.size() != Lanes) begin
+      err($sformatf("%0d aligner probes (bind), expected one per lane (%0d)",
+                    tb_dphy_align_probe_pkg::name.size(), Lanes));
+    end
+    foreach (tb_dphy_align_probe_pkg::name[i]) begin
+      if (tb_dphy_align_probe_pkg::n_search[i] != n_bursts) begin
+        err($sformatf("%s: %0d sync searches for %0d bursts", tb_dphy_align_probe_pkg::name[i],
+                      tb_dphy_align_probe_pkg::n_search[i], n_bursts));
       end
     end
+    errors += tb_dphy_align_probe_pkg::errors;
     for (int l = 0; l < Lanes; l++) begin            // random bit phase: most offsets seen
       if ($countones(offs_seen[l]) < 4) begin
         err($sformatf("lane %0d: sync bit offsets 0x%02h", l, offs_seen[l]));

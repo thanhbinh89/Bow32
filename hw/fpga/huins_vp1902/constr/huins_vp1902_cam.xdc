@@ -98,39 +98,56 @@ create_waiver -type METHODOLOGY -id {TIMING-3} -user bow32 \
 # 5.556 ns, clk_vid 5 ns); the CPU <-> byte command counters change rarely and get 5 ns.
 # Destinations are the first synchroniser flops. tcl/build.tcl counts the constraints of
 # report_bus_skew: 11 in this file (CSI-2 receiver 9, H.264 output FIFO 2), all met.
+# The receiver's cells are selected by the tail of their hierarchical name, not by their
+# full path, so that a constraint follows its flops when the receiver's hierarchy changes
+# (docs/ip/mipi_rx_arch.md, section 10, step 1): cells with names of their own (byte clock
+# meter, synchronisers, tap load logic) by those names, the pixel FIFO, register file and
+# capture flops by their path below u_csi2rx. Each tail selects the same cells as the full
+# path it replaced. Two cell groups of one side are a list of two selectors (not an OR in
+# one filter), so that Vivado warns about each one that matches nothing. tcl/build.tcl
+# also checks the cells of every constraint (hw/fpga/common/tcl/bus_skew_checks.tcl):
+# all in u_soc/u_csi2rx, u_soc/u_h264/u_out or u_dphy, every destination reached from
+# the sources, as many source as destination flops.
 set dphy_byte_skew [expr {$dphy_byte_period - 0.07}]
 # pixel FIFO (bow_fifo_async): write pointer byte -> vid, read pointer vid -> byte
-set_bus_skew -from [get_cells {u_soc/u_csi2rx/u_fifo/wgray_q_reg[*]}] \
-             -to   [get_cells {u_soc/u_csi2rx/u_fifo/wgray_r1_q_reg[*]}] $dphy_byte_skew
-set_bus_skew -from [get_cells {u_soc/u_csi2rx/u_fifo/rgray_q_reg[*]}] \
-             -to   [get_cells {u_soc/u_csi2rx/u_fifo/rgray_w1_q_reg[*]}] $vid_period
+set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_fifo/wgray_q_reg[*]}] \
+             -to   [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_fifo/wgray_r1_q_reg[*]}] \
+             $dphy_byte_skew
+set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_fifo/rgray_q_reg[*]}] \
+             -to   [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_fifo/rgray_w1_q_reg[*]}] \
+             $vid_period
 # byte clock meter, byte -> CPU
-set_bus_skew -from [get_cells {u_soc/u_csi2rx/meter_gray_q_reg[*]}] \
-             -to   [get_cells {u_soc/u_csi2rx/u_sync_meter/g_bit[*].u_sync/sync_q_reg[0]}] $dphy_byte_skew
+set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */meter_gray_q_reg[*]}] \
+             -to   [get_cells -hierarchical -filter {NAME =~ */u_sync_meter/g_bit[*].u_sync/sync_q_reg[0]}] \
+             $dphy_byte_skew
 # LOG / RAW capture requests (CPU -> byte) and acknowledges (byte -> CPU)
-set_bus_skew -from [get_cells {u_soc/u_csi2rx/u_regs/log_req_q_reg[*]}] \
-             -to   [get_cells {u_soc/u_csi2rx/u_sync_log_req/g_bit[*].u_sync/sync_q_reg[0]}] 5.0
-set_bus_skew -from [get_cells {u_soc/u_csi2rx/u_regs/raw_req_q_reg[*]}] \
-             -to   [get_cells {u_soc/u_csi2rx/u_sync_raw_req/g_bit[*].u_sync/sync_q_reg[0]}] 5.0
-set_bus_skew -from [get_cells {u_soc/u_csi2rx/u_capture/log_ack_o_reg[*]}] \
-             -to   [get_cells {u_soc/u_csi2rx/u_sync_log_ack/g_bit[*].u_sync/sync_q_reg[0]}] 5.0
-set_bus_skew -from [get_cells {u_soc/u_csi2rx/u_capture/raw_ack_o_reg[*]}] \
-             -to   [get_cells {u_soc/u_csi2rx/u_sync_raw_ack/g_bit[*].u_sync/sync_q_reg[0]}] 5.0
+set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_regs/log_req_q_reg[*]}] \
+             -to   [get_cells -hierarchical -filter {NAME =~ */u_sync_log_req/g_bit[*].u_sync/sync_q_reg[0]}] 5.0
+set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_regs/raw_req_q_reg[*]}] \
+             -to   [get_cells -hierarchical -filter {NAME =~ */u_sync_raw_req/g_bit[*].u_sync/sync_q_reg[0]}] 5.0
+set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_capture/log_ack_o_reg[*]}] \
+             -to   [get_cells -hierarchical -filter {NAME =~ */u_sync_log_ack/g_bit[*].u_sync/sync_q_reg[0]}] 5.0
+set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_capture/raw_ack_o_reg[*]}] \
+             -to   [get_cells -hierarchical -filter {NAME =~ */u_sync_raw_ack/g_bit[*].u_sync/sync_q_reg[0]}] 5.0
 # Input delay load requests (CsiDlyVid = 1, DLYn writes, CPU -> clk_vid): per lane a 2 bit
 # gray request counter and the 9 bit tap, written in the same CPU cycle, each through a
 # per-bit synchroniser. The video side takes the tap 2 cycles after it saw the last
 # counter change, so all these bits must arrive within one video period of each other
 # (the clock groups leave their delays unbounded).
-set_bus_skew -from [get_cells {u_soc/u_csi2rx/u_regs/dly_req_q_reg[*] u_soc/u_csi2rx/u_regs/dly_q_reg[*]}] \
-             -to   [get_cells {u_soc/u_csi2rx/g_dly_vid.u_sync_req/g_bit[*].u_sync/sync_q_reg[0] \
-                               u_soc/u_csi2rx/g_dly_vid.u_sync_tap/g_bit[*].u_sync/sync_q_reg[0]}] $vid_period
+set_bus_skew \
+  -from [list [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_regs/dly_req_q_reg[*]}] \
+              [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_regs/dly_q_reg[*]}]] \
+  -to   [list [get_cells -hierarchical -filter {NAME =~ */g_dly_vid.u_sync_req/g_bit[*].u_sync/sync_q_reg[0]}] \
+              [get_cells -hierarchical -filter {NAME =~ */g_dly_vid.u_sync_tap/g_bit[*].u_sync/sync_q_reg[0]}]] \
+  $vid_period
 # Input delay readback (DLYn[24:16], clk_vid -> CPU): CNTVALUEOUT of the XPHYs (CTRL_CLK =
 # clk_vid; binary, and VT tracking may step it by a tap until the first load of the lane)
 # through a per-bit synchroniser. Not a gray code: a CPU read at a step can still mix old
 # and new bits, so software compares two reads; the bound keeps that window to one video
 # period (the clock groups leave these delays unbounded).
 set_bus_skew -from [get_cells -hierarchical -filter {REF_NAME == XPHY && NAME =~ u_dphy/*}] \
-             -to   [get_cells {u_soc/u_csi2rx/u_sync_tap_out/g_bit[*].u_sync/sync_q_reg[0]}] $vid_period
+             -to   [get_cells -hierarchical -filter {NAME =~ */u_sync_tap_out/g_bit[*].u_sync/sync_q_reg[0]}] \
+             $vid_period
 
 # ---- H.264 encoder output FIFO (u_soc/u_h264/u_out, bow_fifo_async) -----------------------
 # write pointer clk_vid -> clk_sys, read pointer clk_sys -> clk_vid

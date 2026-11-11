@@ -5,8 +5,12 @@
 // together, so only for data that is quasi-static (changes while the
 // receiver does not use it) or gray coded (one bit changes at a time, with
 // a bus skew constraint on the path).
+//
+// Cell names: bit i is g_bit[i].u_sync, its first flop g_bit[i].u_sync/
+// sync_q_reg[0]. FPGA constraints (set_bus_skew) and the reviewed CDC lists
+// select the destination flops by these names.
 
-module bow_csi2_sync #(
+module bow_sync_bus #(
   parameter int unsigned      Width      = 1,
   parameter logic [Width-1:0] ResetValue = '0
 ) (
