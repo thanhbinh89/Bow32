@@ -94,9 +94,11 @@ SIM_BIN_274 := $(OBJ_DIR_274)/Vtb_bow32
 # the build of the selected test
 RUN_BIN := $(if $(filter $(TEST),$(TESTS_IMX274)),$(SIM_BIN_274),$(SIM_BIN))
 # The D-PHY transmitter model of the CSI-2 receiver tests (package
-# csi2_tx_pkg + module csi2_tx_model), the DDR and the HyperRAM clock and pad
+# csi2_tx_pkg + module csi2_tx_model), the PPI v1 checker of the receiver's
+# D-PHY (bound by the testbench), the DDR and the HyperRAM clock and pad
 # models are compiled before the testbench.
-TB_SRCS := $(REPO)/hw/ip/csi2rx/dv/csi2_tx_model.sv $(REPO)/hw/ip/ddr/dv/ddr_clk_model.sv \
+TB_SRCS := $(REPO)/hw/ip/csi2rx/dv/csi2_tx_model.sv $(REPO)/hw/ip/dphy_rx/dv/bow_ppi_chk.sv \
+           $(REPO)/hw/ip/ddr/dv/ddr_clk_model.sv \
            $(REPO)/hw/ip/ddr/dv/bow_ddr_io_sim.sv $(REPO)/hw/ip/hyperram/dv/hyperram_clk_model.sv \
            $(REPO)/hw/ip/hyperram/dv/bow_hyperram_io_sim.sv tb/tb_bow32.sv
 # (*.v: the generated LiteDRAM cores of hw/ip/ddr/litedram/generated)

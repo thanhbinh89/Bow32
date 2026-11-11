@@ -30,6 +30,9 @@
 // is in an LP state or opened while it toggles (csi2_tx_model counters); with
 // DlyVid = 1 the input delay contract of the Versal PHY model (dly_bad,
 // dly_drop, loads per lane); at the end irq_o = |(IRQ_STATUS & IRQ_EN).
+// On every video clock edge: the PPI v1 outputs of the D-PHY that the
+// controller does not use (bow_ppi_chk, bound into bow_dphy_rx; a violation
+// stops the simulation, the counts go to sim.log).
 //
 // Clocks: CPU 50 MHz, video 200 MHz (PhyClkHz, also the Versal PHY control
 // clock), byte clock from the TX model; all unrelated.
@@ -101,6 +104,23 @@ module tb_bow_csi2rx;
     .dly_tap_o       (dly_tap),
     .dly_load_o      (dly_load),
     .dly_tap_i       (dly_tap_rb)
+  );
+
+  // The PPI v1 outputs of the D-PHY that the controller does not use (Stopstate,
+  // RxClkActiveHS, bit 1 of ErrControl, idle values): checked on every lp clock edge against
+  // the LP state machines' inputs, counts in sim.log (hw/ip/dphy_rx/dv/bow_ppi_chk.sv)
+  bind bow_dphy_rx bow_ppi_chk #(.Lanes (Lanes), .Report (1'b1)) u_ppi_chk (
+    .lp_clk_i     (lp_clk_i),
+    .lp_rst_ni    (lrst_n),
+    .byte_clk_i   (byte_clk_i),
+    .byte_rst_ni  (brst_n),
+    .ppi_hs_i     (ppi_hs_o),
+    .ppi_lp_i     (ppi_lp_o),
+    .ppi_lp_clk_i (ppi_lp_clk_o),
+    .lane_en_i    (lane_en),
+    .lp_i         (lp_st),
+    .clk_force_i  (clk_force),
+    .byte_ce_i    (byte_ce)
   );
 
   csi2_tx_model #(.Lanes(Lanes)) u_tx (

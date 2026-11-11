@@ -521,7 +521,12 @@
   mọi cặp cùng tên; DV `csi2rx` và log của các test camera trong `make test` giống bước 1. `make
   lint` lint thêm `bow_mipi_rx` và controller một mình; luật CDC-11 của bản camera Huins cắt đường
   ở bộ thu `u_csi2rx` đầu tiên (`make -C hw/fpga/huins_vp1902 test-cdc`); `sim/tb/tb_bow32.sv` đọc
-  `dut.u_csi2rx.u_csi2rx.cfg.phy_en`.
+  `dut.u_csi2rx.u_csi2rx.cfg.phy_en`. Sau review: `bow_ppi_pkg` chuyển vào `hw/ip/common`
+  (`common.f`), controller không cần nguồn của D-PHY; `PpiLpClkHz` không còn mặc định (mọi
+  instance phải nêu clock lp của PHY); luồng Formality chỉ đổi tên phía implementation và kiểm
+  từng cell nằm đúng khối D-PHY / controller (`partition.rpt`); bộ kiểm `bow_ppi_chk`
+  (`hw/ip/dphy_rx/dv`, bind vào `bow_dphy_rx` trong DV `csi2rx` và `sim`) kiểm các đầu ra PPI v1
+  mà controller chưa dùng.
 - Bộ thu CSI-2, bước 1 của kế hoạch chuyển MIPI RX ([docs/ip/mipi_rx_arch.md](docs/ip/mipi_rx_arch.md)
   mục 10): phần số của D-PHY (máy LP, phát hiện cạnh byte clock, `byte_rst`, flop word, đồng
   bộ `arm`, aligner, nạp tap, đồng hồ đo byte clock và các bộ đồng bộ của chúng) tách thành

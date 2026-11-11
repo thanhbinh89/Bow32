@@ -42,8 +42,9 @@
 //   enable_i[l], enable_clk_i  Enable[l], EnableClk (CPU domain flops of the controller,
 //                     synchronised here with the rest of the configuration)
 // The ErrControl pulses are not gated: the controller marks the lost bursts (lane enables,
-// CLK_FORCE). They are pulses of lp_clk_i, which the controller must run on (FPGA: lp_clk =
-// vid_clk, checked by bow_csi2rx).
+// CLK_FORCE). They are pulses of lp_clk_i, which the controller must run on, as must the lp
+// domain signals of the band below (FPGA: lp_clk = vid_clk, the connection in bow_mipi_rx;
+// bow_csi2rx checks the frequency it is given as PpiLpClkHz).
 //
 // Temporary band (band_*, bow_mipi_rx; docs/ip/mipi_rx_arch.md section 10, step 2), with the
 // step that removes each part:

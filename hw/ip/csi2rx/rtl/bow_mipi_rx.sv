@@ -25,8 +25,11 @@
 //                   idle
 //   ppi_lp_clk      lp domain: StopstateClk, RxClkActiveHS, ErrControlClk, ULPS idle
 //   enable[l], enable_clk  Enable, EnableClk (controller -> D-PHY)
-// The D-PHY's lp clock is vid_clk_i (FPGA: lp_clk = vid_clk): the v1 lp domain errors are
-// pulses of the controller's own video clock (PpiLpClkHz = PhyClkHz, checked by bow_csi2rx).
+// The D-PHY's lp clock is vid_clk_i (FPGA: lp_clk = vid_clk): the v1 lp domain errors and the
+// lp domain signals of the band (the lp reset, HS entry pulses, synchronised lane enables
+// and CLK_FORCE) are signals of the controller's own video clock. This connection is the
+// guarantee; bow_csi2rx's PpiLpClkHz (= PhyClkHz here) only states it for its elaboration
+// check.
 //
 // Temporary band (band_*): the PHY part of the CSI2RX register file and the resets the two
 // blocks share, until the D-PHY has its own registers and resets (step 4) and the AFE

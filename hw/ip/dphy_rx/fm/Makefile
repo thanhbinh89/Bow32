@@ -6,13 +6,16 @@
 # this tree, RTL against RTL, with Synopsys Formality (fm_shell in PATH and a Formality
 # license; not part of CI). The receiver's ports never change: bow_csi2rx up to step 1,
 # bow_mipi_rx (bow_dphy_rx and the controller bow_csi2rx joined by the PPI) from step 2
-# on. equiv.tcl describes the setup, the rename rules of each step and the pass criteria.
+# on. equiv.tcl describes the setup, the rename rules and blocks of each step and the pass
+# criteria: the rules of the steps between REF and this tree rename the implementation
+# only, so against a reference from step 1 on (with hw/ip/dphy_rx) a cell that moved
+# between the D-PHY and the controller fails, and no cell may sit in bow_mipi_rx itself.
 #
 #   make equiv                every configuration of CFGS (~30 s each), step STEP
 #   make equiv-huins          one configuration
-#   make equiv REF=<commit>   another reference (default: 3a1e780, main before step 1;
-#                             a reference from step 1 on, with hw/ip/dphy_rx, works too,
-#                             e.g. 35ef151, the end of step 1)
+#   make equiv REF=<commit>   another reference (default: 3a1e780, main before step 1, the
+#                             end to end check; a reference from step 1 on also checks the
+#                             blocks, e.g. 35ef151, the end of step 1)
 #   make equiv STEP=<n>       the implementation top and rename rules of step n (default 2,
 #                             this tree; STEP=1 only fits a tree of step 1)
 #

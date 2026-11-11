@@ -54,8 +54,9 @@ sw:
 # a lane count bow_mipi_rx must refuse. The receiver on its own (bow_mipi_rx:
 # 2, 1 and 4 lanes as on the KV260, Huins and 1 lane builds, without a PHY),
 # its CSI-2 controller on its own with the PPI ports (bow_csi2rx: the same
-# configurations; a PPI lp clock other than its video clock it must refuse)
-# and its digital D-PHY on its own (bow_dphy_rx: 1, 2 and 4 lanes, input delay
+# configurations, each stating the PHY's lp clock; no lp clock, or one other
+# than its video clock, it must refuse, with its own message) and its digital
+# D-PHY on its own (bow_dphy_rx: 1, 2 and 4 lanes, input delay
 # taps in the byte or the lp clock domain; a lane count it must refuse). Then
 # the Versal board level RTL against port-only stubs of the AMD primitives
 # (hw/lint/xilinx_versal_stubs.sv): the D-PHY with its synthetic default
@@ -70,6 +71,12 @@ RX_LINT = $(VERILATOR) --lint-only -Wall hw/lint/verilator_waivers.vlt -F hw/ip/
 	  -F hw/ip/bus/bus.f -F hw/ip/dphy_rx/dphy_rx.f -F hw/ip/csi2rx/csi2rx.f
 RX_CFGS = "" "-GLanes=1" "-GLanes=4 -GDlyVid=1'b1 -GFifoDepth=512" \
 	  "-GHasPhy=1'b0 -GPhyClkHz=50000000"
+# the controller alone: the same, with the PHY's lp clock = vid_clk_i (PhyClkHz, 200 MHz default)
+CTRL_CFGS = "-GPpiLpClkHz=200000000" "-GLanes=1 -GPpiLpClkHz=200000000" \
+	  "-GLanes=4 -GDlyVid=1'b1 -GFifoDepth=512 -GPpiLpClkHz=200000000" \
+	  "-GHasPhy=1'b0 -GPhyClkHz=50000000 -GPpiLpClkHz=50000000"
+# arguments for bow_csi2rx alone that it must refuse, and the message it must refuse them with
+CTRL_BAD = "|PpiLpClkHz not set" "-GPpiLpClkHz=250000000|PPI lp clock 250000000 Hz != vid_clk_i"
 VLINT_CMD = $(VERILATOR) --lint-only -Wall hw/lint/verilator_waivers.vlt hw/lint/xilinx_versal_stubs.sv
 DPHY_LINT = $(VLINT_CMD) hw/fpga/common/rtl/bow_dphy_io_versal.sv --top-module bow_dphy_io_versal
 
@@ -89,12 +96,17 @@ lint: deps
 	@# bow_mipi_rx takes 1, 2 or 4 data lanes
 	@! $(LINT_CMD) -GCsiLanes=3 > /dev/null 2>&1 || \
 	  { echo "lint: bow_mipi_rx accepted 3 data lanes"; exit 1; }
-	@for top in bow_mipi_rx bow_csi2rx; do for g in $(RX_CFGS); do \
-	  echo "$(RX_LINT) --top-module $$top $$g"; \
-	  $(RX_LINT) --top-module $$top $$g || exit 1; done; done
-	@# bow_csi2rx: the v1 PPI lp errors are pulses of its own video clock
-	@! $(RX_LINT) --top-module bow_csi2rx -GPpiLpClkHz=250000000 > /dev/null 2>&1 || \
-	  { echo "lint: bow_csi2rx accepted a PPI lp clock other than vid_clk_i"; exit 1; }
+	@for g in $(RX_CFGS); do echo "$(RX_LINT) --top-module bow_mipi_rx $$g"; \
+	  $(RX_LINT) --top-module bow_mipi_rx $$g || exit 1; done
+	@for g in $(CTRL_CFGS); do echo "$(RX_LINT) --top-module bow_csi2rx $$g"; \
+	  $(RX_LINT) --top-module bow_csi2rx $$g || exit 1; done
+	@# bow_csi2rx: the v1 PPI lp errors are pulses of its own video clock, and every
+	@# instantiation states the PHY's lp clock (PpiLpClkHz has no default)
+	@for c in $(CTRL_BAD); do g="$${c%%|*}"; m="$${c#*|}"; \
+	  if out="$$($(RX_LINT) --top-module bow_csi2rx $$g 2>&1)"; then \
+	    echo "lint: bow_csi2rx accepted '$$g' (expected: $$m)"; exit 1; fi; \
+	  echo "$$out" | grep -q "$$m" || { echo "lint: bow_csi2rx refused '$$g' without '$$m':"; \
+	    echo "$$out" | head -5; exit 1; }; done
 	$(DPHYRX_LINT)
 	$(DPHYRX_LINT) -GLanes=1
 	$(DPHYRX_LINT) -GLanes=4 -GDlyVid=1\'b1

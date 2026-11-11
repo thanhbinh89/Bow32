@@ -61,7 +61,9 @@
 # CDC-11 row needs the lane enable flop and the synchroniser in the same receiver. The
 # other ends keep their exact paths (u_dphy is the board level D-PHY I/O).
 # tcl/timing_checks_cam_test.tcl (make test-cdc) checks every path form and the rows that
-# must stay unreviewed.
+# must stay unreviewed, on paths written in the test: a later step that moves these cells
+# again (a new hierarchy level) shows up in the build's own CDC check, as unreviewed rows,
+# not in test-cdc.
 proc bow32_huins_cam_rx_split {path} {
   # {receiver below} of a pin path, {} without an instance named u_csi2rx
   set parts [split $path /]

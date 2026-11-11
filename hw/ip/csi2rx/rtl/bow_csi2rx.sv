@@ -30,8 +30,12 @@
 // PPI (v1, bow_ppi_pkg): the byte domain runs on rx_byte_clk_hs_i (RxByteClkHS). The lp
 // domain signals belong to the PHY's lp clock; in v1 ErrControl / ErrControlClk are one
 // cycle pulses (bit 0), sampled here on vid_clk_i, so the PHY's lp clock must be vid_clk_i
-// itself: PpiLpClkHz (its frequency) must equal PhyClkHz, checked at elaboration
-// (bow_mipi_rx runs the D-PHY on vid_clk_i; v1.x: gray counters, section 4.11 of the spec).
+// itself (v1.x: gray counters, section 4.11 of the spec). So do the lp domain signals of the
+// band below: the D-PHY's lp reset (band_lp_rst_no = vrst_n, synchronised to vid_clk_i), the
+// HS entry pulses and the synchronised lane enables and CLK_FORCE. PpiLpClkHz (the PHY's lp
+// clock frequency) has no default: every instantiation states it, and elaboration fails
+// unless it equals PhyClkHz. That compares two numbers only; the guarantee is the
+// connection (bow_mipi_rx runs the D-PHY's lp_clk_i on vid_clk_i).
 // Used here: RxActiveHS, RxValidHS, RxDataHS, RxSyncHS, ErrSotSyncHS of every lane,
 // RxSkewCalHS of lane 0, ErrControl[0] of every lane and ErrControlClk[0]; the other PPI
 // signals are not used yet.
@@ -84,8 +88,8 @@ module bow_csi2rx
   parameter int unsigned FifoDepth  = 256,          // pixel FIFO entries (4 px each), power of 2
   parameter bit          DlyVid     = 1'b0,         // INFO.DLY_VID: the D-PHY loads its input
                                                     // delays in the video domain (Versal XPHY)
-  parameter int unsigned PpiLpClkHz = PhyClkHz      // the PHY's lp clock (PPI lp domain): v1
-                                                    // needs vid_clk_i itself (see above)
+  parameter int unsigned PpiLpClkHz = 0             // the PHY's lp clock (PPI lp domain), no
+                                                    // default: v1 needs vid_clk_i (see above)
 ) (
   input  logic                  clk_i,
   input  logic                  rst_ni,
@@ -141,7 +145,14 @@ module bow_csi2rx
   // v1 PPI: the lp domain errors are one cycle pulses of the PHY's lp clock, sampled on
   // vid_clk_i (see above). As below, the initial copy stops simulations that build with
   // -Wno-fatal.
-  if (PpiLpClkHz != PhyClkHz) begin : g_bad_lp_clk
+  if (PpiLpClkHz == 0) begin : g_no_lp_clk
+    $fatal(1, "bow_csi2rx: PpiLpClkHz not set (the PHY's lp clock; v1: vid_clk_i, %0d Hz)",
+           PhyClkHz);
+`ifndef SYNTHESIS
+    initial $fatal(1, "bow_csi2rx: PpiLpClkHz not set (the PHY's lp clock; v1: vid_clk_i, %0d Hz)",
+                   PhyClkHz);
+`endif
+  end else if (PpiLpClkHz != PhyClkHz) begin : g_bad_lp_clk
     $fatal(1, "bow_csi2rx: PPI lp clock %0d Hz != vid_clk_i %0d Hz (v1 PPI errors are pulses)",
            PpiLpClkHz, PhyClkHz);
 `ifndef SYNTHESIS

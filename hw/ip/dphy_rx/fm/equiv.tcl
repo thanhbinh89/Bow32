@@ -14,28 +14,39 @@
 # included when the tree has it (a reference from step 1 on). Reports in the current
 # directory.
 #
-# Tops. The receiver's ports never change: bow_csi2rx up to step 1, bow_mipi_rx (the same
-# ports and parameters) from step 2 on. The reference top is the receiver of the
-# reference tree (bow_mipi_rx when the tree has it), the implementation top that of the
-# step (step_top below). step 1: bow_csi2rx with bow_dphy_rx inside (u_dphy_rx); step 2:
-# bow_mipi_rx with bow_dphy_rx (u_dphy_rx) and the controller bow_csi2rx (u_csi2rx) side
-# by side.
+# Tops and hierarchy. The receiver's ports never change: bow_csi2rx up to step 1,
+# bow_mipi_rx (the same ports and parameters) from step 2 on. The hierarchy of a tree is
+# that of its step: 0 (before step 1, e.g. 3a1e780) flat bow_csi2rx; 1 (e.g. 35ef151)
+# bow_csi2rx with bow_dphy_rx inside (u_dphy_rx); 2 bow_mipi_rx with bow_dphy_rx
+# (u_dphy_rx) and the controller bow_csi2rx (u_csi2rx) side by side and no cell of its own.
+# The implementation is a tree at step STEP (STEP=1 checks a tree of step 1, not this
+# one); the step of the reference tree is read from its files (tree_step below).
 #
-# Names. The moved flops keep their names one or more levels down. The rename rules of
-# the step (step_rules below) map them back, as compare rules on both designs (a rule has
-# no effect where the prefix does not occur, e.g. on a reference from before the split);
-# matching through the names of attached nets is off. After matching, every matched pair
-# must have the same name once the rules are applied (names.rpt lists the pairs that do
-# not): Formality reports pairs matched through net names as "matched by name" too, and
-# a functional check cannot see synthesis attributes, so a synchroniser rebuilt from plain
-# flops (no ASYNC_REG, cell names the XDC and the CDC review do not know) would otherwise
-# pass.
+# Names. Moved flops keep their names one level down per step. The rename rules of each
+# step (step_rules below) map the names of a tree at that step to those of the step
+# before; the rules of the steps between the reference and the implementation are compare
+# rules on the implementation only, so the reference keeps its hierarchy: against a step 1
+# reference, u_dphy_rx/ stays and only u_csi2rx/ goes, and a cell that moved between the
+# D-PHY and the controller no longer matches by name. Matching through the names of
+# attached nets is off. After matching, every matched pair, unread ones included, must
+# have the reference's name once the rules are applied to the implementation's (names.rpt
+# lists the pairs that do not): Formality reports pairs matched through net names as
+# "matched by name" too, and a functional check cannot see synthesis attributes, so a
+# synchroniser rebuilt from plain flops (no ASYNC_REG, cell names the XDC and the CDC
+# review do not know) would otherwise pass.
+#
+# Blocks (step_blocks below). Each matched cell (every pair but ports) must sit in the same
+# block on both sides when the reference has blocks (from step 1 on: the D-PHY u_dphy_rx/,
+# the controller), and at step 2 in u_dphy_rx/ or u_csi2rx/, never in the wrapper itself.
+# partition.rpt counts the pairs per block and lists the ones that break this. With a
+# reference from before step 1 only the wrapper rule applies: the flat reference does
+# not say which block a cell belongs to.
 #
 # The run passes ("EQUIV <cfg>: PASS ...", exit code 0) only when the verification
 # succeeds with every compare point matched by name and verified: no unmatched, failing,
-# aborted or unverified point, every matched pair with identical names, no black box
-# instance, no user match, no constant, no don't-verify point. The memories (pixel FIFO,
-# LOG and RAW RAMs) are read as registers, not black boxes.
+# aborted or unverified point, every matched pair with the reference's name and in its
+# block, no black box instance, no user match, no constant, no don't-verify point. The
+# memories (pixel FIFO, LOG and RAW RAMs) are read as registers, not black boxes.
 
 # Configurations: the parameter sets of the builds that instantiate the receiver
 # (hw/top/rtl/bow32_top.sv, the board tops, sim/tb/tb_bow32.sv)
@@ -52,33 +63,56 @@ if {![info exists cfg_params($cfg)]} {
 }
 set params $cfg_params($cfg)
 
-# Steps of section 10: the implementation's top and the rename rules, pairs {from to} of
-# literal strings (letters, digits, '_', '/'), each applied once per name like a compare
-# rule (sed s/from/to/), to both designs. A later step that moves cells again adds its own
-# entry. The implementation of a step is a tree at that step: STEP=1 checks a tree of
-# step 1 (35ef151), not this one.
+# Steps of section 10 (a later step that moves cells again adds its entries):
+#   step_top     the receiver's top in a tree at that step
+#   step_rules   rename rules from that step's names to the step before: pairs {from to}
+#                of literal strings (letters, digits, '_', '/'), each applied once per name
+#                like a compare rule (sed s/from/to/)
+#   step_blocks  the blocks of the receiver, pairs {block prefix} tried in order; a cell
+#                whose name starts with no prefix is in the last block, or, when that has a
+#                prefix too, in the wrapper (step 2: bow_mipi_rx holds no cell)
 array set step_top {
+  0 bow_csi2rx
   1 bow_csi2rx
   2 bow_mipi_rx
 }
 array set step_rules {
   1 {u_dphy_rx/ {}}
-  2 {u_dphy_rx/ {} u_csi2rx/ {}}
+  2 {u_csi2rx/ {}}
+}
+array set step_blocks {
+  0 {rx {}}
+  1 {dphy u_dphy_rx/ ctrl {}}
+  2 {dphy u_dphy_rx/ ctrl u_csi2rx/}
 }
 if {![info exists step]} {
   set step 2
 }
-if {![info exists step_top($step)]} {
-  puts "EQUIV $cfg: unknown step $step ([lsort [array names step_top]])"
+if {$step < 1 || ![info exists step_top($step)]} {
+  puts "EQUIV $cfg: unknown step $step ([lsort [array names step_rules]])"
   exit 1
 }
-set rename_rules $step_rules($step)
-set impl_top     $step_top($step)
-# the receiver of the reference tree
-if {[file exists [file join $ref_root hw ip csi2rx rtl bow_mipi_rx.sv]]} {
-  set ref_top bow_mipi_rx
-} else {
-  set ref_top bow_csi2rx
+# the step of a tree, from its files
+proc tree_step {root} {
+  if {[file exists [file join $root hw ip csi2rx rtl bow_mipi_rx.sv]]} {
+    return 2
+  }
+  if {[file exists [file join $root hw ip dphy_rx dphy_rx.f]]} {
+    return 1
+  }
+  return 0
+}
+set ref_step [tree_step $ref_root]
+if {$ref_step > $step} {
+  puts "EQUIV $cfg: the reference is a tree of step $ref_step, the implementation of step $step"
+  exit 1
+}
+set impl_top $step_top($step)
+set ref_top  $step_top($ref_step)
+# the rules from the implementation's step down to the reference's
+set rename_rules {}
+for {set s $step} {$s > $ref_step} {incr s -1} {
+  lappend rename_rules {*}$step_rules($s)
 }
 foreach {from to} $rename_rules {
   if {![regexp {^[A-Za-z0-9_/]+$} $from] || ![regexp {^[A-Za-z0-9_/]*$} $to]} {
@@ -86,6 +120,7 @@ foreach {from to} $rename_rules {
     exit 1
   }
 }
+# an implementation name as the reference names it
 proc renamed {name} {
   foreach {from to} $::rename_rules {
     set i [string first $from $name]
@@ -94,6 +129,15 @@ proc renamed {name} {
     }
   }
   return $name
+}
+# the block of a cell name in a tree at a step (wrapper: none of the blocks)
+proc block_of {s name} {
+  foreach {blk prefix} $::step_blocks($s) {
+    if {$prefix eq {} || [string first $prefix $name] == 0} {
+      return $blk
+    }
+  }
+  return wrapper
 }
 
 # File lists: the same .f files as every other flow (hw/fpga/common/tcl/filelist.tcl)
@@ -129,7 +173,6 @@ read_sverilog -i -12 -work_library WORK $impl_files
 set_top i:/WORK/$impl_top -parameter $params
 
 foreach {from to} $rename_rules {
-  set_compare_rule $ref  -from $from -to $to
   set_compare_rule $impl -from $from -to $to
 }
 
@@ -146,38 +189,78 @@ report_user_matches        > user_matches.rpt
 report_constants           > constants.rpt
 report_dont_verify_points  > dont_verify.rpt
 
-# Every matched pair (compare points and inputs) with the same name once the rename rules
-# are applied; the pairs that differ go to names.rpt. Returns {pairs differing renamed}.
-proc check_names {} {
-  set fh [open names.rpt w]
-  set n 0
+# Matched pairs {ref impl} without the container and design (r:/WORK/<design>/<path>):
+# the default list (compare points and inputs) and the unread points it leaves out
+proc strip {name} {
+  regsub {^[ri]:/[^/]+/[^/]+/} $name {} name
+  return $name
+}
+proc matched_pairs {args} {
+  set pairs [dict create]
+  foreach st {{} {-status unread}} {
+    foreach pair [report_matched_points {*}$st {*}$args -list] {
+      lassign $pair r i
+      dict set pairs [list [strip $r] [strip $i]] 1
+    }
+  }
+  return [dict keys $pairs]
+}
+
+# Every matched pair with the reference's name once the rename rules are applied to the
+# implementation's (the pairs that differ go to names.rpt), and every cell in its block
+# (partition.rpt). Returns {pairs unread differing renamed outside}.
+proc check_pairs {} {
+  set pairs [matched_pairs]
+  set n_unread [llength [report_matched_points -status unread -list]]
+  set ports [dict create]
+  foreach pair [matched_pairs -point_type port] {
+    dict set ports $pair 1
+  }
+  set fn [open names.rpt w]
+  set fp [open partition.rpt w]
   set bad 0
   set moved 0
-  foreach pair [report_matched_points -list] {
+  set outside 0
+  set count [dict create]
+  foreach pair $pairs {
     lassign $pair r i
-    # strip the container and the design: r:/WORK/<design>/<path>
-    regsub {^[ri]:/[^/]+/[^/]+/} $r {} r
-    regsub {^[ri]:/[^/]+/[^/]+/} $i {} i
-    incr n
     if {[renamed $i] ne $i} {
       incr moved
     }
-    if {[renamed $r] ne [renamed $i]} {
+    if {[renamed $i] ne $r} {
       incr bad
-      puts $fh "ref $r <-> impl $i"
+      puts $fn "ref $r <-> impl $i"
+    }
+    if {[dict exists $ports $pair]} {
+      dict incr count port
+      continue
+    }
+    set bi [block_of $::step $i]
+    set br [block_of $::ref_step $r]
+    dict incr count $bi
+    if {$bi eq "wrapper" || ($::ref_step > 0 && $br ne $bi)} {
+      incr outside
+      puts $fp "ref $r ($br) <-> impl $i ($bi)"
     }
   }
-  puts $fh "$n matched pairs, $moved renamed by the rules ($::rename_rules), $bad with different names"
-  close $fh
-  return [list $n $bad $moved]
+  set n [llength $pairs]
+  puts $fn "$n matched pairs ($n_unread unread), $moved renamed by the rules ($::rename_rules),\
+            $bad with different names"
+  set per {}
+  dict for {k v} $count {
+    lappend per "$k $v"
+  }
+  puts $fp "$n matched pairs by block of the implementation ([join [lsort $per] {, }]),\
+            $outside outside their block (reference step $::ref_step, implementation step\
+            $::step)"
+  close $fn
+  close $fp
+  return [list $n $n_unread $bad $moved $outside]
 }
-lassign [check_names] n_pairs n_name_diff n_moved
-proc count_method {m} {
-  return [llength [report_matched_points -method $m -list]]
-}
+lassign [check_pairs] n_pairs n_unread n_name_diff n_moved n_outside
 set n_method {}
 foreach m {name user topology function} {
-  lappend n_method [count_method $m]
+  lappend n_method [llength [matched_pairs -method $m]]
 }
 
 set ok [verify]
@@ -210,7 +293,7 @@ foreach {rpt re what} {
     lappend bad "$what ($rpt)"
   }
 }
-# names: identical after the rename rules, every pair matched by name
+# names: the reference's after the rename rules, every pair matched by name
 if {$n_pairs == 0 || $n_name_diff != 0} {
   lappend bad "$n_name_diff of $n_pairs matched pairs with different names (names.rpt)"
 }
@@ -218,6 +301,10 @@ lassign $n_method by_name by_user by_topo by_func
 if {$by_name != $n_pairs || $by_user + $by_topo + $by_func != 0} {
   lappend bad "matched pairs by name $by_name of $n_pairs, by user / topology / function\
                $by_user / $by_topo / $by_func"
+}
+# blocks: every cell in its block, none in the wrapper
+if {$n_outside != 0} {
+  lappend bad "$n_outside of $n_pairs matched pairs outside their block (partition.rpt)"
 }
 # black boxes: report_black_boxes lists the unlinked library modules too; none may have
 # an instance in the designs
@@ -241,11 +328,18 @@ foreach v {total port dff creg unread} {
     lappend bad "no '$v' count in status.rpt"
   }
 }
-set summary "step $step, $ref_top -> $impl_top: $total compare points matched and passing\
-             ($port ports, $dff flops), 0 unmatched, 0 failing / aborted / unverified,\
-             $n_pairs matched pairs with identical names ($n_moved through the rename rules),\
-             no black box, user match or constant; not compared: $creg constant registers,\
-             $unread unread flops"
+set blocks [lindex [split [slurp partition.rpt] "\n"] end-1]
+regexp {\(([^)]*)\)} $blocks -> blocks
+if {$ref_step > 0} {
+  set blocks "in the reference's blocks ($blocks)"
+} else {
+  set blocks "in the blocks ($blocks; the flat reference has none to compare)"
+}
+set summary "step $ref_step -> $step, $ref_top -> $impl_top: $total compare points matched\
+             and passing ($port ports, $dff flops), 0 unmatched, 0 failing / aborted /\
+             unverified, $n_pairs matched pairs ($n_unread unread) with the reference's names\
+             ($n_moved through the rename rules) and $blocks, no black box, user match or\
+             constant; not compared: $creg constant registers, $unread unread flops"
 if {$ok && [llength $bad] == 0} {
   puts "EQUIV $cfg: PASS: $summary"
   exit 0
