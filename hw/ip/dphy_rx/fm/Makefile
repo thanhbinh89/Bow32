@@ -1,15 +1,20 @@
 # Copyright Bow32 contributors.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Formal equivalence of the D-PHY split (docs/ip/mipi_rx_arch.md, section 10, step 1):
-# bow_csi2rx of a reference commit against bow_csi2rx of this tree (bow_dphy_rx
-# inside), RTL against RTL, with Synopsys Formality (fm_shell in PATH and a Formality
-# license; not part of CI). equiv.tcl describes the setup and the pass criteria.
+# Formal equivalence of the steps of the MIPI receiver split (docs/ip/mipi_rx_arch.md,
+# section 10, steps 1 and 2): the receiver of a reference commit against the receiver of
+# this tree, RTL against RTL, with Synopsys Formality (fm_shell in PATH and a Formality
+# license; not part of CI). The receiver's ports never change: bow_csi2rx up to step 1,
+# bow_mipi_rx (bow_dphy_rx and the controller bow_csi2rx joined by the PPI) from step 2
+# on. equiv.tcl describes the setup, the rename rules of each step and the pass criteria.
 #
-#   make equiv                every configuration of CFGS (~30 s each)
+#   make equiv                every configuration of CFGS (~30 s each), step STEP
 #   make equiv-huins          one configuration
 #   make equiv REF=<commit>   another reference (default: 3a1e780, main before step 1;
-#                             a reference from step 1 on, with hw/ip/dphy_rx, works too)
+#                             a reference from step 1 on, with hw/ip/dphy_rx, works too,
+#                             e.g. 35ef151, the end of step 1)
+#   make equiv STEP=<n>       the implementation top and rename rules of step n (default 2,
+#                             this tree; STEP=1 only fits a tree of step 1)
 #
 # Configurations (equiv.tcl): kv260 (2 lanes, FIFO 256, taps in the byte clock domain:
 # the KV260 camera build), huins (4 lanes, FIFO 512, taps in the video clock domain:
@@ -22,12 +27,13 @@ REPO    := $(abspath ../../../..)
 BUILD   := $(REPO)/build/dphy_rx_fm
 FM      ?= fm_shell
 REF     ?= 3a1e780
+STEP    ?= 2
 CFGS    ?= kv260 huins lanes1 nophy sim
 REF_DIR := $(BUILD)/ref
 TIMEOUT ?= 3600
 
 equiv: $(addprefix equiv-,$(CFGS))
-	@echo "equiv: $(words $(CFGS)) configurations PASS against $(REF) ($(CFGS))"
+	@echo "equiv: step $(STEP), $(words $(CFGS)) configurations PASS against $(REF) ($(CFGS))"
 
 # The reference RTL, extracted again on every run (REF may change); hw/ip/dphy_rx too when
 # REF has it
@@ -44,7 +50,7 @@ equiv-%: ref
 	@command -v $(FM) > /dev/null || { echo "$(FM) not found (Synopsys Formality)"; exit 1; }
 	@mkdir -p $(BUILD)/$*
 	cd $(BUILD)/$* && timeout $(TIMEOUT) $(FM) -file $(CURDIR)/equiv.tcl \
-	  -x "set cfg $*; set ref_root $(REF_DIR); set impl_root $(REPO)" \
+	  -x "set cfg $*; set step $(STEP); set ref_root $(REF_DIR); set impl_root $(REPO)" \
 	  -output_log_file fm.log -overwrite < /dev/null > fm.out 2>&1 || true
 	@grep -h '^EQUIV ' $(BUILD)/$*/fm.out || echo "EQUIV $*: no result, see $(BUILD)/$*/fm.log"
 	@grep -q '^EQUIV $*: PASS' $(BUILD)/$*/fm.out

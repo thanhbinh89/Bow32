@@ -12,3 +12,7 @@ lint_off -rule PINCONNECTEMPTY
 // width extensions, unused signals, incomplete cases). bow_ddr's own
 // connections to them are linted on the Bow32 side.
 lint_off -file "*/ip/ddr/litedram/generated/*"
+
+// The default request / response of the bus package are used by the SoC, not by an IP
+// linted on its own (make lint: bow_mipi_rx and the controller bow_csi2rx).
+lint_off -rule UNUSEDPARAM -file "*/ip/bus/rtl/bow_bus_pkg.sv" -match "*BUS_R*_DEFAULT*"

@@ -1,7 +1,8 @@
 // Copyright Bow32 contributors.
 // SPDX-License-Identifier: Apache-2.0
 //
-// Unit testbench of the Bow32 CSI-2 receiver (Verilator --binary --timing).
+// Unit testbench of the Bow32 CSI-2 receiver (Verilator --binary --timing): the DUT is
+// bow_mipi_rx, the digital D-PHY and the CSI-2 controller joined by the PPI.
 //
 // Reads a test case written by `tools/csi2/csi2_model.py gen DIR`:
 //   DIR/cfg.txt   settings ('key value': lanes, clock mode, D-PHY timing, eye,
@@ -67,7 +68,7 @@ module tb_bow_csi2rx;
   logic [Lanes-1:0][7:0] rx_data;
   logic [Lanes-1:0][8:0] dly_tap, dly_tap_rb;
 
-  bow_csi2rx #(
+  bow_mipi_rx #(
     .Lanes     (Lanes),
     .PhyClkHz  (PhyClkHz),
     .CpuClkHz  (1_000_000_000 / (CpuPs / 1000)),

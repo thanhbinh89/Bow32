@@ -816,7 +816,7 @@ module tb_bow32 #(
   function automatic void s274_stop(string why);
     s274_run = 1'b0;
     s274_stops++;
-    if (dut.u_csi2rx.cfg.phy_en) begin
+    if (dut.u_csi2rx.u_csi2rx.cfg.phy_en) begin
       $fatal(1, "IMX274: %s while the CSI-2 receiver is enabled (the lanes drop to LP-00: LP error)",
              why);
     end

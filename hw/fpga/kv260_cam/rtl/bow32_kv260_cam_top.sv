@@ -5,7 +5,7 @@
 // connector J9 -> Bow32 MIPI CSI-2 receiver -> Bow32 ISP. No vendor CSI-2 or
 // D-PHY IP: the pins go to bow_dphy_io_xusp (UltraScale+ I/O primitives:
 // IBUFDS_DPHY, IDELAYE3, ISERDESE3, BUFGCE_DIV), the LP state machines, the
-// byte alignment and the CSI-2 layer are in bow_csi2rx inside the SoC
+// byte alignment and the CSI-2 layer are in bow_mipi_rx inside the SoC
 // (CSI2RX registers at 0x4000_8000, see docs/camera_kv260.md).
 //
 // The block design "bow32_cam" (tcl/cam_bd.tcl) holds the Xilinx IP:

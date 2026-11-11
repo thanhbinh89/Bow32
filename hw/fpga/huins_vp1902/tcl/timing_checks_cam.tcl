@@ -52,14 +52,26 @@
 #                   the receiver is disabled)
 #   CDC-13          the byte clock gate: BUFGCE CE from the clock lane state machine
 #                   (clk_vid), changes only while the clock lane is static (false path)
-# The receiver's rows match on the tail of the pin path, as the set_bus_skew selectors of
-# constr/huins_vp1902_cam.xdc do, so that they follow its flops when the receiver's
-# hierarchy changes (docs/ip/mipi_rx_arch.md, section 10, step 1): the register file by its
-# path below u_csi2rx, the D-PHY cells by their own instance names (u_sync_vcfg, u_lp_clk)
-# at any depth below u_csi2rx; a CDC-11 row needs the lane enable flop and the
-# synchroniser in the same receiver instance. The other ends keep their exact paths
-# (u_dphy is the board level D-PHY I/O). tcl/timing_checks_cam_test.tcl (make test-cdc)
-# checks both path forms and the rows that must stay unreviewed.
+# The receiver's rows follow its cells when the receiver's hierarchy changes
+# (docs/ip/mipi_rx_arch.md, section 10): a pin path is split at its first instance named
+# u_csi2rx, the receiver (bow_mipi_rx in bow32_top, bow_csi2rx up to step 1; anywhere
+# above it), and the part below it must be one of the known places of the cell: the
+# register file in u_regs of the controller (u_csi2rx/u_regs from step 2, u_regs before),
+# the D-PHY cells in u_dphy_rx (from step 1) or right below the receiver (before). A
+# CDC-11 row needs the lane enable flop and the synchroniser in the same receiver. The
+# other ends keep their exact paths (u_dphy is the board level D-PHY I/O).
+# tcl/timing_checks_cam_test.tcl (make test-cdc) checks every path form and the rows that
+# must stay unreviewed.
+proc bow32_huins_cam_rx_split {path} {
+  # {receiver below} of a pin path, {} without an instance named u_csi2rx
+  set parts [split $path /]
+  set i [lsearch -exact $parts u_csi2rx]
+  if {$i < 0} {
+    return {}
+  }
+  return [list [join [lrange $parts 0 $i] /] [join [lrange $parts [expr {$i + 1}] end] /]]
+}
+
 proc bow32_huins_cam_cdc_known {id from to} {
   switch -- $id {
     CDC-1 - CDC-4 {
@@ -76,11 +88,11 @@ proc bow32_huins_cam_cdc_known {id from to} {
       }
     }
     CDC-11 {
-      # rx_from / rx_to: the path above u_csi2rx at each end ("" at the top level)
-      if {[regexp {^(.*/)?u_csi2rx/u_regs/lane_en_q_reg\[\d+\]/C$} $from -> rx_from] &&
-          [regexp {^(.*/)?u_csi2rx/(?:.*/)?u_sync_vcfg/g_bit\[\d+\]\.u_sync/sync_q_reg\[0\]/D$} \
-             $to -> rx_to] &&
-          $rx_from eq $rx_to} {
+      lassign [bow32_huins_cam_rx_split $from] rx_from below_from
+      lassign [bow32_huins_cam_rx_split $to] rx_to below_to
+      if {$rx_from ne "" && $rx_from eq $rx_to &&
+          [regexp {^(u_csi2rx/)?u_regs/lane_en_q_reg\[\d+\]/C$} $below_from] &&
+          [regexp {^(u_dphy_rx/)?u_sync_vcfg/g_bit\[\d+\]\.u_sync/sync_q_reg\[0\]/D$} $below_to]} {
         return "CDC-11 CSI-2 lane enables (merged flop of equal enables, quasi-static)"
       }
     }
@@ -88,7 +100,8 @@ proc bow32_huins_cam_cdc_known {id from to} {
       if {[regexp {^u_soc/u_isp/u_regs/} $from] && [regexp {^u_soc/u_isp/} $to]} {
         return "$id ISP coefficients / capture scale, quasi-static (clk_sys -> clk_vid)"
       }
-      if {[regexp {(^|/)u_csi2rx/(.*/)?u_lp_clk/ce_q_reg/C$} $from] &&
+      lassign [bow32_huins_cam_rx_split $from] rx_from below_from
+      if {$rx_from ne "" && [regexp {^(u_dphy_rx/)?u_lp_clk/ce_q_reg/C$} $below_from] &&
           $to eq {u_dphy/u_byte_bufg/CE}} {
         return "CDC-13 byte clock gate (BUFGCE CE)"
       }

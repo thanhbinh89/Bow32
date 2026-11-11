@@ -6,7 +6,7 @@
 // adapter on FMC+01 -> Bow32 MIPI CSI-2 receiver (4 lanes x 1440 Mbit/s) -> Bow32 ISP ->
 // capture buffer / H.264 encoder. No vendor CSI-2 or D-PHY IP: the pins go to
 // bow_dphy_io_versal (IBUFDS_DPHY, XPHY, XPLL, BUFGCE), the LP state machines, the byte
-// alignment and the CSI-2 layer are bow_csi2rx inside the SoC (CSI2RX registers at
+// alignment and the CSI-2 layer are bow_mipi_rx inside the SoC (CSI2RX registers at
 // 0x4000_8000), as on the KV260 (docs/camera_kv260.md). Board preparation, build and use:
 // docs/camera_huins.md. Only the PL is used: Vivado adds a default PS wizard (PMC) to the
 // device image, loaded over the board's USB JTAG.

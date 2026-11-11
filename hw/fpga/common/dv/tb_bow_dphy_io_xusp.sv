@@ -4,7 +4,7 @@
 // Pin level test of the KV260 D-PHY receive I/O (Vivado simulator with the
 // UltraScale+ unisim models, `make -C hw/fpga/common/dv test`):
 //
-//   bit-serial D-PHY transmitter -> pads -> bow_dphy_io_xusp -> bow_csi2rx -> m_axis
+//   bit-serial D-PHY transmitter -> pads -> bow_dphy_io_xusp -> bow_mipi_rx -> m_axis
 //                                           (IBUFDS_DPHY, IDELAYE3,
 //                                            ISERDESE3, BUFGCE_DIV)
 //
@@ -378,7 +378,7 @@ module tb_bow_dphy_io_xusp;
   logic [1:0] m_tuser;                // [1] line error: never on this clean link
   logic [9:0] m_tdata;
 
-  bow_csi2rx #(
+  bow_mipi_rx #(
     .Lanes    (Lanes),
     .PhyClkHz (200_000_000),
     .CpuClkHz (50_000_000),

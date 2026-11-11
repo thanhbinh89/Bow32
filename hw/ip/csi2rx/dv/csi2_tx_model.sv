@@ -5,7 +5,7 @@
 // testbenches (hw/ip/csi2rx/dv/tb_bow_csi2rx.sv, sim/tb/tb_bow32.sv).
 //
 // The model replaces the sensor AND the board level receive I/O: its ports
-// are the D-PHY side of bow_csi2rx with the names of the PHY wrappers
+// are the D-PHY side of bow_mipi_rx with the names of the PHY wrappers
 // (without the pads). Two PHY flavours (knob `versal`):
 //   versal = 0  hw/fpga/common/rtl/bow_dphy_io_xusp.sv (UltraScale+): a word
 //               on every byte clock (rx_valid_o = '1), IDELAY taps loaded on

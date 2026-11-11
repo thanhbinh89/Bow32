@@ -1,26 +1,35 @@
 # Copyright Bow32 contributors.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Synopsys Formality, RTL against RTL: bow_csi2rx of a reference commit against bow_csi2rx
-# of this tree (bow_dphy_rx inside, step 1 of docs/ip/mipi_rx_arch.md section 10), in one
+# Synopsys Formality, RTL against RTL: the CSI-2 receiver of a reference commit against
+# the receiver of this tree after a step of docs/ip/mipi_rx_arch.md section 10, in one
 # parameter configuration per run.
 #
-#   fm_shell -file equiv.tcl -x "set cfg <name>; set ref_root <dir>; set impl_root <dir>"
+#   fm_shell -file equiv.tcl -x "set cfg <name>; set step <n>; set ref_root <dir>;
+#                                set impl_root <dir>"
 #
-# Normally run by the Makefile next to this file (make equiv). ref_root holds the
+# Normally run by the Makefile next to this file (make equiv STEP=<n>). ref_root holds the
 # reference tree (git archive of the reference commit), impl_root this tree; both are
 # read through the same .f file lists as every other flow, hw/ip/dphy_rx/dphy_rx.f
 # included when the tree has it (a reference from step 1 on). Reports in the current
 # directory.
 #
-# Names. The ports of bow_csi2rx do not change and the moved flops keep their names one
-# level down (u_dphy_rx/...). The rename rules below map them back, as compare rules on
-# both designs (no effect on a reference from before the split); matching through the
-# names of attached nets is off. After matching, every matched pair must have the same
-# name once the rules are applied (names.rpt lists the pairs that do not): Formality
-# reports pairs matched through net names as "matched by name" too, and a functional
-# check cannot see synthesis attributes, so a synchroniser rebuilt from plain flops (no
-# ASYNC_REG, cell names the XDC and the CDC review do not know) would otherwise pass.
+# Tops. The receiver's ports never change: bow_csi2rx up to step 1, bow_mipi_rx (the same
+# ports and parameters) from step 2 on. The reference top is the receiver of the
+# reference tree (bow_mipi_rx when the tree has it), the implementation top that of the
+# step (step_top below). step 1: bow_csi2rx with bow_dphy_rx inside (u_dphy_rx); step 2:
+# bow_mipi_rx with bow_dphy_rx (u_dphy_rx) and the controller bow_csi2rx (u_csi2rx) side
+# by side.
+#
+# Names. The moved flops keep their names one or more levels down. The rename rules of
+# the step (step_rules below) map them back, as compare rules on both designs (a rule has
+# no effect where the prefix does not occur, e.g. on a reference from before the split);
+# matching through the names of attached nets is off. After matching, every matched pair
+# must have the same name once the rules are applied (names.rpt lists the pairs that do
+# not): Formality reports pairs matched through net names as "matched by name" too, and
+# a functional check cannot see synthesis attributes, so a synchroniser rebuilt from plain
+# flops (no ASYNC_REG, cell names the XDC and the CDC review do not know) would otherwise
+# pass.
 #
 # The run passes ("EQUIV <cfg>: PASS ...", exit code 0) only when the verification
 # succeeds with every compare point matched by name and verified: no unmatched, failing,
@@ -28,7 +37,7 @@
 # instance, no user match, no constant, no don't-verify point. The memories (pixel FIFO,
 # LOG and RAW RAMs) are read as registers, not black boxes.
 
-# Configurations: the parameter sets of the builds that instantiate bow_csi2rx
+# Configurations: the parameter sets of the builds that instantiate the receiver
 # (hw/top/rtl/bow32_top.sv, the board tops, sim/tb/tb_bow32.sv)
 array set cfg_params {
   kv260   {Lanes = 2, PhyClkHz = 200000000, CpuClkHz = 50000000, HasPhy = 1, FifoDepth = 256, DlyVid = 0}
@@ -43,10 +52,34 @@ if {![info exists cfg_params($cfg)]} {
 }
 set params $cfg_params($cfg)
 
-# Rename rules, pairs {from to}: literal strings (letters, digits, '_', '/'), each applied
-# once per name like a compare rule (sed s/from/to/), to both designs. A later step of
-# section 10 that moves cells again gives its own rules here.
-set rename_rules {u_dphy_rx/ {}}
+# Steps of section 10: the implementation's top and the rename rules, pairs {from to} of
+# literal strings (letters, digits, '_', '/'), each applied once per name like a compare
+# rule (sed s/from/to/), to both designs. A later step that moves cells again adds its own
+# entry. The implementation of a step is a tree at that step: STEP=1 checks a tree of
+# step 1 (35ef151), not this one.
+array set step_top {
+  1 bow_csi2rx
+  2 bow_mipi_rx
+}
+array set step_rules {
+  1 {u_dphy_rx/ {}}
+  2 {u_dphy_rx/ {} u_csi2rx/ {}}
+}
+if {![info exists step]} {
+  set step 2
+}
+if {![info exists step_top($step)]} {
+  puts "EQUIV $cfg: unknown step $step ([lsort [array names step_top]])"
+  exit 1
+}
+set rename_rules $step_rules($step)
+set impl_top     $step_top($step)
+# the receiver of the reference tree
+if {[file exists [file join $ref_root hw ip csi2rx rtl bow_mipi_rx.sv]]} {
+  set ref_top bow_mipi_rx
+} else {
+  set ref_top bow_csi2rx
+}
 foreach {from to} $rename_rules {
   if {![regexp {^[A-Za-z0-9_/]+$} $from] || ![regexp {^[A-Za-z0-9_/]*$} $to]} {
     puts "EQUIV $cfg: rename rule '$from' -> '$to' is not a literal name part"
@@ -90,10 +123,10 @@ set_app_var hdlin_error_on_duplicate_design true
 set_app_var name_match_based_on_nets false
 
 read_sverilog -r -12 -work_library WORK $ref_files
-set_top r:/WORK/bow_csi2rx -parameter $params
+set_top r:/WORK/$ref_top -parameter $params
 
 read_sverilog -i -12 -work_library WORK $impl_files
-set_top i:/WORK/bow_csi2rx -parameter $params
+set_top i:/WORK/$impl_top -parameter $params
 
 foreach {from to} $rename_rules {
   set_compare_rule $ref  -from $from -to $to
@@ -208,10 +241,11 @@ foreach v {total port dff creg unread} {
     lappend bad "no '$v' count in status.rpt"
   }
 }
-set summary "$total compare points matched and passing ($port ports, $dff flops), 0 unmatched,\
-             0 failing / aborted / unverified, $n_pairs matched pairs with identical names\
-             ($n_moved through the rename rules), no black box, user match or constant; not\
-             compared: $creg constant registers, $unread unread flops"
+set summary "step $step, $ref_top -> $impl_top: $total compare points matched and passing\
+             ($port ports, $dff flops), 0 unmatched, 0 failing / aborted / unverified,\
+             $n_pairs matched pairs with identical names ($n_moved through the rename rules),\
+             no black box, user match or constant; not compared: $creg constant registers,\
+             $unread unread flops"
 if {$ok && [llength $bad] == 0} {
   puts "EQUIV $cfg: PASS: $summary"
   exit 0

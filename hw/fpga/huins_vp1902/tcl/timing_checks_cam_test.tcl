@@ -7,14 +7,18 @@
 #   tclsh timing_checks_cam_test.tcl     (make -C hw/fpga/huins_vp1902 test-cdc)
 #
 #   * the CSI-2 receiver's rows (CDC-11 lane enables, CDC-13 byte clock gate) are accepted
-#     with the D-PHY cells right below u_csi2rx (before the D-PHY was split out) and one
-#     level down (u_csi2rx/u_dphy_rx/..., docs/ip/mipi_rx_arch.md section 10, step 1),
-#     with the receiver in u_soc, below a further wrapper and at the top level;
+#     in the three hierarchies of docs/ip/mipi_rx_arch.md section 10: before the split
+#     (u_csi2rx/u_regs, the D-PHY cells right below u_csi2rx), step 1 (the D-PHY cells in
+#     u_csi2rx/u_dphy_rx) and step 2 (bow_mipi_rx u_csi2rx with the controller
+#     u_csi2rx/u_csi2rx and the D-PHY u_csi2rx/u_dphy_rx), with the receiver in u_soc,
+#     below a further wrapper and at the top level;
 #   * rows that are not accepted: other registers, other pins, the second synchroniser
 #     stage, the data lane state machines, another clock buffer, other CDC ids, cells of
 #     the same names outside u_csi2rx (another block, a D-PHY outside the receiver),
 #     instance names that only end in u_csi2rx, the lane enable flop of one receiver
-#     instance and the synchroniser of another;
+#     instance and the synchroniser of another, cells at other places below the receiver
+#     (an unknown level, the synchroniser in the controller, the register file in the
+#     D-PHY);
 #   * the SoC's own reviewed rows (ISP / H.264 configuration, reset synchronisers) still
 #     match.
 # Prints "timing_checks_cam_test: PASS (<n> checks)" or the failures, exit code 1 on a
@@ -36,11 +40,12 @@ proc check {expect id from to} {
 
 set gate u_dphy/u_byte_bufg/CE
 # top: the path above the receiver (u_soc as today, a further wrapper, the top level);
-# dphy: where the D-PHY cells are below u_csi2rx, before and after the split
+# ctrl, dphy: where the register file and the D-PHY cells are below u_csi2rx, before the
+# split, at step 1 and at step 2
 foreach top {u_soc/ u_soc/u_cam/ {}} {
-  foreach dphy {{} u_dphy_rx/} {
+  foreach {ctrl dphy} {{} {} {} u_dphy_rx/ u_csi2rx/ u_dphy_rx/} {
     set rx   "${top}u_csi2rx/$dphy"
-    set regs "${top}u_csi2rx/u_regs"
+    set regs "${top}u_csi2rx/${ctrl}u_regs"
     # CDC-11: one lane_en_q flop of the register file feeds two lane enable synchronisers
     foreach {q b} {0 29 1 30 4 31 4 32} {
       check 1 CDC-11 "$regs/lane_en_q_reg\[$q\]/C" \
@@ -91,12 +96,28 @@ check 0 CDC-11 {u_soc/u_csi2rx/u_regs/lane_en_q_reg[1]/C} \
                {u_csi2rx/u_sync_vcfg/g_bit[30].u_sync/sync_q_reg[0]/D}
 check 0 CDC-11 {u_soc/u_csi2rx/u_regs/lane_en_q_reg[1]/C} \
                {u_soc/u_cam/u_csi2rx/u_dphy_rx/u_sync_vcfg/g_bit[30].u_sync/sync_q_reg[0]/D}
+check 0 CDC-11 {u_soc/u_csi2rx/u_csi2rx/u_regs/lane_en_q_reg[1]/C} \
+               {u_soc/u_cam/u_csi2rx/u_dphy_rx/u_sync_vcfg/g_bit[30].u_sync/sync_q_reg[0]/D}
+# other places below the receiver: an unknown level, the synchroniser in the controller,
+# the register file in the D-PHY
+check 0 CDC-11 {u_soc/u_csi2rx/u_x/u_regs/lane_en_q_reg[1]/C} \
+               {u_soc/u_csi2rx/u_dphy_rx/u_sync_vcfg/g_bit[30].u_sync/sync_q_reg[0]/D}
+check 0 CDC-11 {u_soc/u_csi2rx/u_csi2rx/u_regs/lane_en_q_reg[1]/C} \
+               {u_soc/u_csi2rx/u_x/u_dphy_rx/u_sync_vcfg/g_bit[30].u_sync/sync_q_reg[0]/D}
+check 0 CDC-11 {u_soc/u_csi2rx/u_csi2rx/u_regs/lane_en_q_reg[1]/C} \
+               {u_soc/u_csi2rx/u_csi2rx/u_sync_vcfg/g_bit[30].u_sync/sync_q_reg[0]/D}
+check 0 CDC-11 {u_soc/u_csi2rx/u_dphy_rx/u_regs/lane_en_q_reg[1]/C} \
+               {u_soc/u_csi2rx/u_dphy_rx/u_sync_vcfg/g_bit[30].u_sync/sync_q_reg[0]/D}
+check 0 CDC-13 {u_soc/u_csi2rx/u_x/u_dphy_rx/u_lp_clk/ce_q_reg/C} $gate
+check 0 CDC-13 {u_soc/u_csi2rx/u_csi2rx/u_lp_clk/ce_q_reg/C} $gate
 # the rest of the list is unchanged
 check 1 CDC-1  {u_soc/u_isp/u_regs/gain_q_reg[3]/C} {u_soc/u_isp/u_awb/acc_q_reg[7]/D}
 check 1 CDC-4  {u_soc/u_h264/u_regs/qp_q_reg[2]/C} {u_soc/u_h264/u_mb/x_q_reg[1]/D}
 check 1 CDC-14 {u_soc/u_isp/u_regs/scale_q_reg[1]/C} {u_soc/u_isp/u_cap/addr_q_reg[3]/D}
 check 1 CDC-10 {u_soc/u_h264/u_busy_q_reg/C} {u_soc/u_h264/u_sync_busy/sync_q_reg[0]/D}
 check 1 CDC-10 {u_soc/u_csi2rx/u_regs/rx_on_q_reg/C} {u_soc/u_csi2rx/u_drst/sync_q_reg[0]/CLR}
+check 1 CDC-10 {u_soc/u_csi2rx/u_csi2rx/u_regs/rx_on_q_reg/C} \
+               {u_soc/u_csi2rx/u_csi2rx/u_drst/sync_q_reg[0]/CLR}
 check 0 CDC-1  {u_soc/u_csi2rx/u_regs/vc_q_reg[0]/C} {u_soc/u_csi2rx/u_packet/vc_q_reg[0]/D}
 check 0 CDC-7  {u_soc/u_csi2rx/u_regs/lane_en_q_reg[1]/C} \
                {u_soc/u_csi2rx/u_sync_vcfg/g_bit[30].u_sync/sync_q_reg[0]/D}

@@ -30,7 +30,8 @@
 // Glitch filter: lp_o takes a new level once it was seen filter_i
 // consecutive cycles (0 counts as 1). LP-00 at the pin -> hs_en_o takes
 // 2 (synchroniser) + filter_i + 1 (state machine) cycles.
-// All outputs are flops.
+// All outputs are flops, except stop_o (PPI Stopstate), decoded from the
+// state register: a level for logic on clk_i only.
 
 module bow_dphy_lp #(
   parameter bit ClockLane = 1'b0
@@ -49,7 +50,8 @@ module bow_dphy_lp #(
   output logic       hs_active_o,
   output logic       ce_o,
   output logic       ev_hs_o,      // pulse: HS entry
-  output logic       ev_err_o      // pulse: unexpected LP sequence / watchdog
+  output logic       ev_err_o,     // pulse: unexpected LP sequence / watchdog
+  output logic       stop_o        // the lane is in Stop (PPI Stopstate)
 );
 
   localparam logic [1:0] Lp00 = 2'b00;
@@ -216,6 +218,7 @@ module bow_dphy_lp #(
   assign hs_en_o     = hs_en_q;
   assign ce_o        = ce_q;
   assign hs_active_o = act_q;
+  assign stop_o      = (state_q == Stop);
 
 `ifdef VERILATOR
   // Two-state simulators (see bow_rstmgr): the clock lane starts with the

@@ -3,8 +3,8 @@
 //
 // MIPI D-PHY receive I/O on AMD UltraScale+ HP banks (component mode
 // primitives, no vendor D-PHY IP): the board level half of the Bow32 CSI-2
-// receiver. bow_csi2rx (hw/ip/csi2rx) runs the LP state machines, the byte
-// alignment and the CSI-2 layer on these signals.
+// receiver. bow_mipi_rx (hw/ip/csi2rx: bow_dphy_rx + bow_csi2rx) runs the LP
+// state machines, the byte alignment and the CSI-2 layer on these signals.
 //
 //   clock lane  IBUFDS_DPHY --HSRX_O--+--> BUFGCE_DIV /1 --> hs_clk    ISERDES CLK, CLK_B
 //                                     +--> BUFGCE_DIV /4 --> byte_clk  ISERDES CLKDIV, IDELAY CLK
@@ -33,7 +33,7 @@
 //   in one CLOCK_DELAY_GROUP and selects them by the output pins of
 //   u_hs_bufg/u_byte_bufg (Vivado synthesis drops the attribute in RTL, and a
 //   net name match silently misses a renamed net). Keep the instance names.
-// There is no fabric logic here: bow_csi2rx registers rx_data_o and
+// There is no fabric logic here: bow_mipi_rx registers rx_data_o and
 // dly_tap_o on byte_clk_o.
 
 module bow_dphy_io_xusp #(
