@@ -13,7 +13,8 @@ IMX274 4 lane, mục *Bốn lane, PHY Versal và IMX274*). Driver:
 Chạy trên board: [../camera_kv260.md](../camera_kv260.md) (KV260, IMX219, 2 lane),
 [../camera_huins.md](../camera_huins.md) (Huins MFP-VP1902, IMX274, 4 lane).
 Đánh giá cho camera công nghiệp và SoC camera AI:
-[../csi2rx_review.md](../csi2rx_review.md).
+[../csi2rx_review.md](../csi2rx_review.md). Kiến trúc cho ASIC (D-PHY analog và số, PPI, bộ
+điều khiển sau khi tách, kế hoạch chuyển): [mipi_rx_arch.md](mipi_rx_arch.md).
 
 ```
           FPGA (bow_dphy_io_xusp)                     bow_csi2rx
