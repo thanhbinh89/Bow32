@@ -535,7 +535,7 @@
   `bow_dphy_align` chuyển sang `hw/ip/dphy_rx/rtl/`, `bow_csi2_sync` thành `bow_sync_bus`
   (`hw/ip/common/rtl/`, tên instance và `g_bit` giữ nguyên). Tương đương hình thức với `main`
   trước bước 1 (`3a1e780`): Synopsys Formality, RTL với RTL, 5 cấu hình (`make -C
-  hw/ip/dphy_rx/fm equiv`; thay cho Yosys eqy của D8, chờ duyệt), đạt khi mọi compare point
+  hw/ip/dphy_rx/fm equiv`; thay cho Yosys eqy, D8 sửa đổi đã duyệt ngày 2026-11-11), đạt khi mọi compare point
   tương đương và mọi cặp khớp có tên giống hệt sau luật đổi tên `u_dphy_rx/` → rỗng; `REF` có
   thể là commit từ bước 1 trở đi; `make lint` lint thêm `bow_dphy_rx` một mình; `make -C
   hw/fpga/common/dv` bỏ qua file không còn tồn tại trong `build/fpga_dv/files.txt` cũ (thư mục
