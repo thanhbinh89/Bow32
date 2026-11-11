@@ -1,6 +1,6 @@
 # Kiến trúc bộ thu MIPI cho ASIC: AFE, D-PHY số, PPI và bộ điều khiển CSI-2
 
-Đặc tả kiến trúc (RTL: bước 1 và 2 của mục 10 xong, trừ lần chạy trên bo Huins) cho bộ thu MIPI mà
+Đặc tả kiến trúc (RTL: bước 1 và 2 của mục 10 xong, đã chạy trên bo Huins) cho bộ thu MIPI mà
 Bow32 sở hữu trọn vẹn trên **ASIC**: cả **D-PHY** (phần analog lẫn phần số) và **bộ điều khiển
 CSI-2**, chia theo các lớp chuẩn của MIPI:
 
@@ -33,7 +33,7 @@ số dòng theo commit đó.
 | Khối mới | `bow_dphy_rx`, `bow_dphy_rx_regs`, `bow_dphy_raw`, `bow_dphy_dsk`, `bow_dphy_prbs`, `bow_ppi_pkg`, `bow_mipi_rx` (wrapper Bow32), `bow_mipi_rx_apb` (wrapper APB4 cho ASIC); FPGA: `bow_dphy_dly_xusp`, `bow_dphy_dly_xphy` (logic adapter không có primitive); DV: `bow_ppi_bfm`, `bow_dphy_afe_model`, `bow_dphy_tx` |
 | Đổi vai | `bow_dphy_io_xusp`, `bow_dphy_io_versal` thành **adapter AFE** (giữ tên file và tên instance mà XDC dùng) |
 | Giữ nguyên | lớp CSI-2 của `bow_csi2rx` (ghép lane, packet, unpack, FIFO, đầu ra, LOG); bản đồ `CSI2RX` ở `0x4000_8000` (thanh ghi PHY chuyển sang D-PHY ở `0x4000_8C00`; không có alias, driver chọn theo `INFO[6]`, mục 6.3) |
-| Trạng thái | đặc tả; RTL: bước 1 và 2 xong, trừ lần chạy `csi2_test` trên bo Huins (bước 1: `bow_dphy_rx` tách bên trong `bow_csi2rx`; bước 2: `bow_mipi_rx` ghép `bow_dphy_rx` và controller `bow_csi2rx` bằng PPI v1 cộng một dải phụ tạm thời; cổng và thanh ghi không đổi, tương đương chứng minh bằng Synopsys Formality thay cho Yosys eqy: lệch khỏi D8, chờ duyệt, mục 0 và 10); các quyết định kiến trúc đã chốt ngày 2026-11-11 (mục 0); kế hoạch chuyển gồm các bước 0–11, mỗi bước giữ mọi test hiện có, build và chạy trên bo Huins (KV260 chỉ kiểm bằng mô phỏng, quyết định D1), kỳ vọng nào đổi thì ghi rõ (mục 10) |
+| Trạng thái | đặc tả; RTL: bước 1 và 2 xong, `csi2_test` `test` PASS 17/17 trên bo Huins ngày 2026-11-11 (bước 1: `bow_dphy_rx` tách bên trong `bow_csi2rx`; bước 2: `bow_mipi_rx` ghép `bow_dphy_rx` và controller `bow_csi2rx` bằng PPI v1 cộng một dải phụ tạm thời; cổng và thanh ghi không đổi, tương đương chứng minh bằng Synopsys Formality thay cho Yosys eqy: lệch khỏi D8, chờ duyệt, mục 0 và 10); các quyết định kiến trúc đã chốt ngày 2026-11-11 (mục 0); kế hoạch chuyển gồm các bước 0–11, mỗi bước giữ mọi test hiện có, build và chạy trên bo Huins (KV260 chỉ kiểm bằng mô phỏng, quyết định D1), kỳ vọng nào đổi thì ghi rõ (mục 10) |
 
 ## 0. Quyết định đã chốt (2026-11-11)
 
@@ -1548,9 +1548,10 @@ lane và bộ đồng bộ của cùng một bộ thu).
   (bằng bản 1b). DV `csi2rx` 105/105 (dòng kết quả giống bản 1b); `make test` 15/15, log của
   `camera`, `csi2`, `camera274`, `csi2_274`, `video274` và luồng H.264 của `video274` giống bản
   chạy trên RTL cũ; `make lint`, `make test-tools` 197 test, `make sw`, `make gen-check`.
-- **Chưa làm:** chạy `csi2_test` `test` trên bo Huins (khi bo rảnh); KV260 không build và không
-  chạy trên bo (D1). Theo tiêu chí "xanh" ở đầu mục này, PR của bước 1 chỉ gộp sau lần chạy bo
-  Huins, và sau khi chủ dự án duyệt lệch khỏi D8 (mục 0).
+- **Trên bo Huins** (2026-11-11, chung lần chạy với bước 2, PDI của bước 2 vốn chứa bước 1):
+  `csi2_test` `test` PASS 17/17, xem kết quả bước 2. KV260 không build và không chạy trên bo
+  (D1). Theo tiêu chí "xanh" ở đầu mục này, PR của bước 1 còn chờ chủ dự án duyệt lệch khỏi D8
+  (mục 0).
 
 **Bước 2: PPI, dải phụ tạm thời và hai chỗ nối của bước 1.** `bow32_top` có một instance
 `bow_mipi_rx` tên `u_csi2rx` (cổng và tham số như `bow_csi2rx` trước bước 2); bên trong là
@@ -1651,8 +1652,12 @@ X-2025.06-SP4:
   và bản bước 2, tham số KV260 và Huins: mọi `set_bus_skew` của bộ thu trong `kv260_cam.xdc` (7
   ràng buộc, 9/9/20/4/4/4/4 cell mỗi phía) và `huins_vp1902_cam.xdc` (8: 10/10/20/4/4/4/4/44) chọn
   đúng cùng cell sau khi bỏ cấp controller, `bow32_bus_skew_checks` 0 lỗi.
-- **Chưa làm:** chạy `csi2_test` `test` trên bo Huins (khi bo rảnh, cùng lần chạy của bước 1);
-  KV260 không build và không chạy trên bo (D1); duyệt lệch D8 (mục 0).
+- **Trên bo Huins** (2026-11-11, PDI của commit sửa review bước 2, firmware cùng commit): nạp qua
+  JTAG, `camera: IMX274 found`, `phy`: `PHY_RDY` 1, trễ BISC 122/75/118/130 (như các lần trước);
+  `start` ở trễ BISC báo lỗi link như dự kiến (mục 7.1); `cal 8`: tap 300/184/260/228, eye
+  352/360/352/352 (trùng lần chạy 1–3); `test` **PASS 17/17**: 1080p30 và 720p60, lề ±88–90 tap
+  mỗi lane, 0 lỗi trong 60 frame mỗi điểm (BER < 1,0×10^-8 ở 1080p), byte clock 180 078 kHz,
+  không lỗi `extra`. KV260 không build và không chạy trên bo (D1); duyệt lệch D8 (mục 0).
 
 Bước 1–3 không đổi hành vi (refactor; bước 1–2 chứng minh bằng tương đương hình thức, cả hai bằng
 Formality: lệch khỏi D8, mục 0; bước 3 chỉ thêm DV); bước 4–5 đổi bản đồ và giao diện, các kỳ
