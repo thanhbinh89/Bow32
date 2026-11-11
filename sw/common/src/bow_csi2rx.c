@@ -112,7 +112,9 @@ static uint32_t settle_cycles(uint32_t lane_rate, uint32_t mhz, uint32_t lp_filt
  * pipeline; the Versal XPHY (vid) + 8: up to 8 words of its RX FIFO reach
  * the receiver before the end of the burst does), times the lanes in use,
  * + 8. 4 lanes at 1440 Mbit/s: 160, 192 with the XPHY; 0 lane rate: the
- * reset value 64. */
+ * reset value 64. Measured trails: 17..20 bytes on 2 lanes (KV260, IMX219
+ * at 912 Mbit/s: 62 is set), 49..52 bytes on 4 lanes (Huins VP1902, IMX274
+ * through the XPHY: 192 leaves 140 bytes, the reset value 64 only 12). */
 static uint32_t extra_bytes(uint32_t lane_rate, uint32_t lanes, bool vid) {
   if (lane_rate == 0) return 64u;
   uint64_t ui_ps = 1000000000000ull / lane_rate;
@@ -763,7 +765,7 @@ void bow_csi2rx_print_margin(const bow_csi2rx_margin_t *m, int result) {
   for (uint32_t l = 1; l < nk; l++) bow_printf("/+-%u", m->k[l]);
   bow_puts(" taps: ");
   if (m->centre.errors) {
-    bow_printf("%u errors at the calibrated taps ", m->centre.errors);
+    bow_printf("%u errors at the taps in use ", m->centre.errors);
     put_list(m->centre.tap, nk < 2u ? 2u : nk);
     return;
   }

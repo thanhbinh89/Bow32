@@ -184,7 +184,9 @@ tiên trong lúc stream; sau đó lane 0 lỗi SOT / ECC / CRC, SKEW và FRAME l
 mọi `SETTLE` 50–150 ns, tới khi `BurstRxRst` = 1 lại. Cấu hình `BurstRxRst` = 0
 với `SETTLE` ~115 ns (tuỳ chọn build `-DCAM_BURST_RST=0 -DSETTLE_VID_NS=115`,
 mô phỏng `make -C sim run TEST=csi2_274 FW=brst0`) vì vậy **chỉ dùng cho mô
-phỏng**: mô hình FIFO của XPHY chưa giải thích được lỗi đó trên silicon.
+phỏng**: mô hình FIFO của XPHY chưa giải thích được lỗi đó trên silicon. Lần chạy
+bo 2 (2026-11-11, RTL đã gộp PR #17) quét lại với `BurstRxRst` = 1: cùng cửa sổ,
+13…34 chu kỳ sạch, 12 có lỗi misc, 35 có lỗi SOT.
 
 **Ngân sách IMX274 (clock video 200 MHz, ISP 1 pixel/clock).** Cảm biến gửi
 một dòng CSI-2 mỗi **2 × HMAX** chu kỳ 72 MHz (T_line = 2 · HMAX / 72 MHz). Một
@@ -210,7 +212,9 @@ dòng RAW10 đến trong burst với 576 Mpx/s (4 × 1440 Mbit/s / 10), đầu r
   `CLK_MISS` của driver ở 1440 Mbit/s: 1 chu kỳ byte clock (2 chu kỳ video) + 3
   = 5. `CTRL.EXTRA` của driver: 4 × (38 + 8) + 8 = 192 byte (trail của 4 lane ở
   1440 Mbit/s, + 8 word FIFO XPHY mỗi lane), thay cho giá trị reset 64 chỉ hợp
-  1–2 lane.
+  1–2 lane. Đo trên bo (IMX274 + XPHY, lần chạy bo 2): trail 49–52 byte trên 4
+  lane (~13 byte clock; `EXTRA` 52 sạch, 48 báo mọi burst), nên 192 dư 140 byte,
+  64 chỉ dư 12.
 - Packet DT ≠ `CTRL.DT` (dòng embedded 0x12, dòng optical black 0x37 của
   IMX274) bị bỏ mà không tính là lỗi (`CNT_DROP`); ECC và CRC của chúng vẫn
   được kiểm (CRC sai vẫn vào `CNT_CRC`), và packet kết thúc theo WC nên không
@@ -389,7 +393,12 @@ Clock không liên tục có thể dừng trước khi cuối burst tới miền
   packet có payload ≥ ~57 byte (6 + WC + trail > 62) luôn bị; short packet
   (4 byte) và long packet nhỏ (Null/blanking, embedded ngắn, dòng ROI hẹp) có thể
   bị bỏ không có cờ, bộ đếm hay LOG (DV: trail 16 byte ở T_HS-TRAIL 70 ns → báo
-  từ WC ≥ 41). Hạ `CTRL.EXTRA` về gần trail đo trên board thu hẹp vùng mù.
+  từ WC ≥ 41). Trên Huins + IMX274 (4 lane × 1440 Mbit/s qua XPHY của Versal) đo
+  được 49–52 byte: `EXTRA` ≤ 48 báo mọi burst, ≥ 52 không báo. Khi `EXTRA` thấp
+  hơn trail, mọi burst báo EXTRA và burst trước dòng đầu của frame (EMB, OB) làm
+  bỏ cả frame (SKIP): với một packet mỗi burst **mọi frame bị bỏ** (đo: `FRAME_ERR`
+  0xC00, `FRAME_SUM` 0, `CNT_MISC[31:24]` +1 mỗi frame). Hạ `CTRL.EXTRA` về gần
+  trail đo trên board thu hẹp vùng mù, nhưng phải giữ trên trail.
 - Dòng lỗi: `px_err` đi cùng `eol` khi dòng có lỗi CRC, lỗi FORMAT hoặc bị cắt
   (TRUNC); unpack đưa nó ra `tuser[1]`. Khi word cuối có cả payload lẫn CRC (4
   byte mỗi word) `eol` đến một chu kỳ sau word đó, `px_err` (CRC tính trên cả
@@ -720,7 +729,9 @@ hiệu chỉnh bắt đầu từ tap BISC và quét quanh nó, không bao giờ 
 một UI ở 1440 Mbit/s (694 ps); độ lớn thật của một tap trên silicon chưa đo
 (UNVERIFIED). Trên bo Huins (2026-11-10) trễ BISC nằm ở **mép sớm** của eye trên
 mọi lane (122/75/118/130 so với tâm 300/184/264/228 sau hiệu chỉnh, eye rộng
-352–360 tap; ~11 % dòng lỗi CRC ở trễ BISC), nên app `camera` và `video` luôn
+352–360 tap; ~11 % dòng lỗi CRC ở trễ BISC; lần chạy bo 2 với RTL đã gộp PR #17:
+123/76/119/129, cùng tâm và eye, 0,2–1,5 dòng lỗi CRC mỗi frame 1080p, nên một link
+check 64 packet có thể đạt ở trễ BISC), nên app `camera` và `video` luôn
 hiệu chỉnh ở lần khởi động đầu, như trên KV260 (nạp tap làm các lane đó thôi bù
 VT), và `margin` của chúng đo quanh trễ đang dùng (`bow_csi2rx_get_delays()`),
 không bao giờ quanh tap 0 khi chưa hiệu chỉnh. Vì sao BISC ở chế độ native
@@ -929,7 +940,22 @@ của nhánh IMX274 trước khi gộp PR #17, nên chưa có `margin`, `FRAME_E
   `video`: H.264 1080p30 giải mã không lỗi (20 frame: rate control cũ làm đầy video
   RAM).
 
-Bản gộp PR #17 cùng các sửa sau lần 1 chưa chạy trên bo này (lần chạy bo 2).
+Lần chạy bo 2 (2026-11-11, bản gộp PR #17 cùng các sửa sau lần 1: PDI và firmware
+`cd289e3`, như main `458dd33`; [../camera_huins.md](../camera_huins.md) mục 6, 7):
+
+- `csi2_test`, lệnh `test`: `csi2_test: PASS (17/17)` trong 37 s; calibrate và
+  integrity như lần 1 (cùng tap, eye và tổng); `margin` ±88/±90/±88/±88 tap ở 1080p30
+  (BER < 1,0×10^-8) và ±88/±90/±90/±88 ở 720p60 (BER < 2,2×10^-8), 0 lỗi ở 9 điểm.
+  Lệnh `margin` đo quanh tap đang dùng của cả 4 lane, kể cả tap đặt bằng `delay`.
+- Ở trễ BISC (123/76/119/129) còn 0,2–1,5 dòng lỗi CRC mỗi frame 1080p (lần 1:
+  ~11 %), đủ ít để link check 64 packet của `start` in `link check ok`; sau `cal` 0
+  lỗi.
+- `extra 0`, `CNT_EXT` 0 và `ERR_STATUS` 0 với `CTRL.EXTRA` 192 ở 720p60, 1080p30
+  và 9012 frame liên tục; trail đo được 49–52 byte trên 4 lane (mục *Lớp packet*).
+  `SETTLE`: cùng cửa sổ 65–170 ns với `BurstRxRst` = 1.
+- Ứng dụng `camera`: `cam` đầu hiệu chỉnh (296/184/264/224, `margin ok` 9 × 8
+  frame), 5 phút 1080p30 không lỗi, `flip 0 1` đúng màu (RGGB). Ứng dụng `video`:
+  H.264 1080p30 30 / 30 frame (QP 37–38) và 720p30 45 / 45 frame, giải mã không lỗi.
 
 ## Tài nguyên (`kv260_cam`, Vivado 2025.2)
 
@@ -974,12 +1000,13 @@ nằm trên đường găng, nên không cần thêm tầng pipeline.
   LP-11 giữa các packet (sai chuẩn) hoặc dùng LRTE/EPD của CSI-2 v2.0+ thì packet
   sau bị bỏ; quá `CTRL.EXTRA` byte được báo (`ERR_STATUS.EXTRA`), short packet và
   long packet nhỏ theo sau thường nằm dưới ngưỡng (không bị báo). Ngưỡng tính
-  theo byte của mọi lane đang dùng: với 4 lane (trail ~160–192 byte) chỉ packet
-  sau dài hơn ~200 byte được báo. IMX274 trên bo Huins (lần chạy bo 1): mỗi burst
-  đúng một packet (1091 burst mỗi frame 1080p = FS + 1 dòng embedded + 8 dòng OB +
-  1080 dòng + FE, 727 ở 720p), tức cảm biến về LP-11 sau mỗi packet; trail thật so
-  với ngưỡng 192 chưa đo (firmware của lần 1 có trước `CTRL.EXTRA`: `extra` của
-  `stat`, `CNT_EXT`).
+  theo byte của mọi lane đang dùng: với 4 lane (ngưỡng của driver 160–192 byte)
+  chỉ packet sau dài hơn ~200 byte được báo. IMX274 trên bo Huins (lần chạy bo 1):
+  mỗi burst đúng một packet (1091 burst mỗi frame 1080p = FS + 1 dòng embedded + 8
+  dòng OB + 1080 dòng + FE, 727 ở 720p), tức cảm biến về LP-11 sau mỗi packet; lần
+  chạy bo 2 đo trail thật: 49–52 byte trên 4 lane, dưới ngưỡng 192 của driver 140
+  byte (`extra` 0 suốt lần 2); ngưỡng dưới trail làm mọi frame bị bỏ (mục *Lớp
+  packet*).
 - 1, 2 hoặc 4 lane (không có 3), VC 2 bit (CSI-2 v1.x, không có VCX của v2.0),
   một VC/DT tại một thời điểm, ISP chỉ nhận RAW8/RAW10.
 - 1 pixel/clock: RAW8 liền nhau ở 2 × 912 Mbit/s (228 Mpx/s) nhanh hơn

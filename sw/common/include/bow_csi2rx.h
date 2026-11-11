@@ -115,7 +115,10 @@ _Static_assert(__builtin_offsetof(bow_csi2rx_regs_t, RAW) == 0x800, "CSI2RX RAW 
 #define CSI2RX_CTRL_DT_MASK   (0x3Fu << 8)
 /* More than EXTRA bytes after a packet in its HS burst: ERR_STATUS.EXTRA (the
  * burst most likely carries further packets, which are dropped). 0 = off,
- * reset 64; must be above the trail bytes (bow_csi2rx_start sets it). */
+ * reset 64; must be above the trail bytes (bow_csi2rx_start sets it). Below
+ * the trail every burst is flagged, and a flagged burst before the first
+ * line of a frame drops that frame (ERR_STATUS.SKIP): with one packet per
+ * burst, as the IMX219 and IMX274 send, every frame is lost. */
 #define CSI2RX_CTRL_EXTRA(n)   (((uint32_t)(n) & 0xFFu) << 16)
 #define CSI2RX_CTRL_EXTRA_MASK (0xFFu << 16)
 

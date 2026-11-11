@@ -16,7 +16,18 @@
     rate control cũ). Đo thêm: `SETTLE` sạch 65–170 ns với PA5 = 1, PA5 = 0 hỏng sau lần bật
     lại bộ thu, trễ BISC ở mép sớm của eye, mỗi burst một packet. Kết quả từng bước và danh
     sách kiểm: docs/camera_huins.md mục 6, 7. Bản gộp main cùng các sửa dưới đây đã kiểm trong
-    mô phỏng, chưa chạy lại trên bo (lần chạy bo 2).
+    mô phỏng rồi trên bo ở lần chạy bo 2 (dòng sau).
+  - Kiểm chứng trên bo lần 2 (2026-11-11, PDI và firmware `cd289e3`, như main `458dd33`): mọi
+    kiểm tra đạt: firmware không sửa tìm thấy cảm biến (VMAX 0x906), `csi2_test` PASS 17/17,
+    `extra 0` ở 1080p30 và 720p60 (trail đo được 49–52 byte trên 4 lane, `CTRL.EXTRA` 192 dư 140
+    byte), `margin` 0 lỗi trên cả 4 lane (±88/±90/±90/±88 tap, BER < 1,0e-8) và giữ tap đặt
+    bằng tay, `cam` đầu tự hiệu chỉnh, `flip 0 1` đúng màu (RGGB), AE/AWB đứng yên khi test
+    pattern bật, 5 phút 1080p30 (9012 frame) không lỗi, H.264 1080p30 30 / 30 frame (QP 37–38)
+    và 720p30 45 / 45 frame giải mã không lỗi; cửa sổ `SETTLE` và độ lệch trễ BISC như lần 1.
+    Sau lần 2: `margin` in `errors at the taps in use` (thay cho `calibrated taps`), chú thích
+    `CTRL.EXTRA` ghi trail đã đo; tài liệu: kết quả lần 2, trail `CTRL.EXTRA`, nạp PDI khi
+    hw_server của người khác cũ hơn, việc còn mở (docs/camera_huins.md mục 5–9,
+    docs/ip/csi2rx.md).
   - Sửa theo lần chạy bo 1: `imx274_probe()` nhận VMAX sau reset 0x906 (cảm biến trên bo) và
     0x905 (datasheet), MDSEL / HMAX / đọc lại BLKLEVEL vẫn phải khớp; khi không khớp các app in
     giá trị đã đọc (`cam_print_not_found()`) thay cho gợi ý XCLR sai. `imx274_bayer()` trả RGGB
