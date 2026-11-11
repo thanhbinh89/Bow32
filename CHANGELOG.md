@@ -28,7 +28,8 @@
     `CTRL.EXTRA` ghi trail đã đo; tài liệu: kết quả lần 2, trail `CTRL.EXTRA`, nạp PDI khi
     hw_server của người khác cũ hơn, việc còn mở (docs/camera_huins.md mục 5–9,
     docs/ip/csi2rx.md).
-  - Sửa theo lần chạy bo 2 (phần mềm và công cụ; mô phỏng và test host, chưa chạy trên bo):
+  - Sửa theo lần chạy bo 2 (phần mềm và công cụ; mô phỏng và test host, rồi trên bo ở lần 3,
+    dòng sau):
     `start` của `csi2_test` kiểm 16 frame nguyên thay cho 64 packet
     (`bow_csi2rx_link_check_frames()`; ở trễ BISC có 0,2–1,5 lỗi CRC mỗi frame 1080p mà 64 packet
     không thấy), lỗi do tap in `try cal` và trên bản Versal thêm hai dòng gợi ý về trễ BISC, đầu ra
@@ -41,6 +42,17 @@
     hw_server cũ hơn Vivado (`Labtools 27-3366`) in hw_server nào giữ cổng (người dùng, pid, phiên
     bản), `VIVADO=` của Vivado cùng phiên bản hoặc `HW_SERVER=`, và không dừng tiến trình của
     người khác.
+  - Kiểm chứng trên bo lần 3 (2026-11-11, PDI `cd289e3`, firmware `5c68b53`): ba sửa trên chạy
+    đúng (`start` bắt lỗi ở trễ BISC 7 / 7 lần và in gợi ý `cal`; `rec` chọn `QP 37 (auto)` ở 720p
+    45 frame và `QP 38 (auto)` ở 1080p 30 frame, đủ frame, giải mã không lỗi; gợi ý của `make jtag`
+    hiện đúng trước hw_server 2025.1 thật), `csi2_test` PASS 17/17, 30 phút 1080p30 (53 999 frame)
+    không lỗi, tap không đổi. Tìm nguyên nhân độ lệch của BISC với hai PDI thử (generic tạm, chưa
+    vào repo): tap ~1,86–1,89 ps, tâm eye cao hơn trễ BISC 0,26–0,48 UI (không phải 1/4 UI); slice N
+    như IP của AMD không đổi gì; `DELAY_VALUE` 250 ps dời trễ BISC +132 tap với tâm không đổi, link
+    sạch ở trễ BISC nhưng còn lệch +44/−24/+8/−34 tap: phần chung là một thời gian cố định ngoài
+    những gì BISC đo, ~0,2 UI lệch riêng từng lane đến từ ngoài FPGA. RTL và mặc định không đổi,
+    ứng dụng vẫn hiệu chỉnh; tài liệu: kết quả lần 3, độ ổn định, mục 9.1 về BISC, việc còn mở
+    (docs/camera_huins.md mục 5–9, docs/ip/csi2rx.md, docs/video_kv260.md).
   - Sửa theo lần chạy bo 1: `imx274_probe()` nhận VMAX sau reset 0x906 (cảm biến trên bo) và
     0x905 (datasheet), MDSEL / HMAX / đọc lại BLKLEVEL vẫn phải khớp; khi không khớp các app in
     giá trị đã đọc (`cam_print_not_found()`) thay cho gợi ý XCLR sai. `imx274_bayer()` trả RGGB

@@ -725,19 +725,21 @@ tap nào, PHY giữ delay mà BISC (tự hiệu chỉnh) tìm được, đọc �
 khi `STATUS.PHY_RDY` = 1; mỗi lần ghi `DLYn` nạp tap ngay, không cần burst; và
 4 lane cùng đi qua strobe của lane clock nên eye của các lane gần nhau. Vì vậy
 hiệu chỉnh bắt đầu từ tap BISC và quét quanh nó, không bao giờ nạp mù tap 0
-(tap 0 có thể nằm ngoài eye). 512 tap của XPHY phủ ≥ 625 ps theo AM010, cỡ
-một UI ở 1440 Mbit/s (694 ps); độ lớn thật của một tap trên silicon chưa đo
-(UNVERIFIED). Trên bo Huins (2026-11-10) trễ BISC nằm ở **mép sớm** của eye trên
-mọi lane (122/75/118/130 so với tâm 300/184/264/228 sau hiệu chỉnh, eye rộng
-352–360 tap; ~11 % dòng lỗi CRC ở trễ BISC; lần chạy bo 2 với RTL đã gộp PR #17:
-123/76/119/129, cùng tâm và eye, 0,2–1,5 dòng lỗi CRC mỗi frame 1080p, nên một link
-check 64 packet có thể đạt ở trễ BISC), nên app `camera` và `video` luôn
-hiệu chỉnh ở lần khởi động đầu, như trên KV260 (nạp tap làm các lane đó thôi bù
-VT), và `margin` của chúng đo quanh trễ đang dùng (`bow_csi2rx_get_delays()`),
-không bao giờ quanh tap 0 khi chưa hiệu chỉnh. Vì sao BISC ở chế độ native
-strobe đặt điểm lấy mẫu sớm khoảng 1/4 UI là câu hỏi mở của RTL
-([camera_huins.md](../camera_huins.md) mục 9: giả thuyết strobe căn mép so với lane
-clock căn giữa của D-PHY).
+(tap 0 có thể nằm ngoài eye). 512 tap của XPHY phủ ≥ 625 ps theo AM010; trên bo
+Huins (lần chạy bo 3) một tap đo được ~1,86–1,89 ps, nên 512 tap ≈ 0,96 ns ≈ 1,4
+UI ở 1440 Mbit/s (694 ps, 1 UI ≈ 374 tap). Trên bo Huins (2026-11-10) trễ BISC nằm
+ở **mép sớm** (tap thấp) của eye trên mọi lane (122/75/118/130 so với tâm
+300/184/264/228 sau hiệu chỉnh, eye rộng 352–360 tap; ~11 % dòng lỗi CRC ở trễ
+BISC; lần chạy bo 2 với RTL đã gộp PR #17: 123/76/119/129, cùng tâm và eye,
+0,2–1,5 dòng lỗi CRC mỗi frame 1080p, nên một link check 64 packet có thể đạt ở
+trễ BISC; lần 3 như vậy), nên app `camera` và `video` luôn hiệu chỉnh ở lần khởi
+động đầu, như trên KV260 (nạp tap làm các lane đó thôi bù VT), và `margin` của
+chúng đo quanh trễ đang dùng (`bow_csi2rx_get_delays()`), không bao giờ quanh tap
+0 khi chưa hiệu chỉnh. Vì sao BISC không căn giữa (tâm cao hơn trễ BISC 0,26–0,48
+UI tuỳ lane) là câu hỏi mở ([camera_huins.md](../camera_huins.md) mục 9.1: thuộc
+tính XPHY như IP của AMD, lane clock căn giữa; phần chung là một thời gian cố định
+mà BISC không thấy, `DELAY_VALUE` bù được; ~0,2 UI lệch riêng từng lane đến từ
+ngoài FPGA).
 
 ## Ràng buộc và kiểm tra sau build (`kv260_cam`)
 
@@ -953,13 +955,28 @@ Lần chạy bo 2 (2026-11-11, bản gộp PR #17 cùng các sửa sau lần 1: 
   lỗi. Sau lần 2, `start` của `csi2_test` kiểm 16 frame nguyên
   (`bow_csi2rx_link_check_frames()`: chỉ đếm frame có FS sau khi xoá bộ đếm, dừng ở
   lỗi đầu tiên; 0,2 lỗi mỗi frame bị thấy 96 % số lần) và khi lỗi do tap in `try
-  cal` kèm gợi ý về trễ BISC (chưa chạy trên bo).
+  cal` kèm gợi ý về trễ BISC (lần chạy bo 3: dòng sau).
 - `extra 0`, `CNT_EXT` 0 và `ERR_STATUS` 0 với `CTRL.EXTRA` 192 ở 720p60, 1080p30
   và 9012 frame liên tục; trail đo được 49–52 byte trên 4 lane (mục *Lớp packet*).
   `SETTLE`: cùng cửa sổ 65–170 ns với `BurstRxRst` = 1.
 - Ứng dụng `camera`: `cam` đầu hiệu chỉnh (296/184/264/224, `margin ok` 9 × 8
   frame), 5 phút 1080p30 không lỗi, `flip 0 1` đúng màu (RGGB). Ứng dụng `video`:
   H.264 1080p30 30 / 30 frame (QP 37–38) và 720p30 45 / 45 frame, giải mã không lỗi.
+
+Lần chạy bo 3 (2026-11-11, cùng PDI, firmware `5c68b53` với các sửa sau lần 2;
+[../camera_huins.md](../camera_huins.md) mục 6, 7, 9.1):
+
+- Sau khi nạp PDI hay `phy reinit`, `start` của `csi2_test` in `link check failed
+  (ERR_STATUS 008), try cal` và hai dòng gợi ý về trễ BISC 7 / 7 lần (lỗi đầu ở
+  frame 1–14 của 16); ở trễ BISC 1,3–49 dòng lỗi CRC mỗi frame 1080p tuỳ lần
+  khởi động. `test`: `csi2_test: PASS (17/17)` trên PDI mặc định và hai PDI thử.
+- 30 phút 1080p30 trên cảnh thật (53 999 frame) với tap đã hiệu chỉnh: mọi bộ đếm
+  lỗi 0, tap không đổi, `margin` cuối ±86/±90/±86/±86 tap, eye dời nhiều nhất một
+  bước 8 tap.
+- Một tap ~1,86–1,89 ps (1 UI ≈ 374 tap); tâm cao hơn trễ BISC 0,26–0,48 UI. PDI
+  thử với slice N như IP của AMD: không đổi gì; với `DELAY_VALUE` 250 ps trên các
+  lane dữ liệu: trễ BISC +132 tap, tâm không đổi, link sạch ở trễ BISC nhưng còn
+  lệch −34…+44 tap giữa các lane. RTL không đổi.
 
 ## Tài nguyên (`kv260_cam`, Vivado 2025.2)
 

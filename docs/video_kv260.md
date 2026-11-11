@@ -140,7 +140,10 @@ Lần chạy bo Huins đầu (2026-11-10, QP đầu 30, mỗi frame ±1) chỉ g
 30 frame 1080p; với rate control này 30 frame 1080p vừa 1 MiB (QP 37–39 với kích
 thước frame đo được, kiểm trong `tools/tests/test_h264_model.py`). Lần 2
 (2026-11-11): 30 / 30 frame 1080p và 45 / 45 frame 720p; kích thước và QP từng frame
-của lần này cũng nằm trong test đó.
+của lần này cũng nằm trong test đó. Lần 3 (2026-11-11, QP đầu ở trên): `QP 37 (auto)`
+cho 45 frame 720p, `QP 38 (auto)` cho 30 frame 1080p, đủ frame, giải mã không lỗi;
+cảnh hôm đó tối (tắt đèn) nên frame đầu chỉ bằng 47–49 % đích và rate control hạ QP
+còn 29–32 từ frame 2 ([camera_huins.md](camera_huins.md) mục 6.5).
 
 ## 4. Giới hạn và lựa chọn
 
