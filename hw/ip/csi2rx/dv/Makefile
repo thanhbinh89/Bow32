@@ -59,14 +59,16 @@ PARAMS_4  := -GLanes=4 -GDlyVid=1\'b1 -GFifoDepth=512
 GENOPT_4   = --versal --fifo-depth 512 --burst-rst $(BURSTRST)
 
 sim_bin  = $(BUILD)/obj_l$(1)/Vtb_bow_csi2rx
-FLISTS  := -F $(REPO)/hw/ip/common/common.f -F $(REPO)/hw/ip/bus/bus.f -F $(REPO)/hw/ip/csi2rx/csi2rx.f
-SRCS    := $(shell find $(REPO)/hw/ip/csi2rx $(REPO)/hw/ip/common $(REPO)/hw/ip/bus -name '*.sv' -o -name '*.f')
+FLISTS  := -F $(REPO)/hw/ip/common/common.f -F $(REPO)/hw/ip/bus/bus.f \
+           -F $(REPO)/hw/ip/dphy_rx/dphy_rx.f -F $(REPO)/hw/ip/csi2rx/csi2rx.f
+SRCS    := $(shell find $(REPO)/hw/ip/csi2rx $(REPO)/hw/ip/dphy_rx $(REPO)/hw/ip/common \
+                    $(REPO)/hw/ip/bus -name '*.sv' -o -name '*.f')
 
 build: $(call sim_bin,1) $(call sim_bin,2) $(call sim_bin,4)
 
 # Aligner unit test: search window edges (deskew, sync errors, HS-PREPARE noise)
 ALIGN_BIN := $(BUILD)/obj_align/Vtb_dphy_align
-$(ALIGN_BIN): $(REPO)/hw/ip/csi2rx/rtl/bow_dphy_align.sv tb_dphy_align.sv
+$(ALIGN_BIN): $(REPO)/hw/ip/dphy_rx/rtl/bow_dphy_align.sv tb_dphy_align.sv
 	@mkdir -p $(BUILD)
 	$(VERILATOR) --binary --timing -j $(JOBS) -Wno-fatal -Wno-lint -Wno-style -Wno-TIMESCALEMOD \
 	  --top-module tb_dphy_align -Mdir $(BUILD)/obj_align -o Vtb_dphy_align $^

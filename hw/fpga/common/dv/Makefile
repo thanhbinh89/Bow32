@@ -69,8 +69,13 @@ GLBL   = $$XILINX_VIVADO/data/verilog/src/glbl.v
 # ------------------------------------------------------------- D-PHY I/O
 TOP    := tb_bow_dphy_io_xusp
 SNAP   := $(BUILD)/xsim.dir/$(TOP)_sim/xsimk
-FLISTS := $(REPO)/hw/ip/common/common.f $(REPO)/hw/ip/bus/bus.f $(REPO)/hw/ip/csi2rx/csi2rx.f
-SRCS    = $(filter %.sv %.v,$(shell cat $(BUILD)/files.txt 2>/dev/null)) $(CURDIR)/$(TOP).sv
+FLISTS := $(REPO)/hw/ip/common/common.f $(REPO)/hw/ip/bus/bus.f $(REPO)/hw/ip/dphy_rx/dphy_rx.f \
+          $(REPO)/hw/ip/csi2rx/csi2rx.f
+# The sources of the last files.txt, as far as they still exist: a file that left the
+# file lists (moved or renamed) must not become a missing prerequisite. files.txt is
+# remade from the lists, which rebuilds the snapshot anyway.
+SRCS    = $(filter %.sv %.v,$(wildcard $(shell cat $(BUILD)/files.txt 2>/dev/null))) \
+          $(CURDIR)/$(TOP).sv
 
 # --------------------------------------------------------------- DDR pads
 # Configurations of bow_ddr_io_xilinx (xelab -generic_top of the testbench):

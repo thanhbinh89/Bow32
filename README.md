@@ -196,6 +196,8 @@ Bow32/
 │   │   ├── gpio/                 #   GPIO / IOPAD (2 port, chức năng thay thế)
 │   │   ├── isp/                  #   ISP: rtl/ + dv/ (test bit-exact với mô hình)
 │   │   ├── csi2rx/               #   bộ thu MIPI CSI-2: rtl/ + dv/ (mô hình máy phát D-PHY)
+│   │   ├── dphy_rx/              #   phần số của D-PHY thu (bow_dphy_rx, bên trong bộ thu CSI-2): rtl/,
+│   │   │                         #   fm/ (tương đương hình thức với Formality)
 │   │   ├── h264/                 #   bộ mã hoá H.264: rtl/ + dv/ (test bit-exact với mô hình)
 │   │   ├── dma/                  #   DMA 2 kênh (bus master)
 │   │   ├── mkv/                  #   mã khối MKV (TCVN 14263:2024): rtl/ + dv/ (so với mô hình)

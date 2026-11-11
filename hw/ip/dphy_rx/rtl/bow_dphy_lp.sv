@@ -220,7 +220,7 @@ module bow_dphy_lp #(
 `ifdef VERILATOR
   // Two-state simulators (see bow_rstmgr): the clock lane starts with the
   // gate open (and so the receiver on) until the reset pulse, which then
-  // gives the ISERDES reset synchroniser in bow_csi2rx (asynchronous input =
+  // gives the ISERDES reset synchroniser in bow_dphy_rx (asynchronous input =
   // gate open) a real falling edge.
   initial begin
     ce_q    = ClockLane;

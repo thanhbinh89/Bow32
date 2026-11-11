@@ -15,6 +15,7 @@
 -F ../ip/sysctrl/sysctrl.f
 -F ../ip/gpio/gpio.f
 -F ../ip/isp/isp.f
+-F ../ip/dphy_rx/dphy_rx.f
 -F ../ip/csi2rx/csi2rx.f
 -F ../ip/h264/h264.f
 -F ../ip/dma/dma.f

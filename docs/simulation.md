@@ -462,7 +462,10 @@ cả hai với T_HS-PREPARE + T_HS-ZERO đúng tối thiểu trên mọi lane (p
 nhiên qua T_CLK-PRE): bộ thu bỏ qua nhiễu và vẫn thấy mọi sync. White box: ở chu
 kỳ đầu của mỗi lần dò, word cũ nhất của cửa sổ aligner phải là HS-zero (cửa sổ
 bắt đầu sau nhiễu và trước sync); `00 B8` giả một mình chỉ thấy cửa sổ lấn ≥ 16
-UI vào nhiễu. `+SETTLE=<n>` thay SETTLE của driver để quét: 20…28 đạt ở mọi seed,
+UI vào nhiễu. Probe này (`tb_dphy_align_probe`) được gắn vào mọi `bow_dphy_align`
+bằng `bind`, nên không phụ thuộc chỗ đặt aligner trong phân cấp (hôm nay
+`u_rx.u_dphy_rx.g_align[l].u_align`); test kiểm có đúng một probe mỗi lane và mỗi
+probe thấy một lần dò mỗi burst. `+SETTLE=<n>` thay SETTLE của driver để quét: 20…28 đạt ở mọi seed,
 19 ở một nửa, ≤ 18 cửa sổ bắt đầu trong nhiễu (≤ 15 còn khoá vào sync giả), ≥ 29
 lỡ sync thật; driver dùng 22 (mô hình không có trễ ~8 ns của bộ thu LP, trên
 thiết bị cửa sổ muộn hơn ~1,6 chu kỳ). Hai lần chạy xsim song song không được

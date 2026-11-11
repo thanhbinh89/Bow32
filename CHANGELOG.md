@@ -507,6 +507,20 @@
   144 chu kỳ, không giới hạn số lần thử.
 
 ### Changed
+- Bộ thu CSI-2, bước 1 của kế hoạch chuyển MIPI RX ([docs/ip/mipi_rx_arch.md](docs/ip/mipi_rx_arch.md)
+  mục 10): phần số của D-PHY (máy LP, phát hiện cạnh byte clock, `byte_rst`, flop word, đồng
+  bộ `arm`, aligner, nạp tap, đồng hồ đo byte clock và các bộ đồng bộ của chúng) tách thành
+  `bow_dphy_rx` (`hw/ip/dphy_rx/`, instance `u_dphy_rx` bên trong `bow_csi2rx`); cổng và bản đồ
+  thanh ghi của `bow_csi2rx` không đổi, RAW vẫn ở `bow_csi2_capture`. `bow_dphy_lp` và
+  `bow_dphy_align` chuyển sang `hw/ip/dphy_rx/rtl/`, `bow_csi2_sync` thành `bow_sync_bus`
+  (`hw/ip/common/rtl/`, tên instance và `g_bit` giữ nguyên). Tương đương hình thức với `main`
+  trước bước 1 (`3a1e780`): Synopsys Formality, RTL với RTL, 5 cấu hình (`make -C
+  hw/ip/dphy_rx/fm equiv`); `make lint` lint thêm `bow_dphy_rx` một mình; `make -C hw/fpga/common/dv`
+  bỏ qua file không còn tồn tại trong `build/fpga_dv/files.txt` cũ (thư mục build có từ trước khi
+  chuyển file không còn báo "No rule to make target"). Trước đó (bước 1a):
+  `set_bus_skew` của bộ thu trong `kv260_cam.xdc` / `huins_vp1902_cam.xdc` và danh sách CDC đã
+  duyệt của bản camera Huins chọn cell theo đuôi tên phân cấp (`make -C hw/fpga/huins_vp1902
+  test-cdc`), probe hộp trắng của `tb_bow_dphy_io_xusp` gắn vào `bow_dphy_align` bằng `bind`.
 - `kv260_cam`: `tcl/build.tcl` dùng directive `Explore` cho place, phys_opt và route (với RTL bộ
   thu 4 lane, clock video 200 MHz còn −0,040 ns với directive mặc định, +0,065 ns với
   `Explore`).
