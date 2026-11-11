@@ -20,6 +20,8 @@
 #                             (tcl/cam_plan.tcl, a short Vivado run, part of make pdi CARD=cam)
 #   make test-plan            the plan rules of tcl/cam_plan.tcl on synthetic pin sets
 #                             (tclsh, no Vivado, no board documents)
+#   make test-cdc             the reviewed CDC list of the camera build
+#                             (tcl/timing_checks_cam.tcl) on synthetic report rows (tclsh)
 #   make CARD=cam             the camera build -> build/fpga/huins_vp1902_cam/
 #                             bow32_huins_vp1902_cam.pdi (make CARD=cam jtag to load it)
 #   make FMC_SITE=10          FMC+ site of the card, as in the board's net names
@@ -105,6 +107,9 @@ endif
 test-plan:
 	tclsh tcl/cam_plan_test.tcl
 
+test-cdc:
+	tclsh tcl/timing_checks_cam_test.tcl
+
 pdi: rom pins $(if $(filter cam,$(CARD)),plan)
 	@mkdir -p $(OUT)
 	@rm -f $(STAMP)
@@ -162,4 +167,4 @@ jtag:
 clean:
 	rm -rf $(OUT)
 
-.PHONY: all rom pins plan test-plan pdi jtag clean
+.PHONY: all rom pins plan test-plan test-cdc pdi jtag clean

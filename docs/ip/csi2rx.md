@@ -740,7 +740,7 @@ clock căn giữa của D-PHY).
 | `set_false_path -from` chân data | bắt data không có static timing (eye hiệu chỉnh lúc chạy); bộ thu LP của chân data được đồng bộ ở `clk_vid` |
 | `set_false_path -to` chân CE của hai BUFGCE_DIV | CE là flop `clk_vid`, FSM chỉ đổi nó khi lane clock đứng yên ở HS-0 (PHY_EN = 0 đóng cổng ngay, nên driver chờ `STATUS.CE` = 0 trước khi xoá PHY_EN) |
 | `CLOCK_DELAY_GROUP bow_dphy_rx_clk` | cân bằng cây clock /1 và /4; net được tìm qua chân `O` của buffer |
-| 7 × `set_bus_skew` | bus gray (clock group không che `set_bus_skew`): con trỏ ghi FIFO 8,7 ns, con trỏ đọc 5 ns, đồng hồ đo byte clock 8,7 ns, req/ack LOG/RAW 5 ns; đích là flop đồng bộ đầu tiên |
+| 7 × `set_bus_skew` | bus gray (clock group không che `set_bus_skew`): con trỏ ghi FIFO 8,7 ns, con trỏ đọc 5 ns, đồng hồ đo byte clock 8,7 ns, req/ack LOG/RAW 5 ns; đích là flop đồng bộ đầu tiên. Cell được chọn theo đuôi tên phân cấp (`get_cells -hierarchical -filter`): cell D-PHY theo tên của nó (`*/meter_gray_q_reg[*]`, `*/u_sync_meter/...`), FIFO, thanh ghi, capture theo đường dưới `u_csi2rx`, nên ràng buộc không phụ thuộc chỗ đặt khối D-PHY ([mipi_rx_arch.md](mipi_rx_arch.md) mục 10, bước 1) |
 
 `tcl/build.tcl` ghi thêm `clocks.rpt`, `clock_interaction.rpt`,
 `check_timing.rpt`, `methodology.rpt`, `drc.rpt`, `bus_skew.rpt`, chép
