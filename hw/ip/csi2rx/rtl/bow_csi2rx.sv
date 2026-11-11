@@ -31,9 +31,10 @@
 //
 // Clock domains:
 //   clk_i       CPU: registers, counters, LOG/RAW read (bow_csi2rx_regs)
-//   vid_clk_i   video: LP state machines, PHY control, pixel output and, with
-//               DlyVid = 1, the input delay control (dly_*) (the last three in
-//               bow_dphy_rx)
+//   vid_clk_i   video: LP state machines, PHY control and, with DlyVid = 1,
+//               the input delay control (dly_*), all in bow_dphy_rx; here the
+//               LP event release, the lost burst request (lpl_*) and the pixel
+//               output
 //   byte_clk_i  byte clock = HS clock / 4, runs only while byte_ce_o = 1 and
 //               the clock lane toggles (non-continuous clock: HS bursts only)
 // Resets (asynchronous assertion, synchronous release):

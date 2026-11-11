@@ -29,6 +29,7 @@ if {![file exists $rom_vmem]} {
 }
 
 source [file join $repo_root hw fpga common tcl filelist.tcl]
+source [file join $repo_root hw fpga common tcl bus_skew_checks.tcl]
 
 # ---------------------------------------------------------------- project
 create_project bow32_kv260_cam [file join $out_dir vivado] -part $part -force
@@ -115,6 +116,14 @@ set skew_met [regexp -all {Slack \(MET\)} $skew]
 if {[regexp {Slack \(VIOLATED\)} $skew] || $skew_met != 9} {
   puts "CRITICAL WARNING: bus skew violated or not constrained ($skew_met met), see bus_skew.rpt"
 }
+# The cells of every constraint (hw/fpga/common/tcl/bus_skew_checks.tcl): the
+# CSI-2 receiver's selectors match on the tail of cell names
+# (constr/kv260_cam.xdc)
+set skew_bad [bow32_bus_skew_checks $skew {u_soc/u_csi2rx/ u_soc/u_h264/u_out/}]
+foreach p $skew_bad {
+  puts "CRITICAL WARNING: bus skew $p"
+}
+puts "INFO: bus skew cells: [llength $skew_bad] problems in $skew_met constraints"
 
 # The placer lists the members of every CLOCK_DELAY_GROUP: both D-PHY clock
 # nets (HS clock and byte clock) must be in it.

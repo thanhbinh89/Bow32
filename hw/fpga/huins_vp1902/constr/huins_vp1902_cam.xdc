@@ -103,7 +103,11 @@ create_waiver -type METHODOLOGY -id {TIMING-3} -user bow32 \
 # (docs/ip/mipi_rx_arch.md, section 10, step 1): cells with names of their own (byte clock
 # meter, synchronisers, tap load logic) by those names, the pixel FIFO, register file and
 # capture flops by their path below u_csi2rx. Each tail selects the same cells as the full
-# path it replaced.
+# path it replaced. Two cell groups of one side are a list of two selectors (not an OR in
+# one filter), so that Vivado warns about each one that matches nothing. tcl/build.tcl
+# also checks the cells of every constraint (hw/fpga/common/tcl/bus_skew_checks.tcl):
+# all in u_soc/u_csi2rx, u_soc/u_h264/u_out or u_dphy, every destination reached from
+# the sources, as many source as destination flops.
 set dphy_byte_skew [expr {$dphy_byte_period - 0.07}]
 # pixel FIFO (bow_fifo_async): write pointer byte -> vid, read pointer vid -> byte
 set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_fifo/wgray_q_reg[*]}] \
@@ -131,8 +135,10 @@ set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_captur
 # counter change, so all these bits must arrive within one video period of each other
 # (the clock groups leave their delays unbounded).
 set_bus_skew \
-  -from [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_regs/dly_req_q_reg[*] || NAME =~ */u_csi2rx/u_regs/dly_q_reg[*]}] \
-  -to   [get_cells -hierarchical -filter {NAME =~ */g_dly_vid.u_sync_req/g_bit[*].u_sync/sync_q_reg[0] || NAME =~ */g_dly_vid.u_sync_tap/g_bit[*].u_sync/sync_q_reg[0]}] \
+  -from [list [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_regs/dly_req_q_reg[*]}] \
+              [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_regs/dly_q_reg[*]}]] \
+  -to   [list [get_cells -hierarchical -filter {NAME =~ */g_dly_vid.u_sync_req/g_bit[*].u_sync/sync_q_reg[0]}] \
+              [get_cells -hierarchical -filter {NAME =~ */g_dly_vid.u_sync_tap/g_bit[*].u_sync/sync_q_reg[0]}]] \
   $vid_period
 # Input delay readback (DLYn[24:16], clk_vid -> CPU): CNTVALUEOUT of the XPHYs (CTRL_CLK =
 # clk_vid; binary, and VT tracking may step it by a tap until the first load of the lane)

@@ -8,7 +8,8 @@
 #
 #   make equiv                every configuration of CFGS (~30 s each)
 #   make equiv-huins          one configuration
-#   make equiv REF=<commit>   another reference (default: main before step 1)
+#   make equiv REF=<commit>   another reference (default: 3a1e780, main before step 1;
+#                             a reference from step 1 on, with hw/ip/dphy_rx, works too)
 #
 # Configurations (equiv.tcl): kv260 (2 lanes, FIFO 256, taps in the byte clock domain:
 # the KV260 camera build), huins (4 lanes, FIFO 512, taps in the video clock domain:
@@ -28,11 +29,13 @@ TIMEOUT ?= 3600
 equiv: $(addprefix equiv-,$(CFGS))
 	@echo "equiv: $(words $(CFGS)) configurations PASS against $(REF) ($(CFGS))"
 
-# The reference RTL, extracted again on every run (REF may change)
+# The reference RTL, extracted again on every run (REF may change); hw/ip/dphy_rx too when
+# REF has it
 ref:
 	@rm -rf $(REF_DIR)
 	@mkdir -p $(REF_DIR)
-	git -C $(REPO) archive $(REF) hw/ip/common hw/ip/bus hw/ip/csi2rx | tar -x -C $(REF_DIR)
+	git -C $(REPO) archive $(REF) hw/ip/common hw/ip/bus hw/ip/csi2rx \
+	  $$(git -C $(REPO) ls-tree -d --name-only $(REF) hw/ip/dphy_rx) | tar -x -C $(REF_DIR)
 	@git -C $(REPO) rev-parse --verify $(REF)^{commit} > $(REF_DIR)/COMMIT
 
 # fm_shell reads no terminal input (a script error then ends the session instead of

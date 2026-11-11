@@ -86,15 +86,18 @@ là 99,999 MHz nên ra 199,998 / 49,9995 MHz) và 2 `proc_sys_reset`. Ràng bu�
 | File | Phải thấy |
 |------|-----------|
 | `timing_summary.rpt` | WNS ≥ 0 và WHS ≥ 0 (PR #17: +0,005 ns / +0,010 ns; bộ thu 4 lane: +0,025 ns; bản gộp hai thay đổi, 2026-11-10: +0,074 ns / +0,010 ns; đường găng ở bộ macroblock H.264, `tcl/build.tcl` dùng directive Explore và bật `phys_opt_design` sau route cho nó) |
-| `bus_skew.rpt` | 9 ràng buộc `set_bus_skew` (7 của bộ thu, 2 của FIFO ra H.264), cả 9 `Slack (MET)` |
+| `bus_skew.rpt` | 9 ràng buộc `set_bus_skew` (7 của bộ thu, 2 của FIFO ra H.264), cả 9 `Slack (MET)`; log: `INFO: bus skew cells: 0 problems in 9 constraints` (cell của từng ràng buộc, `hw/fpga/common/tcl/bus_skew_checks.tcl`) |
 | `clockInfo.txt` | `The following 2 clock nets belong to CLOCK_DELAY_GROUP bow_dphy_rx_clk`: `u_dphy/dphy_byte_clk`, `u_dphy/hs_clk` |
 | `drc.rpt` | không có lỗi (nhất là REQP-1742: `CLK` của IDELAYE3 phải là `CLKDIV` của ISERDESE3) |
 | `clocks.rpt`, `clock_interaction.rpt` | `dphy_hs_clk` 2,193 ns; `dphy_byte_clk` và `dphy_hs_clk_DIV4_INV` 8,772 ns; các cặp clock khác miền là *Asynchronous Groups* |
 | `bd_ports.txt` | chỉ `sys_clk`, `sys_resetn`, `vid_clk`, `vid_resetn` |
 
 `tcl/build.tcl` in `CRITICAL WARNING` khi WNS < 0, khi bus skew vi phạm hay
-không đủ 9 ràng buộc, hoặc khi `CLOCK_DELAY_GROUP` không đủ 2 net (thường do
-đổi tên instance trong RTL mà XDC còn dùng tên cũ). Clock video 200 MHz chỉ dư
+không đủ 9 ràng buộc, khi cell của một ràng buộc không đúng (cell ngoài
+`u_soc/u_csi2rx` và FIFO ra của H.264, flop đích không có đường từ nguồn, số flop
+nguồn khác số flop đích: selector của bộ thu chọn theo đuôi tên), hoặc khi
+`CLOCK_DELAY_GROUP` không đủ 2 net (thường do đổi tên instance trong RTL mà XDC
+còn dùng tên cũ). Clock video 200 MHz chỉ dư
 vài chục ps sau route (phép tính macroblock của H.264): với RTL bộ thu 4 lane
 (2026-11-10) directive mặc định còn −0,040 ns, nên `build.tcl` dùng directive
 `Explore` cho place, phys_opt và route (+0,065 ns với cùng netlist; RTL của nhánh
