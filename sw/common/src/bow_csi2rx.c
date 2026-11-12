@@ -112,7 +112,9 @@ static uint32_t settle_cycles(uint32_t lane_rate, uint32_t mhz, uint32_t lp_filt
  * pipeline; the Versal XPHY (vid) + 8: up to 8 words of its RX FIFO reach
  * the receiver before the end of the burst does), times the lanes in use,
  * + 8. 4 lanes at 1440 Mbit/s: 160, 192 with the XPHY; 0 lane rate: the
- * reset value 64. */
+ * reset value 64. Measured trails: 17..20 bytes on 2 lanes (KV260, IMX219
+ * at 912 Mbit/s: 62 is set), 49..52 bytes on 4 lanes (Huins VP1902, IMX274
+ * through the XPHY: 192 leaves 140 bytes, the reset value 64 only 12). */
 static uint32_t extra_bytes(uint32_t lane_rate, uint32_t lanes, bool vid) {
   if (lane_rate == 0) return 64u;
   uint64_t ui_ps = 1000000000000ull / lane_rate;
@@ -286,6 +288,33 @@ bool bow_csi2rx_link_check(uint32_t packets, uint32_t timeout_ms) {
     if (c.packets >= packets) return true;
     if (expired(start, limit)) return false;
   }
+}
+
+bool bow_csi2rx_link_check_frames(uint32_t frames, uint32_t timeout_ms, uint32_t *done) {
+  uint32_t start = bow_cycles(), limit = ms_cycles(timeout_ms), n = 0;
+  bool whole = false; /* a frame start seen since the clear: the next FE ends a whole frame */
+  bool ok = false;
+  bow_csi2rx_cnt_t c;
+  bow_csi2rx_clear();
+  CSI2RX->IRQ_STATUS = CSI2RX_IRQ_FS | CSI2RX_IRQ_FE;
+  for (;;) {
+    uint32_t irq = CSI2RX->IRQ_STATUS & (CSI2RX_IRQ_FS | CSI2RX_IRQ_FE);
+    if (irq) CSI2RX->IRQ_STATUS = irq;
+    /* an FE and the next FS in one read: the FE ends the frame before */
+    if ((irq & CSI2RX_IRQ_FE) && whole) n++;
+    if (irq & CSI2RX_IRQ_FS) whole = true;
+    /* the counters after the status: they hold every error of the frames
+     * counted (their packets come before their FE) */
+    bow_csi2rx_counters(&c);
+    if (bow_csi2rx_link_errors(&c)) break;
+    if (n >= frames) {
+      ok = true;
+      break;
+    }
+    if (expired(start, limit)) break;
+  }
+  if (done) *done = n;
+  return ok;
 }
 
 bool bow_csi2rx_wait_frame(uint32_t timeout_ms) {
@@ -763,7 +792,7 @@ void bow_csi2rx_print_margin(const bow_csi2rx_margin_t *m, int result) {
   for (uint32_t l = 1; l < nk; l++) bow_printf("/+-%u", m->k[l]);
   bow_puts(" taps: ");
   if (m->centre.errors) {
-    bow_printf("%u errors at the calibrated taps ", m->centre.errors);
+    bow_printf("%u errors at the taps in use ", m->centre.errors);
     put_list(m->centre.tap, nk < 2u ? 2u : nk);
     return;
   }

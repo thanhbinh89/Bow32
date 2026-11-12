@@ -173,8 +173,17 @@ uint32_t bow_h264_write_headers(uint8_t *buf, uint32_t size, const bow_h264_para
 }
 
 /* ------------------------------------------------------------ rate control */
-#define RC_STEP_MAX    12  /* QP change per frame: a factor of 4 in size */
-#define RC_PX_PER_BYTE 27u /* a detailed scene at QP 30 (Huins board, 1080p: 77 KB) */
+#define RC_STEP_MAX 12 /* QP change per frame: a factor of 4 in size */
+/* First QP (bow_h264_rc_init): the office scene of Huins board run 2 (IMX274,
+ * 2026-11-11) at QP 37 gave 37.5 KB per 1920x1080 frame and 23.0 KB per
+ * 1280x720 frame. Both IMX274 modes bin the whole sensor, so the smaller
+ * frame holds more detail per pixel: the size grows with the pixel count to
+ * the power 0.6 (fit to the two modes), not linearly. */
+#define RC_QP_REF    37            /* QP of the reference sizes */
+#define RC_BYTES_REF 37500u        /* bytes of a RC_PX_REF pixel frame at RC_QP_REF */
+#define RC_PX_REF    (1920u * 1080u)
+#define RC_PX_EXP_N  3             /* size ~ pixels^(N / D) */
+#define RC_PX_EXP_D  5
 
 /* 256 x log2(x), x >= 1 (0 counts as 1): the integer part from the highest
  * set bit, 8 fraction bits by repeated squaring of the mantissa (Q30). */
@@ -192,10 +201,17 @@ static int32_t log2_q8(uint32_t x) {
   return (int32_t)(n << 8 | f);
 }
 
+/* a Q8 value rounded to the nearest integer (halves away from 0) */
+static int32_t round_q8(int32_t d) { return d >= 0 ? (d + 128) >> 8 : -((-d + 128) >> 8); }
+
 /* round(6 x log2(a / b)): QP steps between frames of a and b bytes */
-static int32_t qp_steps(uint32_t a, uint32_t b) {
-  int32_t d = 6 * (log2_q8(a) - log2_q8(b)); /* Q8 */
-  return d >= 0 ? (d + 128) >> 8 : -((-d + 128) >> 8);
+static int32_t qp_steps(uint32_t a, uint32_t b) { return round_q8(6 * (log2_q8(a) - log2_q8(b))); }
+
+/* 256 x log2 of the size at RC_QP_REF of a frame of px pixels of the
+ * reference scene: RC_BYTES_REF x (px / RC_PX_REF)^0.6 */
+static int32_t rc_ref_size_q8(uint32_t px) {
+  return log2_q8(RC_BYTES_REF) +
+         RC_PX_EXP_N * (log2_q8(px) - log2_q8(RC_PX_REF)) / RC_PX_EXP_D;
 }
 
 static uint32_t qp_clamp(int32_t q) {
@@ -228,7 +244,11 @@ void bow_h264_rc_init(bow_h264_rc_t *rc, uint32_t width, uint32_t height, uint32
   rc->reserve = space / rc->frames / 8u + 4096u;
   if (rc->reserve > space / 2u) rc->reserve = space / 2u;
   rc->target = rc_target(rc, 0, 0);
-  if (qp == 0) qp = qp_clamp(30 + qp_steps(width * height / RC_PX_PER_BYTE, rc->target));
+  if (qp == 0) {
+    /* the QP at which the reference scene fills the first target */
+    int32_t d = 6 * (rc_ref_size_q8(width * height) - log2_q8(rc->target)); /* Q8 */
+    qp = qp_clamp(RC_QP_REF + round_q8(d));
+  }
   rc->qp = qp_clamp((int32_t)qp);
 }
 

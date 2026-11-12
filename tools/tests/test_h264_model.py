@@ -178,15 +178,54 @@ class RcState(ctypes.Structure):
 class RateControlTest(unittest.TestCase):
     """The rate control of sw/apps/video `rec` (bow_h264_rc_* of
     sw/common/src/bow_h264.c, built for the host) in closed loop: with the
-    frame sizes the Huins board measured (1080p, 2026-11-10) and with the
-    frame sizes of this encoder model on camera-like frames. The firmware
-    loop: rc_init gives the first QP; after each frame rc_frame with the
-    frame count and the total bytes (FRAME_CNT, TOTAL_BYTES) gives the QP of
-    the next frame (the encoder takes it at its next frame start); false
-    means STOP."""
+    frame sizes the Huins board measured (board run 1, 2026-11-10: 1080p;
+    run 2, 2026-11-11: 1080p and 720p, BOARD_RUN2) and with the frame sizes
+    of this encoder model on camera-like frames. The firmware loop: rc_init
+    gives the first QP; after each frame rc_frame with the frame count and
+    the total bytes (FRAME_CNT, TOTAL_BYTES) gives the QP of the next frame
+    (the encoder takes it at its next frame start); false means STOP."""
 
     VRAM = 1 << 20
     HDR = 64  # SPS + PPS of the video app (rounded up)
+    # Board run 2 (IMX274 on the Huins MFP-VP1902, office scene, 2026-11-11):
+    # `rec` with the qp auto of the firmware then (first QP 37 at 1080p, 33
+    # at 720p), skip 1; the bytes and the QP of every frame, in order.
+    # 1080p30: 12 frames at QP 37 (37384..37736 bytes), 18 at QP 38
+    # (32664..32972); 720p30: 42 at QP 37 (22884..23048), one each at QP 33,
+    # 36 and 38.
+    BOARD_RUN2 = {
+        (1920, 1080): (
+            [37600, 32792, 32852, 32956, 32972, 32816, 37736, 32940, 37408, 32732,
+             37632, 32844, 37384, 32664, 37468, 32728, 37600, 32912, 32800, 37616,
+             32756, 37420, 32852, 32816, 37580, 32948, 32792, 37420, 32788, 37512],
+            [37, 38, 38, 38, 38, 38, 37, 38, 37, 38, 37, 38, 37, 38, 37, 38, 37, 38, 38, 37,
+             38, 37, 38, 38, 37, 38, 38, 37, 38, 37]),
+        (1280, 720): (
+            [33600, 24424, 22972, 22920, 23028, 22968, 22992, 22964, 22972, 22972,
+             22976, 22932, 22916, 22916, 22896, 22968, 22912, 22928, 22908, 22980,
+             22988, 22924, 22968, 22976, 22964, 22912, 23008, 22948, 22932, 23028,
+             22992, 22912, 23012, 22984, 22884, 22964, 23048, 22944, 22960, 23032,
+             22992, 23008, 20040, 23016, 23000],
+            [33, 36] + [37] * 40 + [38, 37, 37]),
+    }
+
+    @classmethod
+    def run2_size(cls, w, h, qp):
+        """Bytes of a frame of the run-2 scene at qp: the mean of the frames
+        measured at a QP, log-linear between those, 6 QP per halving beyond
+        them."""
+        at = {}
+        for b, q in zip(*cls.BOARD_RUN2[(w, h)]):
+            at.setdefault(q, []).append(b)
+        pts = sorted((q, sum(v) / len(v)) for q, v in at.items())
+        if qp <= pts[0][0]:
+            return pts[0][1] * 2 ** ((pts[0][0] - qp) / 6)
+        if qp >= pts[-1][0]:
+            return pts[-1][1] * 2 ** ((pts[-1][0] - qp) / 6)
+        for (q0, b0), (q1, b1) in zip(pts, pts[1:]):
+            if q0 <= qp <= q1:
+                return b0 * (b1 / b0) ** ((qp - q0) / (q1 - q0))
+        raise AssertionError(qp)
 
     @classmethod
     def setUpClass(cls):
@@ -255,9 +294,11 @@ class RateControlTest(unittest.TestCase):
 
     def test_first_qp(self):
         rc = self.init(1920, 1080, 30)
-        self.assertEqual((rc.qp, rc.reserve), (37, (self.VRAM - self.HDR) // 30 // 8 + 4096))
+        self.assertEqual((rc.qp, rc.reserve), (38, (self.VRAM - self.HDR) // 30 // 8 + 4096))
         self.assertEqual(rc.target, (rc.space - rc.reserve) // 30)
-        self.assertEqual(self.init(1280, 720, 45).qp, 33)
+        self.assertEqual(self.init(1280, 720, 45).qp, 37)
+        self.assertEqual(self.init(1280, 720, 30).qp, 33)
+        self.assertEqual(self.init(1920, 1080, 10).qp, 28)
         self.assertEqual(self.init(64, 48, 3).qp, 10)
         self.assertEqual(self.init(1920, 1080, 30, qp=26).qp, 26)     # `qp 26`
         rc = self.init(1920, 1080, 30, cap=20 * 1024)                 # `rec 30 0 20`
@@ -284,6 +325,40 @@ class RateControlTest(unittest.TestCase):
         # the old start (QP 30) also fits now
         rc = self.init(1920, 1080, 30, qp=30)
         self.assertEqual(self.record(rc, size_at)[3], "done")
+
+    def test_board_run2(self):
+        """Board run 2 (BOARD_RUN2) started at the first QP of the old model:
+        37 at 1080p (37600 bytes, 8 % above the target 34669) and 33 at 720p
+        (33600 bytes, 45 % above 23145, QP 37 from frame 3 on). Fed the
+        measured sizes in order, the rate control built here gives the QP of
+        every frame the board coded. The first QP now fits each mode: 38 at
+        1080p and 37 at 720p, where the frames of that scene come out within
+        10 % below the target; with +-3 % scatter all frames fit and stay
+        within 15 % of their targets."""
+        rnd = random.Random(7)
+        for (w, h), first in (((1920, 1080), 38), ((1280, 720), 37)):
+            board_sizes, board_qps = self.BOARD_RUN2[(w, h)]
+            n = len(board_sizes)
+            rc = self.init(w, h, n, qp=board_qps[0])
+            sizes, qps, _, end = self.record(rc, lambda k, qp: board_sizes[k])
+            self.assertEqual((qps, end), (board_qps, "done"), (w, h))
+
+            scatter = [1 + rnd.uniform(-0.03, 0.03) for _ in range(n)]
+
+            def size_at(k, qp):
+                return int(self.run2_size(w, h, qp) * scatter[k]) & ~3
+
+            rc = self.init(w, h, n)
+            b = self.run2_size(w, h, rc.qp)
+            self.assertEqual(rc.qp, first, (w, h))
+            self.assertTrue(0.9 * rc.target < b <= rc.target, (w, h, rc.qp, b, rc.target))
+            sizes, qps, targets, end = self.record(rc, size_at)
+            self.assertEqual((len(sizes), end), (n, "done"), (w, h, sizes, qps))
+            self.assertLessEqual(sum(sizes), self.VRAM - self.HDR)
+            self.assertGreater(sum(sizes), 0.9 * (self.VRAM - self.HDR))
+            for k in range(n):
+                self.assertLess(abs(sizes[k] - targets[k]), 0.15 * targets[k],
+                                (w, h, k, sizes, qps, targets))
 
     def test_stop_when_full(self):
         """A scene too detailed for the space even at QP 51 (60 KB per 1080p

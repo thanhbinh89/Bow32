@@ -115,7 +115,10 @@ _Static_assert(__builtin_offsetof(bow_csi2rx_regs_t, RAW) == 0x800, "CSI2RX RAW 
 #define CSI2RX_CTRL_DT_MASK   (0x3Fu << 8)
 /* More than EXTRA bytes after a packet in its HS burst: ERR_STATUS.EXTRA (the
  * burst most likely carries further packets, which are dropped). 0 = off,
- * reset 64; must be above the trail bytes (bow_csi2rx_start sets it). */
+ * reset 64; must be above the trail bytes (bow_csi2rx_start sets it). Below
+ * the trail every burst is flagged, and a flagged burst before the first
+ * line of a frame drops that frame (ERR_STATUS.SKIP): with one packet per
+ * burst, as the IMX219 and IMX274 send, every frame is lost. */
 #define CSI2RX_CTRL_EXTRA(n)   (((uint32_t)(n) & 0xFFu) << 16)
 #define CSI2RX_CTRL_EXTRA_MASK (0xFFu << 16)
 
@@ -308,6 +311,13 @@ void bow_csi2rx_print_errors(const bow_csi2rx_cnt_t *c);
  * otherwise ERR_STATUS tells the cause: a new calibration only helps when it
  * holds CSI2RX_ERR_TAP bits (EXTRA, FORMAT, FRAME, OVF are not tap problems). */
 bool bow_csi2rx_link_check(uint32_t packets, uint32_t timeout_ms);
+/* The same over whole frames of the selected VC: clear the counters, then
+ * true once `frames` frames that started after the clear (FS) have ended
+ * (FE) without a link error; false at the first error or after timeout_ms
+ * (as bow_csi2rx_link_check; *done, if not NULL: the frames that ended).
+ * A rare error (e.g. one CRC error every few frames) needs many frames to be
+ * seen at all. */
+bool bow_csi2rx_link_check_frames(uint32_t frames, uint32_t timeout_ms, uint32_t *done);
 
 /* Wait for the next frame end of the selected VC (IRQ_STATUS.FE is cleared
  * first); false on timeout. */
