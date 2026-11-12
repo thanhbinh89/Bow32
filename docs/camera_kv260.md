@@ -18,6 +18,14 @@ Trước khi đọc, hãy chạy được Bow32 cơ bản theo [fpga_kria.md](fp
 > `kv260` giờ có thêm khối CSI2RX không có D-PHY (WNS +5,985 ns ở 50 MHz);
 > trên board `csi2_test` báo `csi2rx: Bow32 receiver, no D-PHY in this
 > bitstream`, `INFO` = `0x01003202`.
+>
+> **Bước 4 của kế hoạch chuyển (2026-11-12):** thanh ghi PHY của bộ thu nay ở D-PHY
+> `0x4000_8C00` ([ip/dphy_rx.md](ip/dphy_rx.md)), không có alias. Firmware mới từ chối bitstream
+> dựng trước đó (`csi2rx: bitstream before the D-PHY split, rebuild it`): lần chạy KV260 sau phải
+> build bitstream và firmware từ cùng commit (quyết định D1 của
+> [ip/mipi_rx_arch.md](ip/mipi_rx_arch.md); KV260 chưa build lại, chỉ kiểm bằng mô phỏng). `INFO`
+> của controller từ bước 4: `kv260_cam` `0x0100C852`, `kv260` `0x01003242` (bit 6 = D-PHY ở
+> `0xC00`); `TIM0` của D-PHY (`rd 40008c24`, `PHY_CFG` cũ) của driver ở 912 Mbit/s: `051e0216`.
 
 ```
  Pi camera v2 ──D-PHY──► bow_dphy_io_xusp ──► bow_csi2rx ──RAW10──► ISP Bow32 ──► capture ──► CPU ──UART0──► PC
@@ -61,9 +69,9 @@ cho cả hai bitstream), chân D-PHY trong `hw/fpga/kv260_cam/constr/kv260_cam.x
 | Cửa sổ AXI4-Lite `0x5000_0000` | không có thiết bị (timeout → bus error) | như bên trái |
 
 Ứng dụng `camera` và `csi2_test` tự nhận ra mình đang chạy trên bitstream nào
-(`CSI2RX.INFO`). Driver chỉ chờ `STATUS.PHY_RDY` khi `INFO.DLY_VID` = 1 (XPHY của Versal,
-[camera_huins.md](camera_huins.md)): trên KV260 bit đó nối 1, và bitstream `kv260_cam` dựng
-trước khi có nó (đọc 0) vẫn chạy với firmware mới.
+(`CSI2RX.INFO`). Driver chỉ chờ `AFE_STATUS.READY` của D-PHY khi AFE tự hiệu chỉnh delay
+(`INFO[23]` của D-PHY: XPHY của Versal, [camera_huins.md](camera_huins.md)); trên KV260 không chờ.
+Bitstream dựng trước bước 4 không chạy với firmware mới (mục *Trạng thái*).
 
 ## 3. Build
 
@@ -256,7 +264,7 @@ ok
 
 | Check | Nội dung |
 |-------|----------|
-| `phy-idle` | cảm biến standby, PHY bật: mọi lane LP-11, không có HS. `STATUS 403f`: bit 14 là `PHY_RDY`, trên KV260 nối 1; bitstream dựng trước khi có bit đó in `003f` (như lần chạy 2026-10-30), firmware mới vẫn chạy trên nó |
+| `phy-idle` | cảm biến standby, PHY bật: mọi lane LP-11, không có HS: `LANE_LP 03f LANE_HS 00000` của D-PHY (từ bước 4; trước đó `STATUS 403f` của controller, bit 14 = `PHY_RDY`) |
 | `link-up` | stream màu đơn: số lần vào HS của hai data lane và lane clock tăng |
 | `calibrate` | có eye trên mọi lane (bước 8), tap đã nạp (`DLYn` đọc lại), rồi 64 packet không lỗi |
 | `margin` | test pattern PN9: 60 frame ở tap đã hiệu chỉnh, rồi 60 frame ở tap − k và tap + k của từng lane (k = eye / 4, ≥ 40), không lỗi lấy mẫu nào; in BER bị chặn trên (95 %); tap trở về tâm, rồi lại màu đơn |

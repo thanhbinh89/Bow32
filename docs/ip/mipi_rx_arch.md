@@ -34,7 +34,7 @@ số dòng theo commit đó.
 | Khối mới | `bow_dphy_rx`, `bow_dphy_rx_regs`, `bow_dphy_raw`, `bow_dphy_dsk`, `bow_dphy_prbs`, `bow_ppi_pkg`, `bow_mipi_rx` (wrapper Bow32), `bow_mipi_rx_apb` (wrapper APB4 cho ASIC), `bow_csi2rx_ppi_flat` (controller với cổng PPI phẳng cho PHY chuẩn, bước 3); FPGA: `bow_dphy_dly_xusp`, `bow_dphy_dly_xphy` (logic adapter không có primitive); DV: `bow_ppi_bfm` và `tb_csi2rx_ppi` (bước 3), `bow_dphy_afe_model`, `bow_dphy_tx` |
 | Đổi vai | `bow_dphy_io_xusp`, `bow_dphy_io_versal` thành **adapter AFE** (giữ tên file và tên instance mà XDC dùng) |
 | Giữ nguyên | lớp CSI-2 của `bow_csi2rx` (ghép lane, packet, unpack, FIFO, đầu ra, LOG); bản đồ `CSI2RX` ở `0x4000_8000` (thanh ghi PHY chuyển sang D-PHY ở `0x4000_8C00`; không có alias, driver chọn theo `INFO[6]`, mục 6.3) |
-| Trạng thái | đặc tả; RTL: bước 1 và 2 xong, `csi2_test` `test` PASS 17/17 trên bo Huins ngày 2026-11-11 (bước 1: `bow_dphy_rx` tách bên trong `bow_csi2rx`; bước 2: `bow_mipi_rx` ghép `bow_dphy_rx` và controller `bow_csi2rx` bằng PPI v1 cộng một dải phụ tạm thời; cổng và thanh ghi không đổi, tương đương chứng minh bằng Synopsys Formality, D8 sửa đổi đã duyệt, mục 0 và 10); bước 3 xong trong mô phỏng 2026-11-12: bench controller ở PPI `tb_csi2rx_ppi` với `bow_ppi_bfm`, hai chế độ thời gian (D-PHY Bow32, PHY chuẩn qua wrapper cổng phẳng) đều sạch, hồ sơ PPI mục 5.5 sửa theo kết quả, không đổi RTL nào có sẵn; các quyết định kiến trúc đã chốt ngày 2026-11-11 (mục 0); kế hoạch chuyển gồm các bước 0–11, mỗi bước giữ mọi test hiện có, build và chạy trên bo Huins (KV260 chỉ kiểm bằng mô phỏng, quyết định D1), kỳ vọng nào đổi thì ghi rõ (mục 10) |
+| Trạng thái | đặc tả; RTL: bước 1 và 2 xong, `csi2_test` `test` PASS 17/17 trên bo Huins ngày 2026-11-11 (bước 1: `bow_dphy_rx` tách bên trong `bow_csi2rx`; bước 2: `bow_mipi_rx` ghép `bow_dphy_rx` và controller `bow_csi2rx` bằng PPI v1 cộng một dải phụ tạm thời; cổng và thanh ghi không đổi, tương đương chứng minh bằng Synopsys Formality, D8 sửa đổi đã duyệt, mục 0 và 10); bước 3 xong trong mô phỏng 2026-11-12: bench controller ở PPI `tb_csi2rx_ppi` với `bow_ppi_bfm`, hai chế độ thời gian (D-PHY Bow32, PHY chuẩn qua wrapper cổng phẳng) đều sạch, hồ sơ PPI mục 5.5 sửa theo kết quả, không đổi RTL nào có sẵn; bước 4 xong trong mô phỏng và build 2026-11-12 (chờ chạy bo Huins): D-PHY có thanh ghi riêng ở `0x4000_8C00` (tập con v1 của mục 4.10, [dphy_rx.md](dphy_rx.md)), reset và RAW riêng, dải phụ tạm thời đã bỏ, driver `bow_dphy_rx`, không alias; các quyết định kiến trúc đã chốt ngày 2026-11-11 (mục 0); kế hoạch chuyển gồm các bước 0–11, mỗi bước giữ mọi test hiện có, build và chạy trên bo Huins (KV260 chỉ kiểm bằng mô phỏng, quyết định D1), kỳ vọng nào đổi thì ghi rõ (mục 10) |
 
 ## 0. Quyết định đã chốt (2026-11-11)
 
@@ -194,7 +194,7 @@ kể trên lấy theo tài liệu hiện có của Bow32 ([csi2rx.md](csi2rx.md)
 | đồng hồ đo byte clock | `bow_csi2rx.sv:794-817`, `bow_csi2rx_regs.sv:487-516` | `bow_dphy_rx` |
 | RAW (64 word thô mỗi lane) | `bow_csi2_capture.sv:153-230` | `bow_dphy_rx` |
 | `PHY_CFG`, phần PHY của `STATUS`, `DLYn`, `BYTECLK`, `CNT_BURST*`, `CNT_MISC[23:0]`, `CTRL.CLK_FORCE`, `INFO[5]` | `bow_csi2rx_regs.sv` | thanh ghi D-PHY ở `0xC00` của cửa sổ `CSI2RX` (mục 6.3; không có alias) |
-| núm PA4 (`reinit_i`), PA5 (`burst_rst_en_i`), trạng thái PB6/PB7 | GPIO của top camera Huins | `AFE_CTRL.PD`, `des_rst` luôn bật, `AFE_STATUS` của D-PHY |
+| núm PA4 (`reinit_i`), PA5 (`burst_rst_en_i`), trạng thái PB6/PB7 | GPIO của top camera Huins | bước 4: `CMD.REINIT` (xung `reinit_o`), `CTRL.DES_RST_DIS` (0 từ reset: luôn bật), `AFE_STATUS[15:8]` của D-PHY; bước 5: `AFE_CTRL.PD`, `des_rst` |
 | ghép lane, packet, unpack, FIFO, đầu ra, LOG, phần còn lại của thanh ghi | `bow_csi2rx` | giữ trong controller |
 
 ## 3. Giao diện AFE
@@ -763,6 +763,21 @@ mọi tên có tiền tố `DPHY_` (struct `DPHY`, macro `DPHY_CTRL_*`…).
 | 0x108 | `LANE_POL` | RW | v2: [0] lane clock, [l+1] data lane l: đảo P/N (0). Data lane: đảo bit HS (ở flop word, trước aligner) và đổi chỗ P/N của LP; lane clock: chỉ LP (LP-01 ↔ LP-10), phần HS không cần vì aligner tìm sync ở mọi pha bit |
 | 0x200–0x3FC | `RAW[64]` | R | entry i: `0x200 + 8i` = lane 0–3 (byte k = lane k), `0x204 + 8i` = lane 4–7 |
 
+**v1 (bước 4, [dphy_rx.md](dphy_rx.md)).** RTL có tập con sau của bảng; offset hay trường chưa có
+đọc 0, ghi bị bỏ. `ID`, `INFO` ([3:0], [7:5], [17:8], [21:18] = 9, [23]; bit khối [24]–[31] = 0),
+`INFO2`; `CTRL` chỉ [1] CLK_CONT và [6] DES_RST_DIS ([0] EN và các bit khác của v1.x ở bước 6, 8,
+10); `CMD` [1] REINIT và [3] CNT_CLR: REINIT ở v1 chỉ là xung `reinit_o` 32 chu kỳ bus tới I/O của
+PHY (thay GPIO PA4: adapter Versal chạy lại XPLL, BISC, VT; UltraScale+ không có), phần "các FSM
+về `WaitStop`, `T_INIT` đếm lại" đến ở bước 6; `AFE_STATUS` [0] READY và [15:8] `status` (CAL_* ở
+bước 5); `TIM0`; `LANE_LP`; `LANE_HS` ([17] `RxClkActiveHS` = cổng, mục 5.3); `IRQ_STATUS` /
+`IRQ_EN` [0] ERR, [3] RAW_DONE; `ERR_STATUS` [2] CONTROL; `ERR_LANE` [8+l], [16]; `BYTECLK`;
+`CNT_BURST0`…`3`, `CNT_CLK`, `CNT_LPERR`; `DLY0`…`3`; `RAW_CTRL`, `RAW`. `DLYn` ở v1 giữ giao thức
+nạp của trước bước 5 (`DlyVid`) và **chưa có chủ thứ hai** của mã: [8:0] CODE đọc lại mã đã ghi
+(không đồng bộ ngược), `PEND` = OWN ∧ (`dly_q` ≠ CODE) lấy từ delay của chính PHY thay cho ack gray
+(không thêm bus gray mới, nên phép đếm 9 / 11 ràng buộc bus skew không đổi); OWN đặt bởi lần ghi khi
+`AFE_STATUS.READY` = 1, xoá khi READY = 0; chưa có `CMD.DLY_REL`, nên DV `be` kiểm hai trường hợp
+đầu (ghi cả word, ghi chỉ byte 2–3). Bộ đếm 32 bit bão hoà, xoá bằng `CMD.CNT_CLR`.
+
 **Ánh xạ lane** (`LANE_MAP`, `LANE_POL`; v2; lane swap ở [../csi2rx_review.md](../csi2rx_review.md)
 mục 4): trên ASIC, package và đường mạch in hay buộc đổi thứ tự hoặc cực của lane; trong D-PHY số
 việc này rẻ. Ánh xạ đặt ở đầu ra PPI, sau aligner: mọi thứ bên trong D-PHY (FSM, delay, `DLYn`,
@@ -859,8 +874,8 @@ thêm vào `ErrControl`, nên không đổi luật đánh dấu burst mất và 
 cố định hôm nay. Hai ngoại lệ có chủ ý: (1) `RxSkewCalHS` thành mức: controller đếm cạnh lên ở
 lane 0, nên `CNT_EXT[31:16]` không đổi, các case `deskew` của DV là bằng chứng; (2) reset đường
 thu khi cổng đóng luôn bật từ bước 4 (`burst_rst_en_i` = ¬`DES_RST_DIS` thay cho PA5; từ bước 5 là `des_rst`),
-vì PA5 = 0 đã hỏng trên bo; chỉ tắt được bằng bit thử `DES_RST_DIS`; các tuỳ chọn `S274_PA5=0` /
-`FW=brst0` của mô phỏng chuyển sang bit này.
+vì PA5 = 0 đã hỏng trên bo; chỉ tắt được bằng bit thử `DES_RST_DIS`; các tuỳ chọn của mô phỏng
+chuyển sang bit này (`+S274_PA5=0` thành `+S274_DESRST=0`, `FW=brst0` ghi `DES_RST_DIS` = 1).
 
 ## 5. PPI
 
@@ -1092,7 +1107,7 @@ build trên hw-station-1).
 | `DLY0`…`DLY3` (0x070–0x07C) | `DLY0`…`DLY3` của D-PHY: [9:0] mã đang lái, PEND, OWN chỉ đọc (mục 4.10) |
 | `RAW_CTRL` (0x084), `RAW` (0x800 + 4i) | `RAW_CTRL`, `RAW` (0x200 + 8i) của D-PHY |
 | `IRQ_STATUS` | thêm [5] PHY (= `irq_o` của D-PHY) |
-| GPIO PA4/PA5/PB6/PB7 (top Huins) | `AFE_CTRL.PD`, `des_rst` luôn bật, `AFE_STATUS[15:8]`; top camera Huins thôi nối bốn chân GPIO này |
+| GPIO PA4/PA5/PB6/PB7 (top Huins) | bước 4: `CMD.REINIT`, `CTRL.DES_RST_DIS` (0 từ reset: luôn bật), `AFE_STATUS[15:8]`; bước 5: `AFE_CTRL.PD`, `des_rst`; top camera Huins thôi nối bốn chân GPIO này (PA4…PA6 không còn chân, PB6 / PB7 đọc 0) |
 
 Ngắt: D-PHY có `irq_o` riêng; trong Bow32 nó vào `IRQ_STATUS[5]` của controller và chung đường
 `irq_fast[7]`; SoC khác có thể nối riêng (hai đường `irq_fast[13:14]` còn trống).
@@ -1108,7 +1123,14 @@ Ngắt: D-PHY có `irq_o` riêng; trong Bow32 nó vào `IRQ_STATUS[5]` của con
 | `bow_dphy_rx_deskew(mode, ms)`, `deskew_result()` | `bow_csi2rx_calibrate()`, `bow_csi2rx_margin()`: thuật toán giữ nguyên, delay qua `bow_dphy_rx_*`, lỗi từ controller |
 | `bow_dphy_rx_prbs()`, `raw()`, `byteclk_hz()`, `print_status()`, `print_delays()` | `print_status()` (gọi phần PHY bên trái) |
 
-`cam_sensor.c` thôi đặt PA5; lệnh `phy` của `csi2_test` đọc `AFE_STATUS`/`DLYn` của D-PHY,
+**v1 (bước 4).** `bow_dphy_rx.c` có `probe()`, `lanes()` / `afe()` / `self_cal()` / `lp_mhz()`
+(thay `info()`), `timing()` (không `CMD.APPLY` ở v1), `ready()`, `wait_ready()`, `reinit(ms, &us)`
+(`CMD.REINIT`: READY phải xuống trong 20 µs, không thì PHY không có re-init), `des_rst(on)`,
+`set_delay()`, `read_delay()` (đọc tới khi hai lần giống nhau), `wait_delay()` (PEND = 0 trên lane
+có OWN), `get_delays()`, `print_delays()`, `counters()`, `clear()`, `raw()`, `byteclk_hz()`;
+`power()`, `release_delay()`, `deskew()`, `prbs()` đến ở bước 5, 8. `cam_sensor.c` thôi đặt PA5
+mà ghi `DES_RST_DIS` = 0 (giá trị reset) mỗi lần khởi động bộ thu trên Versal (`-DCAM_BURST_RST=0`
+của mô phỏng ghi 1); lệnh `phy` của `csi2_test` đọc `AFE_STATUS`/`DLYn` của D-PHY,
 `phy reinit` gọi `bow_dphy_rx_reinit()`. Driver bỏ mặt nạ `dly_written` và
 `bow_csi2rx_forget_delays()`: lane nào còn giữ mã của phần mềm thì đọc OWN (phần cứng xoá OWN khi
 AFE khởi động lại).
@@ -1529,7 +1551,7 @@ lane và bộ đồng bộ của cùng một bộ thu).
 | 1 | **1a. Bộ chọn không phụ thuộc phân cấp**, trước khi dời cell: XDC / tcl chọn cell bằng `get_cells -hierarchical -filter {NAME =~ */meter_gray_q_reg*}` (như luật BLI của `u_dphy` đã làm) và giữ phép đếm 9 / 11; danh sách duyệt CDC khớp theo đuôi đường; probe của `tb_bow_dphy_io_xusp` chuyển sang `bind` vào `bow_dphy_align`. **1b. Tách `bow_dphy_rx` bên trong `bow_csi2rx`**, cổng và thanh ghi không đổi: FSM LP, phát hiện cạnh clock, flop word, đồng bộ `arm`, aligner, `byte_rst`, nạp tap, đồng hồ đo vào module mới; RAW vẫn ở `bow_csi2_capture` (D-PHY xuất word thô) | 1a: `kv260_cam.xdc`, `huins_vp1902_cam.xdc`, `build.tcl` của hai bản build, `timing_checks_cam.tcl`, `tb_bow_dphy_io_xusp.sv`. 1b: mới `hw/ip/dphy_rx/rtl/bow_dphy_rx.sv`, `hw/ip/dphy_rx/dphy_rx.f`; chuyển `bow_dphy_lp.sv`, `bow_dphy_align.sv` sang `hw/ip/dphy_rx/rtl/`, `bow_csi2_sync.sv` sang `hw/ip/common/rtl/` với tên module mới `bow_sync_bus` (giữ tên instance `u_sync_*` và `g_bit` mà XDC dùng); đổi `bow_csi2rx.sv`, `csi2rx.f`, Makefile DV, filelist lint / FPGA / `sim` | 1a: trên RTL cũ, PDI Huins vẫn đủ 11 ràng buộc bus skew (9 của `kv260_cam` đếm ở lần build KV260 kế tiếp, D1), kiểm tra CDC không đổi, xsim chạy. 1b: tương đương với `bow_csi2rx` cũ (Synopsys Formality, D8 sửa đổi, mục 0); mọi test không đổi kết quả; LUT/FF lệch ≈ 0; `bow_dphy_rx` lint riêng được. **Xong** (bo Huins: `csi2_test` `test` PASS 17/17), kết quả dưới bảng |
 | 2 | **Đảo cấp:** `bow_mipi_rx` (cổng = `bow_csi2rx` hôm nay) chứa `bow_dphy_rx` + `bow_csi2rx` (controller, cổng PPI + dải cấu hình/trạng thái PHY tạm thời từ `bow_csi2rx_regs`); lỗi lp trên PPI là xung cùng clock (FPGA: `lp_clk` = `vid_clk`, kiểm khi elaborate), có `ErrControlClk` | mới: `hw/ip/dphy_rx/rtl/bow_ppi_pkg.sv`, `hw/ip/csi2rx/rtl/bow_mipi_rx.sv`; đổi: `bow_csi2rx.sv`, `bow_dphy_rx.sv`, `bow_dphy_lp.sv` (`stop_o`), `hw/top/rtl/bow32_top.sv` (một instance, giữ tên `u_csi2rx`), `tb_bow_csi2rx.sv`, `tb_bow_dphy_io_xusp.sv`, `sim/tb/tb_bow32.sv` (đường `cfg.phy_en` mới: `dut.u_csi2rx.u_csi2rx.cfg.phy_en`), file list, `Makefile` (lint), `timing_checks_cam.tcl` (CDC-11 giữa hai khối), `hw/ip/dphy_rx/fm` (`STEP=2`) | tương đương hình thức (Formality như bước 1, D8 sửa đổi, mục 0; luật đổi tên của bước 2 trong `hw/ip/dphy_rx/fm/equiv.tcl`): `bow_mipi_rx` so với `bow_csi2rx` cũ (cổng không đổi); controller chỉ cần PPI + một dải phụ đã liệt kê; dải phụ biến mất ở bước 4–5. **Xong** (bo Huins: `csi2_test` `test` PASS 17/17), kết quả dưới bảng |
 | 3 | **PPI BFM + bench controller**, hai chế độ thời gian: D-PHY Bow32 và PHY chuẩn qua wrapper cổng phẳng (mục 5.5) | mới: `hw/ip/csi2rx/dv/bow_ppi_bfm.sv`, `tb_csi2rx_ppi.sv`, `mutants_ppi.py`, `csi2_model.py gen --ppi` (lớp `Ppi`, `ppi_merge`, test `clkstop`, `gaps`, `lpmask`), wrapper cổng phẳng `hw/ip/csi2rx/rtl/bow_csi2rx_ppi_flat.sv` (không trong `csi2rx.f`); đổi: Makefile DV (`test` = `test-rx` + `test-ppi`, `run-ppi`, `mutants-ppi`; case của `test-rx` cũng chạy song song), `ci.yml` (bước `test-ppi`), `Makefile` (lint wrapper), `tools/tests/test_csi2_model.py`. Ở v1, BFM lái hoặc nối dải phụ (`band_lane_en_lp` theo `Enable` với độ trễ đồng bộ như D-PHY thật, để luật burst mất chạy như trên bo) và phát lỗi lp dạng xung ở `vid_clk_i` | hành vi controller định nghĩa ở mức PPI (khe, lệch lane, lỗi, clock dừng sớm) ở cả hai chế độ. DV nhanh hơn: **không đạt** (cùng case, cùng cách chạy song song, bench PPI không nhanh hơn bench cả bộ thu; chủ dự án quyết bỏ hay viết lại yêu cầu này, kết quả dưới bảng). **Xong** trong mô phỏng (không đổi RTL nào có sẵn: không cần Formality, PDI hay bo), kết quả dưới bảng |
-| 4 | **Tách thanh ghi + driver**, không alias: driver đọc `INFO[6]` (mục 6.3); RAW sang D-PHY; GPIO PA4/PA5/PB6/PB7 thành thanh ghi (`burst_rst_en_i` = ¬`CTRL.DES_RST_DIS`); công thức `SETTLE` thống nhất (mục 4.4) | mới: `bow_dphy_rx_regs.sv`, `bow_dphy_raw.sv` (nửa RAW của `bow_csi2_capture`), `sw/common/include/bow_dphy_rx.h` (tên `DPHY_*`), `sw/common/src/bow_dphy_rx.c`; đổi: `bow_csi2rx_regs.sv`, `bow_csi2_capture.sv`, `bow_mipi_rx.sv`, `bow_csi2rx.c`, `cam_sensor.c`, `csi2_test`, top camera Huins (bỏ bốn dây GPIO), `bow32_memmap.yaml` (mô tả), `sim/tb/tb_bow32.sv`, tài liệu | firmware mới chạy trên phần cứng mới; `SETTLE` từng bit như hôm nay (22 trên KV260 ở 912 Mbit/s, 200 MHz; `0x13` trên Huins); DV `be` phủ cửa sổ D-PHY. Kỳ vọng mô phỏng đổi, ghi trong PR: `csi2_274` so `TIM0` (`rd 40008c24` = `051e0213`) thay cho `rd 4000800c`, `csi2` (KV260) thêm phép so tương tự; dòng in của `phy` đổi từ "(PB6 PB7) … (PA4 PA5)" sang `AFE_STATUS` / `DLYn`; không còn kiểm PA5 (`des_rst` luôn bật); `phy reinit` đếm xung `reinit_i` thay cho xung PA4. Hành vi đổi theo ghi chú bước 2 (mục 10): lỗi LP của lane clock khi `CLK_CONT` = 1 và lỗi của một lane ở chu kỳ nó vừa tắt không còn vào `ERR_STATUS.LP` / `CNT_MISC[23:16]` của controller; aligner thôi bị reset khi RX tắt (DV `stop`) |
+| 4 | **Tách thanh ghi + driver**, không alias: driver đọc `INFO[6]` (mục 6.3); RAW sang D-PHY; GPIO PA4/PA5/PB6/PB7 thành thanh ghi (`burst_rst_en_i` = ¬`CTRL.DES_RST_DIS`); công thức `SETTLE` thống nhất (mục 4.4) | mới: `bow_dphy_rx_regs.sv`, `bow_dphy_raw.sv` (nửa RAW của `bow_csi2_capture`), `sw/common/include/bow_dphy_rx.h` (tên `DPHY_*`), `sw/common/src/bow_dphy_rx.c`; đổi: `bow_csi2rx_regs.sv`, `bow_csi2_capture.sv`, `bow_mipi_rx.sv`, `bow_csi2rx.c`, `cam_sensor.c`, `csi2_test`, top camera Huins (bỏ bốn dây GPIO), `bow32_memmap.yaml` (mô tả), `sim/tb/tb_bow32.sv`, tài liệu | firmware mới chạy trên phần cứng mới; `SETTLE` từng bit như hôm nay (22 trên KV260 ở 912 Mbit/s, 200 MHz; `0x13` trên Huins); DV `be` phủ cửa sổ D-PHY. Kỳ vọng mô phỏng đổi, ghi trong PR: `csi2_274` so `TIM0` (`rd 40008c24` = `051e0213`) thay cho `rd 4000800c`, `csi2` (KV260) thêm phép so tương tự; dòng in của `phy` đổi từ "(PB6 PB7) … (PA4 PA5)" sang `AFE_STATUS` / `DLYn`; không còn kiểm PA5 (`des_rst` luôn bật); `phy reinit` đếm xung `reinit_i` thay cho xung PA4. Hành vi đổi theo ghi chú bước 2 (mục 10): lỗi LP của lane clock khi `CLK_CONT` = 1 và lỗi của một lane ở chu kỳ nó vừa tắt không còn vào `ERR_STATUS.LP` / `CNT_MISC[23:16]` của controller; aligner thôi bị reset khi RX tắt (DV `stop`). **Xong** trong mô phỏng và build (chờ bo Huins), kết quả dưới bảng |
 | 5 | **Giao diện AFE + adapter:** `bow_dphy_rx` nói giao diện AFE (mã delay tĩnh + OWN, `des_rst` = ¬`clk_gate_en`, `pd`/`ready`, `hsrx_en`/`term_en` riêng); logic nạp tap và `des_rst` vào `bow_dphy_dly_xusp` / `bow_dphy_dly_xphy` (không primitive, chạy trong Verilator) bên trong hai adapter; bỏ `DlyVid`. Sáu nơi dùng `bow32_top` đổi trong cùng PR (hoặc giữ cổng cũ của `bow32_top` tới khi mọi nơi đã chuyển) | đổi: `bow_dphy_rx.sv`, `bow_dphy_io_xusp.sv`, `bow_dphy_io_versal.sv`, `csi2_tx_model.sv` (tên cổng AFE, núm `versal` giữ), sáu file dùng `bow32_top` (danh sách ở trên), `tb_bow_dphy_io_*.sv`, `Makefile` (lint mọi top); mới: `bow_dphy_dly_xusp.sv`, `bow_dphy_dly_xphy.sv`, stub UltraScale+ trong `hw/lint/` (`IDELAYE3`, `ISERDESE3`, `BUFGCE_DIV`, và `IBUFDS_DPHY` nếu stub Versal không khớp); XDC giữ tên instance | một RTL số cho hai họ FPGA; logic adapter vẫn trong CI; `make lint` phủ sáu top và `bow_dphy_io_xusp`; giao diện AFE hiện thực được bằng primitive; xsim mức chân + bo |
 | 6 | **D-PHY v1.x:** `T_INIT` (sau `ready` / `REINIT`), `HS_TMO`, `ESC_TMO`, `HSRX_EARLY`, `CLK_MISS_OFF`, `RxSkewCalHS` mọi lane, `CLK_TOG_DIV`, lỗi lp của PPI dạng bộ đếm gray (lấy mẫu ở clock của controller), ULPS, shadow + APPLY, bộ đếm gray phía bus, `CLK_LOST_EN`, LATE_EOT | đổi: `bow_dphy_rx*.sv`, `bow_dphy_lp.sv`, `bow_csi2rx.sv` (lấy mẫu bộ đếm gray); mới: `tb_bow_dphy_rx.sv` (máy phát mức bit), `hw/ip/dphy_rx/dv/Makefile`, bước CI trong `.github/workflows/ci.yml`, harness mutant (mục 8.3) | từng tính năng có test + mutant; mọi bit mới có reset = hành vi hôm nay, hai ngoại lệ có chủ ý (mục 4.12) |
 | 7 | **Controller ở clock liên tục (F7):** FIFO 2 clock sau ghép lane, packet/unpack ở `csi_clk` | đổi: `bow_csi2rx.sv`, `bow_csi2_lane_merge.sv`; mới: dấu cuối burst qua FIFO | FE và ngắt không phụ thuộc byte clock (test T_CLK-POST ngắn); timing FPGA đạt |
@@ -1817,6 +1839,114 @@ bullet cuối):
   một file như thế với 1 lane, nay build được và vào danh sách. Mô tả khe của `gaps` sửa
   thành tham số 0,4 / 0,75 (≈ 20 % / 38 % chu kỳ); mục 5.5 ghi bốn điều phần dựng PHY chuẩn mượn
   của D-PHY Bow32, điều kiện SKEW ở lệch ≥ 7 và giới hạn mốc thời gian ở 80 Mbit/s.
+
+**Bước 4: thanh ghi D-PHY riêng.** `bow_dphy_rx` có thanh ghi riêng (`bow_dphy_rx_regs`, miền bus,
+`u_dphy_rx/u_regs`) ở offset `0xC00` của cửa sổ `CSI2RX`: tập con v1 của mục 4.10
+([dphy_rx.md](dphy_rx.md)). `bow_mipi_rx` chia cửa sổ (`addr[11:10]` = 3 → D-PHY; hai khối grant
+ngay và trả lời một chu kỳ sau, nên phản hồi lấy từ khối có `rvalid`) và nối `irq_o` của D-PHY vào
+`IRQ_STATUS[5]` của controller. RAW sang D-PHY (`bow_dphy_raw`, `u_dphy_rx/u_raw`: nửa RAW của
+`bow_csi2_capture`, cùng flop word và cùng `arm` của lane 0), D-PHY đồng bộ reset của mình
+(`u_lrst` miền lp, `u_brst` miền byte, từ `rst_ni & lp_rst_ni`), sự kiện HS entry / lỗi LP về bus
+cho bộ đếm của nó (một `bow_cdc_pulse` mỗi lane và loại, như controller làm trước đó). Dải phụ bỏ
+hẳn: D-PHY che `ErrControl[l]` theo `lane_en` (enable đã đồng bộ) và `ErrControlClk` khi
+`CLK_CONT` (đã đồng bộ), đúng hai mặt nạ controller dùng ở bước 2–3, cùng chu kỳ, nên luật đánh
+dấu burst mất không đổi; controller chỉ còn OR của chúng. Controller: thanh ghi PHY cũ đọc 0
+(không alias), `INFO[6]` = 1 (tham số `DphyWin`; wrapper cổng phẳng: 0), `INFO[5]` = 0,
+`CNT_MISC` chỉ còn [31:24], `ERR_STATUS.LP` = OR các lỗi trên PPI. `DLYn.PEND` = OWN ∧ Q ≠ CODE
+(mục 4.10, v1) không cần bus ack mới: số ràng buộc bus skew giữ 9 / 11, cell mới chỉ là chỗ ở mới
+của req / ack RAW và yêu cầu / mã `DLYn`. Top camera Huins: `reinit_i` ← `reinit_o` (`CMD.REINIT`,
+xung 32 chu kỳ bus), `burst_rst_en_i` ← `burst_rst_en_o` (¬`CTRL.DES_RST_DIS`, 1 từ reset),
+`phy_status_o` → `AFE_STATUS[15:8]`, LED10 ← `AFE_STATUS.READY`; PA4…PA6 không ra chân, PB6 /
+PB7 đọc 0. Driver `bow_dphy_rx` (mục 6.4, v1), `bow_csi2rx` từ chối bitstream trước bước 4.
+Danh sách duyệt CDC không đổi (CDC-11 vẫn từ `u_csi2rx/u_regs/lane_en_q` của controller tới
+`u_dphy_rx/u_sync_vcfg`).
+
+**Kết quả bước 4 (2026-11-12)**, trên `21e16d6` (bước 3 gộp `main` `e56793f`), commit `0c4331c`
+(RTL), `e2f64d0` (phần mềm), `281f53e` (mô phỏng / DV), Verilator 5.020, Vivado 2025.2:
+
+- **`SETTLE`.** `tools/tests/test_dphy_settle.py` biên dịch `bow_dphy_rx_settle()` của
+  `bow_dphy_rx.h` bằng `cc` của máy host cùng hai công thức cũ: KV260 (107 ns + 24 UI) 912 Mbit/s,
+  200 MHz: 22 = `settle_cycles()` = 22 (`TIM0` `0x051E0216`); Huins (120 ns + 0 UI) 1440 Mbit/s:
+  `0x13` = `phy_cycles(95)` (`TIM0` `0x051E0213`); mô phỏng KV260 (108 MHz): 9 = 9; lưới lp clock
+  50–400 MHz × LP_FILTER 0/5/10/15 × lane rate 0 và 80 Mbit/s…2,5 Gbit/s (bước 7 Mbit/s, hơn
+  100 000 điểm): 0 điểm khác; Versal: 0x13 ở mọi lane rate như `SETTLE_VID_NS` = 95.
+- **DV.** `make -C hw/ip/csi2rx/dv test` 272/272 (`test-rx` 105 gồm unit test aligner, `test-ppi`
+  167); `SEEDS="1 … 10"` 434/434 (171 + 263); `mutants-ppi` 19/19 chết. So với bước 3 trên cùng
+  case (HEAD dựng lại trong một cây riêng): `out.txt` (pixel, `tuser`, `tlast`) của `test-rx` giống
+  từng byte ở 91/104 case, mọi case 1 và 2 lane; 13 case khác đều trên bộ thu 4 lane với PHY
+  Versal (lần ghi `DES_RST_DIS` đầu test đổi thời gian, nên trạng thái ngẫu nhiên của FIFO PHY khác;
+  khác ở dòng bị cắt / dừng mà mô hình cho phép mọi độ dài, mô hình kiểm đúng). Item TX chỉ đổi ở
+  `be` (một lỗi LP của lane 0 với RX tắt để kiểm W1C của D-PHY) và `dly` (re-init bằng
+  `CMD.REINIT`). Lỗi có từ trước, tìm thấy ở bước này: `deskew` và `loss` trên bộ thu 4 lane với
+  PHY Versal hỏng ở ~1/3 seed Verilator (trên `main`: 9/30 và 10/30, bước 4 trước khi sửa 14/30 và
+  11/30; directed test chỉ chạy seed 1): trễ FIFO trôi theo word glitch (`BurstRxRst` = 0) đưa cửa
+  sổ dò sync vào nhiễu HS-PREPARE, nơi luật leader của deskew không nhận burst deskew, còn mô hình
+  coi cửa sổ bắt đầu trong HS-zero. Hai test đó nay chạy không word glitch: 0/30 hỏng ở 4 lane, 2
+  trên 4, cả hai test (random vẫn có trôi). `clk` 4 lane hỏng 1/30 seed ở bước 4 (0/30 ở `main`):
+  một sync giả `00 B8` trong các word nhiễu ngay ở chu kỳ đầu của lần dò (lane 3, đoạn clock liên
+  tục), cùng loại cửa sổ bắt đầu trong nhiễu, hiếm; không sửa (seed 1 đạt).
+- **Hành vi đổi** (ghi chú bước 2): lỗi LP của lane clock khi `CLK_CONT` = 1: DV `loss` frame 16
+  (`ERR_STATUS.LP` = 0, `CNT_LPERR` +1, `ERR_LANE[16]`; trước bước 4 `ERR_STATUS.LP` và
+  `CNT_MISC[23:16]` đếm); aligner không bị reset khi RX tắt: DV `stop` (1, 2, 4, 2 trên 4 lane)
+  đạt, pixel của `stop` 1 và 2 lane giống từng byte bước 3; lỗi của data lane ở chu kỳ enable vừa
+  xuống: không test nào nhắm được chu kỳ đó bằng chuỗi LP, `bow_ppi_chk` kiểm ở mọi chu kỳ rằng
+  không có `ErrControl[l]` khi `Enable[l]` = 0 và không `ErrControlClk` khi `CLK_CONT`.
+- **Hệ thống.** `make test` 15/15. So với gốc của nhánh `21e16d6` (= `main` `e56793f` + bước 3,
+  chạy lại trong một cây riêng): 9 test không dùng firmware của bộ thu (`boot`, `load`, `break`,
+  `flash`, `irq`, `gpio`, `mkv`, `ddr`, `hyperram`) có log giống hệt, kể cả số chu kỳ, trừ số dòng
+  của `$finish` trong `tb_bow32.sv`; bốn luồng H.264 (`h264.hex`, `h264_rc.hex`, `h264_274a.hex`,
+  `h264_274b.hex`) giống từng byte. Kỳ vọng đổi: `csi2_274`: dòng `phy` (`phy: READY 1, every
+  nibble PHY_RDY 1 DLY_RDY 1, XPLL LOCKED 1 LOCKED_FB 1 (AFE_STATUS 00000f01), DES_RST_DIS 0`, trước
+  `phy: STATUS.PHY_RDY 1, ... (PB6 PB7), reinit 0 burstrst 0 (PA4 PA5)`), `phy reinit` (`phy: READY
+  40 us after CMD.REINIT`, đúng một xung `reinit_i`; trước `phy: PHY_RDY 40 us after the reinit
+  pulse`, xung PA4), sau `test quick` `DES_RST_DIS` = 0 và `rd 40008c24` = `051e0213` (trước PA5 = 1
+  và `rd 4000800c`): thanh ghi đã sang D-PHY; `csi2`: thêm `rd 40008c24` = `04100209` (`TIM0` của
+  mô phỏng KV260); `camera274`: `error: D-PHY not ready (AFE_STATUS.READY = 0)` (trước `(CSI2RX
+  STATUS.PHY_RDY = 0)`); `FW=brst0`: `DES_RST_DIS` = 1 và `-DDPHY_SETTLE_NS=140u` (SETTLE 23 =
+  115 ns; `csi2_274 brst0` của `test-extra` đạt). Dòng `phy-idle` đổi theo thanh ghi (`LANE_LP 03f
+  LANE_HS 00000` ở `csi2`, `LANE_LP 000 LANE_HS 00000` ở `csi2_274`; trước `STATUS 403f` /
+  `004000`). Khác nữa, không phải kỳ vọng: firmware `camera` / `csi2_test` / `video` lớn hơn 308 /
+  644 / 308 byte và đọc bộ đếm của hai khối, nên mọi thứ phụ thuộc thời gian của firmware đổi: số
+  chu kỳ (`camera` 15 472 414 → 15 495 059, `csi2` 9 400 680 → 9 485 995, `h264` 8 166 368 →
+  8 144 303, `camera274` 20 661 121 → 20 754 099, `csi2_274` 23 280 285 → 23 359 335, `video274`
+  13 899 003 → 13 900 313), số frame / burst trong các dòng `stat` và của testbench, `link-up
+  bursts 13/13` → `16/16` (số burst đếm được trong lúc chờ), số đo `timing` / byte clock, pha bit
+  và số word HS-zero của `raw` (trạng thái ngẫu nhiên của mô hình), điểm khoá của AE ở `camera274`
+  (`exp=60` → `65`).
+- **xsim.** `test-dphy` seed 1–3 đạt: 37 burst, 2977 / 2985 / 2967 byte clock như bước 2, RAW của
+  D-PHY khớp 46–51 byte sau sync mỗi lane, `DLYn` PEND tới burst sau; `test-dphy-versal` 25/25,
+  mới `reinit_pulse` (`reinit_i` 651 ns: `phy_rdy_o` xuống sau 3 chu kỳ, trễ trở về BISC).
+- **Kiểm tra khác.** `make lint`; `make test-tools` 207 test (1 bỏ qua: PyAV; 42 của mô hình
+  CSI-2, 3 của `SETTLE`); `make sw` không cảnh báo, 8 binary không dùng bộ thu giống từng byte
+  (`bootrom`, `ddr`, `flash_demo`, `gpio_demo`, `hello`, `hyperram`, `mkv`, `uart_irq`); `make
+  gen-check`; `test-cdc` 204 check; ISP DV 12/12, H.264 DV 8/8; `make -C sim test-extra` 9/9
+  (`csi2_274` corner 2, clock liên tục, `brst0`, `noglitch`; `camera274` corner 1, `brst0`;
+  `video274` corner 0; `geo274` 1080p, 720p).
+- **KV260 (không build, D1).** Netlist out-of-context của bộ thu ở `u_soc/u_csi2rx`, bản bước 3 và
+  bản bước 4, tham số KV260 và Huins: mọi `set_bus_skew` của bộ thu trong `kv260_cam.xdc` (7) và
+  `huins_vp1902_cam.xdc` (8; cái thứ 9 có phía XPHY, kiểm ở PDI) chọn cùng cell, cùng số
+  (9/9/20/4/4/4/4 và 10/10/20/4/4/4/4/44) sau các đổi chỗ đã biết (req RAW `u_csi2rx/u_regs` →
+  `u_dphy_rx/u_regs`, ack RAW `u_csi2rx/u_capture` → `u_dphy_rx/u_raw`, đích `u_sync_raw_*` vào
+  `u_dphy_rx`, 44 cell nguồn của `DLYn` → `u_dphy_rx/u_regs`), `bow32_bus_skew_checks` 0 lỗi.
+- **PDI camera Huins** (hw-station-1, `make -C hw/fpga/huins_vp1902 pdi CARD=cam ... JOBS=8`, 25,9
+  phút, từ đúng cây của `281f53e`: `git archive` cộng Ibex; một bản build trước từ snapshot có cùng
+  RTL / XDC / Tcl cho cùng mọi số): timing đạt, WNS +0,342 ns (đường recovery trong H.264, ngoài bộ
+  thu), WHS +0,017 ns, WPWS +0,231 ns; `clk_vid` +0,797 / +0,017 ns, `clk_sys` +3,761 / +0,040 ns,
+  byte clock +1,669 / +0,039 ns; bus skew 11/11 (+3,893 … +5,042 ns), `INFO: bus skew cells: 0
+  problems in 11 constraints`; kiểm tra clock / CDC 0 lỗi (mọi dòng nghiêm trọng thuộc danh sách
+  duyệt: CDC-10 12 = 1 H.264 + 11 chân CLR của bộ đồng bộ reset, CDC-11 4 enable lane, CDC-13 709 =
+  708 ISP + 1 cổng byte clock, CDC-1 245, CDC-4 4, CDC-14 18), sơ đồ nibble đạt, không có dòng
+  `CRITICAL WARNING` (Vivado: 0 critical warning). Sau route 39 657 LUT / 25 266 FF (bước 2:
+  39 393 / 25 171); bộ thu `bow_mipi_rx` 2816 LUT / 3156 FF (bước 2: 2545 / 2967): `bow_dphy_rx`
+  1304 / 1405 (thanh ghi `u_regs` 381 / 416, RAW `u_raw` 55 / 52), controller 1516 / 1751 (thanh
+  ghi 510 / 659); phần tăng là bộ đếm 32 bit, cửa sổ thanh ghi thứ hai và các bộ đồng bộ sự kiện
+  của D-PHY.
+- **Formality.** Không chạy ở bước 4: bản đồ thanh ghi và cổng bus đổi, nên không có phép so tương
+  đương ở cổng. Phần không đổi được chứng minh bằng cách khác: file của datapath pixel (ghép lane,
+  packet, unpack, đầu ra, FIFO) và của aligner, máy LP giống từng byte bước 3; pixel của DV như
+  trên. Không chứng minh hình thức: rằng logic mới (thanh ghi, RAW, mặt nạ) đúng: phần đó là DV.
+- **Trên bo Huins:** chờ chủ bo (lệnh và kết quả mong đợi đã chuẩn bị); KV260 không build và
+  không chạy trên bo (D1).
 
 Bước 1–3 không đổi hành vi (refactor; bước 1–2 chứng minh bằng tương đương hình thức, cả hai bằng
 Formality, D8 sửa đổi, mục 0; bước 3 chỉ thêm DV và một wrapper không nằm trong bản build nào);
