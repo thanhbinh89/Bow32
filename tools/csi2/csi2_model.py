@@ -22,9 +22,9 @@ Command line (used by hw/ip/csi2rx/dv):
            ovf, stop, byteclk, eye, skew, deskew, extra, loss, ovf2, ovf8, be, rxoff,
            dly, raw (directed tests, see gen_<name>; dly needs --versal, raw --versal
            with 4 lanes). --versal:
-           receiver built with DlyVid = 1 and the Versal XPHY model of
+           receiver built with AfeKind = 2 and the Versal XPHY model of
            csi2_tx_model (RX FIFOs with a latency that the stale words of the
-           previous burst, rx_valid gaps and glitch words change, PHY ready
+           previous burst, hs_valid gaps and glitch words change, PHY ready
            after a delay, input delays in the video clock domain starting at
            the BISC taps), byte clock 180 MHz (1.44 Gbit/s per lane);
            --burst-rst: BurstRxRst of that PHY (0, the shipped default: the
@@ -73,9 +73,11 @@ Determinism (the generator only creates what the checker can predict):
     averaged over a line period everywhere else);
   * bytes after a complete packet in its burst (CTRL.EXTRA): the burst sends
     either none, or more than CTRL.EXTRA beyond what any trail gives;
-  * input delay loads (DlyVid = 1): writes to the same DLYn are separated by
-    at least two other bus accesses or a time step, else the number of loads
-    is not predicted (the receiver may merge requests within 16 video cycles).
+  * input delay loads (Versal AFE): a DLYn write loads when it raises OWN or
+    changes the code (the AFE delay protocol of step 5); loading writes to the
+    same DLYn are separated by at least two other bus accesses or a time step,
+    else the number of loads is not predicted (the adapter's logic merges a
+    change into a load still pending).
   * PPI rendering (--ppi): the trail a lane delivers after its bytes stays
     within the bound above, every lane delivers the bytes of the last merged
     word, the lane merge decides like the model (the exact rule: a lane FIFO
@@ -109,7 +111,8 @@ REG = {
     "DLY1": 0x074, "DLY2": 0x078, "DLY3": 0x07C, "LOG_CTRL": 0x080, "RAW_CTRL": 0x084,
     "LOG": 0x400, "RAW": 0x800,
     "DPHY_ID": 0xC00, "DPHY_INFO": 0xC04, "DPHY_INFO2": 0xC08, "DPHY_CTRL": 0xC0C,
-    "DPHY_CMD": 0xC10, "DPHY_AFE_STATUS": 0xC18, "DPHY_TIM0": 0xC24, "DPHY_LANE_LP": 0xC30,
+    "DPHY_CMD": 0xC10, "DPHY_AFE_CTRL": 0xC14, "DPHY_AFE_STATUS": 0xC18, "DPHY_TIM0": 0xC24,
+    "DPHY_LANE_LP": 0xC30,
     "DPHY_LANE_HS": 0xC34, "DPHY_IRQ_STATUS": 0xC3C, "DPHY_IRQ_EN": 0xC40,
     "DPHY_ERR_STATUS": 0xC44, "DPHY_ERR_LANE": 0xC48, "DPHY_BYTECLK": 0xC4C,
     "DPHY_CNT_BURST0": 0xC50, "DPHY_CNT_BURST1": 0xC54, "DPHY_CNT_BURST2": 0xC58,
@@ -132,6 +135,7 @@ CTRL_PHY_EN, CTRL_RX_EN, CTRL_LANES, CTRL_VC_ANY = 1, 2, 4, 16
 DCTRL_CLK_CONT, DCTRL_DES_RST_DIS = 2, 0x40
 DCTRL_MASK = DCTRL_CLK_CONT | DCTRL_DES_RST_DIS
 DCMD_REINIT, DCMD_CNT_CLR = 2, 8
+DAFE_PD = 1                     # AFE_CTRL.PD (step 5)
 DIRQ_ERR, DIRQ_RAW = 1, 8
 DERR_CONTROL = 4
 DLY_PEND, DLY_OWN = 1 << 15, 1 << 31
@@ -642,14 +646,16 @@ class Receiver:
         self.log_ram = [0] * 64
         self.log = Capture()
         self.raw = Capture()
-        # Input delays. DlyVid = 0: a tap is loaded at the next byte clock
-        # (the first one also after a reset); a write while the byte clock
-        # runs loads it at once, CNTVALUEOUT reaches DLYn[24:16] a few cycles
-        # later (dly_cdc). DlyVid = 1 (Versal PHY): the PHY shows its BISC taps
-        # once ready, every DLYn write loads its tap without a byte clock
-        # (settled at the next time step).
-        self.dly_vid = bool(cfg.get("dly_vid", 0))
+        # Input delays (the AFE delay protocol of step 5: static codes, OWN). UltraScale+
+        # (AfeKind 1): a code is loaded at the next byte clock; a write while the byte clock
+        # runs loads it at once, CNTVALUEOUT reaches DLYn[24:16] a few cycles later
+        # (dly_cdc). Versal (AfeKind 2): the PHY shows its BISC taps once ready, a DLYn
+        # write that raises OWN or changes the code loads it without a byte clock (settled
+        # at the next time step).
+        self.afe_kind = cfg.get("afe_kind", 1)
+        self.dly_vid = self.afe_kind == 2              # the delays in the video clock domain
         self.phy_rdy = not cfg.get("versal", 0)
+        self.afe_pd = False                            # AFE_CTRL.PD
         self.dly = [0] * MAX_LANES
         self.dly_out = [0] * MAX_LANES
         self.own = [False] * MAX_LANES      # DLYn.OWN: written while the PHY was ready
@@ -683,7 +689,7 @@ class Receiver:
         self.skew_exact = not cfg.get("versal", 0) or \
             not (cfg.get("v_lat_lane", 0) or cfg.get("v_gap_pm", 0))
         self.garbage_max = tr_bytes * cfg["lanes"]
-        self.dly_loads = [0] * MAX_LANES     # load requests of this segment (DlyVid = 1)
+        self.dly_loads = [0] * MAX_LANES     # loads of this segment (Versal AFE)
         self.dly_loads_ok = True             # ... all predictable
         # PPI bench (cfg 'ppi'): the D-PHY's PPI and band events of the items, in order,
         # for the rendering (Ppi): ("hs", i) HS entry, ("err", i) LP error of lane FSM i
@@ -833,7 +839,7 @@ class Receiver:
             self.see(CLK, "11")
 
     def byte_clock(self):
-        """The byte clock runs: IDELAY loads (DlyVid = 0), pending capture
+        """The byte clock runs: IDELAY loads (UltraScale+ AFE), pending capture
         requests. (PPI bench: no input delays.)"""
         if self.phy_en:
             if not self.dly_vid and not self.ppi:
@@ -845,19 +851,19 @@ class Receiver:
                     cap.started = not (cap is self.log and cap.mode & 2)
 
     def time_step(self, sure=True):
-        """Time may pass (wait, delay, poll, waitbyte, waitphy, knob): DlyVid = 1
+        """Time may pass (wait, delay, poll, waitbyte, waitphy, knob): Versal AFE
         loads settle. sure: time does pass (not 'knob', which only waits while
-        the TX model is busy): CNTVALUEOUT of a DlyVid = 0 load has arrived."""
+        the TX model is busy): CNTVALUEOUT of an UltraScale+ load has arrived."""
         self.dly_settle.clear()
         self.dly_xfers = [99] * MAX_LANES
         if sure:
             self.dly_cdc = [False] * MAX_LANES
 
     def phy_reinit(self):
-        """CMD.REINIT of the D-PHY (reinit_o, the reinit knob of the Versal PHY model): the
-        Versal PHY restarts its init (PHY_RDY 0, no byte clock, CNTVALUEOUT 0, the loaded
-        codes lost: OWN 0); 'waitphy' then sees the BISC taps again. The UltraScale+ PHY has
-        no re-init."""
+        """CMD.REINIT of the D-PHY (cal_start of the AFE interface; AFE_CTRL.PD = 1 too, which
+        holds it): the Versal PHY restarts its init (PHY_RDY 0, no byte clock, CNTVALUEOUT 0,
+        the loaded codes lost: OWN 0); 'waitphy' then sees the BISC taps again. The
+        UltraScale+ PHY has no re-init and no power down."""
         if not self.cfg.get("versal", 0):
             return
         self.phy_rdy = False
@@ -1252,7 +1258,7 @@ class Receiver:
         self.dly_xfers = [min(x + 1, 99) for x in self.dly_xfers]
 
     def close_seg(self):
-        """Expected input delay loads of the current segment (DlyVid = 1)."""
+        """Expected input delay loads of the current segment (Versal AFE)."""
         if self.dly_vid:
             for l in range(self.dut_lanes):
                 self.seg_expect[self.seg][f"dly_loads{l}"] = \
@@ -1305,7 +1311,8 @@ class Receiver:
         dly = REG_NAME.get(a) in DLY_REGS
         if dly and not be & 3:
             return
-        if a in (REG["DPHY_CTRL"], REG["DPHY_TIM0"], REG["DPHY_IRQ_EN"]) or dly:
+        if a in (REG["DPHY_CTRL"], REG["DPHY_TIM0"], REG["DPHY_IRQ_EN"], REG["DPHY_AFE_CTRL"]) \
+                or dly:
             old = self.read(a, dphy=True).value
             old = old & 0x1FF if dly else old
             d = (old & ~m) | (d & m)
@@ -1327,6 +1334,12 @@ class Receiver:
             if d & DCMD_CNT_CLR:
                 for k in self.dcnt:
                     self.dcnt[k] = 0
+        elif a == REG["DPHY_AFE_CTRL"]:
+            # PD holds the Versal PHY in its init (pd of the AFE interface); 'waitphy' only
+            # after PD = 0 again
+            self.afe_pd = bool(d & DAFE_PD)
+            if self.afe_pd:
+                self.phy_reinit()
         elif a == REG["DPHY_IRQ_STATUS"]:
             self.dirq &= ~d
         elif a == REG["DPHY_IRQ_EN"]:
@@ -1338,18 +1351,21 @@ class Receiver:
         elif dly:
             lane = (a - REG["DPHY_DLY0"]) >> 2
             if lane < self.dut_lanes:
-                self.dly[lane] = d & 0x1FF
+                code = d & 0x1FF
+                # the AFE loads a code when OWN rises or the code changes (step 5), only while
+                # it is ready (OWN is set by a write while READY = 1)
+                load = self.phy_rdy and (not self.own[lane] or code != self.dly[lane])
+                self.dly[lane] = code
                 if self.phy_rdy:
                     self.own[lane] = True
-                if self.dly_vid:
-                    # one load request per write, loaded by the PHY once it is ready;
-                    # requests of a lane within ~16 video cycles may be merged
+                if self.dly_vid and load:
+                    # Versal: loads of a lane within ~16 video cycles may be merged
                     if self.dly_xfers[lane] < 2:
                         self.dly_loads_ok = False
                     self.dly_xfers[lane] = 0
                     self.dly_loads[lane] += 1
-                    if self.phy_rdy and not self.ppi:
-                        self.dly_out[lane] = self.dly[lane]
+                    if not self.ppi:
+                        self.dly_out[lane] = code
                         self.dly_settle.add(lane)
                 elif self.clk_running and self.byte_clock_ok():
                     self.byte_clock()
@@ -1450,7 +1466,7 @@ class Receiver:
                 return Expect("exact", 0)              # lanes 4..7
             return Expect("raw", (a - REG["DPHY_RAW"]) >> 3, a=self.raw.burst, b=self.lanes)
         dl = self.dut_lanes
-        afe = 2 if self.dly_vid else 1
+        afe = self.afe_kind
         n = REG_NAME.get(a)
         if n == "DPHY_ID":
             v = DPHY_ID_VALUE
@@ -1460,6 +1476,8 @@ class Receiver:
             v = 0x00080078 if afe == 2 else 0x0000186B
         elif n == "DPHY_CTRL":
             v = self.dctrl
+        elif n == "DPHY_AFE_CTRL":
+            v = int(self.afe_pd)
         elif n == "DPHY_AFE_STATUS":
             # READY, the status of the PHY model ({4{phy_rdy}}, tb_bow_csi2rx) in [15:8]
             v = 0x0F01 if self.phy_rdy else 0
@@ -1907,7 +1925,7 @@ class Ppi:
 DEFAULT_CFG = {
     "test": "random", "seed": 1, "lanes": 2, "dut_lanes": 2, "contclk": 0, "byte_ps": 8772,
     "vid_ps": 5000, "cpu_ps": 20000, "phy_hz": 200_000_000, "fifo_depth": 256,
-    "lp00": 0, "runt": 0, "byteclk": 0,
+    "lp00": 0, "runt": 0, "byteclk": 0, "afe_kind": 1,
     "t_lpx": 60, "t_hs_prepare": 60, "t_hs_zero": 150, "t_hs_trail": 70, "t_hs_exit": 110,
     "t_clk_prepare": 60, "t_clk_zero": 300, "t_clk_pre": 20, "t_clk_post": 120,
     "t_clk_trail": 70, "t_lp11_next": 120,
@@ -1915,9 +1933,9 @@ DEFAULT_CFG = {
     "eye2_lo": 0, "eye2_hi": 511, "eye3_lo": 0, "eye3_hi": 511,
 }
 
-# Versal PHY (--versal): receiver DlyVid = 1, TX model PHY emulation (csi2_tx_model.sv)
+# Versal PHY (--versal): receiver AfeKind = 2, TX model PHY emulation (csi2_tx_model.sv)
 VERSAL_CFG = {
-    "versal": 1, "dly_vid": 1, "t_phy_rdy": 3000, "t_reinit": 2000, "byte_ps": 5556,
+    "versal": 1, "afe_kind": 2, "t_phy_rdy": 3000, "t_reinit": 2000, "byte_ps": 5556,
     "bisc0": 97, "bisc1": 112, "bisc2": 88, "bisc3": 120,
     "v_burst_rst": 0, "v_lat_lane": 0, "v_glitch_pct": 20, "v_gap_pm": 0,
 }
@@ -1935,7 +1953,8 @@ DUMP_REGS = ["ID", "INFO", "CTRL", "STATUS", "IRQ_STATUS", "IRQ_EN", "ERR_STATUS
 DUMP_REGS4 = ["CNT_SOT23", "CNT_BURST23", "DLY2", "DLY3", "DPHY_CNT_BURST2", "DPHY_CNT_BURST3",
               "DPHY_DLY2", "DPHY_DLY3"]
 # unmapped offsets and registers of later steps: read 0 (the old RAW at 0x800, the D-PHY's
-# AFE_CTRL, TIM1, LANE_STOP, CNT_BURST4, DLY4, LANE_MAP, RAW lanes 4..7)
+# TIM1, LANE_STOP, CNT_BURST4, DLY4, LANE_MAP, RAW lanes 4..7); and the D-PHY's AFE_CTRL
+# (step 5): PD, 0 at every dump (the tests that set it clear it again)
 DUMP_ZERO = (0x088, 0x0FC, 0x300, 0x800, 0x8FC, 0xC14, 0xC28, 0xC38, 0xC60, 0xC90, 0xD04, 0xE04,
              0xFFC)
 
@@ -2404,7 +2423,7 @@ def gen_clk(g):
 def gen_cmd(g):
     """CPU -> byte domain commands while the byte clock is stopped (LOG ARM
     twice, RAW ARM of the D-PHY, DLY write), then traffic; all LOG modes; RAW
-    NOW. (DlyVid = 1: the DLY writes load at once, without a byte clock. PPI
+    NOW. (Versal AFE: the DLY writes load at once, without a byte clock. PPI
     bench: no D-PHY, its window reads 0, no RAW capture to wait for.)"""
     dl = g.cfg["dut_lanes"]
     dlys = DLY_REGS[:max(2, dl)]
@@ -2656,7 +2675,7 @@ def gen_byteclk(g):
 
 def gen_eye(g):
     """Input delay taps: outside the eye (TX knob) the link fails; after loading
-    good taps (DlyVid = 0: needs a burst) and a restart it is clean. Versal
+    good taps (UltraScale+ AFE: needs a burst) and a restart it is clean. Versal
     PHY: the link starts at the BISC taps (outside the eye here)."""
     dl = g.cfg["dut_lanes"]
     g.phy_up()
@@ -2724,11 +2743,16 @@ def gen_skew(g):
 
 
 def gen_dly(g):
-    """Versal PHY input delays (DlyVid = 1): READY and CNTVALUEOUT = 0 before
-    the PHY init, the BISC taps after it (no load after reset, OWN 0), one load
-    per DLYn write without a byte clock (also with RX off), close writes to one
-    lane (merged or not: the last tap wins), traffic in between; then a PHY
-    re-init with CMD.REINIT (OWN cleared, BISC taps again)."""
+    """Versal PHY input delays (the AFE delay protocol of step 5: static codes and
+    OWN, the loads by the adapter's logic): READY and CNTVALUEOUT = 0 before the
+    PHY init, the BISC taps after it (no load after reset, OWN 0), one load per
+    DLYn write that raises OWN or changes the code, without a byte clock (also
+    with RX off), close writes to one lane (merged or not: the last tap wins),
+    traffic in between; then a PHY re-init with CMD.REINIT (cal_start: OWN
+    cleared, BISC taps again); then a write of the code in use (OWN already 1:
+    no load), AFE_CTRL.PD (pd: the PHY held in its init, READY 0, OWN 0, until
+    PD = 0, then the BISC taps again) and the same codes written once more (OWN
+    rises: loaded again)."""
     if not g.cfg.get("versal"):
         raise SystemExit("test dly needs --versal")
     dl = g.cfg["dut_lanes"]
@@ -2784,6 +2808,38 @@ def gen_dly(g):
     for n in DLY_REGS[:dl]:
         g.rd(n)
     frame(g, 0, DT_RAW10, 32, 2, fnum=4)
+    # step 5: the code in use written again loads nothing; after AFE_CTRL.PD (READY falls,
+    # OWN cleared) the same code loads again
+    g.mark()
+    taps = [r.randrange(512) for _ in range(dl)]
+    for l in range(dl):
+        g.wr(DLY_REGS[l], taps[l])                   # OWN rises: one load each
+        g.rd("ID")
+    g.emit("delay 300")
+    for l in range(dl):
+        g.wr(DLY_REGS[l], taps[l])                   # the code in use: no load
+        g.rd("ID")
+    g.emit("delay 300")
+    for n in DLY_REGS[:dl]:
+        g.rd(n)
+    g.wr("DPHY_AFE_CTRL", DAFE_PD)                   # pd: the PHY held in its init
+    g.emit("delay 300")
+    g.rd("DPHY_AFE_CTRL")
+    g.rd("DPHY_AFE_STATUS")
+    for n in DLY_REGS[:dl]:
+        g.rd(n)                                      # OWN 0, CNTVALUEOUT 0
+    g.wr("DPHY_AFE_CTRL", 0)
+    g.phy_up()
+    g.rd("DPHY_AFE_STATUS")
+    for n in DLY_REGS[:dl]:
+        g.rd(n)                                      # BISC taps again
+    for l in range(dl):
+        g.wr(DLY_REGS[l], taps[l])                   # OWN rises: the same code loads again
+        g.rd("ID")
+    g.emit("delay 300")
+    for n in DLY_REGS[:dl]:
+        g.rd(n)
+    frame(g, 0, DT_RAW10, 32, 2, fnum=5)
     g.dump(log=False)
 
 
@@ -3263,7 +3319,9 @@ def gen_be(g):
     bytes that differs from the register, each read back at once: only the
     enabled bytes change, W1C bits outside them stay, LOG/RAW ARM, CNT_CLR and
     the D-PHY's CMD need byte 0; CNT_CLR also clears CNT_EXT; a DLYn write
-    without byte 0 or 1 changes nothing (no load with DlyVid = 1). The
+    without byte 0 or 1 changes nothing (no load with the Versal AFE); the
+    D-PHY's AFE_CTRL.PD only with byte 0 (and set once on the UltraScale+ AFE,
+    which has no power down: READY stays 1). The
     controller's old PHY registers (PHY_CFG, DLYn) take no write."""
     g.phy_up()
     ctrl = on(g)
@@ -3316,6 +3374,13 @@ def gen_be(g):
     g.wrbe("DPHY_CTRL", dctrl ^ 0xFFFFFF02, 0x1)     # CLK_CONT toggled
     g.rd("DPHY_CTRL")
     g.wr("DPHY_CTRL", dctrl)
+    g.wrbe("DPHY_AFE_CTRL", 0xFFFFFFFF, 0xE)         # PD is in byte 0: no change
+    g.rd("DPHY_AFE_CTRL")
+    if not g.cfg.get("versal"):
+        g.wrbe("DPHY_AFE_CTRL", 0xFFFFFF01, 0x1)     # PD: the UltraScale+ AFE stays ready
+        g.rd("DPHY_AFE_CTRL")
+        g.rd("DPHY_AFE_STATUS")
+        g.wr("DPHY_AFE_CTRL", 0)
     g.wr("DPHY_IRQ_EN", DIRQ_ERR | DIRQ_RAW)
     g.wrbe("DPHY_IRQ_EN", 0x00000000, 0x2)           # byte 0 not written: stays 0x09
     g.rd("DPHY_IRQ_EN")
@@ -3812,7 +3877,7 @@ def cmd_gen(args):
             raise SystemExit(f"test {args.test} does not run with --ppi {args.ppi}")
         cfg["ppi"] = PPI_MODES[args.ppi]
         # 4 lanes at the 180 MHz byte clock of the Huins camera build (the input delays,
-        # DlyVid, are the D-PHY's since step 4: none in this bench)
+        # the delays, are the D-PHY's since step 4: none in this bench)
         if cfg["dut_lanes"] == 4:
             cfg["byte_ps"] = 5556
     r = random.Random(f"cfg/{args.test}/{args.seed}/{args.lanes}/{args.contclk}")
@@ -3892,7 +3957,7 @@ def main():
     p.add_argument("--raw8", action="store_true", help="RAW8 lines (CTRL.DT 0x2A)")
     p.add_argument("--contclk", action="store_true", help="continuous clock lane")
     p.add_argument("--versal", action="store_true",
-                   help="Versal XPHY: receiver DlyVid = 1, TX model PHY emulation, 180 MHz byte clock")
+                   help="Versal XPHY: receiver AfeKind = 2, TX model PHY emulation, 180 MHz byte clock")
     p.add_argument("--burst-rst", type=int, choices=(0, 1), default=0,
                    help="BurstRxRst of the Versal PHY model (0: FIFOs restart only at the PHY init)")
     p.add_argument("--fifo-depth", type=int, default=256, help="FifoDepth parameter (pixel groups)")

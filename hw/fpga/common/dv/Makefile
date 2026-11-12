@@ -4,7 +4,8 @@
 # Pin level tests of the UltraScale+ I/O and clock wrappers in the Vivado
 # simulator with the unisim models (each testbench describes its stimulus and
 # its checks):
-#   tb_bow_dphy_io_xusp   KV260 D-PHY receive I/O (bow_dphy_io_xusp) + bow_mipi_rx
+#   tb_bow_dphy_io_xusp   KV260 D-PHY AFE adapter (bow_dphy_io_xusp with its logic
+#                         bow_dphy_dly_xusp) + bow_mipi_rx
 #   tb_bow_ddr_io_xilinx  DDR2/DDR3 pads (bow_ddr_io_xilinx) on bow_ddr_clk_xusp,
 #                         configurations DDR_IO_CFGS (below)
 #   tb_bow_ddr_clk_xusp   DDR clocks (bow_ddr_clk_xusp: three MMCME4_ADV, fine
@@ -18,9 +19,10 @@
 #                         clocks (bow_ddr_clk_versal, bow_hyperram_clk_versal:
 #                         two MMCME5 each, fine phase shift driven through
 #                         bow_mmcm_ps, lock-loss reset), configurations VCLK_CFGS
-#   tb_bow_dphy_io_versal Versal D-PHY receive I/O (bow_dphy_io_versal: IBUFDS_DPHY,
-#                         XPHY strobe mode, XPLL, BUFGCE; secureip XPHY model),
-#                         configurations DPHYV_CFGS
+#   tb_bow_dphy_io_versal Versal D-PHY AFE adapter (bow_dphy_io_versal: IBUFDS_DPHY,
+#                         XPHY strobe mode, XPLL, BUFGCE, with its logic
+#                         bow_dphy_dly_xphy; secureip XPHY model), configurations
+#                         DPHYV_CFGS
 #
 #   make test                 all of them: D-PHY, DDR and HyperRAM pads with every
 #                             seed of SEEDS, DDR clocks, Versal clocks and the Versal
@@ -172,6 +174,7 @@ check-tools:
 $(BUILD)/files.txt: $(FLISTS) flist.py
 	@mkdir -p $(BUILD)
 	$(PYTHON) flist.py $(FLISTS) > $@
+	echo $(REPO)/hw/fpga/common/rtl/bow_dphy_dly_xusp.sv >> $@
 	echo $(REPO)/hw/fpga/common/rtl/bow_dphy_io_xusp.sv >> $@
 
 # The snapshot is rebuilt when a file list, a source or WAVES changes.
@@ -364,21 +367,23 @@ test-vclk: check-tools $(foreach c,$(VCLK_CFGS),$(call vclk_snap,$(c)))
 #   base             synthetic plan 0 (the RTL defaults: strobe local, inter-nibble,
 #                    inter-byte both ways), 3 bursts, tap loads, merge / spacing contract
 #   rden0 envtc_late the options RdenReg = 0, EnVtcEarly = 0
-#   burstrst         burst_rst_en_i = 1 from reset
+#   burstrst         des_rst_i = ~gate from reset (the D-PHY's CTRL.DES_RST_DIS = 0; the other
+#                    configurations: des_rst_i = 0, as DES_RST_DIS = 1)
 #   skew80 sweep     80 ps lane skew steps; tap sweep 0..511 (one burst per tap)
 #   contclk          continuous clock lane, HS receiver on from reset (strobe toggles
 #                    during BISC); contclk_late: HS turned on after phy_rdy
 #   glitch           glitches on the clock lane at HS entry, glitch_burstrst with
-#                    burst_rst_en_i = 1
+#                    des_rst_i = ~gate
 #   vtmode           merge of two requests in the first (VTC) wait
 #   p1*, p2*         plan 1 (two nibbles), plan 2 (inter-byte and inter-nibble chains, 6 -> 8)
-#   burstrst_on      burst_rst_en_i 0 -> 1 in the middle of a burst while streaming
-#   reinit_idle      reinit_i with the clock lane in LP-11, after tap loads (the taps
-#                    return to the BISC delays)
-#   reinit_toggle    reinit_i while the clock lane toggles in HS (BISC with a running
-#                    strobe), reinit_cont the same with the continuous clock
-#   reinit_pulse     reinit_i for 640 ns only: the pulse of the D-PHY's CMD.REINIT (32 cycles
-#                    of the 50 MHz bus clock, step 4 of docs/ip/mipi_rx_arch.md)
+#   burstrst_on      des_rst_i switched on (DES_RST_DIS 1 -> 0) in the middle of a burst while
+#                    streaming
+#   reinit_idle      pd_i = 1 for 2 us (the D-PHY's AFE_CTRL.PD) with the clock lane in LP-11,
+#                    after tap loads (the taps return to the BISC delays, OWN cleared)
+#   reinit_toggle    pd_i while the clock lane toggles in HS (BISC with a running strobe),
+#                    reinit_cont the same with the continuous clock
+#   reinit_pulse     cal_start_i for 640 ns only: the pulse of the D-PHY's CMD.REINIT (32
+#                    cycles of the 50 MHz bus clock; steps 4 and 5 of docs/ip/mipi_rx_arch.md)
 # One xsim library + snapshot directory per configuration in $(DPHYV_DIR)/<cfg>/, the run
 # in $(DPHYV_DIR)/<cfg>/run; rebuilt when a source or WAVES changes. DPHYV_RTL replaces
 # the PHY under test (a broken copy, say), DPHYV_DIR the output directory. Needs the
@@ -386,7 +391,8 @@ test-vclk: check-tools $(foreach c,$(VCLK_CFGS),$(call vclk_snap,$(c)))
 DPHYV_DIR  ?= $(BUILD)/dphy_versal
 DPHYV_RTL  ?= $(REPO)/hw/fpga/common/rtl/bow_dphy_io_versal.sv
 DPHYV_TOP  := tb_bow_dphy_io_versal
-DPHYV_SRCS  = $(DPHYV_RTL) $(CURDIR)/$(DPHYV_TOP).sv
+DPHYV_SRCS  = $(REPO)/hw/ip/common/rtl/bow_sync.sv $(REPO)/hw/ip/common/rtl/bow_sync_bus.sv \
+              $(REPO)/hw/fpga/common/rtl/bow_dphy_dly_xphy.sv $(DPHYV_RTL) $(CURDIR)/$(DPHYV_TOP).sv
 DPHYV_CFGS ?= base rden0 envtc_late burstrst skew80 sweep contclk contclk_late glitch \
               glitch_burstrst vtmode p1 p1_skew80 p1_contclk p1_glitch p2 p2_sweep p2_glitch \
               p2_vtmode burstrst_on reinit_idle reinit_toggle reinit_cont p2_reinit_toggle \

@@ -101,12 +101,13 @@ create_waiver -type METHODOLOGY -id {TIMING-3} -user bow32 \
 # The receiver's cells are selected by the tail of their hierarchical name, not by their
 # full path, so that a constraint follows its flops when the receiver's hierarchy changes
 # (docs/ip/mipi_rx_arch.md, section 10, step 1): cells with names of their own (byte clock
-# meter, synchronisers, tap load logic) by those names, the pixel FIFO, register file and
-# capture flops by their path below u_csi2rx (the controller) or u_dphy_rx (the D-PHY's
-# register file and RAW capture, step 4). Each tail selects the same cells as the full
-# path it replaced. Two cell groups of one side are a list of two selectors (not an OR in
-# one filter), so that Vivado warns about each one that matches nothing. tcl/build.tcl
-# also checks the cells of every constraint (hw/fpga/common/tcl/bus_skew_checks.tcl):
+# meter, synchronisers) by those names, the pixel FIFO, register file and capture flops by
+# their path below u_csi2rx (the controller) or u_dphy_rx (the D-PHY's register file and RAW
+# capture, step 4); the adapter's delay control (step 5) by its path below u_dphy. Each tail
+# selects the same cells as the full path it replaced. Two cell groups of one side are a
+# list of two selectors (not an OR in one filter), so that Vivado warns about each one that
+# matches nothing. tcl/build.tcl also checks the cells of every constraint
+# (hw/fpga/common/tcl/bus_skew_checks.tcl):
 # all in u_soc/u_csi2rx, u_soc/u_h264/u_out or u_dphy, every destination reached from
 # the sources, as many source as destination flops.
 set dphy_byte_skew [expr {$dphy_byte_period - 0.07}]
@@ -132,17 +133,18 @@ set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_captur
              -to   [get_cells -hierarchical -filter {NAME =~ */u_sync_log_ack/g_bit[*].u_sync/sync_q_reg[0]}] 5.0
 set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */u_dphy_rx/u_raw/raw_ack_o_reg[*]}] \
              -to   [get_cells -hierarchical -filter {NAME =~ */u_sync_raw_ack/g_bit[*].u_sync/sync_q_reg[0]}] 5.0
-# Input delay load requests (CsiDlyVid = 1, DLYn writes, CPU -> clk_vid): per lane a 2 bit
-# gray request counter and the 9 bit tap (CODE), written in the same CPU cycle, each through
-# a per-bit synchroniser; the CPU side is the D-PHY's register file (u_dphy_rx/u_regs) since
-# step 4. The video side takes the tap 2 cycles after it saw the last
-# counter change, so all these bits must arrive within one video period of each other
+# Input delay codes (DLYn CODE and OWN, CPU -> clk_vid): the AFE's dly_code / dly_own, static
+# levels of the D-PHY's register file (u_dphy_rx/u_regs), per lane 9 + 1 bits written in the
+# same CPU cycle, each through a per-bit synchroniser of the adapter's delay control
+# (u_dphy/u_dly, bow_dphy_dly_xphy, step 5; the D-PHY's request counter and tap
+# synchronisers up to step 4). The video side takes a value once it was the same in two
+# consecutive cycles, so all these bits must arrive within one video period of each other
 # (the clock groups leave their delays unbounded).
 set_bus_skew \
-  -from [list [get_cells -hierarchical -filter {NAME =~ */u_dphy_rx/u_regs/dly_req_q_reg[*]}] \
-              [get_cells -hierarchical -filter {NAME =~ */u_dphy_rx/u_regs/dly_code_q_reg[*]}]] \
-  -to   [list [get_cells -hierarchical -filter {NAME =~ */g_dly_vid.u_sync_req/g_bit[*].u_sync/sync_q_reg[0]}] \
-              [get_cells -hierarchical -filter {NAME =~ */g_dly_vid.u_sync_tap/g_bit[*].u_sync/sync_q_reg[0]}]] \
+  -from [list [get_cells -hierarchical -filter {NAME =~ */u_dphy_rx/u_regs/dly_code_q_reg[*]}] \
+              [get_cells -hierarchical -filter {NAME =~ */u_dphy_rx/u_regs/own_q_reg[*]}]] \
+  -to   [list [get_cells -hierarchical -filter {NAME =~ u_dphy/u_dly/u_sync_code/g_bit[*].u_sync/sync_q_reg[0]}] \
+              [get_cells -hierarchical -filter {NAME =~ u_dphy/u_dly/u_sync_own/g_bit[*].u_sync/sync_q_reg[0]}]] \
   $vid_period
 # Input delay readback (DLYn[24:16], clk_vid -> CPU): CNTVALUEOUT of the XPHYs (CTRL_CLK =
 # clk_vid; binary, and VT tracking may step it by a tap until the first load of the lane)

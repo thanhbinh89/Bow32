@@ -5,11 +5,14 @@
 
 As mutants_ppi.py, for logic that only the whole receiver (bow_mipi_rx: the D-PHY and the
 controller, tb_bow_csi2rx.sv with csi2_tx_model.sv) exercises: the RAW capture of the D-PHY
-(bow_dphy_raw in bow_dphy_rx, step 4 of docs/ip/mipi_rx_arch.md: no PPI bench sees it) and
-the controller's gate of the aligners' PPI events (ErrSotSyncHS, RxSkewCalHS) while its
-datapath is off. Each mutant is a copy of hw/ip/dphy_rx/rtl and hw/ip/csi2rx/rtl with one
-text substitution; it must make one case fail (simulation or model check). The cases are
-generated once with tools/csi2/csi2_model.py and first run on the RTL as it is.
+(bow_dphy_raw in bow_dphy_rx, step 4 of docs/ip/mipi_rx_arch.md: no PPI bench sees it), the
+controller's gate of the aligners' PPI events (ErrSotSyncHS, RxSkewCalHS) while its
+datapath is off, and the AFE interface of step 5 (des_rst, OWN, lprx_en of the D-PHY; the
+delay logic of the two FPGA adapters that csi2_tx_model runs: bow_afe_chk and the model's
+delay checks must see them). Each mutant is a copy of hw/ip/dphy_rx/rtl, hw/ip/csi2rx/rtl
+and the adapters' delay modules with one text substitution; it must make one case fail
+(simulation or model check). The cases are generated once with tools/csi2/csi2_model.py and
+first run on the RTL as it is.
 
     mutants_rx.py --build <dir> [--jobs N] [--every] [name ...]
 
@@ -26,20 +29,26 @@ from mutants_ppi import MODEL, REPO, TIMEOUT, VERILATOR, VERILATOR_ENV, run
 HERE = os.path.dirname(os.path.abspath(__file__))
 DPHY_RTL = os.path.join(REPO, "hw", "ip", "dphy_rx", "rtl")
 CSI_RTL = os.path.join(REPO, "hw", "ip", "csi2rx", "rtl")
-# dphy_rx.f, then csi2rx.f, in order
+AFE_RTL = os.path.join(REPO, "hw", "fpga", "common", "rtl")
+# dphy_rx.f, then csi2rx.f, in order, then the AFE adapters' logic that csi2_tx_model runs (as
+# AFE_DLY of the Makefile)
 FILES = [(DPHY_RTL, f) for f in ("bow_dphy_lp.sv", "bow_dphy_align.sv", "bow_dphy_raw.sv",
                                   "bow_dphy_rx_regs.sv", "bow_dphy_rx.sv")] + \
         [(CSI_RTL, f) for f in ("bow_csi2rx_pkg.sv", "bow_csi2_lane_merge.sv",
                                  "bow_csi2_packet.sv", "bow_csi2_unpack.sv", "bow_csi2rx_out.sv",
                                  "bow_csi2_capture.sv", "bow_csi2rx_regs.sv", "bow_csi2rx.sv",
-                                 "bow_mipi_rx.sv")]
+                                 "bow_mipi_rx.sv")] + \
+        [(AFE_RTL, f) for f in ("bow_dphy_dly_xusp.sv", "bow_dphy_dly_xphy.sv")]
 # as PARAMS_* of the Makefile: Lanes = 4 is the Huins receiver (Versal PHY model)
 PARAMS = {1: ["-GLanes=1"], 2: ["-GLanes=2"],
-          4: ["-GLanes=4", "-GDlyVid=1'b1", "-GFifoDepth=512"]}
+          4: ["-GLanes=4", "-GAfeKind=2", "-GFifoDepth=512"]}
 DPHY, CTRL = "bow_dphy_rx.sv", "bow_csi2rx.sv"
+LP, REGS = "bow_dphy_lp.sv", "bow_dphy_rx_regs.sv"
+XUSP, XPHY = "bow_dphy_dly_xusp.sv", "bow_dphy_dly_xphy.sv"
 
 # whole receiver cases: (test, lanes, Lanes parameter), seed 1, BurstRxRst 0 (as test-rx)
-CASES = [("raw", 4, 4), ("rxoff", 2, 2), ("rxoff", 4, 4), ("rxoff", 1, 1)]
+CASES = [("raw", 4, 4), ("rxoff", 2, 2), ("rxoff", 4, 4), ("rxoff", 1, 1), ("dly", 4, 4),
+         ("be", 2, 2)]
 
 # name, [(file, old text, new text, occurrences)]: every old text must occur that often
 MUTANTS = [
@@ -59,6 +68,25 @@ MUTANTS = [
                                     "      stale_q  <= '0;", 1)]),
     ("aligner_deskew_ungated", [(CTRL, "  assign dsk_ev = al_deskew[0] & ~stale_q[0];",
                                  "  assign dsk_ev = al_deskew[0];", 1)]),
+    # step 5, the AFE interface: des_rst one lp cycle after the gate (from its flop, not its
+    # next state); des_rst not held off by CTRL.DES_RST_DIS; OWN kept when READY falls (a
+    # restart of the AFE would keep a code it lost); lprx_en not following AFE_CTRL.PD
+    ("des_rst_late", [(LP, "      else         des_rst_q <= !ce_d && des_rst_en_i;",
+                       "      else         des_rst_q <= !ce_q && des_rst_en_i;", 1)]),
+    ("des_rst_dis_ignored", [(LP, "      else         des_rst_q <= !ce_d && des_rst_en_i;",
+                              "      else         des_rst_q <= !ce_d;", 1)]),
+    ("own_kept_not_ready", [(REGS, "    own_d      = ready_i ? own_q : '0;",
+                             "    own_d      = own_q;", 1)]),
+    ("lprx_en_without_pd", [(REGS, "      lprx_en_q <= !pd_d;", "      lprx_en_q <= 1'b1;", 1)]),
+    # the adapters' delay logic: the XPHY sequencer without the wait after RX_EN_VTC 1 -> 0,
+    # loading the code in use again (every stable cycle of an OWN lane); the IDELAYE3 loader
+    # never loading
+    ("xphy_no_vtc_wait", [(XPHY, "              wait_d[l] = 5'(VtcWait);",
+                           "              wait_d[l] = 5'd0;", 1)]),
+    ("xphy_reload_same_code", [(XPHY, "        req[l]    = stable[l] && own_s[l] && "
+                                "(!app_own_q[l] || (code_s[l] != app_code_q[l]));",
+                                "        req[l]    = stable[l] && own_s[l];", 1)]),
+    ("xusp_no_load", [(XUSP, "        load_d[l]   = 1'b1;", "        load_d[l]   = 1'b0;", 1)]),
 ]
 
 
@@ -92,6 +120,7 @@ def build_tb(d, lanes, files):
            "-F", os.path.join(REPO, "hw", "ip", "bus", "bus.f"), *files,
            os.path.join(HERE, "csi2_tx_model.sv"),
            os.path.join(REPO, "hw", "ip", "dphy_rx", "dv", "bow_ppi_chk.sv"),
+           os.path.join(REPO, "hw", "ip", "dphy_rx", "dv", "bow_afe_chk.sv"),
            os.path.join(HERE, "tb_bow_csi2rx.sv")]
     # one retry, as mutants_ppi.py (Verilator 5.020 can abort at its exit after a good build)
     for _ in range(2):

@@ -2,24 +2,27 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // MIPI D-PHY receive I/O on AMD Versal XPIO banks: the Versal twin of
-// bow_dphy_io_xusp, the board level half of the Bow32 CSI-2 receiver
-// (bow_mipi_rx with DlyVid = 1). No vendor D-PHY or Advanced I/O Wizard IP:
-// the IBUFDS_DPHY, XPHY (native mode), XPLL and BUFGCE primitives are
-// instantiated here. Used by the Huins MFP-VP1902 camera build (IMX274,
+// bow_dphy_io_xusp, the AFE adapter of the Bow32 receiver on Versal
+// (docs/ip/mipi_rx_arch.md, section 3.7; its ports are the AFE interface of section 3.2,
+// the signals this adapter has, connected to bow_mipi_rx built with AfeKind = 2). No vendor
+// D-PHY or Advanced I/O Wizard IP: the IBUFDS_DPHY, XPHY (native mode), XPLL and BUFGCE
+// primitives are instantiated here. Used by the Huins MFP-VP1902 camera build (IMX274,
 // 4 lanes x 1440 Mbit/s, hw/fpga/huins_vp1902, docs/camera_huins.md).
 //
 //   clock lane IBUFDS_DPHY -HSRX_O-> XPHY[strobe] DATAIN[0]   (DQS_SRC LOCAL)
 //                                      | PCLK/NCLK_NIBBLE_OUT -> pair nibble   (inter-nibble)
 //                                      | CLK_TO_LOWER/UPPER   -> nibble +-2    (inter-byte)
-//                                      +- FIFO_WR_CLK (strobe / 4) -> BUFGCE (CE = byte_ce_i)
-//                                                                   -> byte_clk_o
+//                                      +- FIFO_WR_CLK (strobe / 4) -> BUFGCE (CE = clk_gate_en_i)
+//                                                                   -> hs_byte_clk_o
 //   data lane  IBUFDS_DPHY -HSRX_O-> XPHY[n] DATAIN[s] -> input delay -> 1:8 -> 8 deep FIFO
-//              -> Q<s> (FIFO_RD_CLK = byte_clk_o) -> capture flop (BLI) -> rx_data_o
+//              -> Q<s> (FIFO_RD_CLK = hs_byte_clk_o) -> capture flop (BLI) -> hs_data_o
 //   all lanes  LPRX_O_P/N ---------------------------------------------------> lp_o (async)
 //   XPLL       pll_clkin_i x 15 / 1 = VCO 3000 MHz, CLKOUTPHY / 2 = 1500 MHz = PLL_CLK of
 //              every nibble of the bank (BISC, delay calibration, VT tracking; the capture
 //              itself runs on the strobe)
-//   ctrl_clk_i free running: CTRL_CLK of every nibble, init sequencer, input delay control
+//   ctrl_clk_i free running: CTRL_CLK of every nibble, init sequencer, u_dly
+//   u_dly      bow_dphy_dly_xphy (no primitive): input delay control from dly_code /
+//              dly_own, RX_RST of the data slices from des_rst
 //
 // Why the XPHY: Versal XPIO has no ISERDES component; XP IOL component mode only reaches
 // ~250 Mbit/s, so 1.44 Gbit/s needs the XPHY in native strobe mode. The clock lane is the
@@ -27,41 +30,45 @@
 // dedicated wires, which never leave the XPIO bank. All five pairs must therefore be in
 // one bank, the clock lane on an XCC pin "N<k>P0" (in practice a GC/XCC pin).
 //
-// Ports, compared with bow_dphy_io_xusp (same pads, LP, HS enable and byte clock ports):
-//   * byte_clk_o: FIFO_WR_CLK of the strobe nibble through a BUFGCE in the bank's clock
+// AFE signals (section 3.7), compared with bow_dphy_io_xusp (same pads, LP, HS enables and
+// byte clock):
+//   * hs_byte_clk_o: FIFO_WR_CLK of the strobe nibble through a BUFGCE in the bank's clock
 //     region, 180 MHz at 1440 Mbit/s. Like the UltraScale+ byte clock it stops with the
-//     clock lane; byte_ce_i is its gate (CE_TYPE SYNC, bow_dphy_lp opens it in the static
+//     clock lane; clk_gate_en_i is its gate (CE_TYPE SYNC, the D-PHY opens it in the static
 //     HS-0 of the clock lane and closes it after the clock stopped).
-//   * byte_rst_i is not used (no ISERDES to align): see burst_rst_en_i.
-//   * rx_data_o[l]: byte_clk_o domain, bit 0 = first bit on the wire (D-PHY sends the
-//     LSB first: an aligned word is the byte); rx_valid_o[l] = 1: a new FIFO word this
-//     cycle (bow_mipi_rx advances the lane aligner only on valid words). FIFO latency 2-3
+//   * hs_data_o[l]: hs_byte_clk_o domain, bit 0 = first bit on the wire (D-PHY sends the
+//     LSB first: an aligned word is the byte); hs_valid_o[l] = 1: a new FIFO word this
+//     cycle (the D-PHY advances the lane aligner only on valid words). FIFO latency 2-3
 //     byte clocks; when the strobe stops the FIFOs keep their last words, which come out
-//     first in the next burst, long before the SoT (harmless for the aligner).
-//   * clk_q_o: deserialised clock lane samples (diagnostics: 55 / aa while it toggles).
-//   * phy_rdy_o (ctrl_clk_i domain flop, asynchronous for the receiver): XPLL locked, BISC
-//     done, PHY_RDY of every nibble. phy_status_o = {PHY_RDY all, DLY_RDY all, XPLL
-//     LOCKED_FB, XPLL LOCKED}, synchronised to ctrl_clk_i.
-//   * dly_tap_i / dly_load_i / dly_tap_o are in the ctrl_clk_i domain (the XPHY loads and
-//     reads its delays on CTRL_CLK) and work without a byte clock. In the Huins camera top
-//     ctrl_clk_i = the SoC video clock, so bow_mipi_rx runs its tap logic with DlyVid = 1.
-//   * reinit_i / burst_rst_en_i: run-time knobs, see "Run-time knobs" below.
+//     first in the next burst, long before the SoT (harmless for the aligner), unless
+//     des_rst drained them (below).
+//   * clk_hs_samp_o: deserialised clock lane samples (diagnostics: 55 / aa while it toggles).
+//   * hsrx_en, term_en: HSRX_DISABLE = ~(hsrx_en | term_en) of the IBUFDS_DPHY (one pin for
+//     the HS receiver and the termination). lprx_en is not modelled (LPRX_DISABLE = 0).
+//   * ready_o (ctrl_clk_i domain flop, asynchronous for the D-PHY): XPLL locked, BISC done,
+//     PHY_RDY of every nibble. status_o = {4'b0, PHY_RDY all, DLY_RDY all, XPLL LOCKED_FB,
+//     XPLL LOCKED}, synchronised to ctrl_clk_i.
+//   * dly_code_i / dly_own_i / dly_q_o: the input delays, see below; they work without a
+//     byte clock. dly_q_o is CNTVALUEOUT (ctrl_clk_i domain).
+//   * pd_i, cal_start_i, des_rst_i: see "Power down, re-calibration, receive path reset".
 //
-// Input delays (bow_mipi_rx DlyVid = 1 contract):
-//   * The tap is the TOTAL input delay of the data P slice, including the alignment delay
-//     BISC added at init. After phy_rdy_o, dly_tap_o shows the BISC result (kept over
-//     voltage and temperature by VT tracking): software starts its eye sweep there and never
-//     loads a blind 0.
-//   * Nothing is loaded without a request. A request is dly_load_i[l] high for one cycle
-//     with the tap on dly_tap_i[l]; the tap is taken in that cycle. The first request of a
-//     lane after init puts the lane's slice into user mode (RX_EN_VTC = 0, "PL updates" in
-//     AM010) and loads VtcWait cycles later; then LD = 1 (CE = INC = RXTX_SEL = 0) for one
-//     cycle with CNTVALUEIN = tap. Loads of one lane are >= LdGap cycles apart (AM010: >= 3);
-//     a request that arrives while one is still pending replaces its tap (the newest value
-//     is loaded). Requests before phy_rdy_o are ignored. A fall of phy_rdy_o ends user mode
-//     (VT tracking again; a re-init, reinit_i or a loss of XPLL lock, restarts from the new
-//     BISC delay: the loaded taps are lost).
-//   * Tap size: AM010 only guarantees >= 625 ps for 512 taps (UI 694 ps at 1440 Mbit/s);
+// Input delays (u_dly = bow_dphy_dly_xphy, the AFE delay protocol of section 3.5):
+//   * The delay is the TOTAL input delay of the data P slice, including the alignment delay
+//     BISC added at init. After ready_o, dly_q_o shows the BISC result (kept over voltage
+//     and temperature by VT tracking): software starts its eye sweep there and never loads
+//     a blind 0.
+//   * Nothing is loaded while dly_own = 0. A lane loads when its dly_own rises or its
+//     dly_code changes while dly_own = 1 (static levels, synchronised in u_dly). The first
+//     load of a lane after init puts the lane's slice into user mode (RX_EN_VTC = 0, "PL
+//     updates" in AM010) and happens VtcWait cycles later; then LD = 1 (CE = INC = RXTX_SEL
+//     = 0) for one cycle with CNTVALUEIN = the code. Loads of one lane are >= LdGap cycles
+//     apart (AM010: >= 3); a change while a load is pending replaces its code (the newest
+//     value is loaded). Nothing is loaded before ready_o. A fall of ready_o ends user mode
+//     (VT tracking again; pd_i, cal_start_i or a loss of XPLL lock restart from the new BISC
+//     delay: the loaded codes are lost, and the D-PHY clears OWN). dly_own 1 -> 0 alone
+//     cannot return a lane to its BISC delay (INFO[30] = 0 of the D-PHY): the lane keeps its
+//     code.
+//   * Delay step: AM010 only guarantees >= 625 ps for 512 taps (UI 694 ps at 1440 Mbit/s);
 //     the simulation model steps ~2 ps per tap. UNVERIFIED on silicon.
 //
 // Nibble plan (parameters, checked at elaboration). Instance n = 0..NumNib-1 is one XPHY;
@@ -91,26 +98,30 @@
 //   EnVtcEarly 1: EN_VTC = 1 from reset on (AMD); 0: EN_VTC after DLY_RDY (AM010 sequence).
 //   RdenReg    1: FIFO_RDEN = ~FIFO_EMPTY registered once (AMD); 0: ~FIFO_EMPTY directly
 //              (AM010 text). Both decode every burst.
-//   BitRev     1 reverses rx_data_o, if the wire order ever turns out different.
+//   BitRev     1 reverses hs_data_o, if the wire order ever turns out different.
 //   FwdDqsLocal 1: DQS_SRC LOCAL on inter-nibble receivers (AMD and the default: EXTERN).
 //
-// Run-time knobs (asynchronous levels, two flop synchronisers to ctrl_clk_i here; 0 = the
-// AMD-like behaviour above): the questions only the silicon answers can be tried without a
-// rebuild. The Huins camera top drives them from the registers of the receiver's D-PHY
-// (step 4 of docs/ip/mipi_rx_arch.md; GPIO PA4 / PA5 before): reinit_i from CMD.REINIT, a
-// pulse of 32 bus clock cycles (640 ns at 50 MHz), burst_rst_en_i = ~CTRL.DES_RST_DIS, 1
-// from reset.
-//   reinit_i       1 holds the PHY in its init reset, the state after a loss of XPLL lock:
-//                  XPLL RST, XPHY RST / RX_RST / TX_RST, CLKOUTPHYEN 0, phy_rdy_o = 0, user
-//                  mode and pending loads cleared (the loaded taps are lost). Its release
+// Power down, re-calibration, receive path reset (the AFE controls of the D-PHY's register
+// file; GPIO PA4 / PA5 of the Huins camera top up to step 3, the reinit_i / burst_rst_en_i
+// knobs in step 4):
+//   pd_i, cal_start_i  asynchronous levels (bus clock flops of the D-PHY: AFE_CTRL.PD, 0
+//                  after reset on the FPGA, and CMD.REINIT, a pulse of 32 bus clock cycles =
+//                  640 ns at 50 MHz), each with a two flop synchroniser to ctrl_clk_i; either
+//                  one holds the PHY in its init reset, the state after a loss of XPLL lock:
+//                  XPLL RST, XPHY RST / RX_RST / TX_RST, CLKOUTPHYEN 0, ready_o = 0, user
+//                  mode and pending loads cleared (the loaded codes are lost). The release
 //                  runs the init sequence again: XPLL lock, BISC, VT tracking, e.g. to retry
 //                  BISC with the clock lane toggling (sensor streaming) if it did not
-//                  complete with the clock lane in LP-11.
-//   burst_rst_en_i 1: RX_RST of the used slices while byte_ce_i = 0, which drains the FIFOs
-//                  every burst: keeps the FIFO latency constant when glitches at HS entry
-//                  clock the strobe before the gate opens (simulation); 0: no per burst
-//                  reset (AMD). It only acts while the gate is closed, so it may change at
-//                  any time (RX_RST "does not reset the input delay", AM010).
+//                  complete with the clock lane in LP-11. pd only comes from AFE_CTRL.PD,
+//                  never from the receiver's Enable: a stop / start keeps the calibration.
+//   des_rst_i      the D-PHY's lp domain flop, ~clk_gate_en_i (0 while CTRL.DES_RST_DIS = 1,
+//                  a test bit; 1 from reset): RX_RST of the used slices from the cycle after
+//                  the gate closed to the cycle after it opened, which drains the FIFOs
+//                  every time the gate opens: keeps the FIFO latency constant when glitches
+//                  at HS entry clock the strobe before the gate opens (simulation, and the
+//                  board needs it). It only acts while the gate is closed (RX_RST "does not
+//                  reset the input delay", AM010). ctrl_clk_i must be the D-PHY's lp clock:
+//                  u_dly takes des_rst_i without a synchroniser (as byte_ce_i before).
 //
 // Implementation notes (Vivado 2025.2, xcvp1902-vsva6865-2MP-e-S):
 //   * synth_design / opt_design accept hand-instantiated XPHYs (implement_xphy_cores only
@@ -165,36 +176,37 @@ module bow_dphy_io_versal #(
   input  logic                  ctrl_clk_i,       // free running CTRL_CLK (Huins: video clock)
   input  logic                  ctrl_rst_ni,      // async assert, release synchronous to ctrl_clk_i
   input  logic                  pll_clkin_i,      // XPLL CLKIN (from a BUFG)
-  // run-time knobs, asynchronous levels (see "Run-time knobs" above; 0 = AMD-like)
-  input  logic                  reinit_i,         // 1: held in the init reset, 1 -> 0: init again
-  input  logic                  burst_rst_en_i,   // 1: RX_RST of the used slices while byte_ce_i = 0
-  // status, ctrl_clk_i domain
-  output logic                  phy_rdy_o,        // XPLL locked, BISC done, PHY_RDY of all nibbles
-  output logic [3:0]            phy_status_o,     // {PHY_RDY all, DLY_RDY all, LOCKED_FB, LOCKED}
-  // Bow32 D-PHY contract
-  output logic                  byte_clk_o,       // strobe FIFO_WR_CLK (HS clock / 4) via BUFGCE
-  input  logic                  byte_ce_i,        // BUFGCE CE (changes while the clock lane is static)
-  input  logic                  byte_rst_i,       // unused on Versal
+  // AFE interface (docs/ip/mipi_rx_arch.md section 3.2)
+  output logic                  hs_byte_clk_o,    // strobe FIFO_WR_CLK (HS clock / 4) via BUFGCE
+  output logic [Lanes-1:0][7:0] hs_data_o,        // hs_byte_clk_o domain, bit 0 = first bit
+  output logic [Lanes-1:0]      hs_valid_o,       // hs_byte_clk_o domain, new word this cycle
+  output logic [7:0]            clk_hs_samp_o,    // hs_byte_clk_o domain, clock lane samples
+  input  logic                  clk_gate_en_i,    // BUFGCE CE (changes while the clock lane is static)
+  input  logic                  des_rst_i,        // lp (= ctrl) domain flop: RX_RST while 1
   output logic [1:0]            clk_lp_o,         // clock lane LP {P, N}, async
-  input  logic                  clk_hs_en_i,      // 1: clock lane HS receiver on
   output logic [Lanes-1:0][1:0] lp_o,             // data lane LP {P, N}, async
-  input  logic [Lanes-1:0]      hs_en_i,          // 1: data lane HS receiver on
-  output logic [Lanes-1:0][7:0] rx_data_o,        // byte_clk_o domain, bit 0 = first bit
-  output logic [Lanes-1:0]      rx_valid_o,       // byte_clk_o domain, new word this cycle
-  output logic [7:0]            clk_q_o,          // byte_clk_o domain, clock lane samples
-  input  logic [Lanes-1:0][8:0] dly_tap_i,        // ctrl domain: total input delay to load
-  input  logic [Lanes-1:0]      dly_load_i,       // ctrl domain: one cycle load request
-  output logic [Lanes-1:0][8:0] dly_tap_o         // ctrl domain: CNTVALUEOUT of the lane slice
+  input  logic                  clk_lprx_en_i,    // not modelled (LP receivers always on)
+  input  logic [Lanes-1:0]      lprx_en_i,
+  input  logic                  clk_hsrx_en_i,    // clock lane HS receiver + termination on
+  input  logic [Lanes-1:0]      hsrx_en_i,        // (either enable: one pin, HSRX_DISABLE)
+  input  logic                  clk_term_en_i,
+  input  logic [Lanes-1:0]      term_en_i,
+  input  logic [Lanes-1:0][8:0] dly_code_i,       // asynchronous, static: the delay to load
+  input  logic [Lanes-1:0]      dly_own_i,        // asynchronous: the lane uses dly_code_i
+  output logic [Lanes-1:0][8:0] dly_q_o,          // ctrl domain: CNTVALUEOUT of the lane slice
+  input  logic                  pd_i,             // asynchronous: 1 holds the init reset
+  output logic                  ready_o,          // XPLL locked, BISC done, PHY_RDY of all nibbles
+  input  logic                  cal_start_i,      // asynchronous: a pulse runs the init again
+  output logic [7:0]            status_o          // {0, PHY_RDY all, DLY_RDY all, LOCKED_FB, LOCKED}
 );
 
   localparam int unsigned MaxNib = 4;
   localparam int unsigned RoleStrobe = 0, RoleNibble = 1, RoleByte = 2;
 
-  // Input delay control (ctrl_clk_i cycles): the wait after RX_EN_VTC 1 -> 0 before the
-  // first load of a lane (AM010 gives no number, the simulation model needs none:
-  // UNVERIFIED; 12 keeps the first load inside the receiver's 16 cycle request spacing, so
-  // every request of the DlyVid contract becomes its own load), and the minimum distance
-  // between two loads of a lane (AM010: >= 3)
+  // Input delay control (ctrl_clk_i cycles, u_dly): the wait after RX_EN_VTC 1 -> 0 before
+  // the first load of a lane (AM010 gives no number, the simulation model needs none:
+  // UNVERIFIED; 12 as up to step 4), and the minimum distance between two loads of a lane
+  // (AM010: >= 3)
   localparam int unsigned VtcWait = 12;
   localparam int unsigned LdGap   = 4;
 
@@ -356,7 +368,7 @@ module bow_dphy_io_versal #(
   ) u_clk_ibuf (
     .I            (clk_p),
     .IB           (clk_n),
-    .HSRX_DISABLE (~clk_hs_en_i),
+    .HSRX_DISABLE (~(clk_hsrx_en_i | clk_term_en_i)),
     .LPRX_DISABLE (1'b0),
     .HSRX_O       (clk_hs),
     .LPRX_O_P     (clk_lp_o[1]),
@@ -369,7 +381,7 @@ module bow_dphy_io_versal #(
     ) u_ibuf (
       .I            (data_p[l]),
       .IB           (data_n[l]),
-      .HSRX_DISABLE (~hs_en_i[l]),
+      .HSRX_DISABLE (~(hsrx_en_i[l] | term_en_i[l])),
       .LPRX_DISABLE (1'b0),
       .HSRX_O       (lane_hs[l]),
       .LPRX_O_P     (lp_o[l][1]),
@@ -383,8 +395,8 @@ module bow_dphy_io_versal #(
   // XPLL reset -> LOCKED_FB -> release RST / RX_RST / TX_RST -> 64 CTRL_CLK ->
   // CLKOUTPHYEN -> (EnVtcEarly = 0: wait DLY_RDY, then EN_VTC) -> PHY_RDY of all nibbles
   // for 16 cycles (PLL_CLK >= 500 MHz: wait PHY_RDY, not DLY_RDY) -> ready while PHY_RDY
-  // and LOCKED. A loss of LOCKED_FB takes the whole interface back to reset, and reinit_i
-  // holds it there (the release starts at the XPLL reset again).
+  // and LOCKED. A loss of LOCKED_FB takes the whole interface back to reset, and pd_i or
+  // cal_start_i holds it there (the release starts at the XPLL reset again).
   // BISC completes with the clock lane idle in LP-11 (xsim: ~38 us after the release; AM010
   // allows up to 1.3 ms in silicon) and with the clock lane toggling (xsim).
   // ---------------------------------------------------------------------------
@@ -404,7 +416,7 @@ module bow_dphy_io_versal #(
   end
 
   (* ASYNC_REG = "TRUE" *) logic [1:0] sync_lock_fb, sync_lock, sync_dly, sync_phy;
-  (* ASYNC_REG = "TRUE" *) logic [1:0] sync_reinit, sync_burst;
+  (* ASYNC_REG = "TRUE" *) logic [1:0] sync_pd, sync_cal;
 
   always_ff @(posedge ctrl_clk_i or negedge ctrl_rst_ni) begin
     if (!ctrl_rst_ni) begin
@@ -412,25 +424,26 @@ module bow_dphy_io_versal #(
       sync_lock    <= '0;
       sync_dly     <= '0;
       sync_phy     <= '0;
-      sync_reinit  <= '0;
-      sync_burst   <= '0;
+      sync_pd      <= '0;
+      sync_cal     <= '0;
     end else begin
       sync_lock_fb <= {sync_lock_fb[0], lock_fb_all};
       sync_lock    <= {sync_lock[0],    lock_all};
       sync_dly     <= {sync_dly[0],     dly_rdy_all};
       sync_phy     <= {sync_phy[0],     phy_rdy_all};
-      sync_reinit  <= {sync_reinit[0],  reinit_i};
-      sync_burst   <= {sync_burst[0],   burst_rst_en_i};
+      sync_pd      <= {sync_pd[0],      pd_i};
+      sync_cal     <= {sync_cal[0],     cal_start_i};
     end
   end
 
-  logic lock_fb_s, lock_s, dly_s, phy_s, reinit_s, burst_en_s;
+  // pd and cal_start each through a synchroniser of their own (no logic before one); either
+  // holds the init reset (reinit_s, the reinit_i knob of step 4)
+  logic lock_fb_s, lock_s, dly_s, phy_s, reinit_s;
   assign lock_fb_s  = sync_lock_fb[1];
   assign lock_s     = sync_lock[1];
   assign dly_s      = sync_dly[1];
   assign phy_s      = sync_phy[1];
-  assign reinit_s   = sync_reinit[1];
-  assign burst_en_s = sync_burst[1];
+  assign reinit_s   = sync_pd[1] | sync_cal[1];
 
   typedef enum logic [2:0] {
     SPllRst, SLock, SRelease, SDly, SPhy, SReady
@@ -450,7 +463,8 @@ module bow_dphy_io_versal #(
       en_vtc_q      <= EnVtcEarly;
       ready_q       <= 1'b0;
     end else if (reinit_s || ((seq_q != SPllRst) && (seq_q != SLock) && !lock_fb_s)) begin
-      // reinit_i, or a loss of XPLL lock: back to the XPLL reset (held while reinit_i = 1)
+      // pd / cal_start, or a loss of XPLL lock: back to the XPLL reset (held while
+      // pd_i or cal_start_i = 1)
       seq_q         <= SPllRst;
       cnt_q         <= '0;
       pll_rst_q     <= 1'b1;
@@ -493,24 +507,43 @@ module bow_dphy_io_versal #(
     end
   end
 
-  assign phy_rdy_o    = ready_q;
-  assign phy_status_o = {phy_s, dly_s, lock_fb_s, lock_s};
+  assign ready_o  = ready_q;
+  assign status_o = {4'h0, phy_s, dly_s, lock_fb_s, lock_s};
 
-  // burst_rst_en_i = 1: RX_RST (asynchronous, "does not reset the input delay", AM010) of
-  // the used slices while the byte clock gate is closed. RX_RST = the init reset OR this
-  // flop, two flops of one domain: the burst term is 0 unless ready_q = 1, and xphy_rst_q
-  // only changes while ready_q = 0 or rises when ready_q falls. The only cycle in which
-  // they can move in opposite directions (the gate opens as a re-init starts) asserts RST
-  // of the whole nibble at the same edge, so a glitch of the OR does no harm.
-  logic burst_rst_q;
+  // ---------------------------------------------------------------------------
+  // Adapter logic (no primitive, bow_dphy_dly_xphy): input delay control and the receive
+  // path reset, ctrl_clk_i domain
+  // ---------------------------------------------------------------------------
+  logic [Lanes-1:0]      dly_rx_en_vtc, dly_ld;
+  logic [Lanes-1:0][8:0] dly_cntin;
+  logic                  burst_rst;
 
-  always_ff @(posedge ctrl_clk_i or negedge ctrl_rst_ni) begin
-    if (!ctrl_rst_ni) burst_rst_q <= 1'b0;
-    else              burst_rst_q <= burst_en_s & ready_q & ~byte_ce_i;
-  end
+  bow_dphy_dly_xphy #(
+    .Lanes   (Lanes),
+    .VtcWait (VtcWait),
+    .LdGap   (LdGap)
+  ) u_dly (
+    .clk_i        (ctrl_clk_i),
+    .rst_ni       (ctrl_rst_ni),
+    .ready_i      (ready_q),
+    .des_rst_i,
+    .rx_rst_o     (burst_rst),
+    .dly_code_i,
+    .dly_own_i,
+    .rx_en_vtc_o  (dly_rx_en_vtc),
+    .ld_o         (dly_ld),
+    .cntvaluein_o (dly_cntin)
+  );
 
+  // des_rst: RX_RST (asynchronous, "does not reset the input delay", AM010) of the used
+  // slices while the byte clock gate is closed (burst_rst: ready_q & des_rst_i, a flop of
+  // u_dly). RX_RST = the init reset OR this flop, two flops of one domain: the burst term is
+  // 0 unless ready_q = 1, and xphy_rst_q only changes while ready_q = 0 or rises when
+  // ready_q falls. The only cycle in which they can move in opposite directions (the gate
+  // opens as a re-init starts) asserts RST of the whole nibble at the same edge, so a
+  // glitch of the OR does no harm.
   logic slice_rst;
-  assign slice_rst = xphy_rst_q | burst_rst_q;
+  assign slice_rst = xphy_rst_q | burst_rst;
 
   // ---------------------------------------------------------------------------
   // XPLL, one per bank (CLKOUTPHY reaches only the nibbles of its own bank). No deskew:
@@ -569,62 +602,6 @@ module bow_dphy_io_versal #(
       .RIU_RD_DATA        (),
       .RIU_VALID          ()
     );
-  end
-
-  // ---------------------------------------------------------------------------
-  // Input delay control (ctrl_clk_i domain), see "Input delays" in the header. Per lane:
-  // user_q = user mode (RX_EN_VTC = 0 on the lane's P slice), pend_q = a load is waiting,
-  // wait_q = cycles until it may happen, cntin_q = the tap of the next / last load.
-  // ---------------------------------------------------------------------------
-  logic [Lanes-1:0]      user_q, pend_q, ld_q;
-  logic [Lanes-1:0][8:0] cntin_q;
-  logic [Lanes-1:0][4:0] wait_q;
-
-  // Next state in blocking variables, one non-blocking write per register (xsim bug (a)).
-  always_ff @(posedge ctrl_clk_i or negedge ctrl_rst_ni) begin
-    logic [Lanes-1:0]      user_d, pend_d, ld_d;
-    logic [Lanes-1:0][8:0] cntin_d;
-    logic [Lanes-1:0][4:0] wait_d;
-    if (!ctrl_rst_ni) begin
-      user_q  <= '0;
-      pend_q  <= '0;
-      ld_q    <= '0;
-      cntin_q <= '0;
-      wait_q  <= '0;
-    end else begin
-      user_d  = user_q;
-      pend_d  = pend_q;
-      ld_d    = '0;
-      cntin_d = cntin_q;
-      wait_d  = wait_q;
-      if (!ready_q) begin
-        user_d = '0;
-        pend_d = '0;
-        wait_d = '0;
-      end else begin
-        for (int unsigned l = 0; l < Lanes; l++) begin
-          if (wait_q[l] != 5'd0) wait_d[l] = wait_q[l] - 5'd1;
-          if (pend_q[l] && (wait_q[l] == 5'd0)) begin
-            ld_d[l]   = 1'b1;                     // XPHY samples LD and cntin_q next edge
-            pend_d[l] = 1'b0;
-            wait_d[l] = 5'(LdGap - 1);
-          end
-          if (dly_load_i[l]) begin                // the newest request wins
-            cntin_d[l] = dly_tap_i[l];
-            pend_d[l]  = 1'b1;
-            if (!user_q[l]) begin
-              user_d[l] = 1'b1;                   // RX_EN_VTC -> 0 first
-              wait_d[l] = 5'(VtcWait);
-            end
-          end
-        end
-      end
-      user_q  <= user_d;
-      pend_q  <= pend_d;
-      ld_q    <= ld_d;
-      cntin_q <= cntin_d;
-      wait_q  <= wait_d;
-    end
   end
 
   // ---------------------------------------------------------------------------
@@ -687,9 +664,9 @@ module bow_dphy_io_versal #(
         assign rx_en_vtc[s]    = 1'b1;
       end else if (SlSrc >= 0) begin : g_lane
         assign datain[s]       = lane_hs[SlSrc];
-        assign ld[s]           = ld_q[SlSrc];
-        assign cntin[9*s +: 9] = cntin_q[SlSrc];
-        assign rx_en_vtc[s]    = ~user_q[SlSrc];
+        assign ld[s]           = dly_ld[SlSrc];
+        assign cntin[9*s +: 9] = dly_cntin[SlSrc];
+        assign rx_en_vtc[s]    = dly_rx_en_vtc[SlSrc];
       end else begin : g_none
         assign datain[s]       = 1'b0;
         assign ld[s]           = 1'b0;
@@ -743,7 +720,7 @@ module bow_dphy_io_versal #(
       .DIS_QDLY_VT_TRACK    ("FALSE"),
       .DELAY_VALUE_0        (0),           // must be 0 on the strobe slice; the data lanes
       .DELAY_VALUE_1        (0),           //   start at the BISC position and are moved at
-      .DELAY_VALUE_2        (0),           //   run time (dly_load_i)
+      .DELAY_VALUE_2        (0),           //   run time (u_dly)
       .DELAY_VALUE_3        (0),
       .DELAY_VALUE_4        (0),
       .DELAY_VALUE_5        (0),
@@ -915,11 +892,11 @@ module bow_dphy_io_versal #(
     .SIM_DEVICE (SimDevice)
   ) u_byte_bufg (
     .I  (fifo_wr_clk[StrobeIdx]),
-    .CE (byte_ce_i),
+    .CE (clk_gate_en_i),
     .O  (byte_clk)
   );
 
-  assign byte_clk_o = byte_clk;
+  assign hs_byte_clk_o = byte_clk;
 
   // ---------------------------------------------------------------------------
   // FIFO read side (byte clock domain). Every nibble reads whenever its FIFO is not empty;
@@ -933,10 +910,10 @@ module bow_dphy_io_versal #(
   assign rden = RdenReg ? ~empty_q : ~fifo_empty;
 
   // Capture: Q straight into flops (BLI TRUE in the XDC: the flops sit in the XPIO's
-  // BLI sites), the bit order remap is wiring only. rx_valid_o: the word now in the capture
+  // BLI sites), the bit order remap is wiring only. hs_valid_o: the word now in the capture
   // flops was read (FIFO_RDEN one byte clock earlier). The clock lane samples are kept even
-  // when clk_q_o is not used (DONT_TOUCH): the strobe slice then has the same read path as
-  // in the verified builds.
+  // when clk_hs_samp_o is not used (DONT_TOUCH): the strobe slice then has the same read
+  // path as in the verified builds.
   (* DONT_TOUCH = "TRUE" *) logic [7:0] clk_bli_q;
   logic [MaxNib-1:0] rden_q;
 
@@ -956,15 +933,15 @@ module bow_dphy_io_versal #(
       valid_q <= rden_q[Nib];
     end
 
-    assign rx_data_o[l]  = xphy_byte(bli_q);
-    assign rx_valid_o[l] = valid_q;
-    assign dly_tap_o[l]  = cntout_nib[Nib][9*Sl +: 9];
+    assign hs_data_o[l]  = xphy_byte(bli_q);
+    assign hs_valid_o[l] = valid_q;
+    assign dly_q_o[l]    = cntout_nib[Nib][9*Sl +: 9];
   end
 
-  assign clk_q_o = xphy_byte(clk_bli_q);
+  assign clk_hs_samp_o = xphy_byte(clk_bli_q);
 
   logic unused;
-  assign unused = ^{byte_rst_i, clk_to_upper, clk_to_lower, pclk_out, nclk_out, fifo_wr_clk,
-                    cntout_nib, bisc_start_in, bisc_stop_in};
+  assign unused = ^{clk_lprx_en_i, lprx_en_i, clk_to_upper, clk_to_lower, pclk_out, nclk_out,
+                    fifo_wr_clk, cntout_nib, bisc_start_in, bisc_stop_in};
 
 endmodule

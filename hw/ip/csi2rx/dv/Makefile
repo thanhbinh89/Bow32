@@ -31,16 +31,19 @@
 # Verilator (default 0: all cores). PJOBS: cases of test-rx / test-ppi run at a time
 # (default: the number of CPUs; PJOBS=1: one after the other).
 #
-# One model per Lanes parameter: Lanes = 1 and 2 as on the KV260 (UltraScale+
-# PHY: a word every byte clock, IDELAY taps in the byte clock domain, FIFO 256),
-# Lanes = 4 as on the Huins camera build (DlyVid = 1, FIFO 512) with the Versal
-# XPHY model of csi2_tx_model (RX FIFOs: latency, stale words, glitch words and
-# wraps, rx_valid gaps; PHY ready after a delay, PHY re-init, BISC taps, delays
-# in the video clock domain) at 180 MHz byte clock. Its re-init and BurstRxRst
-# inputs come from the D-PHY (CMD.REINIT, ~CTRL.DES_RST_DIS). BurstRxRst is 0
-# like the shipped camera build (the FIFOs only restart at the PHY init; the
-# test case writes DES_RST_DIS first), or 1 (BURSTRST=1: they restart at every
-# burst).
+# One model per Lanes parameter: Lanes = 1 and 2 as on the KV260 (the
+# UltraScale+ AFE adapter: a word every byte clock, IDELAY taps loaded in the
+# byte clock domain, FIFO 256), Lanes = 4 as on the Huins camera build
+# (AfeKind = 2, FIFO 512) with the Versal XPHY model of csi2_tx_model (RX
+# FIFOs: latency, stale words, glitch words and wraps, hs_valid gaps; PHY ready
+# after a delay, PHY re-init, BISC taps, delays in the video clock domain) at
+# 180 MHz byte clock. csi2_tx_model runs the adapters' own logic
+# (hw/fpga/common/rtl/bow_dphy_dly_xusp.sv, bow_dphy_dly_xphy.sv) on the D-PHY's
+# AFE interface: the Versal PHY's re-init comes from cal_start / pd (CMD.REINIT,
+# AFE_CTRL.PD), its BurstRxRst from des_rst (0 while CTRL.DES_RST_DIS = 1).
+# BurstRxRst is 0 like the shipped camera build before step 4 (the FIFOs only
+# restart at the PHY init; the test case writes DES_RST_DIS first), or 1
+# (BURSTRST=1: they restart at every burst).
 #
 # PPI bench (tb_csi2rx_ppi.sv): one model per Lanes parameter (FIFO 512 with 4 lanes) and
 # two DUTs, the one of the case's timing clocked: MODE bow, the D-PHY of Bow32 (bow_csi2rx,
@@ -80,7 +83,7 @@ DIRECTED24 := cmd stop skew dly deskew extra ovf2 loss
 # Testbench parameters and model options per Lanes parameter
 PARAMS_1  := -GLanes=1
 PARAMS_2  := -GLanes=2
-PARAMS_4  := -GLanes=4 -GDlyVid=1\'b1 -GFifoDepth=512
+PARAMS_4  := -GLanes=4 -GAfeKind=2 -GFifoDepth=512
 PPARAMS_1 := -GLanes=1
 PPARAMS_2 := -GLanes=2
 PPARAMS_4 := -GLanes=4 -GFifoDepth=512
@@ -90,10 +93,13 @@ sim_bin  = $(BUILD)/obj_l$(1)/Vtb_bow_csi2rx
 ppi_bin  = $(BUILD)/obj_ppi_l$(1)/Vtb_csi2rx_ppi
 FLISTS  := -F $(REPO)/hw/ip/common/common.f -F $(REPO)/hw/ip/bus/bus.f \
            -F $(REPO)/hw/ip/dphy_rx/dphy_rx.f -F $(REPO)/hw/ip/csi2rx/csi2rx.f
-# PPI v1 checker, bound into bow_dphy_rx by the testbench
-PPI_CHK := $(REPO)/hw/ip/dphy_rx/dv/bow_ppi_chk.sv
+# PPI v1 and AFE v1 checkers, bound into bow_dphy_rx by the testbench
+PPI_CHK := $(REPO)/hw/ip/dphy_rx/dv/bow_ppi_chk.sv $(REPO)/hw/ip/dphy_rx/dv/bow_afe_chk.sv
+# the AFE adapters' logic without primitives, which csi2_tx_model runs
+AFE_DLY := $(REPO)/hw/fpga/common/rtl/bow_dphy_dly_xusp.sv \
+           $(REPO)/hw/fpga/common/rtl/bow_dphy_dly_xphy.sv
 SRCS    := $(shell find $(REPO)/hw/ip/csi2rx $(REPO)/hw/ip/dphy_rx $(REPO)/hw/ip/common \
-                    $(REPO)/hw/ip/bus -name '*.sv' -o -name '*.f')
+                    $(REPO)/hw/ip/bus -name '*.sv' -o -name '*.f') $(AFE_DLY)
 # A model build ($(1): the Verilator command), once more if it fails: Verilator 5.020 can
 # abort at its exit after a good build ("attempted to destroy locked Thread Pool"), a real
 # error fails twice. Then the binary is touched: Verilator leaves a model whose C++ did not
@@ -119,7 +125,7 @@ align: $(ALIGN_BIN)
 VRX = $(VERILATOR) --binary --timing -j $(JOBS) -O2 -Wno-fatal -Wno-lint -Wno-style \
   -Wno-TIMESCALEMOD +define+BOW_CDC_JITTER \
   --top-module tb_bow_csi2rx $(PARAMS_$*) -Mdir $(BUILD)/obj_l$* -o Vtb_bow_csi2rx \
-  $(FLISTS) csi2_tx_model.sv $(PPI_CHK) tb_bow_csi2rx.sv
+  $(FLISTS) $(AFE_DLY) csi2_tx_model.sv $(PPI_CHK) tb_bow_csi2rx.sv
 $(BUILD)/obj_l%/Vtb_bow_csi2rx: $(SRCS)
 	@mkdir -p $(BUILD)
 	$(call vbuild,$(VRX))
@@ -168,8 +174,8 @@ test-rx: build $(ALIGN_BIN)
 
 # ------------------------------------------------------------------- PPI bench
 MODE      ?= bow
-PPI_SRCS  := $(REPO)/hw/ip/csi2rx/rtl/bow_csi2rx_ppi_flat.sv csi2_tx_model.sv bow_ppi_bfm.sv \
-             tb_csi2rx_ppi.sv
+PPI_SRCS  := $(REPO)/hw/ip/csi2rx/rtl/bow_csi2rx_ppi_flat.sv $(AFE_DLY) csi2_tx_model.sv \
+             bow_ppi_bfm.sv tb_csi2rx_ppi.sv
 PGENOPT_4 := --fifo-depth 512
 
 VPPI = $(VERILATOR) --binary --timing -j $(JOBS) -O2 -Wno-fatal -Wno-lint -Wno-style \
@@ -240,9 +246,10 @@ test:
 mutants-ppi:
 	$(PYTHON) mutants_ppi.py --build $(BUILD)/mutants_ppi --jobs $(MJOBS)
 
-# Mutants of the D-PHY's RAW capture and of the controller's gate of the aligner events
-# (mutants_rx.py): each must make a case of the whole receiver bench fail (raw, rxoff);
-# not in test or CI
+# Mutants of the D-PHY's RAW capture, of the controller's gate of the aligner events and of
+# the AFE interface of step 5 (des_rst, OWN, lprx_en, the adapters' delay logic)
+# (mutants_rx.py): each must make a case of the whole receiver bench fail (raw, rxoff, dly,
+# be); not in test or CI
 mutants-rx:
 	$(PYTHON) mutants_rx.py --build $(BUILD)/mutants_rx --jobs $(MJOBS)
 

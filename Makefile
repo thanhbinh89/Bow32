@@ -15,7 +15,7 @@ help:
 	@echo "Bow32 - RISC-V (Ibex) learning MCU"
 	@echo ""
 	@echo "  make sw          build boot ROM + applications       -> build/sw/"
-	@echo "  make lint        Verilator lint of the SoC RTL (-Wall), Versal board RTL against port stubs"
+	@echo "  make lint        Verilator lint of the SoC RTL (-Wall), the board tops and AFE adapters against port stubs"
 	@echo "  make sim         build the Verilator testbench (KV260 and IMX274 builds)"
 	@echo "  make test        run all system simulation tests, then a summary"
 	@echo "  make test-tools  unit tests of the host tools (tools/tests)"
@@ -48,8 +48,8 @@ sw:
 # with each LiteDRAM core (DDR2 at 133 MHz, DDR3 at 125 MHz CK), with HyperRAM
 # (the card's pads with level shifters; the MPS4 loopback / system-simulation
 # configuration: emulator of 1 MiB, together with DDR2), the CSI-2 receiver
-# with 4 lanes as on the Huins camera build (FIFO 512, input delays in the
-# video clock domain, 200 MHz) and with 1 lane, then two CKs that bow_ddr's
+# with 4 lanes as on the Huins camera build (FIFO 512, the Versal AFE kind,
+# 200 MHz) and with 1 lane, then two CKs that bow_ddr's
 # elaboration checks must refuse (refresh interval, CK above the core's) and
 # a lane count bow_mipi_rx must refuse. The receiver on its own (bow_mipi_rx:
 # 2, 1 and 4 lanes as on the KV260, Huins and 1 lane builds, without a PHY),
@@ -58,20 +58,29 @@ sw:
 # than its video clock, it must refuse, with its own message), the controller
 # with flat PPI ports for a standard PHY (bow_csi2rx_ppi_flat, not in
 # csi2rx.f: 2, 1 and 4 lanes, 50 MHz video clock) and its digital
-# D-PHY on its own (bow_dphy_rx: 1, 2 and 4 lanes, input delay
-# taps in the byte or the lp clock domain; a lane count it must refuse). Then
-# the Versal board level RTL against port-only stubs of the AMD primitives
-# (hw/lint/xilinx_versal_stubs.sv): the D-PHY with its synthetic default
-# nibble plan, with plan 2 of its xsim test (inter-byte chains, 6 -> 8) and
-# with 2 lanes on 2 nibbles, the Huins camera top with its clock module, and a
-# nibble plan bow_dphy_io_versal must refuse.
+# D-PHY on its own (bow_dphy_rx with its whole AFE interface: 1, 2 and 4 lanes,
+# the UltraScale+ and the Versal AFE kind, an ASIC configuration with the AFE
+# powered down after reset and 32 trim bits; a lane count it must refuse).
+# Then the board level RTL against port-only stubs of the AMD primitives
+# (hw/lint/xilinx_versal_stubs.sv, with hw/lint/xilinx_xusp_stubs.sv for
+# UltraScale+): the AFE adapters' logic without primitives on its own
+# (bow_dphy_dly_xusp, bow_dphy_dly_xphy: 1, 2 and 4 lanes), the UltraScale+
+# AFE adapter (bow_dphy_io_xusp: 1, 2 and 4 lanes), the Versal one with its
+# synthetic default nibble plan, with plan 2 of its xsim test (inter-byte
+# chains, 6 -> 8) and with 2 lanes on 2 nibbles, a nibble plan
+# bow_dphy_io_versal must refuse, and every board top with bow32_top (step 5
+# of docs/ip/mipi_rx_arch.md): KV260 and KV260 camera (with port-only stubs of
+# their block design wrappers, hw/lint/kv260_bd_stubs.sv), MPS4, Huins RAM
+# card and Huins camera with its clock module; the sixth user of bow32_top, the
+# system testbench sim/tb/tb_bow32.sv, its pin connections only (make -C sim
+# lint, both builds: a missing or unconnected pin is an error).
 LINT_CMD = $(VERILATOR) --lint-only -Wall hw/lint/verilator_waivers.vlt \
 	  -F hw/top/bow32_top.f -F hw/vendor/lowrisc_ibex_prim_generic.f --top-module bow32_top
 DPHYRX_LINT = $(VERILATOR) --lint-only -Wall hw/lint/verilator_waivers.vlt \
 	  -F hw/ip/common/common.f -F hw/ip/bus/bus.f -F hw/ip/dphy_rx/dphy_rx.f --top-module bow_dphy_rx
 RX_LINT = $(VERILATOR) --lint-only -Wall hw/lint/verilator_waivers.vlt -F hw/ip/common/common.f \
 	  -F hw/ip/bus/bus.f -F hw/ip/dphy_rx/dphy_rx.f -F hw/ip/csi2rx/csi2rx.f
-RX_CFGS = "" "-GLanes=1" "-GLanes=4 -GDlyVid=1'b1 -GFifoDepth=512" \
+RX_CFGS = "" "-GLanes=1" "-GLanes=4 -GAfeKind=2 -GFifoDepth=512" \
 	  "-GHasPhy=1'b0 -GPhyClkHz=50000000"
 # the controller alone: the same, with the PHY's lp clock = vid_clk_i (PhyClkHz, 200 MHz default)
 CTRL_CFGS = "-GPpiLpClkHz=200000000" "-GLanes=1 -GPpiLpClkHz=200000000" \
@@ -83,7 +92,17 @@ CTRL_BAD = "|PpiLpClkHz not set" "-GPpiLpClkHz=250000000|PPI lp clock 250000000 
 FLAT_LINT = $(RX_LINT) hw/ip/csi2rx/rtl/bow_csi2rx_ppi_flat.sv --top-module bow_csi2rx_ppi_flat
 FLAT_CFGS = "" "-GLanes=1" "-GLanes=4 -GFifoDepth=512" "-GPhyClkHz=50000000"
 VLINT_CMD = $(VERILATOR) --lint-only -Wall hw/lint/verilator_waivers.vlt hw/lint/xilinx_versal_stubs.sv
-DPHY_LINT = $(VLINT_CMD) hw/fpga/common/rtl/bow_dphy_io_versal.sv --top-module bow_dphy_io_versal
+XLINT_CMD = $(VLINT_CMD) hw/lint/xilinx_xusp_stubs.sv
+DPHY_LINT = $(VLINT_CMD) -F hw/ip/common/common.f hw/fpga/common/rtl/bow_dphy_dly_xphy.sv \
+	  hw/fpga/common/rtl/bow_dphy_io_versal.sv --top-module bow_dphy_io_versal
+XDPHY_LINT = $(XLINT_CMD) -F hw/ip/common/common.f hw/fpga/common/rtl/bow_dphy_dly_xusp.sv \
+	  hw/fpga/common/rtl/bow_dphy_io_xusp.sv --top-module bow_dphy_io_xusp
+DLY_LINT = $(VERILATOR) --lint-only -Wall hw/lint/verilator_waivers.vlt -F hw/ip/common/common.f
+# the board tops (the file lists of their FPGA builds) against the stubs
+TOP_LINT = $(XLINT_CMD) hw/lint/kv260_bd_stubs.sv
+TOP_LINT_BOARDS = kv260/kv260.f:bow32_kv260_top kv260_cam/kv260_cam.f:bow32_kv260_cam_top \
+	  mps4/mps4.f:bow32_mps4_top huins_vp1902/huins_vp1902.f:bow32_huins_vp1902_top \
+	  huins_vp1902/huins_vp1902_cam.f:bow32_huins_vp1902_cam_top
 
 lint: deps
 	$(LINT_CMD)
@@ -91,7 +110,7 @@ lint: deps
 	$(LINT_CMD) -GDdrEn=1\'b1 -GDdrMem=3 -GDdrClkHz=125000000
 	$(LINT_CMD) -GHrEn=1\'b1
 	$(LINT_CMD) -GHrEn=1\'b1 -GHrPhyKind=2 -GHrHasLs=1\'b0 -GHrEmuBytes=1048576 -GDdrEn=1\'b1
-	$(LINT_CMD) -GCsiLanes=4 -GCsiFifoDepth=512 -GCsiDlyVid=1\'b1 -GVidClkHz=200000000
+	$(LINT_CMD) -GCsiLanes=4 -GCsiFifoDepth=512 -GCsiAfeKind=2 -GVidClkHz=200000000
 	$(LINT_CMD) -GCsiLanes=1
 	@# the elaboration checks of bow_ddr must refuse a CK the core was not made for
 	@! $(LINT_CMD) -GDdrEn=1\'b1 -GDdrMem=2 -GDdrClkHz=132000000 > /dev/null 2>&1 || \
@@ -115,15 +134,24 @@ lint: deps
 	@for g in $(FLAT_CFGS); do echo "$(FLAT_LINT) $$g"; $(FLAT_LINT) $$g || exit 1; done
 	$(DPHYRX_LINT)
 	$(DPHYRX_LINT) -GLanes=1
-	$(DPHYRX_LINT) -GLanes=4 -GDlyVid=1\'b1
-	$(DPHYRX_LINT) -GLanes=2 -GDlyVid=1\'b1
+	$(DPHYRX_LINT) -GLanes=4 -GAfeKind=2
+	$(DPHYRX_LINT) -GLanes=2 -GAfeKind=2
+	$(DPHYRX_LINT) -GLanes=4 -GAfeKind=0 -GAfePdRst=1\'b1 -GTrimW=32
 	@! $(DPHYRX_LINT) -GLanes=3 > /dev/null 2>&1 || \
 	  { echo "lint: bow_dphy_rx accepted 3 data lanes"; exit 1; }
+	@for g in "-GLanes=1" "-GLanes=2" "-GLanes=4"; do \
+	  for m in bow_dphy_dly_xusp bow_dphy_dly_xphy; do \
+	    echo "$(DLY_LINT) hw/fpga/common/rtl/$$m.sv --top-module $$m $$g"; \
+	    $(DLY_LINT) hw/fpga/common/rtl/$$m.sv --top-module $$m $$g || exit 1; done; \
+	  echo "$(XDPHY_LINT) $$g"; $(XDPHY_LINT) $$g || exit 1; done
 	$(DPHY_LINT)
 	$(DPHY_LINT) -GNibPhys=16\'h6784 -GNibSrc=8\'h3c -GLaneNib=8\'h39 -GLaneSlice=12\'h910
 	$(DPHY_LINT) -GLanes=2 -GNumNib=2 -GNibPhys=16\'h0067 -GNibRole=8\'h04 -GLaneNib=8\'h01 \
 	  -GLaneSlice=12\'h020
-	$(VLINT_CMD) -F hw/fpga/huins_vp1902/huins_vp1902_cam.f --top-module bow32_huins_vp1902_cam_top
+	@for b in $(TOP_LINT_BOARDS); do f="$${b%%:*}"; t="$${b#*:}"; \
+	  echo "$(TOP_LINT) -F hw/fpga/$$f --top-module $$t"; \
+	  $(TOP_LINT) -F hw/fpga/$$f --top-module $$t || exit 1; done
+	$(MAKE) --no-print-directory -C sim lint
 	@# bow_dphy_io_versal refuses an inter-nibble receiver that is not the pair partner
 	@# of its source (the strobe never reaches it)
 	@! $(DPHY_LINT) -GNibPhys=16\'h2764 > /dev/null 2>&1 || \

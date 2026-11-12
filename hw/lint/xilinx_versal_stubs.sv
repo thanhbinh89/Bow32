@@ -2,12 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Port-only stubs of the AMD primitives that the Versal board level RTL instantiates
-// (bow_dphy_io_versal, the Huins camera top and clock module), for the Verilator lint of
-// `make lint`. Lint only: no behaviour, every output is left undriven. Ports (names,
-// directions, widths) follow the primitive port tables of AMD's Versal libraries guide
-// (UG1353) and of the SelectIO / XPHY architecture manual (AM010); the parameters are only
-// those the Bow32 RTL sets, with neutral defaults. The vendor simulation models stay in the
-// Vivado installation (the xsim tests in hw/fpga/common/dv use them).
+// (bow_dphy_io_versal, the Huins camera and RAM card tops, their clock modules, the DDR /
+// HyperRAM pads and clocks), for the Verilator lint of `make lint`; with
+// xilinx_xusp_stubs.sv also the UltraScale+ board level RTL (the primitives of both
+// families are here: BUFG, BUFGCE, IBUFDS, IBUF, OBUF, OBUFT, OBUFDS, IOBUF, IDDRE1,
+// ODDRE1, IBUFDS_DPHY). Lint only: no behaviour, every output is left undriven. Ports
+// (names, directions, widths) follow the primitive port tables of AMD's Versal libraries
+// guide (UG1353), its UltraScale guide (UG974) and the SelectIO / XPHY architecture manual
+// (AM010); the parameters are only those the Bow32 RTL sets, with neutral defaults. The
+// vendor simulation models stay in the Vivado installation (the xsim tests in
+// hw/fpga/common/dv use them).
 
 /* verilator lint_off DECLFILENAME */
 /* verilator lint_off UNDRIVEN */
@@ -38,6 +42,32 @@ module IBUFDS (
 );
 endmodule
 
+module IBUF (
+  input  wire I,
+  output wire O
+);
+endmodule
+
+module OBUF (
+  input  wire I,
+  output wire O
+);
+endmodule
+
+module OBUFT (
+  input  wire I,
+  input  wire T,
+  output wire O
+);
+endmodule
+
+module OBUFDS (
+  input  wire I,
+  output wire O,
+  output wire OB
+);
+endmodule
+
 module IOBUF (
   input  wire I,
   input  wire T,
@@ -46,9 +76,24 @@ module IOBUF (
 );
 endmodule
 
+module IDDRE1 #(
+  parameter       DDR_CLK_EDGE   = "OPPOSITE_EDGE",
+  parameter [0:0] IS_C_INVERTED  = 1'b0,
+  parameter [0:0] IS_CB_INVERTED = 1'b0
+) (
+  input  wire C,
+  input  wire CB,
+  input  wire D,
+  input  wire R,
+  output wire Q1,
+  output wire Q2
+);
+endmodule
+
 module ODDRE1 #(
-  parameter       SIM_DEVICE = "",
-  parameter [0:0] SRVAL      = 1'b0
+  parameter       SIM_DEVICE    = "",
+  parameter [0:0] SRVAL         = 1'b0,
+  parameter [0:0] IS_C_INVERTED = 1'b0
 ) (
   input  wire C,
   input  wire D1,
@@ -58,8 +103,10 @@ module ODDRE1 #(
 );
 endmodule
 
-// MIPI D-PHY input buffer: HS receiver output to the XPHY, LP receivers to the fabric
+// MIPI D-PHY input buffer: HS receiver output to the XPHY (Versal) / to the IDELAYE3 or the
+// clock buffers (UltraScale+), LP receivers to the fabric
 module IBUFDS_DPHY #(
+  parameter IOSTANDARD = "DEFAULT",
   parameter SIM_DEVICE = ""
 ) (
   input  wire I,
@@ -88,6 +135,18 @@ module MMCME5 #(
   parameter real         CLKOUT1_PHASE      = 0.0,
   parameter real         CLKOUT1_DUTY_CYCLE = 0.5,
   parameter [1:0]        CLKOUT1_PHASE_CTRL = 2'b00,
+  parameter integer      CLKOUT2_DIVIDE     = 1,
+  parameter real         CLKOUT2_PHASE      = 0.0,
+  parameter real         CLKOUT2_DUTY_CYCLE = 0.5,
+  parameter [1:0]        CLKOUT2_PHASE_CTRL = 2'b00,
+  parameter integer      CLKOUT3_DIVIDE     = 1,
+  parameter real         CLKOUT3_PHASE      = 0.0,
+  parameter real         CLKOUT3_DUTY_CYCLE = 0.5,
+  parameter [1:0]        CLKOUT3_PHASE_CTRL = 2'b00,
+  parameter integer      CLKOUT4_DIVIDE     = 1,
+  parameter real         CLKOUT4_PHASE      = 0.0,
+  parameter real         CLKOUT4_DUTY_CYCLE = 0.5,
+  parameter [1:0]        CLKOUT4_PHASE_CTRL = 2'b00,
   parameter              COMPENSATION       = "AUTO",
   parameter              LOCK_WAIT          = "FALSE"
 ) (

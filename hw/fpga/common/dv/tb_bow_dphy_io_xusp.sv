@@ -1,12 +1,18 @@
 // Copyright Bow32 contributors.
 // SPDX-License-Identifier: Apache-2.0
 //
-// Pin level test of the KV260 D-PHY receive I/O (Vivado simulator with the
+// Pin level test of the KV260 D-PHY AFE adapter (Vivado simulator with the
 // UltraScale+ unisim models, `make -C hw/fpga/common/dv test`):
 //
-//   bit-serial D-PHY transmitter -> pads -> bow_dphy_io_xusp -> bow_mipi_rx -> m_axis
+//   bit-serial D-PHY transmitter -> pads -> bow_dphy_io_xusp --AFE--> bow_mipi_rx -> m_axis
 //                                           (IBUFDS_DPHY, IDELAYE3,
-//                                            ISERDESE3, BUFGCE_DIV)
+//                                            ISERDESE3, BUFGCE_DIV,
+//                                            bow_dphy_dly_xusp)
+//
+// The adapter and the receiver are joined by the AFE interface of
+// docs/ip/mipi_rx_arch.md section 3.2 (step 5): the gate, des_rst, the HS
+// receiver / termination enables, the static delay codes with OWN and the
+// delay readback dly_q.
 //
 // Transmitter: 2 data lanes at 912 Mbit/s (UI 1.096 ns) with the HS clock
 // centre aligned (DDR), non-continuous clock lane, one CSI-2 packet per HS
@@ -25,11 +31,15 @@
 //    that lane; the byte clock (/4) and the HS clock (/1) have no runt pulses
 //    and every byte clock edge comes with an HS clock edge, 4 HS cycles
 //    apart, also across the gaps (CE freezes both dividers); BUFGCE_DIV CE
-//    changes only while the clock lane is static in HS-0; the ISERDES RST is
-//    high whenever the gate opens and is released once per burst while the
-//    clock runs, at least 20 byte clocks before the sync byte; a DLYn write
-//    (D-PHY) reaches IDELAYE3 CNTVALUEOUT at the next burst and reads back
-//    (DLYn.Q, PEND until then, OWN).
+//    changes only while the clock lane is static in HS-0; des_rst is the
+//    inverse of the gate at every video clock edge (the D-PHY sets it at the
+//    edge that closes the gate and releases it at the one that opens it); the
+//    ISERDES RST (the adapter's, from des_rst) is high whenever the gate opens
+//    and is released once per burst while the clock runs, at least 20 byte
+//    clocks before the sync byte; a DLYn write (D-PHY: static code + OWN)
+//    reaches IDELAYE3 CNTVALUEOUT at the next burst with one LOAD per lane and
+//    reads back (DLYn.Q, PEND until then, OWN); a write of the code in use
+//    loads nothing.
 //  * receiver, with the D-PHY's TIM0 and the CTRL.EXTRA of the driver
 //    (bow_dphy_rx_timing / bow_csi2rx_start for 2 x 912 Mbit/s, 200 MHz):
 //    RAW10 pixels on m_axis with tuser/tlast (random tready); the
@@ -138,13 +148,18 @@ module tb_bow_dphy_io_xusp;
 
   int unsigned errors = 0;
 
-  // PHY <-> receiver
-  logic                  byte_clk, byte_ce, byte_rst, clk_hs_en;
+  // AFE adapter <-> receiver (the AFE interface)
+  logic                  byte_clk, byte_ce, des_rst, clk_lprx_en, clk_hsrx_en, clk_term_en;
+  logic                  pd, ready, cal_start;
+  logic [7:0]            status;
   logic [1:0]            clk_lp;
   logic [Lanes-1:0][1:0] lp;
-  logic [Lanes-1:0]      hs_en, dly_load;
+  logic [Lanes-1:0]      lprx_en, hsrx_en, term_en, dly_own, hs_valid;
   logic [Lanes-1:0][7:0] rx_data;
-  logic [Lanes-1:0][8:0] dly_tap, dly_tap_out;
+  logic [Lanes-1:0][8:0] dly_code, dly_q;
+  logic                  byte_rst;                     // the adapter's ISERDESE3 RST
+
+  assign byte_rst = u_phy.iserdes_rst;
 
   function automatic void err(input string msg);
     errors++;
@@ -359,21 +374,30 @@ module tb_bow_dphy_io_xusp;
   bow_dphy_io_xusp #(
     .Lanes (Lanes)
   ) u_phy (
-    .clk_p       (clk_p),
-    .clk_n       (clk_n),
-    .data_p      (data_p),
-    .data_n      (data_n),
-    .byte_clk_o  (byte_clk),
-    .byte_ce_i   (byte_ce),
-    .byte_rst_i  (byte_rst),
-    .clk_lp_o    (clk_lp),
-    .clk_hs_en_i (clk_hs_en),
-    .lp_o        (lp),
-    .hs_en_i     (hs_en),
-    .rx_data_o   (rx_data),
-    .dly_tap_i   (dly_tap),
-    .dly_load_i  (dly_load),
-    .dly_tap_o   (dly_tap_out)
+    .clk_p         (clk_p),
+    .clk_n         (clk_n),
+    .data_p        (data_p),
+    .data_n        (data_n),
+    .hs_byte_clk_o (byte_clk),
+    .hs_data_o     (rx_data),
+    .hs_valid_o    (hs_valid),
+    .clk_gate_en_i (byte_ce),
+    .des_rst_i     (des_rst),
+    .clk_lp_o      (clk_lp),
+    .lp_o          (lp),
+    .clk_lprx_en_i (clk_lprx_en),
+    .lprx_en_i     (lprx_en),
+    .clk_hsrx_en_i (clk_hsrx_en),
+    .hsrx_en_i     (hsrx_en),
+    .clk_term_en_i (clk_term_en),
+    .term_en_i     (term_en),
+    .dly_code_i    (dly_code),
+    .dly_own_i     (dly_own),
+    .dly_q_o       (dly_q),
+    .pd_i          (pd),
+    .ready_o       (ready),
+    .cal_start_i   (cal_start),
+    .status_o      (status)
   );
 
   bus_req_t   bus_req = BUS_REQ_DEFAULT;
@@ -401,23 +425,46 @@ module tb_bow_dphy_io_xusp;
     .m_axis_tdata_o  (m_tdata),
     .m_axis_tuser_o  (m_tuser),
     .m_axis_tlast_o  (m_tlast),
-    .byte_clk_i      (byte_clk),
-    .byte_ce_o       (byte_ce),
-    .byte_rst_o      (byte_rst),
-    .clk_lp_i        (clk_lp),
-    .clk_hs_en_o     (clk_hs_en),
-    .lp_i            (lp),
-    .hs_en_o         (hs_en),
-    .rx_data_i       (rx_data),
-    .rx_valid_i      ('1),
-    .phy_rdy_i       (1'b1),
-    .phy_status_i    (8'h00),
-    .reinit_o        (),
-    .burst_rst_en_o  (),
-    .dly_tap_o       (dly_tap),
-    .dly_load_o      (dly_load),
-    .dly_tap_i       (dly_tap_out)
+    .afe_hs_byte_clk_i (byte_clk),
+    .afe_hs_data_i     (rx_data),
+    .afe_hs_valid_i    (hs_valid),
+    .afe_clk_gate_en_o (byte_ce),
+    .afe_des_rst_o     (des_rst),
+    .afe_clk_lp_i      (clk_lp),
+    .afe_lp_i          (lp),
+    .afe_clk_lprx_en_o (clk_lprx_en),
+    .afe_lprx_en_o     (lprx_en),
+    .afe_clk_hsrx_en_o (clk_hsrx_en),
+    .afe_hsrx_en_o     (hsrx_en),
+    .afe_clk_term_en_o (clk_term_en),
+    .afe_term_en_o     (term_en),
+    .afe_dly_code_o    (dly_code),
+    .afe_dly_own_o     (dly_own),
+    .afe_dly_q_i       (dly_q),
+    .afe_pd_o          (pd),
+    .afe_ready_i       (ready),
+    .afe_cal_start_o   (cal_start),
+    .afe_status_i      (status)
   );
+
+  // des_rst = ~gate, both flops of the D-PHY's lp domain set at the same video clock edge
+  // (no CTRL.DES_RST_DIS here); the HS receiver and termination enables equal (v1)
+  int unsigned n_des_rst_chk = 0, n_load [Lanes];
+  initial for (int l = 0; l < Lanes; l++) n_load[l] = 0;
+
+  always @(posedge vclk) begin
+    if (vrst_n) begin
+      n_des_rst_chk++;
+      if (des_rst !== !byte_ce) err($sformatf("des_rst %b with the gate %b", des_rst, byte_ce));
+      if (clk_hsrx_en !== clk_term_en || hsrx_en !== term_en)
+        err("HS receiver and termination enables differ");
+    end
+  end
+
+  // IDELAYE3 LOAD pulses of the adapter, per lane
+  always @(posedge byte_clk) begin
+    for (int l = 0; l < Lanes; l++) if (u_phy.u_dly.load_o[l] === 1'b1) n_load[l]++;
+  end
 
   // ---------------------------------------------------------------- bus BFM
   task automatic bus_xfer(input bit we, input logic [11:0] off, input logic [31:0] wdata,
@@ -783,8 +830,12 @@ module tb_bow_dphy_io_xusp;
     reg_check("CNT_PKT deskew",    12'h028, 0);
     reg_check("ERR_STATUS deskew", 12'h01C, 0);
 
-    // IDELAY taps (the D-PHY's DLYn): loaded at the next burst (lane 1: more than one
-    // UI); until then PEND (OWN: written while the PHY is ready)
+    // IDELAY taps (the D-PHY's DLYn: static codes with OWN, the adapter loads a changed
+    // code): loaded at the next burst (lane 1: more than one UI), one LOAD per lane; until
+    // then PEND (OWN: written while the PHY is ready)
+    for (int l = 0; l < Lanes; l++) begin
+      if (n_load[l] != 0) err($sformatf("lane %0d: %0d IDELAYE3 loads before a DLYn write", l, n_load[l]));
+    end
     reg_wr(12'hC80, 32'd37);
     reg_wr(12'hC84, 32'd300);
     reg_check("DLY0 before burst", 12'hC80, {1'b1, 6'd0, 9'd0, 1'b1, 6'd0, 9'd37});
@@ -800,6 +851,14 @@ module tb_bow_dphy_io_xusp;
         u_phy.g_lane[1].u_idelay.CNTVALUEOUT !== 9'd300) begin
       err("IDELAYE3 CNTVALUEOUT");
     end
+    for (int l = 0; l < Lanes; l++) begin
+      if (n_load[l] != 1) err($sformatf("lane %0d: %0d IDELAYE3 loads for one DLYn write", l, n_load[l]));
+    end
+    // the codes in use written again: OWN is 1 already, nothing to load (checked after the
+    // next frame)
+    reg_wr(12'hC80, 32'd37);
+    reg_wr(12'hC84, 32'd300);
+    reg_check("DLY0 rewritten", 12'hC80, {1'b1, 6'd0, 9'd37, 1'b0, 6'd0, 9'd37});
 
     // Raw capture (the D-PHY's) of the next burst (armed with a stopped byte clock).
     // The 64 words from the rise of lane 0 hs_active and the acknowledge need
@@ -843,6 +902,9 @@ module tb_bow_dphy_io_xusp;
     send_frame(16'd3);
     check_frame(16'd3);
     THsTrail = 70_000;
+    for (int l = 0; l < Lanes; l++) begin
+      if (n_load[l] != 1) err($sformatf("lane %0d: %0d IDELAYE3 loads, the rewrite of the code in use loaded", l, n_load[l]));
+    end
 
     // T_HS-PREPARE min (40 ns + 4 UI) and max (85 ns + 6 UI; its noise ends
     // with a false 0x00, 0xB8 that the receiver must not see), each with
@@ -893,6 +955,8 @@ module tb_bow_dphy_io_xusp;
              $time, n_bursts, n_byte_clk, n_px, offs_seen[0], offs_seen[1]);
     $display("%t clock gate closed %0d..%0d ps after the HS clock stopped (CLK-TRAIL %0d ps)",
              $time, close_min, close_max, TClkTrail);
+    $display("%t des_rst = ~gate at %0d video clock edges, IDELAYE3 loads %0d / %0d", $time,
+             n_des_rst_chk, n_load[0], n_load[1]);
     if (errors == 0) $display("tb_bow_dphy_io_xusp: PASS");
     else             $display("tb_bow_dphy_io_xusp: FAIL (%0d errors)", errors);
     $finish;

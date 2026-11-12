@@ -28,7 +28,7 @@
 //                                                    +--> DDR PHY registers         |
 //                                                    +--> HyperRAM registers        |
 //                                                                           | |    |
-//   dphy_* (D-PHY I/O) -> CSI-2 RX (bow_mipi_rx) --RAW10--> ISP (bow_isp) <-+-+----+
+//   dphy_* (D-PHY AFE) -> CSI-2 RX (bow_mipi_rx) --RAW10--> ISP (bow_isp) <-+-+----+
 //                                             +--> isp_* (RGB888/YUV444 AXI4-Stream)
 //                                             +--> H.264 encoder (YUV444) --stream--> DMA channel 0
 //
@@ -53,14 +53,15 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
   parameter int unsigned        IspBufWords   = 32768,
   // CSI-2 receiver: data lanes (1, 2 or 4), whether a D-PHY is connected to
   // the dphy_* ports (CSI2RX INFO.PHY), frequency of vid_clk_i (PHY timing),
-  // pixel FIFO entries (4 pixels each, power of 2), input delay control in
-  // the video clock domain (Versal XPHY, CSI2RX INFO.DLY_VID; 0: byte clock
-  // domain, UltraScale+ IDELAYE3)
+  // pixel FIFO entries (4 pixels each, power of 2), the kind of AFE on the
+  // dphy_* ports (the D-PHY's INFO[7:5]: 1 the UltraScale+ adapter
+  // bow_dphy_io_xusp, 2 the Versal adapter bow_dphy_io_versal; it sets the
+  // SETTLE target and the trail bytes the D-PHY reports in INFO2)
   parameter int unsigned        CsiLanes      = 2,
   parameter bit                 CsiPhy        = 1'b1,
   parameter int unsigned        VidClkHz      = ClkFreqHz,
   parameter int unsigned        CsiFifoDepth  = 256,
-  parameter bit                 CsiDlyVid     = 1'b0,
+  parameter int unsigned        CsiAfeKind    = 1,
   // AXI4-Lite window: address bits passed to the AXI device
   parameter int unsigned        AxilAddrWidth = 16,
   // Video RAM (vram window of the memory map: at most 1 MiB)
@@ -127,36 +128,40 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
   output logic        isp_tuser_o,
   output logic        isp_tlast_o,
 
-  // MIPI D-PHY receive I/O of the CSI-2 receiver (on the KV260:
-  // hw/fpga/common/rtl/bow_dphy_io_xusp.sv, on Versal:
-  // hw/fpga/common/rtl/bow_dphy_io_versal.sv). LP levels {P, N},
-  // dphy_phy_rdy_i and dphy_phy_status_i are asynchronous, HS/CE enables are
-  // video clock flops, dphy_reinit_o / dphy_burst_rst_en_o (the D-PHY's
-  // CMD.REINIT and ~CTRL.DES_RST_DIS, Versal: reinit_i / burst_rst_en_i) CPU
-  // clock flops, data and rx_valid are in the byte clock domain (gated HS clock
-  // / 4), the input delay control in the byte clock domain (CsiDlyVid = 0) or in
-  // the video clock domain (CsiDlyVid = 1). A PHY with a word in every byte clock
-  // and no ready state (bow_dphy_io_xusp) ties dphy_rx_valid_i = '1,
-  // dphy_phy_rdy_i = 1 and dphy_phy_status_i = '0, leaves dphy_reinit_o and
-  // dphy_burst_rst_en_o open. Without a camera: CsiPhy = 0, dphy_byte_clk_i = 0,
-  // dphy_clk_lp_i = dphy_lp_i = '1 (LP-11), dphy_rx_valid_i = '1,
-  // dphy_phy_rdy_i = 1, others '0.
-  input  logic                     dphy_byte_clk_i,
-  output logic                     dphy_byte_ce_o,
-  output logic                     dphy_byte_rst_o,
+  // AFE interface of the CSI-2 receiver's D-PHY (docs/ip/mipi_rx_arch.md
+  // section 3.2, the signals the FPGA adapters have; on the KV260
+  // hw/fpga/common/rtl/bow_dphy_io_xusp.sv, on Versal
+  // hw/fpga/common/rtl/bow_dphy_io_versal.sv: the ports connect one to one).
+  // dphy_hs_byte_clk_i is the byte clock (HS clock / 4, gated in the AFE by
+  // dphy_clk_gate_en_o), dphy_hs_data_i / dphy_hs_valid_i are in its domain;
+  // LP levels {P, N}, dphy_dly_q_i, dphy_ready_i and dphy_status_i are
+  // asynchronous; the gate, des_rst and the HS receiver / termination enables
+  // are video clock flops, the LP receiver enables, the delay codes and OWN,
+  // PD and cal_start CPU clock flops. An AFE with a word in every byte clock
+  // and no ready state (bow_dphy_io_xusp) drives dphy_hs_valid_i = '1,
+  // dphy_ready_i = 1 and dphy_status_i = '0 itself. Without a camera: CsiPhy =
+  // 0, dphy_hs_byte_clk_i = 0, dphy_clk_lp_i = dphy_lp_i = '1 (LP-11),
+  // dphy_hs_valid_i = '1, dphy_ready_i = 1, the other inputs '0.
+  input  logic                     dphy_hs_byte_clk_i,
+  input  logic [CsiLanes-1:0][7:0] dphy_hs_data_i,
+  input  logic [CsiLanes-1:0]      dphy_hs_valid_i,
+  output logic                     dphy_clk_gate_en_o,
+  output logic                     dphy_des_rst_o,
   input  logic [1:0]               dphy_clk_lp_i,
-  output logic                     dphy_clk_hs_en_o,
   input  logic [CsiLanes-1:0][1:0] dphy_lp_i,
-  output logic [CsiLanes-1:0]      dphy_hs_en_o,
-  input  logic [CsiLanes-1:0][7:0] dphy_rx_data_i,
-  input  logic [CsiLanes-1:0]      dphy_rx_valid_i,
-  input  logic                     dphy_phy_rdy_i,
-  input  logic [7:0]               dphy_phy_status_i,
-  output logic                     dphy_reinit_o,
-  output logic                     dphy_burst_rst_en_o,
-  output logic [CsiLanes-1:0][8:0] dphy_dly_tap_o,
-  output logic [CsiLanes-1:0]      dphy_dly_load_o,
-  input  logic [CsiLanes-1:0][8:0] dphy_dly_tap_i,
+  output logic                     dphy_clk_lprx_en_o,
+  output logic [CsiLanes-1:0]      dphy_lprx_en_o,
+  output logic                     dphy_clk_hsrx_en_o,
+  output logic [CsiLanes-1:0]      dphy_hsrx_en_o,
+  output logic                     dphy_clk_term_en_o,
+  output logic [CsiLanes-1:0]      dphy_term_en_o,
+  output logic [CsiLanes-1:0][8:0] dphy_dly_code_o,
+  output logic [CsiLanes-1:0]      dphy_dly_own_o,
+  input  logic [CsiLanes-1:0][8:0] dphy_dly_q_i,
+  output logic                     dphy_pd_o,
+  input  logic                     dphy_ready_i,
+  output logic                     dphy_cal_start_o,
+  input  logic [7:0]               dphy_status_i,
 
   // AXI4-Lite master (axil window of the memory map, clk_i domain)
   output logic [AxilAddrWidth-1:0] m_axil_awaddr_o,
@@ -477,7 +482,7 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
     .CpuClkHz  (ClkFreqHz),
     .HasPhy    (CsiPhy),
     .FifoDepth (CsiFifoDepth),
-    .DlyVid    (CsiDlyVid)
+    .AfeKind   (CsiAfeKind)
   ) u_csi2rx (
     .clk_i,
     .rst_ni          (sys_rst_n),
@@ -491,22 +496,26 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
     .m_axis_tdata_o  (cam_tdata),
     .m_axis_tuser_o  (cam_tuser),
     .m_axis_tlast_o  (cam_tlast),
-    .byte_clk_i      (dphy_byte_clk_i),
-    .byte_ce_o       (dphy_byte_ce_o),
-    .byte_rst_o      (dphy_byte_rst_o),
-    .clk_lp_i        (dphy_clk_lp_i),
-    .clk_hs_en_o     (dphy_clk_hs_en_o),
-    .lp_i            (dphy_lp_i),
-    .hs_en_o         (dphy_hs_en_o),
-    .rx_data_i       (dphy_rx_data_i),
-    .rx_valid_i      (dphy_rx_valid_i),
-    .phy_rdy_i       (dphy_phy_rdy_i),
-    .phy_status_i    (dphy_phy_status_i),
-    .reinit_o        (dphy_reinit_o),
-    .burst_rst_en_o  (dphy_burst_rst_en_o),
-    .dly_tap_o       (dphy_dly_tap_o),
-    .dly_load_o      (dphy_dly_load_o),
-    .dly_tap_i       (dphy_dly_tap_i)
+    .afe_hs_byte_clk_i (dphy_hs_byte_clk_i),
+    .afe_hs_data_i     (dphy_hs_data_i),
+    .afe_hs_valid_i    (dphy_hs_valid_i),
+    .afe_clk_gate_en_o (dphy_clk_gate_en_o),
+    .afe_des_rst_o     (dphy_des_rst_o),
+    .afe_clk_lp_i      (dphy_clk_lp_i),
+    .afe_lp_i          (dphy_lp_i),
+    .afe_clk_lprx_en_o (dphy_clk_lprx_en_o),
+    .afe_lprx_en_o     (dphy_lprx_en_o),
+    .afe_clk_hsrx_en_o (dphy_clk_hsrx_en_o),
+    .afe_hsrx_en_o     (dphy_hsrx_en_o),
+    .afe_clk_term_en_o (dphy_clk_term_en_o),
+    .afe_term_en_o     (dphy_term_en_o),
+    .afe_dly_code_o    (dphy_dly_code_o),
+    .afe_dly_own_o     (dphy_dly_own_o),
+    .afe_dly_q_i       (dphy_dly_q_i),
+    .afe_pd_o          (dphy_pd_o),
+    .afe_ready_i       (dphy_ready_i),
+    .afe_cal_start_o   (dphy_cal_start_o),
+    .afe_status_i      (dphy_status_i)
   );
 
   logic unused_cam;

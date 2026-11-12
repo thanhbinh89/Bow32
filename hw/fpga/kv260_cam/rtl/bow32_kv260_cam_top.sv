@@ -3,8 +3,10 @@
 //
 // Bow32 + camera on the AMD Kria KV260: Raspberry Pi camera v2 (IMX219) on
 // connector J9 -> Bow32 MIPI CSI-2 receiver -> Bow32 ISP. No vendor CSI-2 or
-// D-PHY IP: the pins go to bow_dphy_io_xusp (UltraScale+ I/O primitives:
-// IBUFDS_DPHY, IDELAYE3, ISERDESE3, BUFGCE_DIV), the LP state machines, the
+// D-PHY IP: the pins go to bow_dphy_io_xusp, the UltraScale+ AFE adapter
+// (IBUFDS_DPHY, IDELAYE3, ISERDESE3, BUFGCE_DIV and its fabric logic
+// bow_dphy_dly_xusp), whose AFE ports (docs/ip/mipi_rx_arch.md section 3.2)
+// connect one to one to the dphy_* ports of the SoC; the LP state machines, the
 // byte alignment and the CSI-2 layer are in bow_mipi_rx inside the SoC
 // (CSI2RX registers at 0x4000_8000, see docs/camera_kv260.md).
 //
@@ -56,33 +58,46 @@ module bow32_kv260_cam_top #(
   );
 
   // ---------------------------------------------------------------------------
-  // D-PHY receive I/O (constr/kv260_cam.xdc refers to the instance name)
+  // D-PHY AFE adapter (constr/kv260_cam.xdc refers to the instance name)
   // ---------------------------------------------------------------------------
-  logic                     dphy_byte_clk, dphy_byte_ce, dphy_byte_rst, dphy_clk_hs_en;
+  logic                     dphy_hs_byte_clk, dphy_clk_gate_en, dphy_des_rst;
+  logic                     dphy_clk_lprx_en, dphy_clk_hsrx_en, dphy_clk_term_en;
+  logic                     dphy_pd, dphy_ready, dphy_cal_start;
+  logic [7:0]               dphy_status;
   logic [1:0]               dphy_clk_lp;
   logic [CsiLanes-1:0][1:0] dphy_lp;
-  logic [CsiLanes-1:0]      dphy_hs_en, dphy_dly_load;
-  logic [CsiLanes-1:0][7:0] dphy_rx_data;
-  logic [CsiLanes-1:0][8:0] dphy_dly_tap, dphy_dly_tap_out;
+  logic [CsiLanes-1:0]      dphy_hs_valid, dphy_lprx_en, dphy_hsrx_en, dphy_term_en;
+  logic [CsiLanes-1:0]      dphy_dly_own;
+  logic [CsiLanes-1:0][7:0] dphy_hs_data;
+  logic [CsiLanes-1:0][8:0] dphy_dly_code, dphy_dly_q;
 
   bow_dphy_io_xusp #(
     .Lanes (CsiLanes)
   ) u_dphy (
-    .clk_p       (mipi_phy_if_raspi_clk_p),
-    .clk_n       (mipi_phy_if_raspi_clk_n),
-    .data_p      (mipi_phy_if_raspi_data_p),
-    .data_n      (mipi_phy_if_raspi_data_n),
-    .byte_clk_o  (dphy_byte_clk),
-    .byte_ce_i   (dphy_byte_ce),
-    .byte_rst_i  (dphy_byte_rst),
-    .clk_lp_o    (dphy_clk_lp),
-    .clk_hs_en_i (dphy_clk_hs_en),
-    .lp_o        (dphy_lp),
-    .hs_en_i     (dphy_hs_en),
-    .rx_data_o   (dphy_rx_data),
-    .dly_tap_i   (dphy_dly_tap),
-    .dly_load_i  (dphy_dly_load),
-    .dly_tap_o   (dphy_dly_tap_out)
+    .clk_p         (mipi_phy_if_raspi_clk_p),
+    .clk_n         (mipi_phy_if_raspi_clk_n),
+    .data_p        (mipi_phy_if_raspi_data_p),
+    .data_n        (mipi_phy_if_raspi_data_n),
+    .hs_byte_clk_o (dphy_hs_byte_clk),
+    .hs_data_o     (dphy_hs_data),
+    .hs_valid_o    (dphy_hs_valid),
+    .clk_gate_en_i (dphy_clk_gate_en),
+    .des_rst_i     (dphy_des_rst),
+    .clk_lp_o      (dphy_clk_lp),
+    .lp_o          (dphy_lp),
+    .clk_lprx_en_i (dphy_clk_lprx_en),
+    .lprx_en_i     (dphy_lprx_en),
+    .clk_hsrx_en_i (dphy_clk_hsrx_en),
+    .hsrx_en_i     (dphy_hsrx_en),
+    .clk_term_en_i (dphy_clk_term_en),
+    .term_en_i     (dphy_term_en),
+    .dly_code_i    (dphy_dly_code),
+    .dly_own_i     (dphy_dly_own),
+    .dly_q_o       (dphy_dly_q),
+    .pd_i          (dphy_pd),
+    .ready_o       (dphy_ready),
+    .cal_start_i   (dphy_cal_start),
+    .status_o      (dphy_status)
   );
 
   // ---------------------------------------------------------------------------
@@ -125,22 +140,26 @@ module bow32_kv260_cam_top #(
     .isp_tdata_o  (),
     .isp_tuser_o  (),
     .isp_tlast_o  (),
-    .dphy_byte_clk_i  (dphy_byte_clk),
-    .dphy_byte_ce_o   (dphy_byte_ce),
-    .dphy_byte_rst_o  (dphy_byte_rst),
-    .dphy_clk_lp_i    (dphy_clk_lp),
-    .dphy_clk_hs_en_o (dphy_clk_hs_en),
-    .dphy_lp_i        (dphy_lp),
-    .dphy_hs_en_o     (dphy_hs_en),
-    .dphy_rx_data_i   (dphy_rx_data),
-    .dphy_rx_valid_i  ('1),
-    .dphy_phy_rdy_i   (1'b1),
-    .dphy_phy_status_i ('0),                // no PHY status, no re-init, no FIFO
-    .dphy_reinit_o    (),
-    .dphy_burst_rst_en_o (),
-    .dphy_dly_tap_o   (dphy_dly_tap),
-    .dphy_dly_load_o  (dphy_dly_load),
-    .dphy_dly_tap_i   (dphy_dly_tap_out),
+    .dphy_hs_byte_clk_i (dphy_hs_byte_clk),
+    .dphy_hs_data_i     (dphy_hs_data),
+    .dphy_hs_valid_i    (dphy_hs_valid),
+    .dphy_clk_gate_en_o (dphy_clk_gate_en),
+    .dphy_des_rst_o     (dphy_des_rst),
+    .dphy_clk_lp_i      (dphy_clk_lp),
+    .dphy_lp_i          (dphy_lp),
+    .dphy_clk_lprx_en_o (dphy_clk_lprx_en),
+    .dphy_lprx_en_o     (dphy_lprx_en),
+    .dphy_clk_hsrx_en_o (dphy_clk_hsrx_en),
+    .dphy_hsrx_en_o     (dphy_hsrx_en),
+    .dphy_clk_term_en_o (dphy_clk_term_en),
+    .dphy_term_en_o     (dphy_term_en),
+    .dphy_dly_code_o    (dphy_dly_code),
+    .dphy_dly_own_o     (dphy_dly_own),
+    .dphy_dly_q_i       (dphy_dly_q),
+    .dphy_pd_o          (dphy_pd),
+    .dphy_ready_i       (dphy_ready),
+    .dphy_cal_start_o   (dphy_cal_start),
+    .dphy_status_i      (dphy_status),
     // no AXI4-Lite device: the bridge times out
     .m_axil_awaddr_o  (),
     .m_axil_awprot_o  (),

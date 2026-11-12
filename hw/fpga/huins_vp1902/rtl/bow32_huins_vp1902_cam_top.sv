@@ -5,9 +5,11 @@
 // xcvp1902-vsva6865-2MP-e-S): Leopard LI-IMX274MIPI-FMC (Sony IMX274) on the Huins camera
 // adapter on FMC+01 -> Bow32 MIPI CSI-2 receiver (4 lanes x 1440 Mbit/s) -> Bow32 ISP ->
 // capture buffer / H.264 encoder. No vendor CSI-2 or D-PHY IP: the pins go to
-// bow_dphy_io_versal (IBUFDS_DPHY, XPHY, XPLL, BUFGCE), the LP state machines, the byte
-// alignment and the CSI-2 layer are bow_mipi_rx inside the SoC (CSI2RX registers at
-// 0x4000_8000), as on the KV260 (docs/camera_kv260.md). Board preparation, build and use:
+// bow_dphy_io_versal, the Versal AFE adapter (IBUFDS_DPHY, XPHY, XPLL, BUFGCE and its fabric
+// logic bow_dphy_dly_xphy), whose AFE ports (docs/ip/mipi_rx_arch.md section 3.2) connect
+// one to one to the dphy_* ports of the SoC; the LP state machines, the byte alignment and
+// the CSI-2 layer are bow_mipi_rx inside the SoC (CSI2RX registers at 0x4000_8000), as on
+// the KV260 (docs/camera_kv260.md). Board preparation, build and use:
 // docs/camera_huins.md. Only the PL is used: Vivado adds a default PS wizard (PMC) to the
 // device image, loaded over the board's USB JTAG.
 //
@@ -32,28 +34,29 @@
 // Clocks (bow32_huins_vp1902_cam_clk, from the fixed 200 MHz board oscillator, bank 718):
 //   clk_sys   50 MHz   SoC (MMCME5 VCO 3200 MHz / 64)
 //   clk_vid   200 MHz  ISP, H.264, CSI-2 LP state machines and PHY control, XPHY CTRL_CLK
-//                      (the receiver's tap logic runs in this domain: CsiDlyVid = 1)
+//                      (the adapter's delay control and des_rst handling run in this domain)
 //   XPLL      200 MHz input (own BUFG) x 15 / 2 = 1500 MHz PLL_CLK of the bank 705 XPHYs
 //   byte clk  180 MHz  D-PHY byte clock (clock lane / 4), runs during HS bursts only
 // Reset: USER_RESET_N (front panel H_RESET, active low) and the MMCM locked: SoC reset =
 // rst_n_i & locked (bow_rstmgr inside the SoC), video domain and PHY reset = the same,
-// synchronised to clk_vid (the PHY then runs XPLL lock + BISC again, phy_rdy after ~40 us
+// synchronised to clk_vid (the PHY then runs XPLL lock + BISC again, AFE ready after ~40 us
 // in simulation, AM010: up to 1.3 ms). Software can re-initialise the PHY alone with
 // CMD.REINIT of the D-PHY registers (below).
 //
-// D-PHY run-time knobs and status of bow_dphy_io_versal (the PA4 / PA5 / PB6 / PB7 GPIO
-// pins up to step 3 of docs/ip/mipi_rx_arch.md; since step 4 registers of the receiver's
-// D-PHY at 0x4000_8C00, docs/ip/dphy_rx.md):
-//   reinit_i        dphy_reinit_o: CMD.REINIT, a 32 cycle clk_sys pulse (XPLL and XPHY
-//                   resets, AFE_STATUS.READY = 0, loaded DLYn taps lost, then XPLL lock, BISC
-//                   and VT tracking again: ~40 us in simulation, AM010: up to 1.3 ms)
-//   burst_rst_en_i  dphy_burst_rst_en_o = ~CTRL.DES_RST_DIS, 1 from reset: RX_RST of the
-//                   data slices while the byte clock gate is closed (FIFOs drained before
-//                   every burst); DES_RST_DIS = 1 (test bit only: the board broke without the
+// D-PHY AFE controls and status of bow_dphy_io_versal (the PA4 / PA5 / PB6 / PB7 GPIO pins
+// up to step 3 of docs/ip/mipi_rx_arch.md; registers of the receiver's D-PHY at
+// 0x4000_8C00 since step 4, docs/ip/dphy_rx.md; the AFE interface since step 5):
+//   cal_start_i     dphy_cal_start_o: CMD.REINIT, a 32 cycle clk_sys pulse (XPLL and XPHY
+//                   resets, AFE_STATUS.READY = 0, loaded DLYn codes lost, then XPLL lock,
+//                   BISC and VT tracking again: ~40 us in simulation, AM010: up to 1.3 ms)
+//   pd_i            dphy_pd_o: AFE_CTRL.PD, 0 from reset: 1 holds the PHY in that reset
+//   des_rst_i       dphy_des_rst_o: ~clk_gate_en (clk_vid flop of the D-PHY, changes at the
+//                   same edge as the gate), 0 while CTRL.DES_RST_DIS = 1: RX_RST of the data
+//                   slices while the byte clock gate is closed (FIFOs drained before every
+//                   burst); DES_RST_DIS = 1 (test bit only: the board broke without the
 //                   reset) = AMD's choice
-//   phy_status_o    AFE_STATUS[11:8] = {PHY_RDY all, DLY_RDY all, XPLL LOCKED_FB, LOCKED}
-//   (all clk_sys flops or synchronised to clk_sys inside the SoC; the PHY synchronises its
-//   inputs to clk_vid)
+//   status_o        AFE_STATUS[15:8] = {0, PHY_RDY all, DLY_RDY all, XPLL LOCKED_FB, LOCKED}
+//   (cal_start, pd, the delay codes: clk_sys flops; the PHY synchronises them to clk_vid)
 //
 // UARTs: as the RAM card build (CP2102N "UART0" = Bow32 UART0, "UART1" = PB0 / PB1).
 // GPIO:
@@ -165,20 +168,21 @@ module bow32_huins_vp1902_cam_top #(
   );
 
   // ---------------------------------------------------------------------------
-  // D-PHY receive I/O. The nibble plan (Dphy* parameters) is the one of the camera pins,
+  // D-PHY AFE adapter. The nibble plan (Dphy* parameters) is the one of the camera pins,
   // derived at build time (tcl/cam_plan.tcl) and checked against the placed pins before
   // opt_design (tcl/pre_opt_cam.tcl, tcl/cam_xphy.tcl). The XDC refers to the instance
-  // name u_dphy. reinit_i / burst_rst_en_i / phy_status_o: registers of the receiver's
-  // D-PHY (above).
+  // name u_dphy. cal_start_i / pd_i / des_rst_i / status_o: the receiver's D-PHY (above).
   // ---------------------------------------------------------------------------
-  logic                     dphy_byte_clk, dphy_byte_ce, dphy_byte_rst, dphy_clk_hs_en;
-  logic                     dphy_phy_rdy, dphy_reinit, dphy_burst_rst_en;
-  logic [3:0]               dphy_status;
+  logic                     dphy_hs_byte_clk, dphy_clk_gate_en, dphy_des_rst;
+  logic                     dphy_clk_lprx_en, dphy_clk_hsrx_en, dphy_clk_term_en;
+  logic                     dphy_pd, dphy_ready, dphy_cal_start;
+  logic [7:0]               dphy_status;
   logic [1:0]               dphy_clk_lp;
   logic [CsiLanes-1:0][1:0] dphy_lp;
-  logic [CsiLanes-1:0]      dphy_hs_en, dphy_rx_valid, dphy_dly_load;
-  logic [CsiLanes-1:0][7:0] dphy_rx_data;
-  logic [CsiLanes-1:0][8:0] dphy_dly_tap, dphy_dly_tap_out;
+  logic [CsiLanes-1:0]      dphy_hs_valid, dphy_lprx_en, dphy_hsrx_en, dphy_term_en;
+  logic [CsiLanes-1:0]      dphy_dly_own;
+  logic [CsiLanes-1:0][7:0] dphy_hs_data;
+  logic [CsiLanes-1:0][8:0] dphy_dly_code, dphy_dly_q;
 
   bow_dphy_io_versal #(
     .Lanes         (CsiLanes),
@@ -201,23 +205,27 @@ module bow32_huins_vp1902_cam_top #(
     .ctrl_clk_i     (clk_vid),
     .ctrl_rst_ni    (vid_rst_n),
     .pll_clkin_i    (xpll_clk),
-    .reinit_i       (dphy_reinit),
-    .burst_rst_en_i (dphy_burst_rst_en),
-    .phy_rdy_o      (dphy_phy_rdy),
-    .phy_status_o   (dphy_status),
-    .byte_clk_o     (dphy_byte_clk),
-    .byte_ce_i      (dphy_byte_ce),
-    .byte_rst_i     (dphy_byte_rst),
+    .hs_byte_clk_o  (dphy_hs_byte_clk),
+    .hs_data_o      (dphy_hs_data),
+    .hs_valid_o     (dphy_hs_valid),
+    .clk_hs_samp_o  (),
+    .clk_gate_en_i  (dphy_clk_gate_en),
+    .des_rst_i      (dphy_des_rst),
     .clk_lp_o       (dphy_clk_lp),
-    .clk_hs_en_i    (dphy_clk_hs_en),
     .lp_o           (dphy_lp),
-    .hs_en_i        (dphy_hs_en),
-    .rx_data_o      (dphy_rx_data),
-    .rx_valid_o     (dphy_rx_valid),
-    .clk_q_o        (),
-    .dly_tap_i      (dphy_dly_tap),
-    .dly_load_i     (dphy_dly_load),
-    .dly_tap_o      (dphy_dly_tap_out)
+    .clk_lprx_en_i  (dphy_clk_lprx_en),
+    .lprx_en_i      (dphy_lprx_en),
+    .clk_hsrx_en_i  (dphy_clk_hsrx_en),
+    .hsrx_en_i      (dphy_hsrx_en),
+    .clk_term_en_i  (dphy_clk_term_en),
+    .term_en_i      (dphy_term_en),
+    .dly_code_i     (dphy_dly_code),
+    .dly_own_i      (dphy_dly_own),
+    .dly_q_o        (dphy_dly_q),
+    .pd_i           (dphy_pd),
+    .ready_o        (dphy_ready),
+    .cal_start_i    (dphy_cal_start),
+    .status_o       (dphy_status)
   );
 
   // ---------------------------------------------------------------------------
@@ -239,7 +247,7 @@ module bow32_huins_vp1902_cam_top #(
     .CsiLanes      (CsiLanes),
     .CsiPhy        (1'b1),
     .CsiFifoDepth  (512),                 // 2048 px: a 1080p line burst (receiver FIFO)
-    .CsiDlyVid     (1'b1),                // tap control in clk_vid = XPHY CTRL_CLK
+    .CsiAfeKind    (2),                   // the Versal adapter (INFO2: SETTLE target, trail)
     .VidClkHz      (VidClkHz)
   ) u_soc (
     .clk_i        (clk_sys),
@@ -264,22 +272,26 @@ module bow32_huins_vp1902_cam_top #(
     .isp_tdata_o  (),
     .isp_tuser_o  (isp_tuser),
     .isp_tlast_o  (),
-    .dphy_byte_clk_i  (dphy_byte_clk),
-    .dphy_byte_ce_o   (dphy_byte_ce),
-    .dphy_byte_rst_o  (dphy_byte_rst),
-    .dphy_clk_lp_i    (dphy_clk_lp),
-    .dphy_clk_hs_en_o (dphy_clk_hs_en),
-    .dphy_lp_i        (dphy_lp),
-    .dphy_hs_en_o     (dphy_hs_en),
-    .dphy_rx_data_i   (dphy_rx_data),
-    .dphy_rx_valid_i  (dphy_rx_valid),
-    .dphy_phy_rdy_i   (dphy_phy_rdy),
-    .dphy_phy_status_i ({4'h0, dphy_status}),
-    .dphy_reinit_o    (dphy_reinit),
-    .dphy_burst_rst_en_o (dphy_burst_rst_en),
-    .dphy_dly_tap_o   (dphy_dly_tap),
-    .dphy_dly_load_o  (dphy_dly_load),
-    .dphy_dly_tap_i   (dphy_dly_tap_out),
+    .dphy_hs_byte_clk_i (dphy_hs_byte_clk),
+    .dphy_hs_data_i     (dphy_hs_data),
+    .dphy_hs_valid_i    (dphy_hs_valid),
+    .dphy_clk_gate_en_o (dphy_clk_gate_en),
+    .dphy_des_rst_o     (dphy_des_rst),
+    .dphy_clk_lp_i      (dphy_clk_lp),
+    .dphy_lp_i          (dphy_lp),
+    .dphy_clk_lprx_en_o (dphy_clk_lprx_en),
+    .dphy_lprx_en_o     (dphy_lprx_en),
+    .dphy_clk_hsrx_en_o (dphy_clk_hsrx_en),
+    .dphy_hsrx_en_o     (dphy_hsrx_en),
+    .dphy_clk_term_en_o (dphy_clk_term_en),
+    .dphy_term_en_o     (dphy_term_en),
+    .dphy_dly_code_o    (dphy_dly_code),
+    .dphy_dly_own_o     (dphy_dly_own),
+    .dphy_dly_q_i       (dphy_dly_q),
+    .dphy_pd_o          (dphy_pd),
+    .dphy_ready_i       (dphy_ready),
+    .dphy_cal_start_o   (dphy_cal_start),
+    .dphy_status_i      (dphy_status),
     // no AXI4-Lite device: the bridge times out
     .m_axil_awaddr_o  (),
     .m_axil_awprot_o  (),
@@ -425,7 +437,7 @@ module bow32_huins_vp1902_cam_top #(
   logic        bclk_s, bclk_last_q;
   logic [23:0] bclk_alive_q;
 
-  always_ff @(posedge dphy_byte_clk) bclk_div_q <= bclk_div_q + 4'd1;
+  always_ff @(posedge dphy_hs_byte_clk) bclk_div_q <= bclk_div_q + 4'd1;
 
   bow_sync u_sync_bclk (
     .clk_i  (clk_vid),
@@ -462,7 +474,7 @@ module bow32_huins_vp1902_cam_top #(
   assign led_o[6]   = dphy_status[0];          // XPLL LOCKED (synchronised to clk_vid)
   assign led_o[7]   = xclr;
   assign led_o[8]   = heartbeat_q[24];
-  assign led_o[9]   = dphy_phy_rdy;
+  assign led_o[9]   = dphy_ready;
   assign led_o[10]  = ~fmc_prsnt_n_i;
   assign led_o[11]  = locked;
 

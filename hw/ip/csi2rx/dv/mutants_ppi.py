@@ -153,6 +153,8 @@ def build_tb(d, lanes, files):
            "-F", os.path.join(REPO, "hw", "ip", "common", "common.f"),
            "-F", os.path.join(REPO, "hw", "ip", "bus", "bus.f"),
            "-F", os.path.join(REPO, "hw", "ip", "dphy_rx", "dphy_rx.f"), *files,
+           *[os.path.join(REPO, "hw", "fpga", "common", "rtl", f)
+             for f in ("bow_dphy_dly_xusp.sv", "bow_dphy_dly_xphy.sv")],
            os.path.join(HERE, "csi2_tx_model.sv"), os.path.join(HERE, "bow_ppi_bfm.sv"),
            os.path.join(HERE, "tb_csi2rx_ppi.sv")]
     # one retry: under load Verilator 5.020 can abort at its exit ("attempted to destroy locked
