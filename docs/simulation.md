@@ -373,15 +373,22 @@ thích (`cfg.txt`, `stim.txt`); `tb_bow_csi2rx.sv` chơi chúng qua
 (`regs.txt`, mỗi FE một dòng `fe FRAME_INFO FRAME_SUM FRAME_ERR`); mô hình so
 sánh pixel (`tuser[0]`/`tlast`/`tuser[1]`, cả khi FIFO tràn), bộ đếm,
 FRAME/LINE_INFO, FRAME_SUM, `FRAME_ERR`, FRAME/LINE_TIME, LOG và các bất biến PHY.
-`stim.txt` có thêm lệnh `wrbe A D BE` (ghi theo byte enable).
+`stim.txt` có thêm lệnh `wrbe A D BE` (ghi theo byte enable). Bench thứ hai (bước 3 của
+[ip/mipi_rx_arch.md](ip/mipi_rx_arch.md) mục 10) chạy controller một mình ở PPI, cùng mô hình
+(dưới).
 
 ```bash
-make -C hw/ip/csi2rx/dv test                          # 105 case, 1/2/4 lane (~24 s)
+make -C hw/ip/csi2rx/dv test                          # test-rx rồi test-ppi
+make -C hw/ip/csi2rx/dv test-rx                       # cả bộ thu: 105 case, 1/2/4 lane, song song
 make -C hw/ip/csi2rx/dv align                         # chỉ unit test của aligner
-make -C hw/ip/csi2rx/dv test SEEDS="1 2 3 4 5 6 7 8"
+make -C hw/ip/csi2rx/dv test-rx SEEDS="1 2 3 4 5 6 7 8"
 make -C hw/ip/csi2rx/dv run SEED=7 LANES=1 ERRORS=1   # thêm DUT_LANES=1|2|4 RAW8=1 CONTCLK=1
 make -C hw/ip/csi2rx/dv run SEED=3 LANES=4 ERRORS=1 BURSTRST=1   # PHY Versal với BurstRxRst = 1
 make -C hw/ip/csi2rx/dv run TEST=clk                  # một test directed
+make -C hw/ip/csi2rx/dv test-ppi                      # controller ở PPI: 167 case, hai chế độ, song song
+make -C hw/ip/csi2rx/dv test-ppi SEEDS="$(seq -s ' ' 1 40)" PJOBS=8
+make -C hw/ip/csi2rx/dv run-ppi MODE=std TEST=loss LANES=4   # một case (MODE bow|std)
+make -C hw/ip/csi2rx/dv mutants-ppi                   # 20 mutant phải làm bench PPI hỏng
 ```
 
 - Unit test aligner (`tb_dphy_align.sv`, chạy đầu tiên trong `test`): word
@@ -409,7 +416,8 @@ make -C hw/ip/csi2rx/dv run TEST=clk                  # một test directed
   (dừng giữa burst rồi chạy lại), `byteclk`, `eye` (nạp và đọc lại tap, mô hình
   eye), `deskew` (burst skew calibration thật: burst thô `FFFFh` + `0101…`, không
   phải lỗi SOT, đếm ở `CNT_EXT[31:16]`, cả giữa các dòng; deskew chỉ trên một
-  lane là SKEW; sync hỏng với `00 FF` trong pixel hay trail, `0xFC`/`0xFE`/`0xFF`
+  số lane là SKEW, liền nhau rồi riêng từng burst với `CNT_EXT` đọc sau nó; sync
+  hỏng với `00 FF` trong pixel hay trail, `0xFC`/`0xFE`/`0xFF`
   trước DI, bit sync ngay trước cuối HS-zero vẫn là SOT), `extra` (byte sau packet trong cùng burst vượt
   `CTRL.EXTRA` → `ERR_STATUS.EXTRA`, `CNT_EXT[15:0]`: dòng + dòng, EMB + dòng,
   VC khác + dòng, FS + dòng thì frame bị bỏ, long packet nhỏ dưới ngưỡng,
@@ -418,8 +426,9 @@ make -C hw/ip/csi2rx/dv run TEST=clk                  # một test directed
   `FRAME_ERR`, mất giữa hai frame tính cho frame sau; dòng đầu không có nhóm
   pixel thì frame bị bỏ, dòng không có nhóm giữa frame đánh dấu dòng sau, ngoài
   frame thì không; vào HS bị từ chối ở mức LP trên data lane hay lane clock,
-  với `CLK_FORCE` thì lane clock không tính; packet bị cắt không phải dòng;
-  ECC_CORR của header FE thuộc frame nó kết thúc), `be` (ghi theo byte enable
+  với `CLK_FORCE` thì lane clock không tính, còn treo qua một burst deskew tới
+  dòng sau; packet bị cắt không phải dòng; ECC_CORR của header FE thuộc frame nó
+  kết thúc; lỗi CRC ở dòng mà word cuối có byte payload, 4 lane), `be` (ghi theo byte enable
   trên mọi thanh ghi). `cmd`, `stop`, `deskew`, `extra`, `ovf`, `ovf2`, `loss`,
   `be`, `eye` chạy thêm với 1 lane; `deskew`, `extra`, `ovf`, `ovf2`, `loss`,
   `eye` với 1 trên 2 lane; `be`, `eye`, `loss` với clock liên tục (2 và 4 lane).
@@ -434,8 +443,30 @@ make -C hw/ip/csi2rx/dv run TEST=clk                  # một test directed
   mục *Kiểm chứng*.
 - Mỗi case giữ file trong `build/csi2rx_dv/<case>/` (`sim.log` cho CI, có dòng thống kê FIFO
   của PHY Versal); một binary Verilator cho mỗi giá trị `Lanes` (`build/csi2rx_dv/obj_l1`,
-  `obj_l2`, `obj_l4`) và một cho aligner (`obj_align`).
-- `make test-tools` chạy 36 unit test của mô hình (`tools/tests/test_csi2_model.py`).
+  `obj_l2`, `obj_l4`) và một cho aligner (`obj_align`). Sau unit test aligner, các case chạy song
+  song `PJOBS` case (mặc định số CPU; `PJOBS=1`: lần lượt), mỗi case in dòng kết quả của nó: ~3 s
+  với 24 job, ~26 s tuần tự. Mỗi bản build model chạy lại Verilator một lần nếu nó hỏng (Verilator
+  5.020 đôi khi abort lúc thoát sau một bản build tốt) và `touch` binary.
+- `make test-tools` chạy 41 unit test của mô hình (`tools/tests/test_csi2_model.py`).
+- **Bench PPI** (`tb_csi2rx_ppi.sv`, `bow_ppi_bfm.sv`; `test-ppi`, bước CI riêng): controller
+  `bow_csi2rx` một mình, PHY là BFM chơi phần dựng PPI của `csi2_model.py gen --ppi bow|std` (mỗi
+  item TX của test case kèm byte mỗi lane mỗi burst với chu kỳ, `RxActiveHS`, `RxSyncHS`, khe,
+  lỗi, lần chạy byte clock, xung lp; kỳ vọng vẫn từ item TX). Chế độ `bow`: thời gian của D-PHY
+  Bow32 (`RxActiveHS` từ cuối SETTLE, khe như XPHY, `ErrSotSyncHS` cuối burst, lỗi lp và HS entry
+  là xung `vid_clk_i`, dải phụ do BFM lái: `band_lane_en_lp` = `Enable` qua 2 flop); chế độ
+  `std`: PHY chuẩn qua wrapper cổng phẳng `bow_csi2rx_ppi_flat` (`RxActiveHS` cùng `RxSyncHS`,
+  không khe, `ErrSotSyncHS` sớm, lỗi dạng xung ở clock lp của PHY, không `PhyReady`). Một model
+  Verilator cho mỗi `Lanes` (`build/csi2rx_dv/obj_ppi_l1`, `obj_ppi_l2`, `obj_ppi_l4`) chứa cả hai
+  DUT, DUT không dùng không có clock. Các test của controller (random, `cmd`, `ovf`, `stop`,
+  `skew`, `deskew`, `extra`, `loss`, `ovf2`, `ovf8`, `be`) cộng `clkstop` (byte clock dừng 4 cạnh
+  sau khi `RxActiveHS` xuống, hay sớm hơn), `lpmask` (lỗi LP của lane đã tắt chỉ đếm, của lane
+  đang bật đánh dấu burst mất; cạnh mặt nạ chỉ ở `bow`), `gaps` (chỉ `bow`, cả RAW có khe); case
+  chạy song song như `test-rx` (`PJOBS`), mỗi case giữ file trong
+  `build/csi2rx_dv/ppi_<MODE>_<case>/`, `sim.log` có dòng phủ của BFM (số burst theo số cạnh byte
+  clock sau khi `RxActiveHS` xuống, khe, `ErrSotSyncHS` cuối / sớm, xung lp, cạnh mặt nạ, chu kỳ
+  không có word RAW...). Bench PPI không nhanh hơn bench cả bộ thu trên cùng case (thời gian nằm
+  ở mô hình Python). Chi tiết: [ip/csi2rx.md](ip/csi2rx.md) mục *Kiểm chứng*,
+  [ip/mipi_rx_arch.md](ip/mipi_rx_arch.md) mục 5.5.
 
 ### D-PHY I/O trên FPGA (xsim)
 

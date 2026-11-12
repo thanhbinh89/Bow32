@@ -48,7 +48,12 @@ jobs:
         run: make -C hw/ip/isp/dv test
 
       - name: CSI-2 receiver unit test (D-PHY TX model, RTL vs. Python model)
-        run: make -C hw/ip/csi2rx/dv test
+        run: make -C hw/ip/csi2rx/dv test-rx
+
+      # The controller alone at its PPI (bow_ppi_bfm): the timing of the D-PHY of Bow32 and
+      # of a standard PHY through the flat-port wrapper (docs/ip/mipi_rx_arch.md, 5.5)
+      - name: CSI-2 controller PPI bench (both timings, RTL vs. Python model)
+        run: make -C hw/ip/csi2rx/dv test-ppi
 
       - name: H.264 encoder unit test (bit-exact vs. Python model)
         run: make -C hw/ip/h264/dv test
