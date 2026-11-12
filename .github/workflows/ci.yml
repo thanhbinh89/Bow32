@@ -47,7 +47,9 @@ jobs:
       - name: ISP unit test (bit-exact vs. Python model)
         run: make -C hw/ip/isp/dv test
 
-      - name: CSI-2 receiver unit test (D-PHY TX model, RTL vs. Python model)
+      # The aligner and the AFE side (the adapters' logic against models of the primitives,
+      # the D-PHY's AFE controls and status) on their own, then the whole receiver
+      - name: CSI-2 receiver unit test (AFE unit tests, D-PHY TX model, RTL vs. Python model)
         run: make -C hw/ip/csi2rx/dv test-rx
 
       # The controller alone at its PPI (bow_ppi_bfm): the timing of the D-PHY of Bow32 and

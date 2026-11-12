@@ -10,6 +10,12 @@
 #                             (e.g. build/sw/camera/camera.vmem)
 #   make jtag                 load bow32_kv260_cam.bit into a running Kria over JTAG
 #                             (JTAG_SERIAL=... when several boards are connected)
+#   make rx-ooc               out-of-context check of the receiver part only (no block
+#                             design, no bitstream; decision D1 of docs/ip/mipi_rx_arch.md):
+#                             bow_mipi_rx + bow_dphy_io_xusp placed and routed on the KV260
+#                             part with the receiver constraints of constr/kv260_cam.xdc;
+#                             timing, bus skew, CE / CLOCK_DELAY_GROUP, CDC (ooc/rx_ooc.tcl)
+#                             -> build/fpga/kv260_cam_rx_ooc/rx_ooc_result.txt, PASS / FAIL
 #
 # Tools: Vivado (vivado, bootgen in PATH), dtc (device-tree-compiler),
 # xsdb (Vitis) for `make jtag`.
@@ -29,6 +35,7 @@ JTAG_SERIAL ?=
 
 FW_DIR := $(OUT)/firmware/bow32_cam
 BIT    := $(OUT)/bow32_kv260_cam.bit
+RX_OOC := $(REPO)/build/fpga/kv260_cam_rx_ooc
 
 all: firmware
 
@@ -57,7 +64,18 @@ firmware: bitstream
 jtag:
 	$(XSDB) $(CURDIR)/../kv260/tcl/jtag_load.tcl $(BIT) $(JTAG_SERIAL)
 
+# the checks of ooc/rx_ooc.tcl, and no CRITICAL WARNING in the Vivado log
+rx-ooc:
+	@mkdir -p $(RX_OOC)
+	cd $(RX_OOC) && $(VIVADO) -mode batch -nojournal -log vivado.log \
+	  -source $(CURDIR)/ooc/rx_ooc.tcl -tclargs $(REPO) $(RX_OOC) > vivado.out 2>&1 || \
+	  { tail -20 $(RX_OOC)/vivado.out; exit 1; }
+	@grep -h '^RX_OOC' $(RX_OOC)/rx_ooc_result.txt
+	@n=$$(grep -c '^CRITICAL WARNING' $(RX_OOC)/vivado.log); \
+	  echo "RX_OOC: $$n CRITICAL WARNING in $(RX_OOC)/vivado.log"; \
+	  grep -q '^RX_OOC: PASS' $(RX_OOC)/rx_ooc_result.txt && [ $$n -eq 0 ]
+
 clean:
 	rm -rf $(OUT)
 
-.PHONY: all rom bitstream firmware jtag clean
+.PHONY: all rom bitstream firmware jtag rx-ooc clean

@@ -1203,15 +1203,22 @@ các cổng LP / HS enable / byte clock với bộ thu:
   burst. Từ bước 4 cả hai đến từ thanh ghi của D-PHY: `reinit_o` (xung 32 chu kỳ bus khi ghi
   `CMD.REINIT`; xsim `reinit_pulse` kiểm xung 640 ns đó) và `burst_rst_en_o` (¬`CTRL.DES_RST_DIS`,
   1 từ reset); trạng thái {PHY_RDY, DLY_RDY của mọi nibble, LOCKED_FB, LOCKED} vào `AFE_STATUS[15:8]`
-  của D-PHY. Trước bước 4: PA4, PA5 và PB6 / PB7.
+  của D-PHY. Trước bước 4: PA4, PA5 và PB6 / PB7. Từ bước 5 module là adapter của giao diện AFE
+  ([ip/mipi_rx_arch.md](ip/mipi_rx_arch.md) mục 3.7): `pd_i` (`AFE_CTRL.PD`, mức) và `cal_start_i`
+  (xung `CMD.REINIT`) thay `reinit_i`, `des_rst_i` (flop miền lp của D-PHY = ¬cổng, 0 khi
+  `DES_RST_DIS` = 1) thay `burst_rst_en_i` (`RX_RST` = `ready` ∧ `des_rst`, cùng chu kỳ như trước);
+  logic nạp delay (`RX_EN_VTC`, chờ, `LD`) nằm trong `bow_dphy_dly_xphy` (`u_dly`), nạp khi OWN của
+  `DLYn` lên hoặc mã đổi.
 - **XPLL** 1500 MHz cho BISC/VT; **byte clock** = `FIFO_WR_CLK` của nibble strobe qua BUFGCE,
-  dừng giữa các burst như byte clock của KV260. Dữ liệu ra có `rx_valid` theo từng lane.
+  dừng giữa các burst như byte clock của KV260. Dữ liệu ra có `hs_valid` (`rx_valid` tới bước 4)
+  theo từng lane.
 - Ràng buộc: [constr/huins_vp1902_cam.xdc](../hw/fpga/huins_vp1902/constr/huins_vp1902_cam.xdc),
   [constr/cam_pads.xdc](../hw/fpga/huins_vp1902/constr/cam_pads.xdc); chú thích trong từng file.
 - Mô phỏng: `hw/fpga/common/dv/tb_bow_dphy_io_versal.sv` với model XPHY của AMD (secureip,
-  cần Vivado, không chạy trong CI), 3 sơ đồ tổng hợp, 24 cấu hình: nạp tap, quét tap, lệch lane,
-  glitch của lane clock, lane clock liên tục, `burst_rst_en_i` bật giữa burst, `reinit_i` khi
-  lane clock nghỉ, đang chạy HS hoặc liên tục (BISC với strobe chạy), tùy chọn `RdenReg` /
+  cần Vivado, không chạy trong CI), 3 sơ đồ tổng hợp, 25 cấu hình: nạp tap (cùng mã không nạp,
+  OWN xuống rồi lên nạp lại), quét tap, lệch lane, glitch của lane clock, lane clock liên tục,
+  `des_rst_i` bật giữa burst, `pd_i` khi lane clock nghỉ, đang chạy HS hoặc liên tục (BISC với
+  strobe chạy), xung `cal_start_i` 640 ns, tùy chọn `RdenReg` /
   `EnVtcEarly`. `make -C hw/fpga/common/dv test-dphy-versal` (cũng trong `make test-fpga-dv`,
   ~16 phút), một cấu hình: `make -C hw/fpga/common/dv run-dphy-versal DPHYV_CFG=reinit_idle
   WAVES=1`. `make lint` lint module (3 sơ đồ, và một sơ đồ phải bị từ chối) và top camera với

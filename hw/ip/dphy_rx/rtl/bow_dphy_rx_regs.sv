@@ -1,10 +1,10 @@
 // Copyright Bow32 contributors.
 // SPDX-License-Identifier: Apache-2.0
 //
-// D-PHY receiver register file, v1 (bus clock domain): step 4 of docs/ip/mipi_rx_arch.md
-// (section 10), the registers of section 4.10 that the D-PHY has in v1; docs/ip/dphy_rx.md
-// is the map with the reset values and the fields of later steps. Offsets in the D-PHY
-// window (bow_mipi_rx: 0xC00 of CSI2RX, 0x4000_8C00):
+// D-PHY receiver register file, v1 (bus clock domain): steps 4 and 5 of
+// docs/ip/mipi_rx_arch.md (section 10), the registers of section 4.10 that the D-PHY has in
+// v1; docs/ip/dphy_rx.md is the map with the reset values and the fields of later steps.
+// Offsets in the D-PHY window (bow_mipi_rx: 0xC00 of CSI2RX, 0x4000_8C00):
 //
 //   0x000 ID          R    0x44505201
 //   0x004 INFO        R    [3:0] lanes [4] PPI 16 bit (0) [7:5] AfeKind [17:8] lp_clk MHz
@@ -12,8 +12,9 @@
 //                          delay (AfeKind = 2, Versal BISC)
 //   0x008 INFO2       R    [7:0] SETTLE_NS [15:8] SETTLE_UI [23:16] AFE trail bytes per lane
 //   0x00C CTRL        RW   [1] CLK_CONT [6] DES_RST_DIS
-//   0x010 CMD         W    [1] REINIT (reinit_o for ReinitCycles cycles) [3] CNT_CLR
-//   0x018 AFE_STATUS  R    [0] READY [15:8] raw AFE status
+//   0x010 CMD         W    [1] REINIT (cal_start_o for ReinitCycles cycles) [3] CNT_CLR
+//   0x014 AFE_CTRL    RW   [0] PD (AfePdRst): pd_o, lprx_en_o = ~PD, lane_pd_o
+//   0x018 AFE_STATUS  R    [0] READY [1] CAL_DONE [2] CAL_ERR [15:8] raw AFE status
 //   0x024 TIM0        RW   [7:0] SETTLE [11:8] LP_FILTER [23:16] CLK_SETTLE [31:24] CLK_MISS
 //   0x030 LANE_LP     R    filtered LP {P, N}: [1:0] clock lane, [2l+3:2l+2] data lane l
 //   0x034 LANE_HS     R    [0] clock lane HS receiver, [l+1] data lane l, [16] byte clock gate,
@@ -34,18 +35,32 @@
 // 0 and 1 changes nothing). In W1C registers a hardware set wins over a clear in the same
 // cycle. Fields of lanes above the Lanes parameter read 0 and ignore writes.
 //
-// Every output towards the D-PHY is a bus clock flop (the receiving domain synchronises
-// it): CTRL.CLK_CONT and TIM0 (bow_dphy_rx: u_sync_vcfg, quasi-static, changed only while
-// the PHY is off), burst_rst_en_o = ~DES_RST_DIS (held in a flop of its own, reset 1: the
-// receive path reset of the PHY I/O is on by default), reinit_o, the DLYn codes and request
-// counters, the RAW commands.
+// Every output is a bus clock flop: CTRL.CLK_CONT, TIM0 and des_rst_en_o = ~DES_RST_DIS
+// (held in a flop of its own, reset 1: the receive path reset of the AFE is on by default)
+// go to bow_dphy_rx, which synchronises them into the lp domain (u_sync_vcfg, quasi-static,
+// changed only while the PHY is off); the RAW commands to its byte domain. The AFE controls
+// of the register file go to the AFE as they are (docs/ip/mipi_rx_arch.md section 3.1: the
+// AFE takes every control as asynchronous): the DLYn codes and OWN (dly_code_o, dly_own_o),
+// pd_o, lprx_en_o, lane_pd_o and cal_start_o. v1 keeps them in the bus domain, where their
+// only owner (the software) writes them; the lp domain copy of the codes comes with the
+// second owner, the deskew engine (step 8).
 //
-// DLYn (v1): CODE is the code the software asked for; every write with byte 0 or 1 steps the
-// lane's 2 bit gray request counter dly_req_o (DlyVid = 1: one load per write, see
-// bow_dphy_rx) and sets OWN while AFE_STATUS.READY = 1. OWN is 0 while READY = 0 (a PHY
-// re-init loses the loaded taps; a load before READY is ignored by the Versal PHY). PEND = OWN
-// and the PHY's delay [24:16] differs from CODE: the request is not applied yet. Software is
-// the only owner of the code in v1 (no deskew engine, no release), so this is all it needs.
+// AFE_CTRL.PD (v1: bit 0 only; TST_MODE and ATB_SEL later): pd_o = PD, lprx_en_o = ~PD (a flop
+// of its own), lane_pd_o = 1 from reset and while PD = 1, 0 once a fresh AFE_STATUS.READY was
+// seen with PD = 0: READY 0 at least once since PD last rose (or since reset), then 1
+// (section 3.6 of the spec; v1 has no LANE_EN and no ULPS, so every lane).
+//
+// CMD.REINIT (v1): cal_start_o high for ReinitCycles cycles, the AFE's re-calibration (Versal
+// adapter: XPLL, BISC and VT tracking again); its other meaning (the state machines back to
+// WaitStop) and the split into CMD.AFE_CAL come with step 6.
+//
+// DLYn (v1): CODE is the code the software asked for: dly_code_o, a static level (the AFE
+// applies a new code by itself; docs/ip/mipi_rx_arch.md section 3.5). Every write with byte 0
+// or 1 sets CODE and, while AFE_STATUS.READY = 1, OWN (dly_own_o: the lane uses CODE). OWN is
+// 0 while READY = 0 (an AFE restart loses the loaded codes; the next write raises OWN again
+// and so reloads, also the same code). PEND = OWN and the AFE's delay [24:16] (dly_q) differs
+// from CODE: not applied yet. Software is the only owner of the code in v1 (no deskew
+// engine, no release), so this is all it needs.
 //
 // BYTECLK: every 256 cycles the byte clock meter delta (mod 2^20) is taken; the maximum of 256
 // such windows, times 256, is BYTECLK = byte clock cycles per 65536 bus cycles while the clock
@@ -63,7 +78,8 @@ module bow_dphy_rx_regs import bow_bus_pkg::*; #(
   parameter int unsigned AfeSettleNs  = 107,
   parameter int unsigned AfeSettleUi  = 24,
   parameter int unsigned AfeTrailB    = 0,
-  parameter int unsigned ReinitCycles = 32            // reinit_o pulse, bus clock cycles
+  parameter bit          AfePdRst     = 1'b0,         // AFE_CTRL.PD after reset
+  parameter int unsigned ReinitCycles = 32            // cal_start_o pulse, bus clock cycles
 ) (
   input  logic                  clk_i,
   input  logic                  rst_ni,
@@ -74,14 +90,18 @@ module bow_dphy_rx_regs import bow_bus_pkg::*; #(
 
   // configuration and commands (bus clock flops)
   output logic                  clk_cont_o,       // CTRL.CLK_CONT
-  output logic                  burst_rst_en_o,   // ~CTRL.DES_RST_DIS
-  output logic                  reinit_o,         // CMD.REINIT pulse
+  output logic                  des_rst_en_o,     // ~CTRL.DES_RST_DIS
   output logic [7:0]            settle_o,         // TIM0
   output logic [3:0]            lp_filter_o,
   output logic [7:0]            clk_settle_o,
   output logic [7:0]            clk_miss_o,
+  // AFE controls (bus clock flops, asynchronous for the AFE)
+  output logic                  cal_start_o,      // CMD.REINIT pulse
+  output logic                  pd_o,             // AFE_CTRL.PD
+  output logic                  lprx_en_o,        // ~AFE_CTRL.PD
+  output logic                  lane_pd_o,        // PD, or no fresh READY since PD = 0
   output logic [Lanes-1:0][8:0] dly_code_o,       // DLYn CODE
-  output logic [Lanes-1:0][1:0] dly_req_o,        // gray, +1 per write to DLYn
+  output logic [Lanes-1:0]      dly_own_o,        // DLYn OWN
   output logic [3:0]            raw_req_o,        // gray
   output logic                  raw_now_o,
   input  logic [3:0]            raw_ack_i,        // synchronised
@@ -97,10 +117,12 @@ module bow_dphy_rx_regs import bow_bus_pkg::*; #(
   input  logic [Lanes:0][1:0]   lp_i,             // filtered LP {P, N}, same order
   input  logic [Lanes:0]        hs_en_i,          // HS receivers on, same order
   input  logic                  ce_i,             // byte clock gate open
-  input  logic                  ready_i,          // phy_rdy_i
+  input  logic                  ready_i,          // AFE ready
+  input  logic                  cal_done_i,       // AFE internal calibration done
+  input  logic                  cal_err_i,        // ... and failed
   input  logic [7:0]            afe_status_i,     // raw AFE status
   input  logic [19:0]           meter_i,          // byte clock cycle counter, gray
-  input  logic [Lanes-1:0][8:0] dly_q_i           // input delays in use (CNTVALUEOUT)
+  input  logic [Lanes-1:0][8:0] dly_q_i           // AFE dly_q: the delays in use
 );
 
   localparam int unsigned MaxLanes = 4;
@@ -192,7 +214,7 @@ module bow_dphy_rx_regs import bow_bus_pkg::*; #(
         clk_settle_q <= tim0_w[23:16];
         clk_miss_q   <= tim0_w[31:24];
       end
-      // REINIT: reinit_o high for ReinitCycles cycles (a new REINIT restarts it)
+      // REINIT: cal_start_o high for ReinitCycles cycles (a new REINIT restarts it)
       if (we0 && (a == 10'h010) && wd[1]) begin
         reinit_q     <= 1'b1;
         reinit_cnt_q <= ReinitLast;
@@ -205,18 +227,51 @@ module bow_dphy_rx_regs import bow_bus_pkg::*; #(
   end
 
   assign clk_cont_o     = clk_cont_q;
-  assign burst_rst_en_o = burst_rst_en_q;
-  assign reinit_o       = reinit_q;
+  assign des_rst_en_o   = burst_rst_en_q;
+  assign cal_start_o    = reinit_q;
   assign settle_o       = settle_q;
   assign lp_filter_o    = lp_filter_q;
   assign clk_settle_o   = clk_settle_q;
   assign clk_miss_o     = clk_miss_q;
 
+  // ----------------------------------------------------------------- AFE_CTRL
+  // PD (pd_o), lprx_en_o = ~PD and lane_pd_o, flops (every AFE control comes from a flop, no
+  // logic after it). lane_pd falls only on a fresh READY: READY seen 0 since PD last rose
+  // (rdy_low_q; 1 from reset), then READY 1 with PD = 0. ready_i comes through two flops
+  // and still reads 1 for a few cycles after PD rises: a PD pulse that short must not
+  // release lane_pd on that stale READY, the AFE restarts after any PD pulse (section 3.6
+  // of the spec). An AFE that keeps ready at 1 through pd (against section 3.2: the
+  // UltraScale+ adapter, which has neither pd nor lane_pd) leaves lane_pd at 1 after a PD
+  // pulse.
+  logic        pd_q, pd_d, lprx_en_q, lane_pd_q, rdy_low_q;
+  logic [31:0] afe_ctrl_rd, afe_ctrl_w;
+
+  assign afe_ctrl_rd = {31'h0, pd_q};
+  assign afe_ctrl_w  = wmerge(afe_ctrl_rd, wd, bm);
+  assign pd_d        = (we && (a == 10'h014)) ? afe_ctrl_w[0] : pd_q;
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      pd_q      <= AfePdRst;
+      lprx_en_q <= !AfePdRst;
+      lane_pd_q <= 1'b1;
+      rdy_low_q <= 1'b1;
+    end else begin
+      pd_q      <= pd_d;
+      lprx_en_q <= !pd_d;
+      rdy_low_q <= (pd_d && !pd_q) ? 1'b0 : (rdy_low_q || !ready_i);   // PD rises: wait again
+      lane_pd_q <= pd_d || (lane_pd_q && !(ready_i && rdy_low_q));
+    end
+  end
+
+  assign pd_o      = pd_q;
+  assign lprx_en_o = lprx_en_q;
+  assign lane_pd_o = lane_pd_q;
+
   // --------------------------------------------------------------------- DLYn
-  // CODE, request counter and OWN per lane (next state computed here, one non-blocking
-  // write per register: see the xsim note in bow_csi2rx)
+  // CODE and OWN per lane (next state computed here, one non-blocking write per register:
+  // see the xsim note in bow_csi2rx)
   logic [Lanes-1:0][DlyW-1:0] dly_code_q, dly_code_d;
-  logic [Lanes-1:0][1:0]      dly_req_q, dly_req_d;
   logic [Lanes-1:0]           own_q, own_d;
   logic [Lanes-1:0][31:0]     dly_w;
 
@@ -226,12 +281,10 @@ module bow_dphy_rx_regs import bow_bus_pkg::*; #(
 
   always_comb begin
     dly_code_d = dly_code_q;
-    dly_req_d  = dly_req_q;
     own_d      = ready_i ? own_q : '0;
     for (int unsigned l = 0; l < Lanes; l++) begin
       if (we && (a == 10'(32'h080 + 4 * l)) && (bus_req_i.be[1:0] != 2'b00)) begin
         dly_code_d[l] = dly_w[l][DlyW-1:0];
-        dly_req_d[l]  = {dly_req_q[l][0], ~dly_req_q[l][1]};   // gray 00 01 11 10
         if (ready_i) own_d[l] = 1'b1;
       end
     end
@@ -240,17 +293,15 @@ module bow_dphy_rx_regs import bow_bus_pkg::*; #(
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       dly_code_q <= '0;
-      dly_req_q  <= '0;
       own_q      <= '0;
     end else begin
       dly_code_q <= dly_code_d;
-      dly_req_q  <= dly_req_d;
       own_q      <= own_d;
     end
   end
 
   assign dly_code_o = dly_code_q;
-  assign dly_req_o  = dly_req_q;
+  assign dly_own_o  = own_q;
 
   // ------------------------------------------------------------- RAW commands
   logic [3:0] raw_req_q, raw_req_n;
@@ -417,7 +468,8 @@ module bow_dphy_rx_regs import bow_bus_pkg::*; #(
       10'h004: rdata_d = Info;
       10'h008: rdata_d = Info2;
       10'h00C: rdata_d = ctrl_rd;
-      10'h018: rdata_d = {16'h0, afe_status_i, 7'h0, ready_i};
+      10'h014: rdata_d = afe_ctrl_rd;
+      10'h018: rdata_d = {16'h0, afe_status_i, 5'h0, cal_err_i, cal_done_i, ready_i};
       10'h024: rdata_d = tim0_rd;
       10'h030: rdata_d = {22'h0, lp5};
       10'h034: rdata_d = {13'h0, (byteclk_q != '0), ce_i, ce_i, 11'h0, hs5};
@@ -466,7 +518,7 @@ module bow_dphy_rx_regs import bow_bus_pkg::*; #(
   logic unused_bus, unused_dly;
   assign unused_bus = ^{bus_req_i.addr[31:10], bus_req_i.addr[1:0], ctrl_w[31:7], ctrl_w[5:2],
                         ctrl_w[0], tim0_w[15:12], irq_en_w[31:4], err_lane_clr[31:17],
-                        err_lane_clr[15:12], err_lane_clr[7:0], unused_dly};
+                        err_lane_clr[15:12], err_lane_clr[7:0], afe_ctrl_w[31:1], unused_dly};
 
   always_comb begin
     unused_dly = 1'b0;

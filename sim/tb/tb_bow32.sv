@@ -16,21 +16,21 @@
 // Parameter Imx274 = 1 (sim/Makefile: model directory build/sim/obj-imx274)
 // turns the camera side into the Huins MFP-VP1902 camera build instead: the
 // Leopard LI-IMX274MIPI-FMC module on the Huins camera adapter. The SoC gets
-// the receiver of that build (CsiLanes = 4, CsiFifoDepth = 512, CsiDlyVid =
-// 1, video clock 200 MHz), csi2_tx_model runs with 4 lanes in its Versal
+// the receiver of that build (CsiLanes = 4, CsiFifoDepth = 512, CsiAfeKind =
+// 2, video clock 200 MHz), csi2_tx_model runs with 4 lanes in its Versal
 // XPHY mode (byte clock 180 MHz = 1440 Mbit/s per lane, PHY_RDY, BISC
-// delays, RX FIFOs with rx_valid; BurstRxRst from the receiver's
-// dphy_burst_rst_en_o = ~CTRL.DES_RST_DIS of its D-PHY, 1 from reset; with
+// delays, RX FIFOs with hs_valid; BurstRxRst from the D-PHY's des_rst, 0
+// while its CTRL.DES_RST_DIS = 1, through the Versal adapter's logic; with
 // BurstRxRst = 0 the FIFO latency drifts with glitch words and wraps; one
 // latency for all lanes) and an IMX274 model (I2C 0x1A, XCLR on PA7, standby
 // cancel sequence, readout modes and crop, HMAX/VMAX line timing, REGHOLD,
 // test patterns; see "IMX274" below) replaces the TCA9546A + IMX219.
-// PRSNT_M2C_L of the camera site (PB5) reads 0; the D-PHY's registers drive
-// the PHY model as in the camera top: CMD.REINIT (dphy_reinit_o) its re-init
-// (reinit_i), CTRL.DES_RST_DIS its BurstRxRst (burst_rst_en_i), and
-// AFE_STATUS[11:8] (dphy_phy_status_i) reads {PHY_RDY, DLY_RDY of every
-// nibble, XPLL LOCKED_FB, LOCKED} = {PHY_RDY, PHY_RDY, 1, 1} of the model
-// (GPIO PA4 / PA5 / PB6 / PB7 before step 4 of docs/ip/mipi_rx_arch.md: PB6 /
+// PRSNT_M2C_L of the camera site (PB5) reads 0; the D-PHY's AFE interface
+// drives the PHY model as in the camera top (step 5 of
+// docs/ip/mipi_rx_arch.md): cal_start (CMD.REINIT) and pd (AFE_CTRL.PD) its
+// re-init, des_rst its BurstRxRst, and AFE_STATUS[11:8] (dphy_status_i) reads
+// {PHY_RDY, DLY_RDY of every nibble, XPLL LOCKED_FB, LOCKED} = {PHY_RDY,
+// PHY_RDY, 1, 1} of the model (GPIO PA4 / PA5 / PB6 / PB7 before step 4: PB6 /
 // PB7 read 0 now). The other tests run on the default build only.
 //
 // The SoC has its DDR2 memory system (DdrEn = 1, DdrMem = 2: LiteDRAM DDR2
@@ -66,8 +66,8 @@
 //                     HS-PREPARE (default in csi2_274), 2 = shortest (default
 //                     in video274); 0 = typical (camera274)
 //   +S274_BURSTRST=<0|1>  IMX274 build: BurstRxRst of the PHY model, whatever
-//                     the receiver says. Default: dphy_burst_rst_en_o of the
-//                     receiver (~CTRL.DES_RST_DIS of the D-PHY, 1 from reset)
+//                     the receiver says. Default: the D-PHY's des_rst (0 while
+//                     its CTRL.DES_RST_DIS = 1; DES_RST_DIS is 0 from reset)
 //   +S274_DESRST=<0|1> +S274_SETTLE=<ns>  csi2_274: the receive path reset
 //                     (1: on, DES_RST_DIS = 0) and data lane SETTLE the
 //                     firmware must have set at its receiver starts (default
@@ -155,21 +155,23 @@ module tb_bow32 #(
   wire        i2c_scl = !(i2c_scl_oe || slv_scl_low);
   wire        i2c_sda = !(i2c_sda_oe || slv_sda_low);
 
-  // D-PHY receive I/O of the CSI-2 receiver (csi2_tx_model below) and ISP
-  // output. rx_valid and phy_rdy come from the model in the IMX274 build
-  // (Versal PHY), else they are tied off like on the KV260.
-  logic                     dphy_byte_clk, dphy_byte_ce, dphy_byte_rst, dphy_clk_hs_en;
-  logic                     dphy_phy_rdy, dphy_reinit, dphy_burst_rst_en;
+  // AFE interface of the CSI-2 receiver's D-PHY (csi2_tx_model below) and ISP
+  // output. hs_valid and ready come from the model in the IMX274 build
+  // (Versal PHY), else they are those of the UltraScale+ adapter (as the model
+  // drives them then too).
+  logic                     dphy_hs_byte_clk, dphy_clk_gate_en, dphy_des_rst;
+  logic                     dphy_clk_lprx_en, dphy_clk_hsrx_en, dphy_clk_term_en;
+  logic                     dphy_pd, dphy_ready, dphy_cal_start;
   logic [1:0]               dphy_clk_lp;
-  logic [CsiLanes-1:0]      dphy_hs_en, dphy_dly_load, dphy_rx_valid;
+  logic [CsiLanes-1:0]      dphy_lprx_en, dphy_hsrx_en, dphy_term_en, dphy_dly_own, dphy_hs_valid;
   logic [CsiLanes-1:0][1:0] dphy_lp;
-  logic [CsiLanes-1:0][7:0] dphy_rx_data;
-  logic [CsiLanes-1:0][8:0] dphy_dly_tap, dphy_dly_tap_rb;
-  wire  [CsiLanes-1:0]      dut_rx_valid = Imx274 ? dphy_rx_valid : '1;
-  wire                      dut_phy_rdy  = Imx274 ? dphy_phy_rdy : 1'b1;
+  logic [CsiLanes-1:0][7:0] dphy_hs_data;
+  logic [CsiLanes-1:0][8:0] dphy_dly_code, dphy_dly_q;
+  wire  [CsiLanes-1:0]      dut_hs_valid = Imx274 ? dphy_hs_valid : '1;
+  wire                      dut_ready    = Imx274 ? dphy_ready : 1'b1;
   // AFE_STATUS[15:8] of the D-PHY: the Versal PHY's {PHY_RDY, DLY_RDY of every nibble,
   // LOCKED_FB, LOCKED}; the model has PHY_RDY only (and no XPLL). KV260: none.
-  wire  [7:0]               dut_phy_status = Imx274 ? {4'h0, {2{dphy_phy_rdy}}, 2'b11} : 8'h00;
+  wire  [7:0]               dut_status = Imx274 ? {4'h0, {2{dphy_ready}}, 2'b11} : 8'h00;
   logic                     isp_tvalid, isp_tuser, isp_tlast;
   logic [23:0]              isp_tdata;
 
@@ -208,7 +210,7 @@ module tb_bow32 #(
     .CsiPhy      (1'b1),
     .VidClkHz    (VidClkHz),
     .CsiFifoDepth (CsiFifoDepth),
-    .CsiDlyVid   (Imx274),
+    .CsiAfeKind  (Imx274 ? 2 : 1),
     .DdrEn       (1'b1),
     .DdrMem      (DdrMem),
     .DdrClkHz    (DdrClkHz),
@@ -244,22 +246,26 @@ module tb_bow32 #(
     .isp_tdata_o  (isp_tdata),
     .isp_tuser_o  (isp_tuser),
     .isp_tlast_o  (isp_tlast),
-    .dphy_byte_clk_i  (dphy_byte_clk),
-    .dphy_byte_ce_o   (dphy_byte_ce),
-    .dphy_byte_rst_o  (dphy_byte_rst),
-    .dphy_clk_lp_i    (dphy_clk_lp),
-    .dphy_clk_hs_en_o (dphy_clk_hs_en),
-    .dphy_lp_i        (dphy_lp),
-    .dphy_hs_en_o     (dphy_hs_en),
-    .dphy_rx_data_i   (dphy_rx_data),
-    .dphy_rx_valid_i  (dut_rx_valid),
-    .dphy_phy_rdy_i   (dut_phy_rdy),
-    .dphy_phy_status_i (dut_phy_status),
-    .dphy_reinit_o    (dphy_reinit),
-    .dphy_burst_rst_en_o (dphy_burst_rst_en),
-    .dphy_dly_tap_o   (dphy_dly_tap),
-    .dphy_dly_load_o  (dphy_dly_load),
-    .dphy_dly_tap_i   (dphy_dly_tap_rb),
+    .dphy_hs_byte_clk_i (dphy_hs_byte_clk),
+    .dphy_hs_data_i     (dphy_hs_data),
+    .dphy_hs_valid_i    (dut_hs_valid),
+    .dphy_clk_gate_en_o (dphy_clk_gate_en),
+    .dphy_des_rst_o     (dphy_des_rst),
+    .dphy_clk_lp_i      (dphy_clk_lp),
+    .dphy_lp_i          (dphy_lp),
+    .dphy_clk_lprx_en_o (dphy_clk_lprx_en),
+    .dphy_lprx_en_o     (dphy_lprx_en),
+    .dphy_clk_hsrx_en_o (dphy_clk_hsrx_en),
+    .dphy_hsrx_en_o     (dphy_hsrx_en),
+    .dphy_clk_term_en_o (dphy_clk_term_en),
+    .dphy_term_en_o     (dphy_term_en),
+    .dphy_dly_code_o    (dphy_dly_code),
+    .dphy_dly_own_o     (dphy_dly_own),
+    .dphy_dly_q_i       (dphy_dly_q),
+    .dphy_pd_o          (dphy_pd),
+    .dphy_ready_i       (dut_ready),
+    .dphy_cal_start_o   (dphy_cal_start),
+    .dphy_status_i      (dut_status),
     .m_axil_awaddr_o  (axil_awaddr),
     .m_axil_awprot_o  (axil_awprot),
     .m_axil_awvalid_o (axil_awvalid),
@@ -1186,20 +1192,25 @@ module tb_bow32 #(
 
   // (Imx274 build: 4 lanes, Versal PHY mode, delays in the video clock domain)
   csi2_tx_model #(.Lanes(CsiLanes)) u_csi (
-    .byte_clk_o  (dphy_byte_clk),
-    .byte_ce_i   (dphy_byte_ce),
-    .byte_rst_i  (dphy_byte_rst),
-    .clk_lp_o    (dphy_clk_lp),
-    .clk_hs_en_i (dphy_clk_hs_en),
-    .lp_o        (dphy_lp),
-    .hs_en_i     (dphy_hs_en),
-    .rx_data_o   (dphy_rx_data),
-    .rx_valid_o  (dphy_rx_valid),
-    .dly_tap_i   (dphy_dly_tap),
-    .dly_load_i  (dphy_dly_load),
-    .dly_tap_o   (dphy_dly_tap_rb),
-    .ctrl_clk_i  (Imx274 ? vclk : 1'b0),
-    .phy_rdy_o   (dphy_phy_rdy)
+    .hs_byte_clk_o (dphy_hs_byte_clk),
+    .hs_data_o     (dphy_hs_data),
+    .hs_valid_o    (dphy_hs_valid),
+    .clk_gate_en_i (dphy_clk_gate_en),
+    .des_rst_i     (dphy_des_rst),
+    .clk_lp_o      (dphy_clk_lp),
+    .lp_o          (dphy_lp),
+    .clk_hsrx_en_i (dphy_clk_hsrx_en),
+    .hsrx_en_i     (dphy_hsrx_en),
+    .clk_term_en_i (dphy_clk_term_en),
+    .term_en_i     (dphy_term_en),
+    .dly_code_i    (dphy_dly_code),
+    .dly_own_i     (dphy_dly_own),
+    .dly_q_o       (dphy_dly_q),
+    .pd_i          (dphy_pd),
+    .cal_start_i   (dphy_cal_start),
+    .ready_o       (dphy_ready),
+    .ctrl_clk_i    (Imx274 ? vclk : 1'b0),
+    .ctrl_rst_ni   (rst_n)
   );
 
   // The PPI v1 outputs of the receiver's D-PHY that its controller does not use, checked on
@@ -1208,7 +1219,7 @@ module tb_bow32 #(
   bind bow_dphy_rx bow_ppi_chk #(.Lanes (Lanes)) u_ppi_chk (
     .lp_clk_i     (lp_clk_i),
     .lp_rst_ni    (lrst_n),
-    .byte_clk_i   (byte_clk_i),
+    .byte_clk_i   (afe_hs_byte_clk_i),
     .byte_rst_ni  (brst_n),
     .ppi_hs_i     (ppi_hs_o),
     .ppi_lp_i     (ppi_lp_o),
@@ -1217,6 +1228,41 @@ module tb_bow32 #(
     .lp_i         (lp_st),
     .clk_force_i  (clk_force),
     .byte_ce_i    (byte_ce)
+  );
+
+  // The AFE v1 outputs of the receiver's D-PHY (hw/ip/dphy_rx/dv/bow_afe_chk.sv), the same
+  // way: des_rst = ~gate at the same lp clock edge, term_en = hsrx_en, lprx_en / lane_pd,
+  // OWN only while ready, the tie-offs, the reset values while reset is asserted;
+  // +afe_chk_report prints the counts at the end
+  bind bow_dphy_rx bow_afe_chk #(
+    .Lanes (Lanes), .TrimW (TrimW), .AfePdRst (AfePdRst)
+  ) u_afe_chk (
+    .clk_i          (clk_i),
+    .rst_ni         (rst_ni),
+    .lp_clk_i       (lp_clk_i),
+    .lp_rst_ni      (lrst_n),
+    .gate_i         (afe_clk_gate_en_o),
+    .des_rst_i      (afe_des_rst_o),
+    .des_rst_en_i   (des_rst_en),
+    .clk_hsrx_en_i  (afe_clk_hsrx_en_o),
+    .hsrx_en_i      (afe_hsrx_en_o),
+    .clk_term_en_i  (afe_clk_term_en_o),
+    .term_en_i      (afe_term_en_o),
+    .pd_i           (afe_pd_o),
+    .clk_lprx_en_i  (afe_clk_lprx_en_o),
+    .lprx_en_i      (afe_lprx_en_o),
+    .clk_lane_pd_i  (afe_clk_lane_pd_o),
+    .lane_pd_i      (afe_lane_pd_o),
+    .ready_i        (phy_rdy_sys),
+    .dly_own_i      (afe_dly_own_o),
+    .clk_dly_code_i (afe_clk_dly_code_o),
+    .clk_dly_own_i  (afe_clk_dly_own_o),
+    .mon_en_i       (afe_mon_en_o),
+    .mon_code_i     (afe_mon_code_o),
+    .trim_i         (afe_trim_o),
+    .tst_mode_i     (afe_tst_mode_o),
+    .tst_data_i     (afe_tst_data_o),
+    .atb_sel_i      (afe_atb_sel_o)
   );
 
   // Frame format of the stream (stream-on) and of the frame (frame start)
@@ -1794,20 +1840,20 @@ module tb_bow32 #(
     end
   end
 
-  // Run-time knobs of the Versal PHY in the camera top
-  // (bow32_huins_vp1902_cam_top), driven into the PHY model from the D-PHY's
-  // registers: dphy_reinit_o (CMD.REINIT, a 32 cycle pulse) = reinit_i,
-  // dphy_burst_rst_en_o (~CTRL.DES_RST_DIS, 1 from reset) = burst_rst_en_i
-  // (BurstRxRst). +S274_BURSTRST=<0|1>: BurstRxRst = 0 / 1 whatever the
-  // receiver says.
-  int          s274_brst_force = -1;      // -1: dphy_burst_rst_en_o
-  int unsigned s274_reinits = 0;          // reinit_i pulses seen
+  // The AFE controls of the Versal PHY in the camera top (bow32_huins_vp1902_cam_top) drive
+  // the PHY model directly (its ports): cal_start (CMD.REINIT, a 32 cycle pulse) and pd
+  // (AFE_CTRL.PD) its re-init, des_rst its BurstRxRst (through the Versal adapter's logic in
+  // the model). +S274_BURSTRST=<0|1>: BurstRxRst = 0 / 1 whatever the receiver says (the
+  // model's v_brst_force). cal_start pulses are counted here.
+  int          s274_brst_force = -1;      // -1: the D-PHY's des_rst
+  int unsigned s274_reinits = 0;          // cal_start pulses seen
+  logic        s274_cal_q = 1'b0;
 
   always @(posedge clk) begin
     if (Imx274) begin
-      if (dphy_reinit && !u_csi.phy_reinit) s274_reinits++;
-      u_csi.phy_reinit  = dphy_reinit;
-      u_csi.v_burst_rst = (s274_brst_force >= 0) ? (s274_brst_force != 0) : dphy_burst_rst_en;
+      if (dphy_cal_start && !s274_cal_q) s274_reinits++;
+      s274_cal_q         = dphy_cal_start;
+      u_csi.v_brst_force = s274_brst_force;
     end
   end
 
@@ -2850,14 +2896,14 @@ module tb_bow32 #(
         // formula with the INFO2 of the Versal PHY)
         if (!$value$plusargs("S274_DESRST=%d", desrst)) desrst = 1;
         if (!$value$plusargs("S274_SETTLE=%d", settle)) settle = 95;
-        if (dphy_burst_rst_en != (desrst != 0)) begin
+        if (dut.u_csi2rx.u_dphy_rx.u_regs.burst_rst_en_q != (desrst != 0)) begin
           $fatal(1, "csi2_test: receive path reset %0d after the receiver starts, expected %0d",
-                 dphy_burst_rst_en, desrst);
+                 dut.u_csi2rx.u_dphy_rx.u_regs.burst_rst_en_q, desrst);
         end
         mark = send_cmd("rd 40008c24");
         expect_text(0, $sformatf("40008c24: 051e02%02x\nok\n> ", (settle * 200 + 500) / 1000), mark);
         $display("[%0t] tb   | csi2_274: receiver starts with DES_RST_DIS %0d, SETTLE %0d ns, PHY model BurstRxRst %0d",
-                 $time, !dphy_burst_rst_en, settle, u_csi.v_burst_rst);
+                 $time, !dut.u_csi2rx.u_dphy_rx.u_regs.burst_rst_en_q, settle, u_csi.v_burst_rst);
         // margin at the taps in use of every lane: lane 2 moved by hand stays
         // there (centre 240, side points 208 / 272), not back at its
         // calibrated tap

@@ -5,26 +5,34 @@
 // testbenches (hw/ip/csi2rx/dv/tb_bow_csi2rx.sv, sim/tb/tb_bow32.sv).
 //
 // The model replaces the sensor AND the board level receive I/O: its ports
-// are the D-PHY side of bow_mipi_rx with the names of the PHY wrappers
-// (without the pads). Two PHY flavours (knob `versal`):
+// are the AFE interface of the receiver's D-PHY (docs/ip/mipi_rx_arch.md
+// section 3.2; the signals the FPGA adapters have, with their names, without
+// the pads; step 5 of section 10). Two AFE flavours (knob `versal`), each
+// with the adapter's own fabric logic inside, so that it runs in every test:
 //   versal = 0  hw/fpga/common/rtl/bow_dphy_io_xusp.sv (UltraScale+): a word
-//               on every byte clock (rx_valid_o = '1), IDELAY taps loaded on
-//               byte clock edges, phy_rdy_o = 1.
+//               on every byte clock (hs_valid_o = '1), ready_o = 1;
+//               bow_dphy_dly_xusp (u_dly_xusp) makes the ISERDESE3 reset from
+//               des_rst_i and the IDELAYE3 loads from dly_code_i / dly_own_i.
 //   versal = 1  hw/fpga/common/rtl/bow_dphy_io_versal.sv (XPHY in native
-//               mode, receiver built with DlyVid = 1), see "Versal PHY".
+//               mode, receiver built with AfeKind = 2), see "Versal PHY";
+//               bow_dphy_dly_xphy (u_dly_xphy) makes the XPHY delay loads
+//               and RX_RST from des_rst_i.
+// hsrx_en_i and term_en_i of a lane act as one (the adapters' HSRX_DISABLE =
+// ~(hsrx_en | term_en)); the LP receivers are always on (no lprx_en).
 //
-//   * byte_clk_o toggles (period byte_ns) only while the clock lane toggles
-//     AND byte_ce_i = 1 (BUFGCE CE_TYPE SYNC). With runt = 1, CE = 1 while
-//     the clock lane is in an LP state gives short runt pulses.
-//   * rx_data_o: the serial stream of every lane cut into words at a random
+//   * hs_byte_clk_o toggles (period byte_ns) only while the clock lane toggles
+//     AND clk_gate_en_i = 1 (BUFGCE CE_TYPE SYNC). With runt = 1, the gate
+//     open while the clock lane is in an LP state gives short runt pulses.
+//   * hs_data_o: the serial stream of every lane cut into words at a random
 //     (or given) bit phase per burst, bit 0 first, updated just after the
-//     byte_clk_o rising edge. 0 while hs_en_i[l] = 0 or (versal = 0)
-//     byte_rst_i = 1. Random bits during HS-PREPARE, zeros in HS-ZERO, then
-//     the sync byte, the bytes of the lane, HS-TRAIL (inverted last bit),
-//     and that constant until the receiver drops hs_en.
+//     hs_byte_clk_o rising edge. 0 while the lane's HS receiver is off or
+//     (versal = 0) the ISERDESE3 is in reset. Random bits during HS-PREPARE,
+//     zeros in HS-ZERO, then the sync byte, the bytes of the lane, HS-TRAIL
+//     (inverted last bit), and that constant until the receiver turns the HS
+//     receiver off.
 //   * versal = 0: the bits keep flowing while the byte clock is gated: they
-//     are lost, not delayed. IDELAY: dly_tap_i is loaded on byte_clk_o
-//     edges with dly_load_i, dly_tap_o is the loaded value.
+//     are lost, not delayed. IDELAY: the LOAD of u_dly_xusp loads its
+//     CNTVALUEIN on hs_byte_clk_o edges, dly_q_o is the loaded value.
 //   * Eye model: while the tap of a lane is outside [eye_lo, eye_hi], every
 //     received bit flips with probability 1/4.
 //   * One burst carries one packet (byte i on lane i % lanes). The clock lane
@@ -35,16 +43,18 @@
 //     HS-PREPARE, HS-ZERO, data, HS-TRAIL, LP-11.
 //
 // Versal PHY (versal = 1; byte clock = BUFGCE of the strobe nibble FIFO_WR_CLK):
-//   * phy_rdy_o rises t_phy_rdy ns after time 0 (XPLL lock + BISC); before
-//     that there is no byte clock at all. phy_reinit = 1 (knob, e.g. the
-//     reinit input of bow_dphy_io_versal) holds the PHY in its init: no
-//     PHY_RDY, no byte clock, FIFOs empty, loaded taps forgotten; on release
-//     PHY_RDY rises t_reinit ns later with the BISC taps again.
+//   * ready_o rises t_phy_rdy ns after time 0 (XPLL lock + BISC); before
+//     that there is no byte clock at all. pd_i or cal_start_i = 1 (the AFE
+//     controls of the receiver's D-PHY: AFE_CTRL.PD, CMD.REINIT) holds the PHY
+//     in its init: no PHY_RDY, no byte clock, FIFOs empty, loaded taps
+//     forgotten; on release ready_o rises t_reinit ns later with the BISC
+//     taps again.
 //   * Per lane an 8 word RX FIFO, written with the word of every step in which
-//     the clock lane toggles while its HS receiver is on (clk_hs_en_i = 1:
-//     HSRX_DISABLE = ~clk_hs_en, no strobe otherwise), whether or not the byte
-//     clock gate is open; read on byte_clk_o edges: rx_valid_o[l] = 1 when a
-//     word was read, else rx_data_o[l] is garbage. A word is read once the
+//     the clock lane toggles while its HS receiver is on (clk_hsrx_en_i or
+//     clk_term_en_i = 1: HSRX_DISABLE = ~(clk_hsrx_en | clk_term_en), no
+//     strobe otherwise), whether or not the byte clock gate is open; read on
+//     hs_byte_clk_o edges: hs_valid_o[l] = 1 when a word was read, else
+//     hs_data_o[l] is garbage. A word is read once the
 //     FIFO holds more than vlat[l] words (0..2: FIFO_EMPTY lags the write
 //     pointer), drawn when the FIFOs restart, one value for all lanes
 //     (v_lat_lane = 0, AMD's XPHY model shows the same latency on every
@@ -55,13 +65,16 @@
 //     one word of latency for good. A 9th word overwrites the oldest unread
 //     one: the write pointer laps the read pointer and the reader jumps over
 //     the 8 oldest words (v_wraps, words lost).
-//   * BurstRxRst (v_burst_rst): 0 (the shipped default) = the FIFOs restart
-//     only at the PHY init; then the opening of the byte clock gate adds one
-//     garbage word to every FIFO with probability v_glitch_pct % (strobe
-//     glitches at the HS entry and exit of the clock lane, while the gate is
-//     closed), so the latency drifts up and wraps. 1 = the FIFOs are held in
-//     reset while the gate is closed (glitch words dropped) and restart at
-//     every opening (new vlat).
+//   * BurstRxRst: the RX_RST of the data slices that u_dly_xphy makes from
+//     des_rst_i (the D-PHY's ~gate, 0 while its CTRL.DES_RST_DIS = 1), or
+//     forced by the knob v_brst_force (-1: follow des_rst; 0, 1: forced, as
+//     the knob v_burst_rst before step 5). 0 = the FIFOs restart only at the
+//     PHY init; then the opening of the byte clock gate adds one garbage word
+//     to every FIFO with probability v_glitch_pct % (strobe glitches at the
+//     HS entry and exit of the clock lane, while the gate is closed), so the
+//     latency drifts up and wraps. 1 = the FIFOs are held in reset while the
+//     gate is closed (glitch words dropped) and restart at every opening (new
+//     vlat). v_burst_rst shows the setting of the last gate opening.
 //   * A byte clock without a read on all lanes (FIFO_EMPTY seen for one more
 //     cycle) comes with probability v_gap_pm per mille, only while every FIFO
 //     is at its minimum (vlat[l] + 1 words before the read): one extra word
@@ -70,14 +83,15 @@
 //     v_gap_byte of its packet bytes, once per burst, under the same rule (with
 //     BurstRxRst = 1 the FIFOs are at their minimum then).
 //   * Input delays in the ctrl_clk_i domain (CTRL_CLK = video clock of the
-//     receiver): after phy_rdy_o, dly_tap_o[l] = bisc[l] (BISC result) until
-//     a load. A load (dly_load_i one cycle with dly_tap_i) shows in
-//     dly_tap_o 10 cycles later for the first load of a lane, else 2 cycles
-//     later; loads before phy_rdy_o are ignored. Contract checks (counters):
-//     dly_bad = dly_load_i longer than one cycle or dly_tap_i not stable
-//     from 1 cycle before until 8 cycles after the load, dly_drop = a load
-//     while the previous one of the lane is pending; dly_loads[l] = loads.
-//   * byte_rst_i is not used.
+//     receiver): after ready_o, dly_q_o[l] = bisc[l] (BISC result) until a
+//     load. u_dly_xphy loads (LD one cycle with CNTVALUEIN) when dly_own_i
+//     rises or dly_code_i changes while it is 1; the XPHY model shows a load
+//     in dly_q_o v_ld_lat cycles after the edge that samples LD. Contract
+//     checks of the XPHY (counters): dly_bad = LD longer than one cycle, LD
+//     while the PHY is not ready, LD with RX_EN_VTC = 1 or less than VtcWait
+//     cycles after it fell, LD less than LdGap cycles after the previous one
+//     of the lane; dly_drop = LD while the previous load of the lane is not
+//     applied yet; dly_loads[l] = LD pulses.
 //
 // API: functions without delays (Verilator inlines tasks with delays at every
 // call site); one timed driver process plays the queue in order.
@@ -110,8 +124,8 @@
 // lanes, its LP-01 l0_late_ns longer and its HS-ZERO as much shorter (its sync
 // byte does not move);
 // Versal PHY: versal, t_phy_rdy, bisc[l], v_lat_lane, v_glitch_pct, v_gap_pm,
-// v_gap_byte (set these at time 0), v_burst_rst, phy_reinit, t_reinit (any
-// time: run time inputs of the PHY).
+// v_gap_byte, v_ld_lat (set these at time 0), v_brst_force, t_reinit (any
+// time).
 // Status for checks (times in ns from csi2_now()):
 //   bursts, bursts_done           bursts started / finished
 //   cur_burst, cur_byte           burst being sent (-1: none), its packet bytes sent so far
@@ -129,9 +143,9 @@
 //                                 words seen in a FIFO before a read
 // Package csi2_tx_pkg: csi2_flags(), csi2_header(vc, dt, wc), csi2_ecc(d24),
 // csi2_crc(bytes), csi2_raw10(pixels), csi2_now(). Examples:
-//   csi2_tx_model #(.Lanes(2)) u_tx (.byte_clk_o (dphy_byte_clk), ...);
-//   csi2_tx_model #(.Lanes(4)) u_tx (..., .rx_valid_o (dphy_rx_valid), .ctrl_clk_i (vid_clk),
-//                                   .phy_rdy_o (dphy_phy_rdy));   // u_tx.versal = 1 at time 0
+//   csi2_tx_model #(.Lanes(2)) u_tx (.hs_byte_clk_o (dphy_hs_byte_clk), ...);
+//   csi2_tx_model #(.Lanes(4)) u_tx (..., .hs_valid_o (dphy_hs_valid), .ctrl_clk_i (vid_clk),
+//                                   .ready_o (dphy_ready));   // u_tx.versal = 1 at time 0
 //   u_tx.push_short(0, 8'h00, 1, csi2_flags());             // FS, frame 1
 //   u_tx.push_long(0, 8'h2B, csi2_raw10(px), csi2_flags()); // one RAW10 line
 
@@ -231,20 +245,27 @@ endpackage
 module csi2_tx_model import csi2_tx_pkg::*; #(
   parameter int unsigned Lanes = 2     // data lanes 1..4
 ) (
-  output logic                  byte_clk_o,
-  input  logic                  byte_ce_i,
-  input  logic                  byte_rst_i,
+  // AFE interface of the receiver's D-PHY (docs/ip/mipi_rx_arch.md section 3.2)
+  output logic                  hs_byte_clk_o,
+  output logic [Lanes-1:0][7:0] hs_data_o,
+  output logic [Lanes-1:0]      hs_valid_o,     // versal = 0: '1
+  input  logic                  clk_gate_en_i,
+  input  logic                  des_rst_i,
   output logic [1:0]            clk_lp_o,
-  input  logic                  clk_hs_en_i,
   output logic [Lanes-1:0][1:0] lp_o,
-  input  logic [Lanes-1:0]      hs_en_i,
-  output logic [Lanes-1:0][7:0] rx_data_o,
-  output logic [Lanes-1:0]      rx_valid_o,   // versal = 0: '1
-  input  logic [Lanes-1:0][8:0] dly_tap_i,
-  input  logic [Lanes-1:0]      dly_load_i,
-  output logic [Lanes-1:0][8:0] dly_tap_o,
-  input  logic                  ctrl_clk_i,   // versal = 1: delay control clock (receiver video clock)
-  output logic                  phy_rdy_o     // versal = 0: 1
+  input  logic                  clk_hsrx_en_i,
+  input  logic [Lanes-1:0]      hsrx_en_i,
+  input  logic                  clk_term_en_i,
+  input  logic [Lanes-1:0]      term_en_i,
+  input  logic [Lanes-1:0][8:0] dly_code_i,
+  input  logic [Lanes-1:0]      dly_own_i,
+  output logic [Lanes-1:0][8:0] dly_q_o,
+  input  logic                  pd_i,           // versal = 1: PHY held in its init (versal = 0: none)
+  input  logic                  cal_start_i,    // versal = 1: the same, a pulse
+  output logic                  ready_o,        // versal = 0: 1
+  // Versal adapter: CTRL_CLK (receiver video clock) and its reset
+  input  logic                  ctrl_clk_i,
+  input  logic                  ctrl_rst_ni
 );
 
   localparam int unsigned ML   = 4;                       // lanes of the internal arrays
@@ -266,8 +287,9 @@ module csi2_tx_model import csi2_tx_pkg::*; #(
   bit          versal = 1'b0;
   int unsigned t_phy_rdy = 2000, t_reinit = 20_000;
   int unsigned bisc [ML] = '{97, 112, 88, 120};
-  bit          v_burst_rst = 1'b0, v_lat_lane = 1'b0, phy_reinit = 1'b0;
-  int unsigned v_glitch_pct = 20, v_gap_pm = 0, v_gap_byte = 0;
+  bit          v_burst_rst = 1'b0, v_lat_lane = 1'b0;
+  int          v_brst_force = -1;
+  int unsigned v_glitch_pct = 20, v_gap_pm = 0, v_gap_byte = 0, v_ld_lat = 1;
   int unsigned l0_late_ns = 0;
 
   // ----------------------------------------------------------------- status
@@ -558,35 +580,80 @@ module csi2_tx_model import csi2_tx_pkg::*; #(
     return items.size() != 0 || prog.size() != 0;
   endfunction
 
-  // ----------------------------------------------------- input delay models
-  // versal = 0: IDELAY loaded on byte clock edges
-  logic [ML-1:0][8:0] tap_k = '0;
+  // ----------------------------------------------------- AFE adapter models
+  // One HS receiver and termination pin per lane (HSRX_DISABLE = ~(hsrx_en | term_en))
+  wire             clk_hs_on = clk_hsrx_en_i | clk_term_en_i;
+  wire [Lanes-1:0] hs_on     = hsrx_en_i | term_en_i;
 
-  always @(posedge byte_clk_o) begin
+  // versal = 0: the UltraScale+ adapter's logic (bow_dphy_dly_xusp): ISERDESE3 reset from
+  // des_rst, IDELAYE3 loads on byte clock edges
+  logic                  iserdes_rst;
+  logic [Lanes-1:0][8:0] xusp_cntin;
+  logic [Lanes-1:0]      xusp_load;
+  logic [ML-1:0][8:0]    tap_k = '0;
+
+  bow_dphy_dly_xusp #(
+    .Lanes (Lanes)
+  ) u_dly_xusp (
+    .byte_clk_i    (hs_byte_clk_o),
+    .des_rst_i,
+    .iserdes_rst_o (iserdes_rst),
+    .dly_code_i,
+    .dly_own_i,
+    .cntvaluein_o  (xusp_cntin),
+    .load_o        (xusp_load)
+  );
+
+  always @(posedge hs_byte_clk_o) begin
     if (!versal) begin
       for (int l = 0; l < int'(Lanes); l++) begin
-        if (dly_load_i[l]) tap_k[l] <= dly_tap_i[l];
+        if (xusp_load[l]) tap_k[l] <= xusp_cntin[l];
       end
     end
   end
 
-  // versal = 1: XPHY delays, CTRL_CLK domain
-  logic [ML-1:0][8:0] tap_v = '0, vval = '0, tap_prev = '0, hold_tap = '0;
-  logic [ML-1:0]      vpend = '0, vfirst = '1, ld_prev = '0;
+  // versal = 1: the Versal adapter's logic (bow_dphy_dly_xphy, CTRL_CLK domain, the
+  // parameters of bow_dphy_io_versal): XPHY delay loads, RX_RST of the data slices from
+  // des_rst; then the XPHY delays
+  localparam int unsigned VtcWait = 12, LdGap = 4;
+
+  logic                  xphy_rx_rst;
+  logic [Lanes-1:0]      xphy_rx_en_vtc, xphy_ld;
+  logic [Lanes-1:0][8:0] xphy_cntin;
+
+  bow_dphy_dly_xphy #(
+    .Lanes   (Lanes),
+    .VtcWait (VtcWait),
+    .LdGap   (LdGap)
+  ) u_dly_xphy (
+    .clk_i        (ctrl_clk_i),
+    .rst_ni       (ctrl_rst_ni),
+    .ready_i      (versal && ready_o),
+    .des_rst_i,
+    .rx_rst_o     (xphy_rx_rst),
+    .dly_code_i,
+    .dly_own_i,
+    .rx_en_vtc_o  (xphy_rx_en_vtc),
+    .ld_o         (xphy_ld),
+    .cntvaluein_o (xphy_cntin)
+  );
+
+  // XPHY delays: BISC taps once ready, a load shows v_ld_lat cycles after the edge that
+  // samples LD; the contract checks of the header
+  logic [ML-1:0][8:0] tap_v = '0, vval = '0;
+  logic [ML-1:0]      vpend = '0, ld_prev = '0;
   int unsigned        vcnt [ML] = '{default: 0};
-  int unsigned        hold_cnt [ML] = '{default: 0};
+  int unsigned        vtc_cnt [ML] = '{default: 0};   // cycles since RX_EN_VTC fell
+  int unsigned        ld_gap [ML] = '{default: 99};   // cycles since the last LD
   bit                 rdy_q = 1'b0;
 
   always @(posedge ctrl_clk_i) begin
     if (versal) begin
-      if (phy_rdy_o && !rdy_q) begin
+      if (ready_o && !rdy_q) begin
         for (int l = 0; l < int'(ML); l++) if (!vpend[l]) tap_v[l] = 9'(bisc[l]);
       end
-      if (!phy_rdy_o && rdy_q) begin           // PHY re-init: loaded taps and pending loads gone
-        vpend  = '0;
-        vfirst = '1;
-      end
-      rdy_q = phy_rdy_o;
+      if (!ready_o && rdy_q) vpend = '0;          // PHY re-init: pending loads gone
+      rdy_q = ready_o;
       for (int l = 0; l < int'(Lanes); l++) begin
         if (vpend[l]) begin
           if (vcnt[l] == 0) begin
@@ -596,34 +663,33 @@ module csi2_tx_model import csi2_tx_pkg::*; #(
             vcnt[l]--;
           end
         end
-        if (dly_load_i[l]) begin
+        if (xphy_rx_en_vtc[l]) vtc_cnt[l] = 0;
+        else if (vtc_cnt[l] < 99) vtc_cnt[l]++;
+        if (ld_gap[l] < 99) ld_gap[l]++;
+        if (xphy_ld[l]) begin
           dly_loads[l]++;
-          if (ld_prev[l] || dly_tap_i[l] != tap_prev[l]) dly_bad++;
-          if (phy_rdy_o) begin
-            if (vpend[l]) begin
-              dly_drop++;
+          if (ld_prev[l] || !ready_o || xphy_rx_en_vtc[l] || vtc_cnt[l] < VtcWait ||
+              ld_gap[l] < LdGap) dly_bad++;
+          if (vpend[l]) dly_drop++;
+          if (ready_o) begin
+            if (v_ld_lat == 0) begin
+              tap_v[l] = xphy_cntin[l];
             end else begin
-              vpend[l]  = 1'b1;
-              vcnt[l]   = vfirst[l] ? 9 : 1;
-              vval[l]   = dly_tap_i[l];
-              vfirst[l] = 1'b0;
+              vpend[l] = 1'b1;
+              vcnt[l]  = v_ld_lat - 1;
+              vval[l]  = xphy_cntin[l];
             end
           end
-          hold_cnt[l] = 8;
-          hold_tap[l] = dly_tap_i[l];
-        end else if (hold_cnt[l] != 0) begin
-          hold_cnt[l]--;
-          if (dly_tap_i[l] != hold_tap[l]) dly_bad++;
+          ld_gap[l] = 0;
         end
-        tap_prev[l] = dly_tap_i[l];
-        ld_prev[l]  = dly_load_i[l];
+        ld_prev[l] = xphy_ld[l];
       end
     end
   end
 
   always_comb begin
     for (int l = 0; l < int'(Lanes); l++) begin
-      dly_tap_o[l] = !versal ? tap_k[l] : (phy_rdy_o ? tap_v[l] : 9'd0);
+      dly_q_o[l] = !versal ? tap_k[l] : (ready_o ? tap_v[l] : 9'd0);
     end
   end
 
@@ -658,18 +724,18 @@ module csi2_tx_model import csi2_tx_pkg::*; #(
       bursts_done++;
       cur_burst = -1;
     end
-    if (byte_ce_i && s.clk == ClkLp) begin
+    if (clk_gate_en_i && s.clk == ClkLp) begin
       if (ce_bad == 0) t_ce_bad = csi2_now();
       ce_bad++;
     end
-    if (byte_ce_i && !ce_q && s.clk == ClkToggle) ce_rise_toggle++;
+    if (clk_gate_en_i && !ce_q && s.clk == ClkToggle) ce_rise_toggle++;
   endfunction
 
   // HS receiver output of lane l in a step, with the eye model
   function automatic logic [7:0] hs_word(step_t s, int l, bit gate);
     logic [7:0] w, e;
     w = s.hs[l] ? s.word[l] : idle_word[l];
-    if (!hs_en_i[l] || gate) begin
+    if (!hs_on[l] || gate) begin
       w = '0;
     end else if (32'(tap_of(l)) < eye_lo[l] || 32'(tap_of(l)) > eye_hi[l]) begin
       e = 8'($urandom) & 8'($urandom);
@@ -679,9 +745,9 @@ module csi2_tx_model import csi2_tx_pkg::*; #(
     return w;
   endfunction
 
-  // versal = 0: ISERDES output of a step
+  // versal = 0: ISERDES output of a step (0 while its RST is high)
   function automatic void rx_word(step_t s);
-    for (int l = 0; l < int'(Lanes); l++) rx_data_o[l] = hs_word(s, l, byte_rst_i);
+    for (int l = 0; l < int'(Lanes); l++) hs_data_o[l] = hs_word(s, l, iserdes_rst);
   endfunction
 
   // versal = 1: XPHY RX FIFOs. vtend[l]: burst ends (last packet byte of a
@@ -748,20 +814,21 @@ module csi2_tx_model import csi2_tx_pkg::*; #(
     if (vq[l].size() > v_occ_max) v_occ_max = vq[l].size();
   endfunction
 
-  // BurstRxRst: FIFOs held in reset while the byte clock gate is closed
-  // (v_burst_rst = 1, a level: may change at any time); else a glitch word
-  // in every FIFO when the gate opens
+  // BurstRxRst: FIFOs held in reset while RX_RST of the data slices is high
+  // (u_dly_xphy: from des_rst, while the byte clock gate is closed; or forced
+  // with v_brst_force); else a glitch word in every FIFO when the gate opens
   function automatic void v_gate();
     bit     rst;
     vword_t v;
-    rst = v_burst_rst && !byte_ce_i;
+    rst = (v_brst_force >= 0) ? ((v_brst_force != 0) && !clk_gate_en_i) : xphy_rx_rst;
+    if (!clk_gate_en_i) v_burst_rst = rst;
     if (rst && !vhold) begin
       vhold = 1'b1;
       v_flush();
     end else if (!rst && vhold) begin
       vhold = 1'b0;
       v_restart();
-    end else if (!vhold && !ce_q && byte_ce_i && clk_hs_en_i && v_glitch_pct != 0 &&
+    end else if (!vhold && !ce_q && clk_gate_en_i && clk_hs_on && v_glitch_pct != 0 &&
                  $urandom_range(99) < v_glitch_pct) begin
       v_glitches++;
       for (int l = 0; l < int'(Lanes); l++) begin
@@ -777,7 +844,7 @@ module csi2_tx_model import csi2_tx_pkg::*; #(
   // the clock lane is off (no strobe) or the FIFOs are held in reset
   function automatic void v_write(step_t s);
     vword_t v;
-    if (vhold || !clk_hs_en_i) begin
+    if (vhold || !clk_hs_on) begin
       if (s.tend) v_tend_lost();
       return;
     end
@@ -807,12 +874,12 @@ module csi2_tx_model import csi2_tx_pkg::*; #(
     for (int l = 0; l < int'(Lanes); l++) begin
       if (!gap && vq[l].size() > vlat[l]) begin
         v = vq[l].pop_front();
-        rx_data_o[l]  = v.w;
-        rx_valid_o[l] = 1'b1;
+        hs_data_o[l]  = v.w;
+        hs_valid_o[l] = 1'b1;
         if (v.tend) vtend[l]++;
       end else begin
-        rx_data_o[l]  = 8'($urandom);
-        rx_valid_o[l] = 1'b0;
+        hs_data_o[l]  = 8'($urandom);
+        hs_valid_o[l] = 1'b0;
       end
     end
     v_tend_check();
@@ -821,10 +888,10 @@ module csi2_tx_model import csi2_tx_pkg::*; #(
   initial begin : driver
     step_t s;
     bit    up, have;
-    byte_clk_o = 1'b0;
-    rx_data_o  = '0;
-    rx_valid_o = '1;
-    phy_rdy_o  = 1'b1;
+    hs_byte_clk_o = 1'b0;
+    hs_data_o     = '0;
+    hs_valid_o    = '1;
+    ready_o       = 1'b1;
     clk_lp_o   = lp00 ? 2'b00 : 2'b11;
     for (int l = 0; l < int'(Lanes); l++) lp_o[l] = clk_lp_o;
     pin_q = {(ML + 1){clk_lp_o}};
@@ -838,39 +905,40 @@ module csi2_tx_model import csi2_tx_pkg::*; #(
       else      s = idle_step();
       if (versal) begin
         // PHY_RDY: t_phy_rdy after time 0, t_reinit after the end of a re-init
-        if (phy_reinit) t_reinit_end = csi2_now();
-        up = !phy_reinit && csi2_now() >= real'(t_phy_rdy) &&
+        // (pd_i or cal_start_i: the init reset of bow_dphy_io_versal)
+        if (pd_i || cal_start_i) t_reinit_end = csi2_now();
+        up = !(pd_i || cal_start_i) && csi2_now() >= real'(t_phy_rdy) &&
              (t_reinit_end < 0.0 || csi2_now() >= t_reinit_end + real'(t_reinit));
-        if (up != phy_rdy_o) begin
+        if (up != ready_o) begin
           v_flush();
           vhold = 1'b0;
           if (up) v_restart();
         end
-        phy_rdy_o = up;
+        ready_o = up;
       end
       apply(s);
-      if (versal && phy_rdy_o) v_gate();
-      if (versal && !phy_rdy_o && s.tend) v_tend_lost();  // no PHY: the burst is lost
-      ce_q = byte_ce_i;
-      if (s.clk == ClkToggle && (!versal || phy_rdy_o)) begin
+      if (versal && ready_o) v_gate();
+      if (versal && !ready_o && s.tend) v_tend_lost();  // no PHY: the burst is lost
+      ce_q = clk_gate_en_i;
+      if (s.clk == ClkToggle && (!versal || ready_o)) begin
         if (versal) v_write(s);
-        if (byte_ce_i) begin
-          byte_clk_o = 1'b1;
+        if (clk_gate_en_i) begin
+          hs_byte_clk_o = 1'b1;
           #(byte_ns * 0.1);
           if (versal) v_read();
           else        rx_word(s);
           #(byte_ns * 0.4);
-          byte_clk_o = 1'b0;
+          hs_byte_clk_o = 1'b0;
           #(byte_ns * 0.5);
         end else begin
           #(byte_ns);
         end
-      end else if (runt && byte_ce_i && clk_hs_en_i && s.clk == ClkLp) begin
+      end else if (runt && clk_gate_en_i && clk_hs_on && s.clk == ClkLp) begin
         runts++;
-        if (versal) rx_valid_o = '0;
-        byte_clk_o = 1'b1;
+        if (versal) hs_valid_o = '0;
+        hs_byte_clk_o = 1'b1;
         #0.4;
-        byte_clk_o = 1'b0;
+        hs_byte_clk_o = 1'b0;
         #(byte_ns - 0.4);
       end else begin
         #(byte_ns);

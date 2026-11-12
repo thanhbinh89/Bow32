@@ -6,17 +6,17 @@
 // of docs/ip/mipi_rx_arch.md, section 10). The register window (CSI2RX, 4 KiB) is split here:
 // offsets 0x000..0xBFF go to the controller (bow_csi2rx_regs, docs/ip/csi2rx.md), 0xC00..0xFFF
 // to the D-PHY (bow_dphy_rx_regs, docs/ip/dphy_rx.md); the D-PHY's interrupt is IRQ_STATUS[5]
-// of the controller, whose irq_o is the receiver's. The D-PHY I/O (LP / HS receivers,
-// deserialisers, input delays) is outside, e.g. hw/fpga/common/rtl/bow_dphy_io_xusp.sv on the
-// KV260 or hw/fpga/common/rtl/bow_dphy_io_versal.sv (XPHY) on Versal.
+// of the controller, whose irq_o is the receiver's. Below the D-PHY is the AFE interface of
+// section 3.2 (step 5): on the FPGAs an adapter of the vendor I/O primitives,
+// hw/fpga/common/rtl/bow_dphy_io_xusp.sv (KV260) or bow_dphy_io_versal.sv (Versal XPHY).
 //
-//   PHY I/O ports --> bow_dphy_rx --PPI--> bow_csi2rx --> m_axis RAW10 (ISP)
-//   (lp, rx_data,      LP state machines,     lane merge, packet, unpack, FIFO,
-//    byte_clk ..)      aligners, tap loads,   LOG, registers 0x000..
-//                      meter, RAW, registers 0xC00..
+//   AFE (afe_*)  --> bow_dphy_rx --PPI--> bow_csi2rx --> m_axis RAW10 (ISP)
+//   (hs_data, lp,    LP state machines,   lane merge, packet, unpack, FIFO,
+//    hs_byte_clk ..) aligners, meter,     LOG, registers 0x000..
+//                    RAW, registers 0xC00..
 //
 // PPI (bow_ppi_pkg, v1):
-//   rx_byte_clk_hs  RxByteClkHS: byte_clk_i
+//   rx_byte_clk_hs  RxByteClkHS: afe_hs_byte_clk_i
 //   ppi_hs[l]       byte domain: RxActiveHS, RxValidHS, RxDataHS, RxSyncHS, RxSkewCalHS,
 //                   ErrSotHS (0), ErrSotSyncHS
 //   ppi_lp[l]       lp domain: Stopstate, ErrControl (one cycle pulse on bit 0, masked by the
@@ -28,21 +28,24 @@
 // pulses of the controller's own video clock. This connection is the guarantee;
 // bow_csi2rx's PpiLpClkHz (= PhyClkHz here) only states it for its elaboration check.
 //
+// AFE ports (afe_*): the signals of section 3.2 that the FPGA adapters have (bow_dphy_rx
+// describes each one). The D-PHY's other AFE signals are tied off here: no FPGA adapter has
+// clk_hs_samp in use, clk_act, a clock lane delay, the monitor sampler, cal_done / cal_err,
+// lane_pd, trim or the test hooks (the ASIC wrapper of step 9 connects them to the macro).
+//
 // Clock domains:
-//   clk_i       CPU: registers, counters, LOG/RAW read, status synchronisers
-//   vid_clk_i   video: the D-PHY's lp clock (LP state machines, PHY control and, with
-//               DlyVid = 1, the input delay control); the controller's LP error release,
-//               lost burst request and pixel output
-//   byte_clk_i  byte clock = HS clock / 4, runs only while byte_ce_o = 1 and the clock
-//               lane toggles (non-continuous clock: HS bursts only)
+//   clk_i              CPU: registers, counters, LOG/RAW read, status synchronisers, the AFE
+//                      controls of the D-PHY's register file (delay codes, PD, cal_start)
+//   vid_clk_i          video: the D-PHY's lp clock (LP state machines, gate, des_rst, HS
+//                      receivers); the controller's LP error release, lost burst request and
+//                      pixel output
+//   afe_hs_byte_clk_i  byte clock = HS clock / 4, runs only while afe_clk_gate_en_o = 1 and
+//                      the clock lane toggles (non-continuous clock: HS bursts only)
 // Resets: each block synchronises vid_rst_ni & rst_ni per domain on its own (the D-PHY:
 // docs/ip/mipi_rx_arch.md section 4.11); the controller's datapath resets are also asserted
-// while RX is off (CTRL.PHY_EN & RX_EN), the D-PHY's aligners are not. byte_rst_o
-// (bow_dphy_rx): ISERDES reset, asserted while the byte clock gate is closed, released 2
-// byte clocks after the clock restarts.
-//
-// PHY I/O contract (besides the ports of bow_dphy_io_xusp): see bow_dphy_rx (rx_valid_i,
-// phy_rdy_i, phy_status_i, reinit_o, burst_rst_en_o, dly_*).
+// while RX is off (CTRL.PHY_EN & RX_EN), the D-PHY's aligners are not. The AFE's receive path
+// reset is des_rst (afe_des_rst_o): set while the byte clock gate is closed; an adapter that
+// needs a synchronous release does it on its own clock (bow_dphy_dly_xusp: the ISERDESE3).
 //
 // The bus response: both register files grant at once and answer one cycle after the
 // request, so the response comes from the one with rvalid (no state here).
@@ -53,7 +56,8 @@ module bow_mipi_rx import bow_bus_pkg::*; import bow_ppi_pkg::*; #(
   parameter int unsigned CpuClkHz  = 0,            // clk_i frequency (0: not checked)
   parameter bit          HasPhy    = 1'b1,         // INFO.PHY: a D-PHY is connected
   parameter int unsigned FifoDepth = 256,          // pixel FIFO entries (4 px each), power of 2
-  parameter bit          DlyVid    = 1'b0          // dly_* in the video domain (Versal XPHY)
+  parameter int unsigned AfeKind   = 1             // the D-PHY's INFO[7:5]: 1 UltraScale+
+                                                   // adapter (KV260), 2 Versal adapter (Huins)
 ) (
   input  logic                  clk_i,
   input  logic                  rst_ni,
@@ -67,22 +71,27 @@ module bow_mipi_rx import bow_bus_pkg::*; import bow_ppi_pkg::*; #(
   output logic [9:0]            m_axis_tdata_o,
   output logic [1:0]            m_axis_tuser_o,   // [0] start of frame, [1] line error (tlast)
   output logic                  m_axis_tlast_o,   // end of line
-  input  logic                  byte_clk_i,
-  output logic                  byte_ce_o,        // video domain flop (clock lane FSM)
-  output logic                  byte_rst_o,       // ISERDES RST
-  input  logic [1:0]            clk_lp_i,
-  output logic                  clk_hs_en_o,      // video domain flop of the FSM, no extra stage
-  input  logic [Lanes-1:0][1:0] lp_i,
-  output logic [Lanes-1:0]      hs_en_o,          // video domain flops of the FSMs, no extra stage
-  input  logic [Lanes-1:0][7:0] rx_data_i,        // registered once on byte_clk_i before use
-  input  logic [Lanes-1:0]      rx_valid_i,       // byte domain: rx_data_i[l] is a new word
-  input  logic                  phy_rdy_i,        // asynchronous: PHY ready (AFE_STATUS.READY)
-  input  logic [7:0]            phy_status_i,     // asynchronous: raw PHY status (AFE_STATUS[15:8])
-  output logic                  reinit_o,         // CPU domain flop: PHY re-init (CMD.REINIT)
-  output logic                  burst_rst_en_o,   // CPU domain flop: ~CTRL.DES_RST_DIS
-  output logic [Lanes-1:0][8:0] dly_tap_o,        // byte domain (DlyVid = 0) / video domain (1)
-  output logic [Lanes-1:0]      dly_load_o,       // same domain as dly_tap_o
-  input  logic [Lanes-1:0][8:0] dly_tap_i         // CNTVALUEOUT, same domain as dly_tap_o
+  // AFE interface (docs/ip/mipi_rx_arch.md section 3.2; the FPGA adapters' set)
+  input  logic                  afe_hs_byte_clk_i,  // byte clock, gated in the AFE
+  input  logic [Lanes-1:0][7:0] afe_hs_data_i,      // byte domain, bit 0 = first bit
+  input  logic [Lanes-1:0]      afe_hs_valid_i,     // byte domain: a new word
+  output logic                  afe_clk_gate_en_o,  // video domain flop
+  output logic                  afe_des_rst_o,      // video domain flop (~gate)
+  input  logic [1:0]            afe_clk_lp_i,       // {P, N}, asynchronous
+  input  logic [Lanes-1:0][1:0] afe_lp_i,           // {P, N}, asynchronous
+  output logic                  afe_clk_lprx_en_o,  // CPU domain flop
+  output logic [Lanes-1:0]      afe_lprx_en_o,      // CPU domain flop
+  output logic                  afe_clk_hsrx_en_o,  // video domain flop
+  output logic [Lanes-1:0]      afe_hsrx_en_o,      // video domain flops
+  output logic                  afe_clk_term_en_o,  // video domain flop
+  output logic [Lanes-1:0]      afe_term_en_o,      // video domain flops
+  output logic [Lanes-1:0][8:0] afe_dly_code_o,     // CPU domain flops, static
+  output logic [Lanes-1:0]      afe_dly_own_o,      // CPU domain flops
+  input  logic [Lanes-1:0][8:0] afe_dly_q_i,        // asynchronous, quasi-static
+  output logic                  afe_pd_o,           // CPU domain flop (AFE_CTRL.PD)
+  input  logic                  afe_ready_i,        // asynchronous (AFE_STATUS.READY)
+  output logic                  afe_cal_start_o,    // CPU domain flop (CMD.REINIT pulse)
+  input  logic [7:0]            afe_status_i        // asynchronous (AFE_STATUS[15:8])
 );
 
   // ---------------------------------------------------------------- PPI
@@ -115,39 +124,61 @@ module bow_mipi_rx import bow_bus_pkg::*; import bow_ppi_pkg::*; #(
 
   bow_dphy_rx #(
     .Lanes    (Lanes),
-    .DlyVid   (DlyVid),
+    .AfeKind  (AfeKind),
     .LpClkHz  (PhyClkHz),                      // FPGA: lp_clk = vid_clk
     .BusClkHz (CpuClkHz)
   ) u_dphy_rx (
     .clk_i,
     .rst_ni,
-    .lp_clk_i         (vid_clk_i),
-    .lp_rst_ni        (vid_rst_ni),
-    .byte_clk_i,
-    .bus_req_i        (bus_req_d),
-    .bus_rsp_o        (bus_rsp_d),
-    .irq_o            (dphy_irq),
-    .enable_i         (enable),
-    .enable_clk_i     (enable_clk),
-    .rx_byte_clk_hs_o (rx_byte_clk_hs),
-    .ppi_hs_o         (ppi_hs),
-    .ppi_lp_o         (ppi_lp),
-    .ppi_lp_clk_o     (ppi_lp_clk),
-    .byte_ce_o,
-    .byte_rst_o,
-    .clk_lp_i,
-    .clk_hs_en_o,
-    .lp_i,
-    .hs_en_o,
-    .rx_data_i,
-    .rx_valid_i,
-    .phy_rdy_i,
-    .phy_status_i,
-    .reinit_o,
-    .burst_rst_en_o,
-    .dly_tap_o,
-    .dly_load_o,
-    .dly_tap_i
+    .lp_clk_i           (vid_clk_i),
+    .lp_rst_ni          (vid_rst_ni),
+    .bus_req_i          (bus_req_d),
+    .bus_rsp_o          (bus_rsp_d),
+    .irq_o              (dphy_irq),
+    .enable_i           (enable),
+    .enable_clk_i       (enable_clk),
+    .rx_byte_clk_hs_o   (rx_byte_clk_hs),
+    .ppi_hs_o           (ppi_hs),
+    .ppi_lp_o           (ppi_lp),
+    .ppi_lp_clk_o       (ppi_lp_clk),
+    .afe_hs_byte_clk_i,
+    .afe_hs_data_i,
+    .afe_hs_valid_i,
+    .afe_clk_gate_en_o,
+    .afe_des_rst_o,
+    .afe_clk_hs_samp_i  ('0),                  // none in use on the FPGA adapters
+    .afe_clk_act_i      (1'b0),                // none on the FPGA adapters (step 10)
+    .afe_clk_lp_i,
+    .afe_lp_i,
+    .afe_clk_lprx_en_o,
+    .afe_lprx_en_o,
+    .afe_clk_hsrx_en_o,
+    .afe_hsrx_en_o,
+    .afe_clk_term_en_o,
+    .afe_term_en_o,
+    .afe_dly_code_o,
+    .afe_dly_own_o,
+    .afe_dly_q_i,
+    .afe_clk_dly_code_o (),                    // no clock lane delay
+    .afe_clk_dly_own_o  (),
+    .afe_clk_dly_q_i    ('0),
+    .afe_mon_en_o       (),                    // no monitor sampler
+    .afe_mon_code_o     (),
+    .afe_mon_data_i     ('0),
+    .afe_pd_o,
+    .afe_clk_lane_pd_o  (),                    // not modelled by the FPGA adapters
+    .afe_lane_pd_o      (),
+    .afe_ready_i,
+    .afe_cal_start_o,
+    .afe_cal_done_i     (1'b0),                // no internal calibration result
+    .afe_cal_err_i      (1'b0),
+    .afe_trim_o         (),
+    .afe_status_i,
+    .afe_tst_mode_o     (),                    // no test hooks
+    .afe_tst_data_o     (),
+    .afe_clk_hs_raw_i   (1'b0),
+    .afe_hs_raw_i       ('0),
+    .afe_atb_sel_o      ()
   );
 
   bow_csi2rx #(

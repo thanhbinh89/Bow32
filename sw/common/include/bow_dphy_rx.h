@@ -11,15 +11,20 @@
  *
  * Every name has the prefix DPHY_ (struct DPHY, macros DPHY_*): the window
  * has registers whose names the controller has too (ID, INFO, CTRL, IRQ_*,
- * ERR_STATUS, BYTECLK, RAW_CTRL). Registers of later steps (AFE_CTRL, TIM1,
- * TIM2, LANE_STOP, deskew, PRBS, ...) are not in v1: they read 0.
+ * ERR_STATUS, BYTECLK, RAW_CTRL). Registers of later steps (TIM1, TIM2,
+ * LANE_STOP, AFE_TRIM, deskew, PRBS, ...) are not in v1: they read 0. Since
+ * step 5 the D-PHY speaks the AFE interface (docs/ip/mipi_rx_arch.md section
+ * 3.2): DLYn drives static delay codes and OWN (the AFE loads a changed code
+ * by itself), AFE_CTRL.PD the AFE's power down, CMD.REINIT its re-calibration
+ * (cal_start).
  *
  * Kinds of PHY I/O (INFO[7:5], DPHY_AFE_*):
  *   UltraScale+ (KV260, IDELAYE3): a code written to DLYn is applied at the
  *     next HS burst (byte clock), the PHY has no start-up calibration
  *     (AFE_STATUS.READY is 1) and no re-init.
- *   Versal (Huins, XPHY): DLYn loads its code at once (no byte clock needed);
- *     after reset or CMD.REINIT the PHY keeps the delay of its self-calibration
+ *   Versal (Huins, XPHY): a new DLYn code is loaded at once (no byte clock
+ *     needed; the code in use written again loads nothing); after reset,
+ *     CMD.REINIT or AFE_CTRL.PD the PHY keeps the delay of its self-calibration
  *     (BISC, INFO[23]: DLYn [24:16] shows it, OWN = 0) and tracks voltage and
  *     temperature until the first load of the lane; AFE_STATUS.READY once its
  *     PLL is locked and BISC is done.
@@ -38,7 +43,7 @@ typedef struct {
   volatile uint32_t INFO2;        /* 0x008 R   DPHY_INFO2_* */
   volatile uint32_t CTRL;         /* 0x00C RW  DPHY_CTRL_* */
   volatile uint32_t CMD;          /* 0x010 W   DPHY_CMD_* */
-  volatile uint32_t AFE_CTRL;     /* 0x014     (later step) */
+  volatile uint32_t AFE_CTRL;     /* 0x014 RW  DPHY_AFE_CTRL_* */
   volatile uint32_t AFE_STATUS;   /* 0x018 R   DPHY_AFE_* */
   volatile uint32_t AFE_TRIM[2];  /* 0x01C     (later step) */
   volatile uint32_t TIM0;         /* 0x024 RW  DPHY_TIM0_*, lp clock cycles */
@@ -96,10 +101,16 @@ _Static_assert(__builtin_offsetof(bow_dphy_rx_regs_t, RAW) == 0x200, "DPHY RAW o
 #define DPHY_CTRL_CLK_CONT    (1u << 1) /* clock lane always HS (continuous clock only) */
 #define DPHY_CTRL_DES_RST_DIS (1u << 6) /* test only: no receive path reset while the gate is closed */
 
-#define DPHY_CMD_REINIT  (1u << 1) /* PHY re-init (Versal: XPLL lock, BISC, VT tracking again) */
+#define DPHY_CMD_REINIT  (1u << 1) /* AFE re-calibration, cal_start (Versal: XPLL lock, BISC, VT
+                                    * tracking again); CMD.AFE_CAL from step 6 */
 #define DPHY_CMD_CNT_CLR (1u << 3) /* clear CNT_* */
 
+#define DPHY_AFE_CTRL_PD (1u << 0) /* AFE powered down (0 after reset on the FPGAs; Versal: the
+                                    * PHY held in its init reset, OWN of every lane cleared) */
+
 #define DPHY_AFE_READY        (1u << 0)
+#define DPHY_AFE_CAL_DONE     (1u << 1)  /* the AFE's internal calibration (0 on the FPGAs) */
+#define DPHY_AFE_CAL_ERR      (1u << 2)
 #define DPHY_AFE_STATUS(s)    (((s) >> 8) & 0xFFu) /* raw PHY status */
 /* Versal: the raw status of bow_dphy_io_versal */
 #define DPHY_AFE_ST_LOCKED    (1u << 8)  /* XPLL LOCKED */
@@ -133,10 +144,11 @@ _Static_assert(__builtin_offsetof(bow_dphy_rx_regs_t, RAW) == 0x200, "DPHY RAW o
 #define DPHY_ERR_LANE_CLK        (1u << 16)
 #define DPHY_ERR_LANE_ALL        0x10F00u
 
-/* DLYn: CODE written (the code the D-PHY drives once applied), PEND (OWN and
- * the PHY's delay differs from CODE), the PHY's delay in use (CNTVALUEOUT),
- * OWN (the lane uses the software's code; 0 after reset and while the PHY is
- * not ready: a re-init loses the loaded codes) */
+/* DLYn: CODE written (the static code the D-PHY drives to the AFE), PEND (OWN
+ * and the AFE's delay differs from CODE), the AFE's delay in use (dly_q:
+ * CNTVALUEOUT on the FPGAs), OWN (the lane uses the software's code; 0 after
+ * reset and while the AFE is not ready: a restart loses the loaded codes, and
+ * the next write raises OWN and loads again) */
 #define DPHY_DLY_CODE(d) ((d) & 0x3FFu)
 #define DPHY_DLY_PEND    (1u << 15)
 #define DPHY_DLY_Q(d)    (((d) >> 16) & 0x3FFu)
@@ -217,10 +229,14 @@ bool bow_dphy_rx_wait_ready(uint32_t timeout_ms);
  * not come back. */
 int bow_dphy_rx_reinit(uint32_t timeout_ms, uint32_t *us);
 
-/* Receive path reset of the PHY I/O while the byte clock gate is closed
- * (Versal: RX FIFO reset at every gate opening, burst_rst_en_i): on = 1 after
- * reset; off (CTRL.DES_RST_DIS = 1) only to test, the Huins board broke
- * without it. */
+/* Receive path reset of the PHY I/O while the byte clock gate is closed: the
+ * AFE's des_rst (step 5 of docs/ip/mipi_rx_arch.md; burst_rst_en_i of the
+ * Versal adapter before). Versal: RX_RST of the data slices, the RX FIFOs
+ * restart at every gate opening; UltraScale+ (KV260): the ISERDESE3 reset at
+ * every gate opening, which aligns its divider. on = 1 after reset; off
+ * (CTRL.DES_RST_DIS = 1) only to test, the Huins board broke without it, and
+ * the KV260 ISERDESE3 is then never reset. The firmware turns it off only on
+ * the Versal build (csi2_test `phy burstrst 0`, CAM_BURST_RST = 0). */
 void bow_dphy_rx_des_rst(bool on);
 bool bow_dphy_rx_des_rst_on(void);
 

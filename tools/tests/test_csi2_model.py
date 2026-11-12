@@ -489,7 +489,7 @@ class ReceiverTest(unittest.TestCase):
         # with Lanes = 2 the LANES4 bit reads 0
         self.assertEqual(read(receiver(), "CTRL") & 0x80, 0)
 
-    def test_dly_vid(self):
+    def test_versal_delays(self):
         cfg = dict(m.DEFAULT_CFG, lanes=4, dut_lanes=4, **m.VERSAL_CFG)
         rx = m.Receiver(cfg)
         own = m.DLY_OWN
@@ -536,6 +536,54 @@ class ReceiverTest(unittest.TestCase):
         rx.write(m.REG["DPHY_CMD"], m.DCMD_REINIT)
         self.assertEqual(read(rx, "DPHY_AFE_STATUS"), 0x0F01)
         self.assertEqual(read(rx, "DPHY_DLY0") & (own | 0x1FF), own | 0x40)
+
+    def test_afe_static_codes(self):
+        # step 5: DLYn drives a static code and OWN; the AFE loads when OWN rises or the code
+        # changes, the code in use written again loads nothing
+        cfg = dict(m.DEFAULT_CFG, lanes=4, dut_lanes=4, **m.VERSAL_CFG)
+        self.assertEqual(cfg["afe_kind"], 2)
+        rx = m.Receiver(cfg)
+        own = m.DLY_OWN
+        self.assertEqual(read(rx, "DPHY_AFE_CTRL"), 0)               # PD 0 after reset
+        rx.phy_ready()
+        rx.mark(1)
+        rx.write(m.REG["DPHY_DLY3"], 0x20)                            # OWN rises: 1 load
+        rx.bus_access()
+        rx.bus_access()
+        rx.write(m.REG["DPHY_DLY3"], 0x20)                            # same code: no load
+        rx.bus_access()
+        rx.bus_access()
+        rx.write(m.REG["DPHY_DLY3"], 0x21)                            # new code: 1 load
+        rx.close_seg()
+        self.assertEqual(rx.seg_expect[1]["dly_loads3"], "=2")
+        self.assertEqual(rx.seg_expect[1]["dly_loads0"], "=0")
+        rx.time_step()
+        self.assertEqual(read(rx, "DPHY_DLY3"), own | 0x21 | 0x21 << 16)
+        # AFE_CTRL.PD: the PHY held in its init (READY 0, CNTVALUEOUT 0, OWN 0); a write
+        # meanwhile keeps the code but loads nothing and raises no OWN
+        rx.write(m.REG["DPHY_AFE_CTRL"], m.DAFE_PD)
+        self.assertEqual(read(rx, "DPHY_AFE_CTRL"), m.DAFE_PD)
+        self.assertEqual(read(rx, "DPHY_AFE_STATUS"), 0)
+        self.assertEqual(read(rx, "DPHY_DLY3"), 0x21)
+        rx.write(m.REG["DPHY_DLY3"], 0x22)
+        self.assertEqual(read(rx, "DPHY_DLY3"), 0x22)
+        rx.write(m.REG["DPHY_AFE_CTRL"], 0)
+        self.assertEqual(read(rx, "DPHY_AFE_CTRL"), 0)
+        rx.phy_ready()
+        self.assertEqual(read(rx, "DPHY_DLY3"), 0x22 | cfg["bisc3"] << 16)  # BISC tap again
+        rx.mark(2)
+        rx.write(m.REG["DPHY_DLY3"], 0x22)                            # OWN rises again: 1 load
+        rx.close_seg()
+        self.assertEqual(rx.seg_expect[2]["dly_loads3"], "=1")
+        rx.time_step()
+        self.assertEqual(read(rx, "DPHY_DLY3"), own | 0x22 | 0x22 << 16)
+        # the UltraScale+ AFE (afe_kind 1): PD has no effect on it (always ready)
+        rx = receiver()
+        self.assertEqual(rx.afe_kind, 1)
+        rx.write(m.REG["DPHY_AFE_CTRL"], m.DAFE_PD)
+        self.assertEqual(read(rx, "DPHY_AFE_CTRL"), m.DAFE_PD)
+        self.assertEqual(read(rx, "DPHY_AFE_STATUS"), 0x0F01)
+        rx.write(m.REG["DPHY_AFE_CTRL"], 0)
 
     def test_log_modes(self):
         for mode, first, n in [(0, 0, 64), (2, 3, 64), (4, None, None), (6, 3, 4)]:

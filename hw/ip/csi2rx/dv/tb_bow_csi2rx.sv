@@ -4,11 +4,13 @@
 // Unit testbench of the Bow32 CSI-2 receiver (Verilator --binary --timing): the DUT is
 // bow_mipi_rx, the digital D-PHY and the CSI-2 controller joined by the PPI. The register
 // window is the receiver's: the controller at 0x000, the D-PHY at 0xC00 (step 4 of
-// docs/ip/mipi_rx_arch.md, docs/ip/dphy_rx.md). The PHY I/O model csi2_tx_model takes the
-// D-PHY's PHY control: its re-init knob is reinit_o (CMD.REINIT), its BurstRxRst knob
-// burst_rst_en_o (~CTRL.DES_RST_DIS: a test case of the Versal PHY with BurstRxRst 0 writes
-// DES_RST_DIS first, the testbench checks the value at every burst); phy_status_i =
-// {4{PHY ready}} (AFE_STATUS[11:8]).
+// docs/ip/mipi_rx_arch.md, docs/ip/dphy_rx.md). The D-PHY speaks the AFE interface (step 5)
+// with the model csi2_tx_model, which plays the sensor and an FPGA AFE adapter with the
+// adapter's own logic (bow_dphy_dly_xusp / bow_dphy_dly_xphy): pd and cal_start (AFE_CTRL.PD,
+// CMD.REINIT) re-initialise the Versal PHY model, des_rst (~the gate, 0 while
+// CTRL.DES_RST_DIS = 1) drives its BurstRxRst (a test case of the Versal PHY with BurstRxRst
+// 0 writes DES_RST_DIS first, the testbench checks the D-PHY's setting at every burst);
+// status = {4{AFE ready}} (AFE_STATUS[11:8]).
 //
 // Reads a test case written by `tools/csi2/csi2_model.py gen DIR`:
 //   DIR/cfg.txt   settings ('key value': lanes, clock mode, D-PHY timing, eye,
@@ -31,14 +33,15 @@
 //                 times ('tend BURST PS') and 'end'
 // which `csi2_model.py check DIR` compares with the reference model.
 //
-// Invariants measured on every burst: LP-01 -> LP-00 at the pins to hs_en
-// (data and clock lanes) and LP-11 to hs_en low, CE open while the clock lane
-// is in an LP state or opened while it toggles (csi2_tx_model counters); with
-// DlyVid = 1 the input delay contract of the Versal PHY model (dly_bad,
+// Invariants measured on every burst: LP-01 -> LP-00 at the pins to hsrx_en
+// (data and clock lanes) and LP-11 to hsrx_en low, the gate open while the clock
+// lane is in an LP state or opened while it toggles (csi2_tx_model counters);
+// with the Versal AFE (AfeKind = 2) the XPHY delay contract of the model (dly_bad,
 // dly_drop, loads per lane); at the end irq_o = |(IRQ_STATUS & IRQ_EN).
 // On every video clock edge: the PPI v1 outputs of the D-PHY that the
 // controller does not use (bow_ppi_chk, bound into bow_dphy_rx; a violation
-// stops the simulation, the counts go to sim.log).
+// stops the simulation, the counts go to sim.log) and its AFE v1 outputs
+// (bow_afe_chk, bound the same way; silent unless one fails or +afe_chk_report).
 //
 // Clocks: CPU 50 MHz, video 200 MHz (PhyClkHz, also the Versal PHY control
 // clock), byte clock from the TX model; all unrelated.
@@ -51,7 +54,8 @@ module tb_bow_csi2rx;
 
   parameter int unsigned Lanes     = 2;
   parameter int unsigned FifoDepth = 256;
-  parameter bit          DlyVid    = 1'b0;
+  parameter int unsigned AfeKind   = 1;                   // 1 UltraScale+, 2 Versal adapter
+  localparam bit         Versal    = (AfeKind == 2);
   localparam int unsigned CpuPs = 20000, VidPs = 5000;    // 50 MHz, 200 MHz
   localparam int unsigned PhyClkHz = 200_000_000;
   localparam int unsigned ML = 4, CL = 4;                 // TX model: lanes, clock lane index
@@ -70,14 +74,14 @@ module tb_bow_csi2rx;
   logic [1:0]            m_tuser;
   logic                  m_tready = 1'b1;
   logic [9:0]            m_tdata;
-  logic                  byte_clk, byte_ce, byte_rst, clk_hs_en, phy_rdy;
-  logic                  reinit, burst_rst_en;
+  logic                  byte_clk, clk_gate_en, des_rst, phy_rdy, pd, cal_start;
+  logic                  clk_lprx_en, clk_hsrx_en, clk_term_en;
   logic [7:0]            phy_status;
   logic [1:0]            clk_lp;
   logic [Lanes-1:0][1:0] lp;
-  logic [Lanes-1:0]      hs_en, dly_load, rx_valid;
-  logic [Lanes-1:0][7:0] rx_data;
-  logic [Lanes-1:0][8:0] dly_tap, dly_tap_rb;
+  logic [Lanes-1:0]      lprx_en, hsrx_en, term_en, dly_own, hs_valid;
+  logic [Lanes-1:0][7:0] hs_data;
+  logic [Lanes-1:0][8:0] dly_code, dly_q;
 
   bow_mipi_rx #(
     .Lanes     (Lanes),
@@ -85,7 +89,7 @@ module tb_bow_csi2rx;
     .CpuClkHz  (1_000_000_000 / (CpuPs / 1000)),
     .HasPhy    (1'b1),
     .FifoDepth (FifoDepth),
-    .DlyVid    (DlyVid)
+    .AfeKind   (AfeKind)
   ) dut (
     .clk_i           (clk),
     .rst_ni          (rst_n),
@@ -99,32 +103,33 @@ module tb_bow_csi2rx;
     .m_axis_tdata_o  (m_tdata),
     .m_axis_tuser_o  (m_tuser),
     .m_axis_tlast_o  (m_tlast),
-    .byte_clk_i      (byte_clk),
-    .byte_ce_o       (byte_ce),
-    .byte_rst_o      (byte_rst),
-    .clk_lp_i        (clk_lp),
-    .clk_hs_en_o     (clk_hs_en),
-    .lp_i            (lp),
-    .hs_en_o         (hs_en),
-    .rx_data_i       (rx_data),
-    .rx_valid_i      (rx_valid),
-    .phy_rdy_i       (phy_rdy),
-    .phy_status_i    (phy_status),
-    .reinit_o        (reinit),
-    .burst_rst_en_o  (burst_rst_en),
-    .dly_tap_o       (dly_tap),
-    .dly_load_o      (dly_load),
-    .dly_tap_i       (dly_tap_rb)
+    .afe_hs_byte_clk_i (byte_clk),
+    .afe_hs_data_i     (hs_data),
+    .afe_hs_valid_i    (hs_valid),
+    .afe_clk_gate_en_o (clk_gate_en),
+    .afe_des_rst_o     (des_rst),
+    .afe_clk_lp_i      (clk_lp),
+    .afe_lp_i          (lp),
+    .afe_clk_lprx_en_o (clk_lprx_en),
+    .afe_lprx_en_o     (lprx_en),
+    .afe_clk_hsrx_en_o (clk_hsrx_en),
+    .afe_hsrx_en_o     (hsrx_en),
+    .afe_clk_term_en_o (clk_term_en),
+    .afe_term_en_o     (term_en),
+    .afe_dly_code_o    (dly_code),
+    .afe_dly_own_o     (dly_own),
+    .afe_dly_q_i       (dly_q),
+    .afe_pd_o          (pd),
+    .afe_ready_i       (phy_rdy),
+    .afe_cal_start_o   (cal_start),
+    .afe_status_i      (phy_status)
   );
 
   assign phy_status = {4'h0, {4{phy_rdy}}};
 
-  // the D-PHY's PHY control -> run time inputs of the Versal PHY model
-  int brst_cfg = -1;                             // cfg v_burst_rst (-1: none)
-  always @(reinit or burst_rst_en) begin
-    u_tx.phy_reinit  = reinit;
-    u_tx.v_burst_rst = burst_rst_en;
-  end
+  // cfg v_burst_rst: the BurstRxRst the test case expects of the D-PHY (~CTRL.DES_RST_DIS,
+  // checked at every burst; -1: none)
+  int brst_cfg = -1;
 
   // The PPI v1 outputs of the D-PHY that the controller does not use (Stopstate,
   // RxClkActiveHS, bit 1 of ErrControl, idle values): checked on every lp clock edge against
@@ -132,7 +137,7 @@ module tb_bow_csi2rx;
   bind bow_dphy_rx bow_ppi_chk #(.Lanes (Lanes), .Report (1'b1)) u_ppi_chk (
     .lp_clk_i     (lp_clk_i),
     .lp_rst_ni    (lrst_n),
-    .byte_clk_i   (byte_clk_i),
+    .byte_clk_i   (afe_hs_byte_clk_i),
     .byte_rst_ni  (brst_n),
     .ppi_hs_i     (ppi_hs_o),
     .ppi_lp_i     (ppi_lp_o),
@@ -143,21 +148,60 @@ module tb_bow_csi2rx;
     .byte_ce_i    (byte_ce)
   );
 
+  // The AFE v1 outputs of the D-PHY (hw/ip/dphy_rx/dv/bow_afe_chk.sv): des_rst = ~gate at the
+  // same lp clock edge, term_en = hsrx_en, lprx_en = ~pd, lane_pd (a fresh READY after PD),
+  // OWN only while ready, the tie-offs of v1, the reset values while reset is asserted
+  bind bow_dphy_rx bow_afe_chk #(
+    .Lanes (Lanes), .TrimW (TrimW), .AfePdRst (AfePdRst)
+  ) u_afe_chk (
+    .clk_i          (clk_i),
+    .rst_ni         (rst_ni),
+    .lp_clk_i       (lp_clk_i),
+    .lp_rst_ni      (lrst_n),
+    .gate_i         (afe_clk_gate_en_o),
+    .des_rst_i      (afe_des_rst_o),
+    .des_rst_en_i   (des_rst_en),
+    .clk_hsrx_en_i  (afe_clk_hsrx_en_o),
+    .hsrx_en_i      (afe_hsrx_en_o),
+    .clk_term_en_i  (afe_clk_term_en_o),
+    .term_en_i      (afe_term_en_o),
+    .pd_i           (afe_pd_o),
+    .clk_lprx_en_i  (afe_clk_lprx_en_o),
+    .lprx_en_i      (afe_lprx_en_o),
+    .clk_lane_pd_i  (afe_clk_lane_pd_o),
+    .lane_pd_i      (afe_lane_pd_o),
+    .ready_i        (phy_rdy_sys),
+    .dly_own_i      (afe_dly_own_o),
+    .clk_dly_code_i (afe_clk_dly_code_o),
+    .clk_dly_own_i  (afe_clk_dly_own_o),
+    .mon_en_i       (afe_mon_en_o),
+    .mon_code_i     (afe_mon_code_o),
+    .trim_i         (afe_trim_o),
+    .tst_mode_i     (afe_tst_mode_o),
+    .tst_data_i     (afe_tst_data_o),
+    .atb_sel_i      (afe_atb_sel_o)
+  );
+
   csi2_tx_model #(.Lanes(Lanes)) u_tx (
-    .byte_clk_o  (byte_clk),
-    .byte_ce_i   (byte_ce),
-    .byte_rst_i  (byte_rst),
-    .clk_lp_o    (clk_lp),
-    .clk_hs_en_i (clk_hs_en),
-    .lp_o        (lp),
-    .hs_en_i     (hs_en),
-    .rx_data_o   (rx_data),
-    .rx_valid_o  (rx_valid),
-    .dly_tap_i   (dly_tap),
-    .dly_load_i  (dly_load),
-    .dly_tap_o   (dly_tap_rb),
-    .ctrl_clk_i  (vclk),
-    .phy_rdy_o   (phy_rdy)
+    .hs_byte_clk_o (byte_clk),
+    .hs_data_o     (hs_data),
+    .hs_valid_o    (hs_valid),
+    .clk_gate_en_i (clk_gate_en),
+    .des_rst_i     (des_rst),
+    .clk_lp_o      (clk_lp),
+    .lp_o          (lp),
+    .clk_hsrx_en_i (clk_hsrx_en),
+    .hsrx_en_i     (hsrx_en),
+    .clk_term_en_i (clk_term_en),
+    .term_en_i     (term_en),
+    .dly_code_i    (dly_code),
+    .dly_own_i     (dly_own),
+    .dly_q_o       (dly_q),
+    .pd_i          (pd),
+    .cal_start_i   (cal_start),
+    .ready_o       (phy_rdy),
+    .ctrl_clk_i    (vclk),
+    .ctrl_rst_ni   (vrst_n)
   );
 
   string dir;
@@ -201,7 +245,7 @@ module tb_bow_csi2rx;
     $fwrite(regs_fd, "inv %0d ce_rise_toggle %0d\n", seg, u_tx.ce_rise_toggle - ce_rise0);
     $fwrite(regs_fd, "inv %0d runts %0d\n", seg, u_tx.runts - runts0);
     $fwrite(regs_fd, "inv %0d flips %0d\n", seg, u_tx.flips - flips0);
-    if (DlyVid) begin
+    if (Versal) begin
       $fwrite(regs_fd, "inv %0d dly_bad %0d\n", seg, u_tx.dly_bad - dly_bad0);
       $fwrite(regs_fd, "inv %0d dly_drop %0d\n", seg, u_tx.dly_drop - dly_drop0);
       for (int l = 0; l < int'(Lanes); l++) begin
@@ -210,14 +254,14 @@ module tb_bow_csi2rx;
     end
   endfunction
 
-  // LP-01 -> LP-00 at the pin -> hs_en (only HS requests of the last 1 us)
+  // LP-01 -> LP-00 at the pin -> hsrx_en (only HS requests of the last 1 us)
   function automatic void hs_on(int i);
     longint d;
     d = longint'((csi2_now() - u_tx.t_lp00[i]) * 1000.0);
     if (d >= 0 && d < 1_000_000 && d > lat_max[i]) lat_max[i] = d;
   endfunction
 
-  // LP-11 at the pin -> hs_en low (only if the lane went LP-11 in the last 200 ns)
+  // LP-11 at the pin -> hsrx_en low (only if the lane went LP-11 in the last 200 ns)
   function automatic void hs_off(int i);
     longint d;
     d = longint'((csi2_now() - u_tx.t_lp11[i]) * 1000.0);
@@ -225,10 +269,10 @@ module tb_bow_csi2rx;
   endfunction
 
   for (genvar l = 0; l < int'(Lanes); l++) begin : g_lane_mon
-    always @(posedge hs_en[l]) hs_on(l);
-    always @(negedge hs_en[l]) hs_off(l);
+    always @(posedge hsrx_en[l]) hs_on(l);
+    always @(negedge hsrx_en[l]) hs_off(l);
   end
-  always @(posedge clk_hs_en) hs_on(CL);
+  always @(posedge clk_hsrx_en) hs_on(CL);
 
   // ---------------------------------------------------------------- bus BFM
   task automatic bus_xfer(input bit we, input logic [31:0] addr, input logic [31:0] wdata,
@@ -297,7 +341,7 @@ module tb_bow_csi2rx;
       "vid_ps":        if (v != int'(VidPs)) $fatal(1, "vid_ps %0d", v);
       "cpu_ps":        if (v != int'(CpuPs)) $fatal(1, "cpu_ps %0d", v);
       "fifo_depth":    if (v != int'(FifoDepth)) $fatal(1, "fifo_depth %0d, testbench built with %0d", v, FifoDepth);
-      "dly_vid":       if (v[0] != DlyVid) $fatal(1, "dly_vid %0d, testbench built with %0d", v, DlyVid);
+      "afe_kind":      if (v != int'(AfeKind)) $fatal(1, "afe_kind %0d, testbench built with %0d", v, AfeKind);
       default: begin
         // eye<l>_lo, eye<l>_hi (l < NEye), bisc<l> (l < 4)
         if (key.len() == 7 && key.substr(0, 2) == "eye" && key.substr(4, 6) == "_lo") begin
@@ -430,9 +474,10 @@ module tb_bow_csi2rx;
           $fwrite(regs_fd, "poll %03x %08x\n", a, rd);
         end
         "pkt": begin
-          if (u_tx.versal && brst_cfg >= 0 && int'(burst_rst_en) != brst_cfg) begin
-            $fatal(1, "burst_rst_en_o %0d (CTRL.DES_RST_DIS), the test case has BurstRxRst %0d",
-                   burst_rst_en, brst_cfg);
+          if (u_tx.versal && brst_cfg >= 0 &&
+              int'(dut.u_dphy_rx.u_regs.burst_rst_en_q) != brst_cfg) begin
+            $fatal(1, "des_rst enable %0d (~CTRL.DES_RST_DIS), the test case has BurstRxRst %0d",
+                   dut.u_dphy_rx.u_regs.burst_rst_en_q, brst_cfg);
           end
           push_pkt(line);
         end

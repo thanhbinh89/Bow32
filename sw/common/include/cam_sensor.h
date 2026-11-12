@@ -116,8 +116,9 @@ void cam_print_prsnt(uint32_t rx_lanes);
 
 /* Huins camera build (Versal XPHY): CTRL.DES_RST_DIS of the receiver's D-PHY
  * (docs/ip/dphy_rx.md; GPIO PA5 before step 4 of docs/ip/mipi_rx_arch.md)
- * gates burst_rst_en_i of the XPHY (BurstRxRst: the RX FIFOs restart at every
- * HS burst), on from reset. CAM_BURST_RST 1 (default): cam_rx_start() keeps it
+ * gates its des_rst, RX_RST of the XPHY data slices (BurstRxRst: the RX FIFOs
+ * restart at every HS burst; burst_rst_en_i of the adapter before step 5), on
+ * from reset. CAM_BURST_RST 1 (default): cam_rx_start() keeps it
  * on (DES_RST_DIS = 0), the FIFO latency stays at 0..3 words; with the
  * driver's SETTLE of 95 ns the board (2026-11-10, IMX274 at 4 x 1440 Mbit/s)
  * ran clean for more than 3.2 M bursts, and every SETTLE from 65 to 170 ns was

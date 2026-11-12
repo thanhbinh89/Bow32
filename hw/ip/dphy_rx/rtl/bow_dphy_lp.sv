@@ -26,6 +26,10 @@
 //   (continuous clock) keeps hs_en_o = ce_o = 1 whatever the state while
 //   en_i = 1. There is no watchdog on the clock lane.
 // * en_i = 0: the gate closes at once, the receiver 8 cycles later (Off).
+// * des_rst_o (clock lane, AFE des_rst, docs/ip/mipi_rx_arch.md section 3.2): the
+//   inverse of the gate, a flop of its own that changes at the same edge as ce_o (1 when
+//   the gate closes or at reset, 0 at the edge that opens it); held at 0 while
+//   des_rst_en_i = 0 (CTRL.DES_RST_DIS = 1, a test bit). Data lanes: always 1, no flop.
 //
 // Glitch filter: lp_o takes a new level once it was seen filter_i
 // consecutive cycles (0 counts as 1). LP-00 at the pin -> hs_en_o takes
@@ -44,11 +48,13 @@ module bow_dphy_lp #(
   input  logic [3:0] filter_i,     // PHY_CFG.LP_FILTER
   input  logic [7:0] miss_i,       // clock lane: PHY_CFG.CLK_MISS
   input  logic       clk_edge_i,   // clock lane: a byte clock edge was seen this cycle
+  input  logic       des_rst_en_i, // clock lane: des_rst_o follows the gate (~CTRL.DES_RST_DIS)
   input  logic [1:0] lp_i,         // {P, N}, asynchronous
   output logic [1:0] lp_o,         // filtered LP state
   output logic       hs_en_o,
   output logic       hs_active_o,
   output logic       ce_o,
+  output logic       des_rst_o,    // clock lane: ~ce_o (same edge) while des_rst_en_i, else 0
   output logic       ev_hs_o,      // pulse: HS entry
   output logic       ev_err_o,     // pulse: unexpected LP sequence / watchdog
   output logic       stop_o        // the lane is in Stop (PPI Stopstate)
@@ -220,11 +226,36 @@ module bow_dphy_lp #(
   assign hs_active_o = act_q;
   assign stop_o      = (state_q == Stop);
 
+  // AFE des_rst: a Moore output of the next state too, so it falls at the very edge that
+  // opens the gate and rises at the one that closes it
+  if (ClockLane) begin : g_des_rst
+    logic des_rst_q;
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) des_rst_q <= 1'b1;
+      else         des_rst_q <= !ce_d && des_rst_en_i;
+    end
+
+    assign des_rst_o = des_rst_q;
+
+`ifdef VERILATOR
+    // with the gate open until the reset pulse (below): des_rst then rises with a real
+    // edge, which the receive path reset synchroniser of an adapter (asynchronous input)
+    // needs in a two-state simulator
+    initial des_rst_q = 1'b0;
+`endif
+  end else begin : g_no_des_rst
+    assign des_rst_o = 1'b1;
+
+    logic unused_des_rst;
+    assign unused_des_rst = des_rst_en_i;
+  end
+
 `ifdef VERILATOR
   // Two-state simulators (see bow_rstmgr): the clock lane starts with the
   // gate open (and so the receiver on) until the reset pulse, which then
-  // gives the ISERDES reset synchroniser in bow_dphy_rx (asynchronous input =
-  // gate open) a real falling edge.
+  // gives the receive path reset synchroniser of the AFE adapter (des_rst_o,
+  // asynchronous input) a real edge.
   initial begin
     ce_q    = ClockLane;
     hs_en_q = ClockLane;

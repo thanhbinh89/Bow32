@@ -18,7 +18,7 @@
 #
 # Two builds of tb_bow32: the default one (KV260 camera: IMX219, 2 lanes,
 # build/sim/obj) and Imx274 = 1 (Huins MFP-VP1902 camera: IMX274 on 4 lanes
-# through the Versal PHY model, receiver FIFO 512, CsiDlyVid = 1, video clock
+# through the Versal PHY model, receiver FIFO 512, CsiAfeKind = 2, video clock
 # 200 MHz, build/sim/obj-imx274) for the tests in TESTS_IMX274.
 
 REPO      := $(abspath ..)
@@ -96,10 +96,14 @@ SIM_BIN_274 := $(OBJ_DIR_274)/Vtb_bow32
 # the build of the selected test
 RUN_BIN := $(if $(filter $(TEST),$(TESTS_IMX274)),$(SIM_BIN_274),$(SIM_BIN))
 # The D-PHY transmitter model of the CSI-2 receiver tests (package
-# csi2_tx_pkg + module csi2_tx_model), the PPI v1 checker of the receiver's
-# D-PHY (bound by the testbench), the DDR and the HyperRAM clock and pad
-# models are compiled before the testbench.
-TB_SRCS := $(REPO)/hw/ip/csi2rx/dv/csi2_tx_model.sv $(REPO)/hw/ip/dphy_rx/dv/bow_ppi_chk.sv \
+# csi2_tx_pkg + module csi2_tx_model, with the logic of the FPGA AFE adapters
+# it runs), the PPI v1 and AFE v1 checkers of the receiver's D-PHY (bound by
+# the testbench), the DDR and the HyperRAM clock and pad models are compiled
+# before the testbench.
+AFE_DLY := $(REPO)/hw/fpga/common/rtl/bow_dphy_dly_xusp.sv \
+           $(REPO)/hw/fpga/common/rtl/bow_dphy_dly_xphy.sv
+TB_SRCS := $(AFE_DLY) $(REPO)/hw/ip/csi2rx/dv/csi2_tx_model.sv \
+           $(REPO)/hw/ip/dphy_rx/dv/bow_ppi_chk.sv $(REPO)/hw/ip/dphy_rx/dv/bow_afe_chk.sv \
            $(REPO)/hw/ip/ddr/dv/ddr_clk_model.sv \
            $(REPO)/hw/ip/ddr/dv/bow_ddr_io_sim.sv $(REPO)/hw/ip/hyperram/dv/hyperram_clk_model.sv \
            $(REPO)/hw/ip/hyperram/dv/bow_hyperram_io_sim.sv tb/tb_bow32.sv
@@ -119,6 +123,24 @@ $(SIM_BIN_274): $(TB_SRCS) $(RTL_DEPS)
 
 sw:
 	$(MAKE) -C $(REPO)/sw all
+
+# Lint of the testbench's connections (make lint of the top Makefile: the sixth user of
+# bow32_top, step 5 of docs/ip/mipi_rx_arch.md), both builds: a pin of bow32_top, of the
+# D-PHY transmitter model or of another model that is missing from an instance
+# (PINMISSING) is an error; the testbench's own arithmetic is not linted (no -Wno-lint /
+# -Wno-style here: Verilator 5.020 then drops PINMISSING whatever comes after). An empty
+# connection, .pin (), is only a waived PINCONNECTEMPTY in Verilator (an empty output is the
+# normal no-connect), so hw/lint/empty_inputs.py lists the inputs connected to nothing of
+# every instance in the same elaboration (Verilator's netlist): one is an error.
+TB_LINT := $(VERILATOR) --lint-only --timing -Wno-fatal -Wno-TIMESCALEMOD -Wno-WIDTH \
+           -Wno-CASEINCOMPLETE -Werror-PINMISSING -Werror-PINNOCONNECT --top-module tb_bow32
+TB_PINS := $(PYTHON) $(REPO)/hw/lint/empty_inputs.py --verilator $(VERILATOR) -- --timing \
+           -Wno-fatal -Wno-TIMESCALEMOD --top-module tb_bow32
+lint:
+	$(TB_LINT) $(REPO)/hw/lint/verilator_waivers.vlt $(RTL_FLISTS) $(TB_SRCS)
+	$(TB_LINT) -GImx274=1 $(REPO)/hw/lint/verilator_waivers.vlt $(RTL_FLISTS) $(TB_SRCS)
+	$(TB_PINS) $(REPO)/hw/lint/verilator_waivers.vlt $(RTL_FLISTS) $(TB_SRCS)
+	$(TB_PINS) -GImx274=1 $(REPO)/hw/lint/verilator_waivers.vlt $(RTL_FLISTS) $(TB_SRCS)
 
 sw-brst0:
 	$(MAKE) -C $(REPO)/sw/apps/csi2_test all BUILD_DIR=$(SW_BRST0) \
@@ -183,4 +205,4 @@ test-extra: $(SIM_BIN_274) sw sw-brst0
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: build run test test-extra sw sw-brst0 clean
+.PHONY: build run test test-extra sw sw-brst0 lint clean
