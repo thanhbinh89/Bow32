@@ -73,7 +73,7 @@ DIRECTED  := lp watchdog clk cmd ovf stop byteclk eye skew deskew extra loss ovf
 # receiver all of them (+ dly), and some with 2 of its 4 lanes
 DIRECTED1 := cmd stop deskew extra ovf ovf2 loss be eye rxoff
 DIRECTED12 := deskew extra ovf ovf2 loss eye
-DIRECTEDC := be eye loss
+DIRECTEDC := be eye loss rxoff
 DIRECTED4 := $(DIRECTED) dly raw
 DIRECTED24 := cmd stop skew dly deskew extra ovf2 loss
 

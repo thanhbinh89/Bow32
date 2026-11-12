@@ -2550,11 +2550,14 @@ def gen_rxoff(g):
     g.emit("tready 100")
     frame(g, 0, DT_RAW10, 32, 2, fnum=1)
     # the stops cover the sync search of a 256 pixel line: up to its latest sync byte from
-    # the start of the burst (clock lane entry, data lane LP-01, HS-PREPARE, HS-ZERO with
-    # the most extra zero time and bytes), well before the end of its data
+    # the start of the burst (clock lane entry, or HS-EXIT with the continuous clock; data
+    # lane LP-01, HS-PREPARE, HS-ZERO with the most extra zero time and bytes), well before
+    # the end of its data
     c = g.cfg
-    t_sync = (c["t_lp11_next"] + c["t_lpx"] + c["t_clk_prepare"] + c["t_clk_zero"] + c["t_clk_pre"] +
-              c["t_lpx"] + c["t_hs_prepare"] + c["t_hs_zero"] + 64 + 6 * c["byte_ps"] // 1000)
+    t_clk = c["t_hs_exit"] if g.rx.contclk else (c["t_lp11_next"] + c["t_lpx"] + c["t_clk_prepare"] +
+                                                  c["t_clk_zero"] + c["t_clk_pre"])
+    t_sync = (t_clk + c["t_lpx"] + c["t_hs_prepare"] + c["t_hs_zero"] + 64 +
+              6 * c["byte_ps"] // 1000)
 
     def clear():
         g.wr("CNT_CLR", 1)
