@@ -373,15 +373,22 @@ thích (`cfg.txt`, `stim.txt`); `tb_bow_csi2rx.sv` chơi chúng qua
 (`regs.txt`, mỗi FE một dòng `fe FRAME_INFO FRAME_SUM FRAME_ERR`); mô hình so
 sánh pixel (`tuser[0]`/`tlast`/`tuser[1]`, cả khi FIFO tràn), bộ đếm,
 FRAME/LINE_INFO, FRAME_SUM, `FRAME_ERR`, FRAME/LINE_TIME, LOG và các bất biến PHY.
-`stim.txt` có thêm lệnh `wrbe A D BE` (ghi theo byte enable).
+`stim.txt` có thêm lệnh `wrbe A D BE` (ghi theo byte enable). Bench thứ hai (bước 3 của
+[ip/mipi_rx_arch.md](ip/mipi_rx_arch.md) mục 10) chạy controller một mình ở PPI, cùng mô hình
+(dưới).
 
 ```bash
-make -C hw/ip/csi2rx/dv test                          # 105 case, 1/2/4 lane (~24 s)
+make -C hw/ip/csi2rx/dv test                          # test-rx rồi test-ppi
+make -C hw/ip/csi2rx/dv test-rx                       # cả bộ thu: 105 case, 1/2/4 lane (~24 s)
 make -C hw/ip/csi2rx/dv align                         # chỉ unit test của aligner
-make -C hw/ip/csi2rx/dv test SEEDS="1 2 3 4 5 6 7 8"
+make -C hw/ip/csi2rx/dv test-rx SEEDS="1 2 3 4 5 6 7 8"
 make -C hw/ip/csi2rx/dv run SEED=7 LANES=1 ERRORS=1   # thêm DUT_LANES=1|2|4 RAW8=1 CONTCLK=1
 make -C hw/ip/csi2rx/dv run SEED=3 LANES=4 ERRORS=1 BURSTRST=1   # PHY Versal với BurstRxRst = 1
 make -C hw/ip/csi2rx/dv run TEST=clk                  # một test directed
+make -C hw/ip/csi2rx/dv test-ppi                      # controller ở PPI: 164 case, hai chế độ, song song
+make -C hw/ip/csi2rx/dv test-ppi SEEDS="$(seq -s ' ' 1 40)" PJOBS=8
+make -C hw/ip/csi2rx/dv run-ppi MODE=std TEST=loss LANES=4   # một case (MODE bow|std)
+make -C hw/ip/csi2rx/dv mutants-ppi                   # 14 mutant phải làm bench PPI hỏng
 ```
 
 - Unit test aligner (`tb_dphy_align.sv`, chạy đầu tiên trong `test`): word
@@ -435,7 +442,23 @@ make -C hw/ip/csi2rx/dv run TEST=clk                  # một test directed
 - Mỗi case giữ file trong `build/csi2rx_dv/<case>/` (`sim.log` cho CI, có dòng thống kê FIFO
   của PHY Versal); một binary Verilator cho mỗi giá trị `Lanes` (`build/csi2rx_dv/obj_l1`,
   `obj_l2`, `obj_l4`) và một cho aligner (`obj_align`).
-- `make test-tools` chạy 36 unit test của mô hình (`tools/tests/test_csi2_model.py`).
+- `make test-tools` chạy 40 unit test của mô hình (`tools/tests/test_csi2_model.py`).
+- **Bench PPI** (`tb_csi2rx_ppi.sv`, `bow_ppi_bfm.sv`; `test-ppi`, bước CI riêng): controller
+  `bow_csi2rx` một mình, PHY là BFM chơi phần dựng PPI của `csi2_model.py gen --ppi bow|std` (mỗi
+  item TX của test case kèm byte mỗi lane mỗi burst với chu kỳ, `RxActiveHS`, `RxSyncHS`, khe,
+  lỗi, lần chạy byte clock, xung lp; kỳ vọng vẫn từ item TX). Chế độ `bow`: thời gian của D-PHY
+  Bow32 (`RxActiveHS` từ cuối SETTLE, khe như XPHY, `ErrSotSyncHS` cuối burst, lỗi lp và HS entry
+  là xung `vid_clk_i`, dải phụ do BFM lái: `band_lane_en_lp` = `Enable` qua 2 flop); chế độ
+  `std`: PHY chuẩn qua wrapper cổng phẳng `bow_csi2rx_ppi_flat` (`RxActiveHS` cùng `RxSyncHS`,
+  không khe, `ErrSotSyncHS` sớm, lỗi dạng xung ở clock lp của PHY, không `PhyReady`). Một model
+  Verilator cho mỗi `Lanes` (`build/csi2rx_dv/obj_ppi_l1`, `obj_ppi_l2`, `obj_ppi_l4`) chứa cả hai
+  DUT, DUT không dùng không có clock. Các test của controller (random, `cmd`, `ovf`, `stop`,
+  `skew`, `deskew`, `extra`, `loss`, `ovf2`, `ovf8`, `be`) cộng `clkstop` (byte clock dừng 4 cạnh
+  sau khi `RxActiveHS` xuống, hay sớm hơn), `gaps`, `lpmask` (chỉ `bow`); case chạy song song
+  (`PJOBS`, mặc định số CPU), mỗi case giữ file trong `build/csi2rx_dv/ppi_<MODE>_<case>/`,
+  `sim.log` có dòng phủ của BFM (số burst theo số cạnh byte clock sau khi `RxActiveHS` xuống, khe,
+  `ErrSotSyncHS` cuối / sớm, xung lp, cạnh mặt nạ...). Chi tiết: [ip/csi2rx.md](ip/csi2rx.md)
+  mục *Kiểm chứng*, [ip/mipi_rx_arch.md](ip/mipi_rx_arch.md) mục 5.5.
 
 ### D-PHY I/O trên FPGA (xsim)
 

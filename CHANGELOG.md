@@ -6,6 +6,25 @@
 ## [Unreleased]
 
 ### Added
+- Bộ thu CSI-2, bước 3 của kế hoạch chuyển MIPI RX ([docs/ip/mipi_rx_arch.md](docs/ip/mipi_rx_arch.md)
+  mục 5.5, 8.1, 10): bench của controller một mình ở PPI, `make -C hw/ip/csi2rx/dv test-ppi` (cũng
+  trong `test` và bước CI riêng): `tb_csi2rx_ppi` với `bow_ppi_bfm`, hai chế độ thời gian: D-PHY
+  Bow32 (`bow_csi2rx` với PPI và dải phụ do BFM lái: `RxActiveHS` từ cuối SETTLE, khe như XPHY,
+  `ErrSotSyncHS` cuối burst, lỗi lp và HS entry là xung `vid_clk_i`, `band_lane_en_lp` = `Enable`
+  qua 2 flop như D-PHY) và PHY chuẩn qua wrapper cổng phẳng mới `bow_csi2rx_ppi_flat`
+  (`hw/ip/csi2rx/rtl/`, không trong `csi2rx.f`; `RxActiveHS` cùng `RxSyncHS`, không khe,
+  `ErrSotSyncHS` sớm, lỗi dạng xung ở clock lp của PHY, không `PhyReady`). `csi2_model.py gen
+  --ppi bow|std` dựng mỗi item TX ở PPI từ chính mô hình bộ thu (kỳ vọng không đổi; luật ghép lane
+  kiểm trên chu kỳ đã dựng), test mới `clkstop`, `gaps`, `lpmask`; 164 case (lane 1, 2, 4, khe, lệch
+  lane tới 6 / 7, lỗi ECC / CRC / SoT / LP, byte clock dừng 4 cạnh sau khi `RxActiveHS` xuống hay
+  sớm hơn, tràn FIFO, lọc DT / VC, EXTRA, LOG) chạy song song, cả hai chế độ sạch; `make
+  mutants-ppi`: 14 mutant của controller và wrapper đều chết. Hồ sơ PPI của controller sửa theo kết
+  quả: v1 cần `RxActiveHS` lên trước `RxSyncHS` ít nhất 1 chu kỳ và còn cao 1 chu kỳ sau byte cuối,
+  `RxSkewCalHS` dạng xung, mỗi lane đưa byte tới hết word cuối, các lane lệch nhau trong FIFO 8 byte
+  và `RxActiveHS` của chúng chồng nhau; wrapper làm thay PHY chuẩn ba việc đầu (trễ miền byte 1
+  chu kỳ, giữ `RxActiveHS` 2 chu kỳ, cạnh lên của `RxSkewCalHS`) và ghi hệ quả của phần dải phụ nối
+  hằng. Không đổi RTL nào có sẵn; `make lint` thêm wrapper (4 cấu hình); test `deskew` đọc
+  `CNT_EXT` sau mỗi burst deskew một phần (mutant đếm deskew ở lane cuối lúc đầu sống).
 - Đặc tả kiến trúc bộ thu MIPI cho ASIC, chưa có RTL ([docs/ip/mipi_rx_arch.md](docs/ip/mipi_rx_arch.md)):
   camera → AFE (D-PHY analog) → giao diện AFE → D-PHY số `bow_dphy_rx` → PPI → bộ điều khiển
   CSI-2; hợp đồng AFE có timing bằng số (phát / bắt nửa chu kỳ trên `hs_byte_clk`, `des_rst`

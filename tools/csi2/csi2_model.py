@@ -29,6 +29,20 @@ Command line (used by hw/ip/csi2rx/dv):
            --burst-rst: BurstRxRst of that PHY (0, the shipped default: the
            FIFOs never restart after the PHY init, glitch words accumulate and
            wrap; 1: they restart at every burst).
+    csi2_model.py gen DIR --ppi bow|std [--seed N --lanes ... --test NAME]
+        the same test case for the controller alone (hw/ip/csi2rx/dv/tb_csi2rx_ppi.sv,
+        bow_ppi_bfm.sv): stim.txt keeps every line above (the expected results come
+        from them, as for the whole receiver) and adds after each TX item its PPI
+        rendering (Ppi: bytes per lane per burst with their cycles, RxActiveHS,
+        RxSyncHS, gaps, errors, the byte clock runs and the band's lp domain
+        events), in one of two timings: bow = the D-PHY of Bow32 (bow_dphy_rx v1:
+        RxActiveHS from the end of SETTLE, RxValidHS gaps like the Versal XPHY,
+        ErrSotSyncHS at the end of the burst, LP errors and HS entries as pulses
+        on vid_clk_i), std = a standard PHY through the flat-port wrapper
+        bow_csi2rx_ppi_flat (RxActiveHS with RxSyncHS, no gaps, ErrSotSyncHS early,
+        pulses on the PHY's own lp clock, no PhyReady, no ErrControlClk, no HS
+        entry pulses, no RAW). NAME: random, cmd, ovf, stop, skew, deskew, extra,
+        loss, ovf2, ovf8, be, clkstop, and with bow gaps, lpmask.
     csi2_model.py check DIR
         compares DIR/out.txt (m_axis transfers) and DIR/regs.txt (register reads,
         frame end records, invariants, burst end times) with the prediction.
@@ -61,9 +75,18 @@ Determinism (the generator only creates what the checker can predict):
   * input delay loads (DlyVid = 1): writes to the same DLYn are separated by
     at least two other bus accesses or a time step, else the number of loads
     is not predicted (the receiver may merge requests within 16 video cycles).
+  * PPI rendering (--ppi): the trail a lane delivers after its bytes stays
+    within the bound above, every lane delivers the bytes of the last merged
+    word, the lane merge decides like the model (the exact rule: a lane FIFO
+    takes the 9th byte before the first word is out, checked on the rendered
+    cycles with their gaps, the rendering drawn again otherwise), and the byte
+    clock runs >= Ppi.EXACT (10) edges after the one of the last packet byte,
+    as the controller sees it (it needs 8 for exact FRAME_TIME / LINE_TIME),
+    whenever the model says the event times are exact.
 """
 
 import argparse
+import functools
 import random
 import sys
 from dataclasses import dataclass, replace
@@ -100,12 +123,13 @@ def extra_thr(rx):
     """CTRL.EXTRA the software sets (as bow_csi2rx_start: trail bytes on
     every lane x the active lanes, + margin). 1 and 2 lanes on the
     UltraScale+ PHY: the reset value 64, exactly as main's stimuli have it
-    (their trail bound is at most 58 bytes). Otherwise (4 lanes, or the
-    Versal PHY, whose FIFO adds 8 bytes per lane to the trail) 64 while the
-    trail (garbage_max) leaves 10 bytes of room below it, else
-    garbage_max + 16 (the trail alone can exceed 64 bytes)."""
+    (their trail bound is at most 58 bytes). Otherwise (4 lanes, the
+    Versal PHY, whose FIFO adds 8 bytes per lane to the trail, or the PPI
+    bench's 180 MHz byte clock of the 4 lane build) 64 while the trail
+    (garbage_max) leaves 10 bytes of room below it, else garbage_max + 16
+    (the trail alone can exceed 64 bytes)."""
     g = rx.garbage_max
-    if rx.cfg["lanes"] <= 2 and not rx.cfg.get("versal", 0):
+    if rx.cfg["lanes"] <= 2 and not rx.cfg.get("versal", 0) and g <= EXTRA_RESET:
         return EXTRA_RESET
     return EXTRA_RESET if g <= EXTRA_RESET - 10 else min(255, g + 16)
 
@@ -117,6 +141,11 @@ PHY_CFG_RESET = 14 | 2 << 8 | 30 << 16 | 8 << 24
 STATUS_PHY_RDY = 1 << 14
 MAX_LANES = 4
 CLK = MAX_LANES          # index of the clock lane in the lane state lists (bit 4 of an LP mask)
+# cfg 'ppi': 0 = the whole receiver (TX model at the D-PHY ports), PPI_BOW / PPI_STD = the
+# controller alone behind bow_ppi_bfm in the timing of the D-PHY of Bow32 / of a standard
+# PHY through the flat-port wrapper (docs/ip/mipi_rx_arch.md, section 5.5)
+PPI_BOW, PPI_STD = 1, 2
+PPI_MODES = {"bow": PPI_BOW, "std": PPI_STD}
 
 
 def ctrl_lanes(lanes):
@@ -377,7 +406,14 @@ class LaneRx:
 
 def lane_receive(lane_bytes, sync, zeros, phase):
     """Aligner (spec 5.2) on one lane: [HS-zero] sync, data, then the trail
-    (inverted last bit, constant until the receiver drops hs_en)."""
+    (inverted last bit, constant until the receiver drops hs_en). The result
+    is shared between the calls with the same arguments (a burst is checked,
+    received and rendered at the PPI): callers do not change it."""
+    return _lane_receive(tuple(lane_bytes), sync, zeros, phase)
+
+
+@functools.lru_cache(maxsize=4096)
+def _lane_receive(lane_bytes, sync, zeros, phase):
     data_bits = to_bits([sync] + list(lane_bytes))
     trail = 1 - data_bits[-1]
     bits = [0] * 16 + data_bits + [trail] * TRAIL_SCAN
@@ -615,6 +651,12 @@ class Receiver:
         self.garbage_max = tr_bytes * cfg["lanes"]
         self.dly_loads = [0] * MAX_LANES     # load requests of this segment (DlyVid = 1)
         self.dly_loads_ok = True             # ... all predictable
+        # PPI bench (cfg 'ppi'): the D-PHY's PPI and band events of the items, in order,
+        # for the rendering (Ppi): ("hs", i) HS entry, ("err", i) LP error of lane FSM i
+        # (CLK: clock lane); the byte clock and the armed lanes of the last burst
+        self.ppi = cfg.get("ppi", 0)
+        self.events = []
+        self.last_clk_ok, self.last_armed = False, []
         self.reset_datapath()
 
     # ------------------------------------------------------------ helpers
@@ -686,20 +728,46 @@ class Receiver:
         elif f == "stop" and st == "01":
             self.fsm[i] = "hsrqst"
         elif f == "stop" and st in ("10", "00"):
-            self.ev("lp")
-            self.lp_loss(i)
+            self.lp_error(i)
             self.fsm[i] = "waitstop"
         elif f == "hsrqst" and st == "00":
             self.fsm[i] = "hs"
-            self.ev("hsclk" if i == CLK else f"hs{i}")
+            self.hs_entry(i)
         elif f == "hsrqst" and st == "11":
             self.fsm[i] = "stop"
         elif f == "hsrqst" and st == "10":
-            self.ev("lp")
-            self.lp_loss(i)
+            self.lp_error(i)
             self.fsm[i] = "waitstop"
         elif f == "hs" and st == "11":
             self.fsm[i] = "stop"
+
+    def hs_entry(self, i):
+        """HS entry of lane FSM i: CNT_BURST* / CNT_MISC[15:0] through the band (none
+        behind the flat wrapper of a standard PHY: its HS entry inputs are tied off)."""
+        self.events.append(("hs", i))
+        if self.ppi != PPI_STD:
+            self.ev("hsclk" if i == CLK else f"hs{i}")
+
+    def lp_error(self, i):
+        """LP error of lane FSM i (ErrControl, ErrControlClk on the PPI). A standard PHY
+        has no ErrControlClk: the clock lane's errors do not reach the controller."""
+        if self.ppi == PPI_STD and i == CLK:
+            return
+        self.events.append(("err", i))
+        self.ev("lp")
+        self.lp_loss(i)
+
+    def ppi_lp_error(self, mask, edge):
+        """'lperr MASK EDGE' (PPI bench): ErrControl of the data lanes in MASK (bit 4:
+        ErrControlClk) without an LP sequence, at once (EDGE 0) or at the next edge of the
+        controller's mask of that lane (the lane disabled, CLK_FORCE set): in the last lp
+        clock cycle before it applies (EDGE 2: a lost burst) or the first one after (EDGE 1:
+        masked). ERR_STATUS.LP and CNT_MISC[23:16] count every error."""
+        for i in list(range(MAX_LANES)) + [CLK]:
+            if mask >> i & 1:
+                self.ev("lp")
+                if edge != 1:
+                    self.lp_loss(i)
 
     def lp_loss(self, i):
         """LP error of an enabled data lane, or of the clock lane while the
@@ -723,9 +791,9 @@ class Receiver:
 
     def byte_clock(self):
         """The byte clock runs: IDELAY loads (DlyVid = 0), pending capture
-        requests."""
+        requests. (PPI bench: no input delays, the band's DLYn readback is 0.)"""
         if self.phy_en:
-            if not self.dly_vid:
+            if not self.dly_vid and not self.ppi:
                 for l in range(self.dut_lanes):
                     self.dly_out[l] = self.dly[l]
             for cap in (self.log, self.raw):
@@ -777,10 +845,15 @@ class Receiver:
         if self.byte_clock_ok():
             self.byte_clock()
             raw = self.raw
-            if raw.armed and not raw.pending and raw.mode & 2:
+            if raw.armed and not raw.pending and raw.mode & 2 and self.raw_words():
                 raw.burst = None
                 self.cap_done(raw, IRQ_RAW)
         self.see(CLK, "11")
+
+    def raw_words(self):
+        """RAW gets PHY words: not behind the flat wrapper of a standard PHY (no raw
+        words on the PPI, its RAW inputs are tied off: a capture never ends)."""
+        return self.ppi != PPI_STD
 
     def byte_clock_ok(self):
         if not self.phy_rdy:
@@ -805,8 +878,7 @@ class Receiver:
         if st == "00" and ns * 1000 > (1 << 20) * self.cfg["vid_ps"] + 400_000:
             for i in range(MAX_LANES):
                 if mask >> i & 1 and self.fsm[i] == "hs":
-                    self.ev("lp")              # HS watchdog
-                    self.lp_loss(i)
+                    self.lp_error(i)           # HS watchdog
                     self.fsm[i] = "waitstop"
 
     def idle(self):
@@ -839,10 +911,11 @@ class Receiver:
             for st in ("11", "01", "00"):
                 self.see(l, st)
         armed = [self.fsm[l] == "hs" for l in range(self.lanes)]
+        self.last_clk_ok, self.last_armed = clk_ok, armed
         if clk_ok:
             self.byte_clock()
             raw = self.raw
-            if raw.armed and not raw.pending and (raw.mode & 2 or armed[0]):
+            if raw.armed and not raw.pending and (raw.mode & 2 or armed[0]) and self.raw_words():
                 raw.burst = None if raw.mode & 2 else b
                 self.cap_done(raw, IRQ_RAW)
             if self.rx_on and not self.blind:
@@ -1187,7 +1260,7 @@ class Receiver:
                         self.dly_loads_ok = False
                     self.dly_xfers[lane] = 0
                     self.dly_loads[lane] += 1
-                    if self.phy_rdy:
+                    if self.phy_rdy and not self.ppi:
                         self.dly_out[lane] = self.dly[lane]
                         self.dly_settle.add(lane)
                 elif self.clk_running and self.byte_clock_ok():
@@ -1217,6 +1290,14 @@ class Receiver:
             v = self.ctrl
         elif n == "PHY_CFG":
             v = self.phy_cfg
+        elif n == "STATUS" and self.ppi:
+            # PPI bench: the band of bow_ppi_bfm and the flat wrapper hold LP-11 on every
+            # lane of the build, HS receivers off, no byte clock meter (BYTECLK_OK 0), PHY
+            # ready; CE follows RxClkActiveHS (the testbench checks it: invariant ce_bad)
+            v = ST["11"] | int(self.in_frame and self.rx_on) << 12 | 1 << 14
+            for l in range(dl):
+                v |= ST["11"] << (2, 4, 16, 18)[l]
+            return Expect("exact", v, 0x3FFFFF & ~(1 << 11))
         elif n == "STATUS":
             # LP {P,N} of the clock lane [1:0], lanes 0/1 [5:2], lanes 2/3 [19:16];
             # HS on: clock [8], lanes 0/1 [10:9], lanes 2/3 [21:20]; absent lanes 0
@@ -1284,6 +1365,8 @@ class Receiver:
                 v = 0
             else:
                 return Expect("time", a=self.line_time[0], b=self.line_time[1])
+        elif n == "BYTECLK" and self.ppi:
+            v = 0                              # PPI bench: the band's meter is held at 0
         elif n == "BYTECLK":
             if self.cfg.get("byteclk"):
                 d = 256 * 20000 * 1000 // self.cfg["byte_ps"] // 1000
@@ -1389,6 +1472,8 @@ def run_stim(cfg, lines, rx=None):
                 rx.clock_off()
         elif op == "knob" and f[1] == "phy_reinit" and int(f[2]):
             rx.phy_reinit()
+        elif op == "lperr":
+            rx.ppi_lp_error(int(f[1]), int(f[2]))
         elif op == "mark":
             rx.mark(int(f[1]))
         elif op == "nocheck":
@@ -1397,6 +1482,305 @@ def run_stim(cfg, lines, rx=None):
             rx.seg_expect[rx.seg][f[1]] = f[2]
     rx.close_seg()
     return rx, exps
+
+
+# --------------------------------------------------------------------- PPI
+# Stimulus of the controller bench (hw/ip/csi2rx/dv/tb_csi2rx_ppi.sv, bow_ppi_bfm.sv), in
+# stim.txt after the TX item it renders. tb_bow_csi2rx and run_stim skip these lines (the
+# expected results come from the TX items); tb_csi2rx_ppi skips the TX items.
+#   ppev HS ERR                lp domain pulses (bow: vid_clk_i, std: the PHY's lp clock):
+#                              band HS entries (bit l: data lane l, bit 4: clock lane; bow
+#                              only), ErrControl / ErrControlClk (same bits); one pulse of a
+#                              kind at least 20 video clocks (std: 24 lp clocks) after the last
+#   lperr MASK EDGE            ErrControl at an edge of a mask of the controller
+#                              (Receiver.ppi_lp_error)
+#   ppl L A F S E K KL H B     lane L of the next ppb, in byte clocks from the first edge of its
+#                              run: RxActiveHS in [A, F) (A -1: none), RxSyncHS and the first byte
+#                              at S (-1: no sync), ErrSotSyncHS at E, RxSkewCalHS in [K, K + KL),
+#                              ErrSotHS with RxSyncHS if H; B: a byte per cycle from S on (hex,
+#                              '--': no RxValidHS in that cycle, '-': no bytes). bow: RAW gets
+#                              00 words from A, B8 at S - 3, then the bytes without the gaps.
+#   ppb N GAP STOP TEND        burst N: GAP ns of LP time (no byte clock unless it runs
+#                              continuously), then the byte clock runs STOP edges; lane events
+#                              after the last one happen when it runs again (stopped early);
+#                              t_end at cycle TEND (-1: when the item ends)
+#   ppclk NS / ppon / ppoff    the byte clock runs NS ns / from now on / stops (continuous clock)
+#   ppidle NS                  LP time (a continuous byte clock keeps running)
+SKEW_FIFO = 8            # bytes of a lane FIFO of the lane merge (the 9th before the start: SKEW)
+
+
+def ppi_merge(push, fall, need):
+    """Lane merge of the controller on rendered PPI cycles (the rendering's check, the
+    rule of bow_csi2_lane_merge as docs/ip/csi2rx.md states it): push[l] = cycles in
+    which lane l drives a byte, from its RxSyncHS on; fall = the first cycle in which
+    every active lane's RxActiveHS is low. The bytes of a cycle enter the lane FIFOs at
+    the next edge; a word (one byte per lane) leaves at an edge where every FIFO holds a
+    byte and some RxActiveHS was high in the cycle before. Returns 'skew' (a FIFO
+    took a 9th byte before the first word: the burst is dropped), 'lost' (one of the
+    first `need` bytes of a lane found its FIFO full later on: lost without an error,
+    the rendering must avoid it; trail bytes after them may be) or the number of words."""
+    n = len(push)
+    lev, ptr = [0] * n, [0] * n
+    started, words = False, 0
+    for e in range(min(p[0] for p in push) + 1, fall + 1):
+        pop = e - 1 < fall and all(lv > 0 for lv in lev)
+        for l in range(n):
+            if ptr[l] < len(push[l]) and push[l][ptr[l]] == e - 1:
+                ptr[l] += 1
+                if lev[l] < SKEW_FIFO:
+                    lev[l] += 1
+                elif not started:
+                    return "skew"
+                elif ptr[l] <= need:
+                    return "lost"
+        if pop:
+            started = True
+            words += 1
+            lev = [lv - 1 for lv in lev]
+    return words
+
+
+class Ppi:
+    """PPI rendering of the TX items (cfg 'ppi'), from the Receiver's view of them (the
+    D-PHY events of its lane FSMs, armed lanes and byte clock, Receiver.events / last_*)
+    and the lane level model (lane_receive, burst_receive), in the timing of the D-PHY of
+    Bow32 (PPI_BOW, bow_dphy_rx v1 with the Versal XPHY's gaps) or of a standard PHY
+    (PPI_STD, through the flat wrapper bow_csi2rx_ppi_flat). Per burst, in byte clocks
+    from the first edge of its run:
+      both  run start, PRE cycles, RxActiveHS rises (bow; std: with RxSyncHS), the sync of
+            the earliest lane ZERO + 1 cycles later, the lanes apart by the model's sot
+            (lane skew) plus, where the model does not use the exact skew rule, 0..2
+            (bow; std 0..1) cycles of PHY offset; every lane delivers the bytes of the
+            last merged word, then a trail (bow 8 .. trail bound - 2 bytes, std 0..3);
+            the byte clock runs >= 4 edges (post) after the one at which the last
+            RxActiveHS falls and >= EXACT edges (std: EXACT + 1, the wrapper's delay)
+            after the one of the last packet byte when the model says the
+            event times are exact (contclk, or CLK-POST >= the D-PHY minimum), else it
+            stops between the last needed byte and 3 cycles after the fall, the rest
+            (RxActiveHS falls 1..2 cycles into the next run, bow: ErrSotSyncHS one
+            later) happening when it runs again
+      bow   RxActiveHS from the end of SETTLE (1 cycle of jitter), RxValidHS gaps
+            (common to all lanes, or on a lane ahead of the others), RxActiveHS falls
+            0..2 cycles before the last trail byte (the aligner's last bytes come
+            with it low), ErrSotSyncHS one cycle after the fall, RxSkewCalHS a pulse
+      std   no gaps, RxActiveHS 1..3 cycles after the last byte, ErrSotSyncHS where the
+            sync would be (with or without RxActiveHS), RxSkewCalHS a pulse or a level
+            until the end of the burst, ErrSotHS sometimes with RxSyncHS (ignored)."""
+
+    PRE = (12, 24)
+    ZERO = (4, 9)
+    EXACT = 10
+
+    def __init__(self, cfg, rx, rnd):
+        self.cfg, self.rx, self.r = cfg, rx, rnd
+        self.std = cfg["ppi"] == PPI_STD
+        self.gap = None          # RxValidHS gap probability per cycle (bow), None: per burst
+        self.post = None         # byte clocks after the last fall (exact bursts), None: random
+        self.std_trail = (0, 3)  # std: trail bytes per lane
+        self.tr_max = rx.garbage_max // cfg["lanes"]
+        self.was_running = False
+
+    def before(self):
+        """Call before the Receiver runs an item."""
+        self.rx.events = []
+        self.was_running = self.rx.clk_running
+
+    def events(self):
+        """ppev lines of the D-PHY events of the item (a kind twice: two lines)."""
+        out, hs, err = [], 0, 0
+        for kind, i in self.rx.events:
+            bit = 1 << i
+            if kind == "hs" and self.std:
+                continue
+            if (hs if kind == "hs" else err) & bit:
+                out.append(f"ppev {hs} {err}")
+                hs = err = 0
+            if kind == "hs":
+                hs |= bit
+            else:
+                err |= bit
+        self.rx.events = []
+        return out + ([f"ppev {hs} {err}"] if hs or err else [])
+
+    def clock(self):
+        """ppon / ppoff when the item started / stopped the continuous clock."""
+        run = self.rx.clk_running
+        return ["ppon"] if run and not self.was_running else \
+            ["ppoff"] if self.was_running and not run else []
+
+    def item(self, line):
+        """PPI lines of a TX item other than a burst, after the Receiver ran it."""
+        f = line.split()
+        out = self.events() + self.clock()
+        if f[0] == "lp":
+            out.append(f"ppidle {f[3]}")
+        elif f[0] == "idle":
+            out.append(f"ppidle {f[1]}")
+        elif f[0] == "clkburst":
+            out.append(f"{'ppidle' if self.rx.contclk else 'ppclk'} {f[1]}")
+        return out
+
+    def burst(self, b):
+        """PPI lines of burst b, after the Receiver ran it."""
+        rx, r = self.rx, self.r
+        out = self.events() + self.clock()
+        idx = rx.burst_idx - 1
+        cont = rx.contclk and rx.clk_running
+        gap_ns = r.randint(150, 300) if cont else r.randint(450, 650)
+        armed = rx.last_armed
+        if not rx.last_clk_ok or not any(armed):
+            return out + [f"ppb {idx} {gap_ns} 0 -1"]
+        for attempt in range(16):
+            lanes = self.plan(b, attempt >= 10)
+            if lanes is not None:
+                break
+        else:
+            raise RuntimeError(f"burst {idx}: no consistent PPI rendering")
+        lanes, stop, tend = lanes
+        for l, ln in sorted(lanes.items()):
+            data = "".join("--" if v < 0 else f"{v:02x}" for v in ln["b"]) or "-"
+            out.append(f"ppl {l} {ln['a']} {ln['f']} {ln['s']} {ln['e']} {ln['k']} {ln['kl']} "
+                       f"{ln['h']} {data}")
+        return out + [f"ppb {idx} {gap_ns} {stop} {tend}"]
+
+    def plan(self, b, plain):
+        """One rendering of burst b: ({lane: fields}, stop, tend), or None when the lane
+        merge would not decide like the model (drawn again; plain: no gaps, no offsets)."""
+        rx, r, std = self.rx, self.r, self.std
+        nl, armed = rx.lanes, rx.last_armed
+        per = lane_split(b.sent(), nl)
+        lrx = [lane_receive(per[l], b.sync[l], b.zeros[l], b.phase[l]) for l in range(nl)]
+        res = burst_receive(b, nl, rx.skew_exact)
+        exact_skew = rx.skew_exact and all(b.sync[l] == SYNC and b.phase[l] == b.phase[0]
+                                           for l in range(nl))
+        locked = [l for l in range(nl) if armed[l] and lrx[l].locked]
+        whole = len(locked) == nl
+        # the bytes every locked lane must deliver: those of the last merged word the
+        # model counts on (res.real transmitted bytes of the merged stream)
+        real = min(lrx[l].real * nl + l for l in locked) if locked else 0
+        words = -(-real // nl)
+        pre = r.randint(*self.PRE)
+        base = pre + 1 + r.randint(*self.ZERO)
+        sot = {l: (lrx[l].sot if l in locked else b.zeros[l] - 1) for l in range(nl) if armed[l]}
+        m0 = min(sot.values())
+        off_max = 0 if exact_skew or plain else (1 if std else 2)
+        s0 = {l: base + sot[l] - m0 + r.randint(0, off_max) for l in sot}
+        gp = 0.0 if std or plain else (self.gap if self.gap is not None else
+                                       r.choice([0.0, 0.0, 0.02, 0.1, 0.3]))
+        # streams of the locked lanes: needed bytes + trail, with gaps (bow)
+        need = {l: max(lrx[l].real, words) for l in locked}
+        want = {}
+        lo, hi = min(8, self.tr_max - 2), self.tr_max - 2
+        trail = r.randint(lo, hi)              # bow: the HS-TRAIL + LP-11 detection, ~ per lane
+        # std: 0..3, but 9..12 where the model drops the burst for lane skew (its rule
+        # counts on the early lane's trail filling the lane FIFO, as the D-PHY's does)
+        t_std = (9, 12) if whole and res.skew else self.std_trail
+        for l in locked:
+            t = r.randint(*t_std) if std else min(hi, max(lo, trail + r.randint(-1, 1)))
+            want[l] = lrx[l].data[:max(need[l], lrx[l].real + t)]
+        stream = {l: [] for l in locked}
+        cyc = {l: [] for l in locked}           # cycles of the bytes
+        c = min(s0[l] for l in locked) if locked else 0
+        while any(len(cyc[l]) < len(want[l]) for l in locked):
+            common = gp and r.random() < gp / 2
+            started = [l for l in locked if c >= s0[l] and len(cyc[l]) < len(want[l])]
+            done = [len(cyc[l]) for l in locked if c >= s0[l]]
+            slow = min(done) if done else 0
+            for l in started:
+                first = c == s0[l]
+                ahead = len(cyc[l]) > slow
+                if not first and (common or (ahead and gp and r.random() < gp / 2)):
+                    stream[l].append(-1)
+                else:
+                    stream[l].append(want[l][len(cyc[l])])
+                    cyc[l].append(c)
+            c += 1
+        # RxActiveHS falls after the needed bytes: bow (and the controller itself) one cycle
+        # later at the earliest, std right after them (the flat wrapper holds it 2 cycles)
+        lanes, fall = {}, {}
+        for l in locked:
+            last = cyc[l][-1]
+            nd = cyc[l][need[l] - 1] if need[l] else s0[l]
+            f = last + 1 + (r.randint(0, 2) if std else -r.randint(0, 2))
+            fall[l] = max(f, nd + (1 if std else 2))
+            lanes[l] = dict(a=s0[l] if std else pre + r.randint(0, 1), f=fall[l], s=s0[l],
+                            e=-1, k=-1, kl=0, h=int(std and r.random() < 0.1), b=stream[l])
+        end = max(fall.values()) if fall else None
+        for l in sot:
+            if l in locked:
+                continue
+            f = (end + r.randint(-1, 1)) if end is not None else \
+                s0[l] + len(per[l]) + r.randint(8, 12)
+            f = max(f, s0[l] + 2)
+            ln = dict(a=pre + r.randint(0, 1), f=f, s=-1, e=-1, k=-1, kl=0, h=0, b=[])
+            if lrx[l].deskew:
+                ln["k"], ln["kl"] = s0[l], 1
+                if std:
+                    level = r.random() < 0.5
+                    ln["a"] = s0[l] if level else -1
+                    ln["kl"] = f - s0[l] if level else 1
+            elif std:
+                ln["e"] = s0[l]
+                ln["a"] = s0[l] if r.random() < 0.5 else -1
+            else:
+                ln["e"] = f + 1
+            if ln["a"] < 0:
+                ln["f"] = -1                   # no RxActiveHS
+            lanes[l] = ln
+        # std: the RxActiveHS of the lanes overlap (the controller takes one burst from the
+        # first rise to the last fall; a lane low before a late lane rises would split it)
+        if std:
+            late = max((ln["a"] for ln in lanes.values() if ln["a"] >= 0), default=-1)
+            for ln in lanes.values():
+                if ln["a"] >= 0 and ln["f"] <= late:
+                    ln["f"] = late + 1 + r.randint(0, 2)
+                    if ln["kl"] > 1:
+                        ln["kl"] = ln["f"] - ln["k"]
+        maxf = max((ln["f"] for ln in lanes.values() if ln["a"] >= 0),
+                   default=max(max(ln["e"], ln["k"] + ln["kl"]) for ln in lanes.values()))
+        # the byte clock run: edges 0 .. stop - 1, the values of cycle c change after edge c
+        # (RxActiveHS falls after edge maxf); post = edges after that one
+        klast = (len(b.sent()) - 1) // nl if b.sent() else 0
+        tlast = max((cyc[l][min(klast, len(cyc[l]) - 1)] for l in locked if cyc[l]), default=maxf)
+        tneed = max((cyc[l][need[l] - 1] for l in locked if need[l]), default=max(s0.values()))
+        if rx.contclk and rx.clk_running:
+            stop = None
+        elif rx.timing_exact():
+            post = self.post if self.post is not None else r.choice([4, 4, 4, 5, 6, 8, 12])
+            stop = max(maxf + 1 + post, tlast + 1 + self.EXACT + int(std))
+        else:
+            stop = r.randint(tneed + 1, maxf + 4)
+            for ln in lanes.values():          # the rest when the clock runs again
+                if ln["a"] >= 0 and ln["f"] > stop:
+                    ln["f"] = stop + r.randint(1, 2)
+                    if ln["e"] >= 0 and not std:
+                        ln["e"] = ln["f"] + 1
+                    if ln["kl"] > 1:
+                        ln["kl"] = max(1, ln["f"] - ln["k"])
+                if ln["s"] >= 0:
+                    keep = max(ln["f"] + (0 if std else r.randint(0, 1)), tneed + 1) - ln["s"]
+                    ln["b"] = ln["b"][:max(0, keep)]
+                    while ln["b"] and ln["b"][-1] < 0:
+                        ln["b"].pop()
+        # the lane merge must decide like the model (exact rule, gaps, FIFO levels); std:
+        # as the controller sees it behind the flat wrapper (bytes one cycle later,
+        # RxActiveHS falling two cycles later)
+        if whole and all(armed):
+            fall_all = max(ln["f"] for ln in lanes.values() if ln["a"] >= 0) + 2 * std
+            push = [[ln["s"] + i + std for i, v in enumerate(ln["b"]) if v >= 0]
+                    for _, ln in sorted(lanes.items())]
+            got = ppi_merge(push, fall_all, words)
+            if res.skew:
+                if got != "skew":
+                    return None
+            elif got in ("skew", "lost") or got < words or \
+                    got * nl - res.real > rx.garbage_max:
+                return None
+        last = max(max(ln["f"], ln["e"], ln["k"] + ln["kl"], ln["s"] + len(ln["b"]))
+                   for ln in lanes.values())
+        if stop is None:
+            stop = last + 2
+        return lanes, stop, tlast
 
 
 # ---------------------------------------------------------------- generator
@@ -1442,6 +1826,11 @@ class Gen:
         self.marks = 0
         self.queued = False            # TX items queued since the last wait
         self.dirty = False             # bursts since the last clock-only burst
+        # PPI bench: the PPI rendering of every TX item follows it (own random stream,
+        # so that the TX items of a seed do not depend on the rendering)
+        self.ppi = Ppi(cfg, self.rx, random.Random(f"ppi/{cfg['ppi']}/{cfg['test']}/{cfg['seed']}/"
+                                                   f"{cfg['lanes']}/{cfg['dut_lanes']}/"
+                                                   f"{cfg['contclk']}")) if cfg.get("ppi") else None
 
     # ------------------------------------------------------------ commands
     def emit(self, line):
@@ -1453,7 +1842,11 @@ class Gen:
         if op == "clkburst":
             self.dirty = False
         self.lines.append(line)
+        if self.ppi:
+            self.ppi.before()
         run_stim(self.cfg, [line], self.rx)
+        if self.ppi:
+            self.lines += self.ppi.item(line)
 
     def sync(self, now=False):
         """Register accesses act on the state after the queued TX items,
@@ -1546,10 +1939,14 @@ class Gen:
             return False
         self.queued = self.dirty = True
         self.lines.append(b.stim())
+        if self.ppi:
+            self.ppi.before()
         if stop:
             self.rx.stop_burst(b)
         else:
             self.rx.burst(b)
+        if self.ppi:
+            self.lines += self.ppi.burst(b)
         return True
 
     def corrupt(self, b, kind):
@@ -2124,7 +2521,8 @@ def gen_deskew(g):
     """D-PHY skew calibration bursts (HS-zero, FFFFh, 0101..., raw bursts with
     no packet): no sync error, counted (CNT_EXT, lane 0), also between the
     lines of a frame; with 2 or 4 lanes, a deskew sync on some lanes only is a
-    skew error (lane 0 alone, all lanes but lane 0). Corrupted 0xB8 syncs
+    skew error (lane 0 alone, all lanes but lane 0; CNT_EXT read after each: only
+    the first counts). Corrupted 0xB8 syncs
     stay sync errors: 00 FF in the pixels, the 0xFF trail after 0x00, 0xFC /
     0xFE / 0xFF before the DI 0x2B, sync bits just before the end of the
     leader (on every lane; with 4 lanes the 2 lane patterns on lanes 0, 1 and
@@ -2152,8 +2550,9 @@ def gen_deskew(g):
     g.rd("ERR_STATUS")
     if lanes >= 2:
         deskew(1)
+        g.rd("CNT_EXT")                              # lane 0 alone: counted
         deskew(full & ~1)
-        g.rd("CNT_EXT")
+        g.rd("CNT_EXT")                              # the other lanes: not counted
         g.rd("CNT_MISC")
         g.rd("ERR_STATUS")
     frame(g, 0, DT_RAW10, 32, 3, fnum=2)
@@ -2620,10 +3019,163 @@ def gen_be(g):
     g.dump(log=False)
 
 
+def send_lost(g, make, kind):
+    """make() with an error of `kind` that the model sees as that loss (as gen_loss)."""
+    for _ in range(60):
+        c = g.corrupt(make(), kind)
+        if c is None:
+            continue
+        res = burst_receive(c, g.rx.lanes, g.rx.skew_exact)
+        if kind == "sync" and (not res.sot_err or res.deskew):
+            continue
+        if kind == "skew" and (not res.skew or res.sot_err):
+            continue
+        if kind == "trunc" and (res.merged is None or res.real >= len(c.packet())):
+            continue
+        if g.pkt(c):
+            return
+    raise RuntimeError(f"no deterministic {kind} loss")
+
+
+def gen_clkstop(g):
+    """PPI: the byte clock stops early (docs/ip/mipi_rx_arch.md section 5.4). Segment 1:
+    exactly 4 byte clocks after the last RxActiveHS of every burst falls, the least the
+    D-PHY of Bow32 gives a transmitter that keeps T_CLK-POST (std: with a trail of
+    8..12 bytes per lane like the D-PHY's, so that the event times stay exact): a frame,
+    then one with a sync error, a skew error (2 or 4 lanes), bytes after a packet
+    (EXTRA) and an accepted line cut short; FRAME_TIME, LINE_TIME exact. Segment 2,
+    T_CLK-POST below the D-PHY minimum: the clock stops between the last byte the lane
+    merge needs and 3 cycles after the fall, so the fall of RxActiveHS, ErrSotSyncHS
+    (bow), SKEW and the cut come when it runs again (the next burst or clock-only
+    burst): the same pixels, counters, LOG and FRAME_ERR, FRAME_TIME / LINE_TIME not
+    predicted."""
+    if not g.ppi:
+        raise SystemExit("test clkstop needs --ppi")
+    lanes = g.cfg["lanes"]
+    on(g)
+    g.wr("IRQ_EN", 0x1F)
+    g.wr("LOG_CTRL", 1 | 4)
+    g.emit("tready 100")
+    wide = extra_px(extra_thr(g.rx))
+    # a line cut short needs more bytes than any trail gives
+    n = 120 + (0 if g.rx.garbage_max <= EXTRA_RESET - 10 else 4 * ((g.rx.garbage_max + 3) // 4))
+    for seg in range(2):
+        if seg:
+            g.sync()
+            g.emit("knob t_clk_post 10")
+            g.mark()
+        g.ppi.post = 4 if seg == 0 else None
+        g.ppi.std_trail = (8, 12) if seg == 0 else (0, 3)    # std: 4 cycles are enough
+        f0 = 3 * seg
+        frame(g, 0, DT_RAW10, 32, 3, fnum=f0 + 1)
+        g.send(g.short(0, DT_FS, f0 + 2))
+        g.send(g.line(0, DT_RAW10, 32))
+        send_lost(g, lambda: g.line(0, DT_RAW10, 32), "sync")
+        g.send(g.line(0, DT_RAW10, 32))                  # tuser[1]
+        if lanes >= 2:
+            send_lost(g, lambda: g.line(0, DT_RAW10, 32), "skew")
+            g.send(g.line(0, DT_RAW10, 32))
+        b = g.line(0, DT_RAW10, 32)
+        b.extra = g.line(0, DT_RAW10, wide).packet()      # EXTRA, the next line tuser[1]
+        g.send(b)
+        g.send(g.line(0, DT_RAW10, 32))
+        send_lost(g, lambda: g.line(0, DT_RAW10, 4 * (n // 5)), "trunc")
+        g.send(g.line(0, DT_RAW10, 32))
+        g.send(g.short(0, DT_FE, f0 + 2))
+        frame(g, 0, DT_RAW10, 32, 2, fnum=f0 + 3)
+        for name in ("CNT_SOT", "CNT_CRC", "CNT_EXT", "CNT_MISC", "ERR_STATUS", "FRAME_ERR",
+                     "FRAME_INFO", "FRAME_TIME", "LINE_TIME"):
+            g.rd(name)
+        g.wr("ERR_STATUS", ERR_ALL)
+    g.dump(log=True)
+
+
+def gen_gaps(g):
+    """PPI, D-PHY of Bow32: RxValidHS gaps anywhere in the bursts, as from the FIFOs of
+    the Versal XPHY (in a cycle on every lane, or on a lane ahead of the others), on 40 %
+    of the cycles, then 75 %: RAW10 lines of 4..200 pixels, embedded data of every length
+    mod the lane count, a generic short packet, an ECC, a CRC and a sync error, lane
+    skew 0..4; then RAW8 lines of 1..64 pixels; LOG of every frame."""
+    if not g.ppi or g.ppi.std:
+        raise SystemExit("test gaps needs --ppi bow")
+    r = g.rnd
+    ctrl = on(g)
+    g.wr("LOG_CTRL", 1 | 2 | 4)
+    g.emit("tready 100")
+    for k, gap in enumerate((0.4, 0.75)):
+        g.ppi.gap = gap
+        g.send(g.short(0, DT_FS, k + 1))
+        for w in (4, 8, 12, 64, 200):
+            g.send(g.line(0, DT_RAW10, w))
+        for n in range(1, 8):
+            g.send(g.long(0, DT_EMB, [r.randrange(256) for _ in range(n)]))
+        g.send(g.short(0, 0x08, r.randrange(0x10000)))
+        for kind in ("ecc1", "crc", "sync"):
+            c = g.corrupt(g.line(0, DT_RAW10, 32), kind)
+            if c is None or not g.pkt(c):
+                g.send(g.line(0, DT_RAW10, 32))
+            g.send(g.line(0, DT_RAW10, 32))
+        g.send(g.short(0, DT_FE, k + 1))
+        for name in ("CNT_PKT", "CNT_LINE", "CNT_ECC", "CNT_CRC", "CNT_SOT", "FRAME_ERR"):
+            g.rd(name)
+        g.wr("LOG_CTRL", 1 | 2 | 4)
+    g.wr("CTRL", ctrl & ~CTRL_RX_EN)
+    g.wr("CTRL", ctrl & ~(0x3F << 8) | DT_RAW8 << 8)
+    g.send(g.short(0, DT_FS, 3))
+    for w in (1, 2, 3, 5, 63, 64):
+        g.send(g.line(0, DT_RAW8, w))
+    g.send(g.short(0, DT_FE, 3))
+    g.dump(log=True)
+
+
+def gen_lpmask(g):
+    """PPI, D-PHY of Bow32: the masks of the lost burst marking come from the band with
+    the D-PHY's latency (band_lane_en_lp = Enable through 2 video clock flops,
+    band_clk_force_lp = CLK_FORCE likewise). ErrControl of the highest lane in the last
+    video clock cycle before its synchronised enable falls (CTRL lowers the lane count with
+    the receiver on, between bursts) marks a lost burst: the next line of the frame has
+    tuser[1]; in the first cycle after it does not. ErrControlClk likewise in the last /
+    first cycle around the rise of CLK_FORCE (written with the receiver on: this test
+    only). Every error counts in ERR_STATUS.LP and CNT_MISC[23:16]."""
+    if not g.ppi or g.ppi.std:
+        raise SystemExit("test lpmask needs --ppi bow")
+    lanes = g.cfg["lanes"]
+    ctrl = on(g)
+    g.emit("tready 100")
+    frame(g, 0, DT_RAW10, 32, 2, fnum=1)
+    cases = []
+    if lanes >= 2:
+        fewer = ctrl & ~(CTRL_LANES | CTRL_LANES4) | ctrl_lanes(lanes // 2)
+        cases += [(1 << (lanes - 1), fewer, 2), (1 << (lanes - 1), fewer, 1)]
+    cases += [(1 << CLK, ctrl | CTRL_CLK_FORCE, 2), (1 << CLK, ctrl | CTRL_CLK_FORCE, 1)]
+    for fnum, (mask, new, edge) in enumerate(cases, start=2):
+        g.send(g.short(0, DT_FS, fnum))
+        g.send(g.line(0, DT_RAW10, 32))
+        g.sync()
+        g.emit(f"lperr {mask} {edge}")
+        g.wr("CTRL", new, now=True)
+        g.send(g.line(0, DT_RAW10, 32))                  # tuser[1] with EDGE 2
+        g.send(g.line(0, DT_RAW10, 32))
+        g.send(g.short(0, DT_FE, fnum))
+        for name in ("FRAME_ERR", "CNT_MISC", "ERR_STATUS"):
+            g.rd(name)
+        g.wr("ERR_STATUS", ERR_ALL)
+        g.wr("CTRL", ctrl)
+    frame(g, 0, DT_RAW10, 32, 2, fnum=len(cases) + 2)
+    g.dump(log=False)
+
+
 TESTS = {"random": gen_random, "lp": gen_lp, "watchdog": gen_watchdog, "clk": gen_clk,
          "cmd": gen_cmd, "ovf": gen_ovf, "stop": gen_stop, "byteclk": gen_byteclk, "eye": gen_eye,
          "skew": gen_skew, "dly": gen_dly, "deskew": gen_deskew, "extra": gen_extra,
-         "loss": gen_loss, "ovf2": gen_ovf2, "ovf8": gen_ovf8, "be": gen_be}
+         "loss": gen_loss, "ovf2": gen_ovf2, "ovf8": gen_ovf8, "be": gen_be,
+         "clkstop": gen_clkstop, "gaps": gen_gaps, "lpmask": gen_lpmask}
+# The tests of the controller alone (--ppi): not those of the D-PHY (LP state machines,
+# watchdog, clock lane gate, byte clock meter, input delays); gaps and lpmask only in the
+# timing of the D-PHY of Bow32 (a standard PHY has no gaps, the masks are the wrapper's)
+PPI_TESTS = ("random", "cmd", "ovf", "stop", "skew", "deskew", "extra", "loss", "ovf2", "ovf8",
+             "be", "clkstop", "gaps", "lpmask")
+PPI_BOW_ONLY = ("gaps", "lpmask")
 
 
 # ------------------------------------------------------------------ checker
@@ -2858,6 +3410,19 @@ def cmd_gen(args):
         cfg["v_burst_rst"] = args.burst_rst
     elif args.burst_rst:
         raise SystemExit("--burst-rst needs --versal")
+    if args.ppi:
+        # the controller alone (tb_csi2rx_ppi): the PHY is bow_ppi_bfm, no D-PHY model
+        if args.versal:
+            raise SystemExit("--ppi: the controller alone, no --versal (the timing of the "
+                             "Versal XPHY is part of --ppi bow)")
+        if args.test not in PPI_TESTS or (args.ppi == "std" and args.test in PPI_BOW_ONLY):
+            raise SystemExit(f"test {args.test} does not run with --ppi {args.ppi}")
+        cfg["ppi"] = PPI_MODES[args.ppi]
+        # the controller's build: 4 lanes as on the Huins camera build (DlyVid 1, its
+        # 180 MHz byte clock); the flat wrapper has DlyVid 0
+        cfg["dly_vid"] = int(cfg["dut_lanes"] == 4 and cfg["ppi"] == PPI_BOW)
+        if cfg["dut_lanes"] == 4:
+            cfg["byte_ps"] = 5556
     r = random.Random(f"cfg/{args.test}/{args.seed}/{args.lanes}/{args.contclk}")
     if args.test == "random":
         cfg["byte_ps"] = r.choice([8772, 8772, 7600, 10400])
@@ -2877,6 +3442,9 @@ def cmd_gen(args):
             cfg["v_lat_lane"] = rv.randrange(2) if args.burst_rst or not cfg["v_glitch_pct"] else 0
             for l in range(MAX_LANES):
                 cfg[f"bisc{l}"] = rv.randrange(512)
+        elif cfg.get("ppi") and cfg["dut_lanes"] == 4:
+            cfg["byte_ps"] = random.Random(f"ppi/{args.seed}/{args.lanes}/{args.contclk}").choice(
+                [5556, 5556, 5556, 6944])
     elif args.test == "byteclk":
         cfg.update(contclk=1, byteclk=1)
     elif args.test == "eye":
@@ -2890,14 +3458,17 @@ def cmd_gen(args):
     g = Gen(cfg)
     TESTS[args.test](g)
     (out / "cfg.txt").write_text("".join(f"{k} {v}\n" for k, v in cfg.items()))
-    head = f"# csi2_model.py gen --test {args.test} --seed {args.seed} --lanes {cfg['lanes']}\n"
+    head = (f"# csi2_model.py gen --test {args.test} --seed {args.seed} --lanes {cfg['lanes']}" +
+            (f" --ppi {args.ppi}" if args.ppi else "") + "\n")
     (out / "stim.txt").write_text(head + "".join(ln + "\n" for ln in g.lines))
     for f in ("out.txt", "regs.txt"):
         (out / f).unlink(missing_ok=True)
+    phy = (f"PPI ({'D-PHY of Bow32' if cfg['ppi'] == PPI_BOW else 'standard PHY, flat wrapper'})"
+           if cfg.get("ppi") else "UltraScale+ PHY" if not cfg.get("versal") else
+           "Versal (BurstRxRst %d) PHY" % cfg["v_burst_rst"])
     print(f"{out}: test {args.test} seed {args.seed}, {cfg['lanes']}/{cfg['dut_lanes']} lanes, "
-          f"{'continuous' if cfg['contclk'] else 'non-continuous'} clock, "
-          f"{'UltraScale+' if not cfg.get('versal') else 'Versal (BurstRxRst %d)' % cfg['v_burst_rst']} "
-          f"PHY, {g.rx.burst_idx} bursts, "
+          f"{'continuous' if cfg['contclk'] else 'non-continuous'} clock, {phy}, "
+          f"{g.rx.burst_idx} bursts, "
           f"{len(g.rx.items)} output items" +
           (f", {getattr(g, 'injected', 0)} scheduled errors not used" if cfg["errors"] else ""))
 
@@ -2933,6 +3504,9 @@ def main():
     p.add_argument("--burst-rst", type=int, choices=(0, 1), default=0,
                    help="BurstRxRst of the Versal PHY model (0: FIFOs restart only at the PHY init)")
     p.add_argument("--fifo-depth", type=int, default=256, help="FifoDepth parameter (pixel groups)")
+    p.add_argument("--ppi", choices=sorted(PPI_MODES),
+                   help="the controller alone behind bow_ppi_bfm (tb_csi2rx_ppi): bow = timing of "
+                        "the D-PHY of Bow32, std = a standard PHY through the flat wrapper")
     p.add_argument("--test", choices=sorted(TESTS), default="random")
     p = sub.add_parser("check", help="compare the testbench dumps in DIR with the model")
     p.add_argument("dir")

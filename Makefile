@@ -55,7 +55,9 @@ sw:
 # 2, 1 and 4 lanes as on the KV260, Huins and 1 lane builds, without a PHY),
 # its CSI-2 controller on its own with the PPI ports (bow_csi2rx: the same
 # configurations, each stating the PHY's lp clock; no lp clock, or one other
-# than its video clock, it must refuse, with its own message) and its digital
+# than its video clock, it must refuse, with its own message), the controller
+# with flat PPI ports for a standard PHY (bow_csi2rx_ppi_flat, not in
+# csi2rx.f: 2, 1 and 4 lanes, 50 MHz video clock) and its digital
 # D-PHY on its own (bow_dphy_rx: 1, 2 and 4 lanes, input delay
 # taps in the byte or the lp clock domain; a lane count it must refuse). Then
 # the Versal board level RTL against port-only stubs of the AMD primitives
@@ -77,6 +79,9 @@ CTRL_CFGS = "-GPpiLpClkHz=200000000" "-GLanes=1 -GPpiLpClkHz=200000000" \
 	  "-GHasPhy=1'b0 -GPhyClkHz=50000000 -GPpiLpClkHz=50000000"
 # arguments for bow_csi2rx alone that it must refuse, and the message it must refuse them with
 CTRL_BAD = "|PpiLpClkHz not set" "-GPpiLpClkHz=250000000|PPI lp clock 250000000 Hz != vid_clk_i"
+# the flat-port wrapper of the controller (standard PHY)
+FLAT_LINT = $(RX_LINT) hw/ip/csi2rx/rtl/bow_csi2rx_ppi_flat.sv --top-module bow_csi2rx_ppi_flat
+FLAT_CFGS = "" "-GLanes=1" "-GLanes=4 -GFifoDepth=512" "-GPhyClkHz=50000000"
 VLINT_CMD = $(VERILATOR) --lint-only -Wall hw/lint/verilator_waivers.vlt hw/lint/xilinx_versal_stubs.sv
 DPHY_LINT = $(VLINT_CMD) hw/fpga/common/rtl/bow_dphy_io_versal.sv --top-module bow_dphy_io_versal
 
@@ -107,6 +112,7 @@ lint: deps
 	    echo "lint: bow_csi2rx accepted '$$g' (expected: $$m)"; exit 1; fi; \
 	  echo "$$out" | grep -q "$$m" || { echo "lint: bow_csi2rx refused '$$g' without '$$m':"; \
 	    echo "$$out" | head -5; exit 1; }; done
+	@for g in $(FLAT_CFGS); do echo "$(FLAT_LINT) $$g"; $(FLAT_LINT) $$g || exit 1; done
 	$(DPHYRX_LINT)
 	$(DPHYRX_LINT) -GLanes=1
 	$(DPHYRX_LINT) -GLanes=4 -GDlyVid=1\'b1

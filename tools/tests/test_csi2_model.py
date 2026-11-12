@@ -497,6 +497,131 @@ class ReceiverTest(unittest.TestCase):
                     self.assertEqual(log[n - 1] & 0x3F, m.DT_FE)
 
 
+class PpiTest(unittest.TestCase):
+    """The PPI rendering (gen --ppi) and the model's view of the controller alone."""
+
+    def test_merge_rule(self):
+        # gapless lanes d byte clocks apart: up to SKEW_MAX (6) merged, from 7 on dropped
+        for d in range(10):
+            push = [list(range(10, 40)), list(range(10 + d, 40 + d))]
+            got = m.ppi_merge(push, 50 + d, 30)
+            self.assertEqual(got, 30 if d <= m.SKEW_MAX else "skew", d)
+        # the early lane pausing before the late one starts holds fewer bytes: 7 merged
+        early = [10, 11, 12, 14] + list(range(15, 45))
+        self.assertIsInstance(m.ppi_merge([early, list(range(17, 50))], 60, 20), int)
+        # after the start a lane waiting 9 cycles overflows the other lane's FIFO: a needed
+        # byte lost is an error of the rendering, a trail byte is not
+        push = [list(range(10, 40)), [10] + list(range(21, 50))]
+        self.assertEqual(m.ppi_merge(push, 60, 25), "lost")
+        self.assertIsInstance(m.ppi_merge(push, 60, 8), int)
+        # RxActiveHS low one cycle after the last byte: its word does not leave the FIFOs
+        self.assertEqual(m.ppi_merge([[10, 11, 12], [10, 11, 12]], 14, 3), 3)
+        self.assertEqual(m.ppi_merge([[10, 11, 12], [10, 11, 12]], 13, 3), 2)
+
+    def gen(self, mode, lanes=2, **kw):
+        cfg = dict(m.DEFAULT_CFG, test="random", seed=3, lanes=lanes, dut_lanes=lanes,
+                   ppi=m.PPI_MODES[mode], tready=100, **kw)
+        g = m.Gen(cfg)
+        m.on(g)
+        return g
+
+    @staticmethod
+    def bursts(lines):
+        """[(pkt line, {lane: fields}, stop, tend)] of the ppl / ppb lines."""
+        out, cur, pkt = [], {}, None
+        for ln in lines:
+            f = ln.split()
+            if f[0] == "pkt":
+                pkt = m.Burst.parse(f[1:])
+            elif f[0] == "ppl":
+                b = f[9]
+                cur[int(f[1])] = dict(zip("a f s e k kl h".split(), map(int, f[2:9])),
+                                      b=[] if b == "-" else
+                                      [-1 if b[i:i + 2] == "--" else int(b[i:i + 2], 16)
+                                       for i in range(0, len(b), 2)])
+            elif f[0] == "ppb":
+                out.append((pkt, cur, int(f[3]), int(f[4])))
+                cur = {}
+        return out
+
+    def test_rendering(self):
+        for mode in m.PPI_MODES:
+            for lanes in (1, 2, 4):
+                g = self.gen(mode, lanes, fifo_depth=512 if lanes == 4 else 256)
+                if mode == "bow":
+                    g.ppi.gap = 0.3
+                for w in (4, 16, 64):
+                    g.send(g.line(0, m.DT_RAW10, w))
+                g.send(g.short(0, m.DT_FS, 1))
+                bs = self.bursts(g.lines)
+                self.assertEqual(len(bs), 4)
+                gaps = 0
+                for b, ln, stop, tend in bs:
+                    self.assertEqual(sorted(ln), list(range(lanes)))
+                    for l, x in ln.items():
+                        if mode == "bow":
+                            self.assertGreaterEqual(x["s"] - x["a"], 4)     # RAW: 00 .. B8 first
+                        else:
+                            self.assertEqual(x["a"], x["s"])                # with RxSyncHS
+                            self.assertNotIn(-1, x["b"])                    # no gaps
+                        gaps += x["b"].count(-1)
+                        self.assertEqual(x["e"], -1)
+                    # the lane bytes, merged: the burst, then its trail
+                    per = [[v for v in ln[l]["b"] if v >= 0] for l in range(lanes)]
+                    n = min(len(p) for p in per)
+                    merged = [per[l][k] for k in range(n) for l in range(lanes)]
+                    self.assertEqual(merged[:len(b.sent())], b.sent())
+                    self.assertGreater(stop, 0)
+                if mode == "bow":
+                    self.assertGreater(gaps, 0)
+
+    def test_errors_rendering(self):
+        # a sync error on lane 1: bow ErrSotSyncHS one cycle after the fall, std early (at
+        # the sync) with or without RxActiveHS; a skew error: the early lane fills its FIFO
+        for mode in m.PPI_MODES:
+            g = self.gen(mode)
+            b = g.line(0, m.DT_RAW10, 32)
+            b.sync = (m.SYNC, 0x00, m.SYNC, m.SYNC)
+            self.assertTrue(g.pkt(b))
+            b = g.line(0, m.DT_RAW10, 32)
+            b.zeros = (0, 14, 0, 0)
+            self.assertTrue(g.pkt(b))
+            (_, ln, _, _), (_, sk, _, _) = self.bursts(g.lines)
+            x = ln[1]
+            self.assertEqual(x["s"], -1)
+            if mode == "bow":
+                self.assertEqual(x["e"], x["f"] + 1)
+                self.assertGreaterEqual(x["a"], 0)
+            else:
+                self.assertLess(x["e"], ln[0]["s"] + len(ln[0]["b"]))
+            self.assertGreaterEqual(len([v for v in sk[0]["b"] if v >= 0]), 9)
+            self.assertGreaterEqual(sk[1]["s"] - sk[0]["s"], 7)
+
+    def test_receiver(self):
+        # what the band (bow) and the flat wrapper (std) give the controller
+        for mode in (m.PPI_BOW, m.PPI_STD):
+            rx = receiver(ppi=mode)
+            rx.write(m.REG["RAW_CTRL"], 1)
+            rx.burst(m.Burst(0, m.DT_FS, 1))
+            self.assertEqual(read(rx, "CNT_BURST"), 0 if mode == m.PPI_STD else 1 | 1 << 16)
+            self.assertEqual(read(rx, "CNT_MISC") & 0xFFFF, 0 if mode == m.PPI_STD else 1)
+            self.assertEqual(read(rx, "RAW_CTRL") & 0x101, 1 if mode == m.PPI_STD else 0x100)
+            rx.idle()
+            rx.lp_item(1 << m.CLK, "00", 200)             # clock lane LP error: no ErrControlClk
+            self.assertEqual(read(rx, "CNT_MISC") >> 16 & 0xFF, 0 if mode == m.PPI_STD else 1)
+            e = rx.read(m.REG["STATUS"])
+            self.assertEqual((e.value, e.mask), (0x403F | 1 << 12, 0x3FF7FF))   # LP-11, in frame
+            self.assertEqual(read(rx, "BYTECLK"), 0)
+        # 'lperr': counted always, a lost burst unless in the first masked cycle
+        rx = receiver(ppi=m.PPI_BOW)
+        rx.burst(m.Burst(0, m.DT_FS, 1))
+        rx.ppi_lp_error(2, 1)
+        self.assertFalse(rx.lp_lost)
+        rx.ppi_lp_error(1 << m.CLK, 2)
+        self.assertTrue(rx.lp_lost)
+        self.assertEqual(read(rx, "CNT_MISC") >> 16 & 0xFF, 2)
+
+
 def perfect_dut(d):
     """Write out.txt/regs.txt the way an RTL that matches the model would."""
     cfg = m.read_cfg(d / "cfg.txt")
@@ -566,9 +691,10 @@ class GenCheckTest(unittest.TestCase):
 
     def test_all_tests_round_trip(self):
         v4 = ("--lanes", "4", "--versal", "--fifo-depth", "512")
+        tx = sorted(t for t in m.TESTS if t not in ("clkstop", "gaps", "lpmask"))   # not PPI only
         with tempfile.TemporaryDirectory() as tmp:
-            cases = [(t, "--seed", "2") for t in sorted(m.TESTS) if t != "dly"]
-            cases += [(t, "--seed", "3", *v4) for t in sorted(m.TESTS)]
+            cases = [(t, "--seed", "2") for t in tx if t != "dly"]
+            cases += [(t, "--seed", "3", *v4) for t in tx]
             cases += [("cmd", "--seed", "1", "--lanes", "2", "--dut-lanes", "4", "--versal")]
             cases += [("random", "--seed", str(s), *o) for s in (1, 2) for o in
                       [(), ("--errors",), ("--raw8", "--errors", "--lanes", "1"), ("--contclk",),
@@ -578,6 +704,17 @@ class GenCheckTest(unittest.TestCase):
                        ("--errors", "--lanes", "2", "--dut-lanes", "4", "--versal"),
                        ("--errors", "--lanes", "1", "--dut-lanes", "4", "--versal")]]
             cases += [("skew", "--seed", "4", "--lanes", "2", "--dut-lanes", "4", "--versal")]
+            # the PPI bench, both timings (the PPI lines do not change the expectations)
+            p4 = ("--lanes", "4", "--fifo-depth", "512")
+            for mode in m.PPI_MODES:
+                for t in m.PPI_TESTS:
+                    if mode == "std" and t in m.PPI_BOW_ONLY:
+                        continue
+                    cases += [(t, "--seed", "5", "--ppi", mode)]
+                    cases += [(t, "--seed", "6", "--ppi", mode, *p4)]
+                cases += [("random", "--seed", "7", "--ppi", mode, "--errors", "--contclk", *p4),
+                          ("random", "--seed", "8", "--ppi", mode, "--errors", "--lanes", "1",
+                           "--dut-lanes", "4", "--fifo-depth", "512")]
             for n, (test, *argv) in enumerate(cases):
                 d = Path(tmp) / f"c{n}"
                 self.gen(d, "--test", test, *argv)
@@ -612,6 +749,12 @@ class GenCheckTest(unittest.TestCase):
                 self.gen(Path(tmp) / "x", "--burst-rst", "1")
             with self.assertRaises(SystemExit):
                 self.gen(Path(tmp) / "y", "--test", "skew", "--lanes", "1")
+            # PPI bench: the controller alone, no D-PHY model, no D-PHY tests
+            for argv in (("--ppi", "bow", "--versal"), ("--ppi", "bow", "--test", "lp"),
+                         ("--ppi", "std", "--test", "gaps"), ("--ppi", "std", "--test", "lpmask"),
+                         ("--test", "clkstop"), ("--test", "gaps")):
+                with self.assertRaises(SystemExit, msg=argv):
+                    self.gen(Path(tmp) / "z", *argv)
 
     def test_checker_catches_mistakes(self):
         with tempfile.TemporaryDirectory() as tmp:
