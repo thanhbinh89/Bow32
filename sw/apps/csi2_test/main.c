@@ -18,21 +18,17 @@
  *
  * The other commands drive the receiver by hand: stream start/stop, eye
  * calibration, packet log, raw PHY words, delay taps, status. With the
- * Versal XPHY (INFO.DLY_VID, Huins camera build) also the PHY knobs on GPIO
- * (`phy`: status, re-initialisation, RX FIFO reset per burst) and the sensor
+ * Versal XPHY (Huins camera build) also the PHY knobs, registers of the
+ * receiver's D-PHY since step 4 of docs/ip/mipi_rx_arch.md (GPIO PA4 / PA5 /
+ * PB6 / PB7 before): `phy` (AFE_STATUS, DES_RST_DIS, delays in use), `phy
+ * reinit` (CMD.REINIT), `phy burstrst` (CTRL.DES_RST_DIS), and the sensor
  * stream without the receiver (`sensor on`): when the PHY's self-calibration
  * (BISC) needs a running clock lane, `sensor on`, `phy reinit`, then `start`.
  */
 #include "csi2_test.h"
 
-/* Huins camera build (bow32_huins_vp1902_cam_top): knobs of the Versal
- * XPHY, level = OUT & DIR of the pin, 0 after reset; raw XPHY status. */
-#define PHY_REINIT   GPIO_PIN(4) /* PA4: 1 = PHY in PLL reset; at 0 XPLL, BISC, VT again */
-#define PHY_BURSTRST GPIO_PIN(5) /* PA5: 1 = RX FIFO reset at every HS burst */
-#define PHY_NIB_RDY  GPIO_PIN(6) /* PB6: PHY_RDY of every nibble */
-#define PHY_NIB_DLY  GPIO_PIN(7) /* PB7: DLY_RDY of every nibble */
-#define PHY_RDY_MS   10u         /* `phy reinit`: wait for STATUS.PHY_RDY */
-/* PA5 that every receiver start writes (cam_rx_start) */
+#define PHY_RDY_MS 10u /* `phy reinit`: wait for AFE_STATUS.READY */
+/* the receive path reset that every receiver start leaves on (cam_rx_start) */
 #if CAM_BURST_RST
 #define CAM_BURST_RST_STR "1"
 #else
@@ -62,9 +58,9 @@ static const char help_274[] =
     "                      11 colour bars 12 horizontal bars\n"
     "  simfast on|off      sensor start-up waits / 64 (simulation only)\n";
 static const char help_phy[] =
-    "  phy                 PHY_RDY, every nibble's PHY_RDY / DLY_RDY (PB6 / PB7), knobs\n"
-    "  phy reinit          XPLL lock + BISC again (PA4 pulse), VT tracking back on\n"
-    "  phy burstrst 0|1    RX FIFO reset at every HS burst (PA5; start sets " CAM_BURST_RST_STR ")\n"
+    "  phy                 READY, every nibble's PHY_RDY / DLY_RDY, XPLL lock (AFE_STATUS)\n"
+    "  phy reinit          XPLL lock + BISC again (CMD.REINIT), VT tracking back on\n"
+    "  phy burstrst 0|1    RX FIFO reset at every HS burst (DES_RST_DIS; start sets " CAM_BURST_RST_STR ")\n"
     "  sensor on|off       sensor stream without the receiver (BISC needs a clock?)\n";
 static const char help_b[] =
     "  rd <addr>  wr <addr> <val>   bus read / write (hex)\n";
@@ -164,7 +160,7 @@ bool stream_start(bool configure) {
   /* before the sensor leaves LP-11 (IMX274: LP-00 in standby); Versal XPHY:
    * PA5 = CAM_BURST_RST (cam_sensor.h) */
   if (cam_rx_start(ct.s, ct.s->dt()) != CSI2RX_OK) {
-    bow_printf("error: D-PHY not ready (CSI2RX STATUS.PHY_RDY = 0)\n");
+    bow_printf("error: D-PHY not ready (AFE_STATUS.READY = 0)\n");
     if (ct.vid) bow_puts("  phy: nibble status; sensor on + phy reinit: BISC with a running clock\n");
     return false;
   }
@@ -265,19 +261,19 @@ uint32_t count_fs_irqs(uint32_t frames, uint32_t timeout_ms) {
 /* 8 bits of a lane's bit stream from bit b on (bit 0 of word 0 first). */
 static uint32_t raw_bits(const uint32_t *w, uint32_t lane, uint32_t b) {
   uint32_t i = b / 8u, v = (w[i] >> (8u * lane)) & 0xFFu;
-  if (i + 1u < CSI2RX_RAW_WORDS) v |= ((w[i + 1u] >> (8u * lane)) & 0xFFu) << 8;
+  if (i + 1u < DPHY_RAW_WORDS) v |= ((w[i + 1u] >> (8u * lane)) & 0xFFu) << 8;
   return (v >> (b % 8u)) & 0xFFu;
 }
 
 static void print_raw(const uint32_t *w) {
   for (uint32_t l = 0; l < ct.lanes; l++) {
     bow_printf("lane %u:", l);
-    for (uint32_t i = 0; i < CSI2RX_RAW_WORDS; i++) {
+    for (uint32_t i = 0; i < DPHY_RAW_WORDS; i++) {
       if (i && i % 16u == 0) bow_puts("\n       ");
       bow_printf(" %02x", (w[i] >> (8u * l)) & 0xFFu);
     }
     /* sync sequence of the aligner: a zero byte, then 0xB8 (LSB first) */
-    uint32_t b = 8, end = 8u * CSI2RX_RAW_WORDS - 8u;
+    uint32_t b = 8, end = 8u * DPHY_RAW_WORDS - 8u;
     while (b <= end && !(raw_bits(w, l, b - 8u) == 0 && raw_bits(w, l, b) == 0xB8u)) b++;
     if (b <= end) {
       bow_printf("\n        sync byte at bit %u (word %u + %u)\n", b, b / 8u, b % 8u);
@@ -287,61 +283,43 @@ static void print_raw(const uint32_t *w) {
   }
 }
 
-/* -------------------------------------------------- Versal XPHY knobs (GPIO) */
-static uint32_t knob(uint32_t pin) { return (GPIOA->OUT & GPIOA->DIR & pin) ? 1u : 0u; }
+/* ------------------------------------------- Versal XPHY knobs (D-PHY registers) */
+static uint32_t phy_ready(void) { return bow_dphy_rx_ready() ? 1u : 0u; }
 
-static void set_knob(uint32_t pin, bool on) {
-  if (on) {
-    bow_gpio_set(GPIOA, pin);
-    bow_gpio_output(GPIOA, pin);
-  } else {
-    bow_gpio_clear(GPIOA, pin);
-  }
-}
-
-static uint32_t phy_ready(void) { return (CSI2RX->STATUS & CSI2RX_ST_PHY_RDY) ? 1u : 0u; }
-
-/* "phy: STATUS.PHY_RDY 1, every nibble PHY_RDY 1 DLY_RDY 1 (PB6 PB7), ..."
- * and the delays in use of every lane of the receiver */
+/* "phy: READY 1, every nibble PHY_RDY 1 DLY_RDY 1, XPLL LOCKED 1 LOCKED_FB 1
+ * (AFE_STATUS 00000f01), DES_RST_DIS 0" and the delays in use of every lane
+ * of the receiver */
 static void print_phy(void) {
-  uint32_t b = bow_gpio_read(GPIOB);
-  bow_printf("phy: STATUS.PHY_RDY %u, every nibble PHY_RDY %u DLY_RDY %u (PB6 PB7), "
-             "reinit %u burstrst %u (PA4 PA5)\n     delays in use",
-             phy_ready(), (b & PHY_NIB_RDY) ? 1u : 0u, (b & PHY_NIB_DLY) ? 1u : 0u,
-             knob(PHY_REINIT), knob(PHY_BURSTRST));
+  uint32_t st = DPHY->AFE_STATUS;
+  bow_printf("phy: READY %u, every nibble PHY_RDY %u DLY_RDY %u, XPLL LOCKED %u LOCKED_FB %u "
+             "(AFE_STATUS %08x), DES_RST_DIS %u\n     delays in use",
+             (st & DPHY_AFE_READY) ? 1u : 0u, (st & DPHY_AFE_ST_PHY_RDY) ? 1u : 0u,
+             (st & DPHY_AFE_ST_DLY_RDY) ? 1u : 0u, (st & DPHY_AFE_ST_LOCKED) ? 1u : 0u,
+             (st & DPHY_AFE_ST_LOCKED_FB) ? 1u : 0u, st, bow_dphy_rx_des_rst_on() ? 0u : 1u);
   for (uint32_t l = 0; l < ct.lanes; l++) {
-    bow_printf("%c%u", l ? '/' : ' ', CSI2RX_DLY_OUT(bow_csi2rx_read_delay(l)));
+    bow_printf("%c%u", l ? '/' : ' ', DPHY_DLY_Q(bow_dphy_rx_read_delay(l)));
   }
   bow_puts("\n");
 }
 
-/* PA4 pulse of >= 10 us: the PHY drops PHY_RDY and its loaded taps, then
- * runs XPLL lock, BISC and VT tracking again. Waits up to 10 ms for
- * STATUS.PHY_RDY and prints the time. */
+/* CMD.REINIT: the PHY drops READY and its loaded codes (OWN clears), then
+ * runs XPLL lock, BISC and VT tracking again. Waits up to 10 ms for READY and
+ * prints the time from the command. */
 static bool phy_reinit(void) {
-  uint32_t mhz = bow_clk_hz() / 1000000u, before = phy_ready();
-  set_knob(PHY_REINIT, true);
-  bow_delay_us(10);
-  uint32_t held = phy_ready();
-  set_knob(PHY_REINIT, false);
-  if (before && held) {
-    bow_puts("error: PHY_RDY stayed 1 during the reinit pulse (no PA4 knob in this bitstream?)\n");
+  uint32_t us = 0;
+  int r = bow_dphy_rx_reinit(PHY_RDY_MS, &us);
+  if (r == DPHY_ENOREINIT) {
+    bow_puts("error: AFE_STATUS.READY stayed 1 after CMD.REINIT (no re-init in this PHY?)\n");
     return false;
   }
-  bow_csi2rx_forget_delays(); /* every lane on its new BISC delay */
-  uint32_t t0 = bow_cycles(), dt, rdy;
-  do {
-    rdy = phy_ready();
-    dt = bow_cycles() - t0;
-  } while (!rdy && dt <= PHY_RDY_MS * 1000u * mhz);
-  if (rdy) {
-    bow_printf("phy: PHY_RDY %u us after the reinit pulse\n", dt / mhz);
+  if (r == DPHY_OK) {
+    bow_printf("phy: READY %u us after CMD.REINIT\n", us);
   } else {
-    bow_printf("phy: PHY_RDY still 0 %u ms after the reinit pulse\n", PHY_RDY_MS);
+    bow_printf("phy: READY still 0 %u ms after CMD.REINIT\n", PHY_RDY_MS);
   }
   print_phy();
   if (CSI2RX->CTRL & CSI2RX_CTRL_RX_EN) bow_puts("phy: the receiver ran through it: start\n");
-  return rdy != 0;
+  return r == DPHY_OK;
 }
 
 /* `phy [reinit | burstrst 0|1]` (Versal XPHY) */
@@ -355,7 +333,7 @@ static bool phy_cmd(const char *a) {
   if (word_is(s, "reinit")) return phy_reinit();
   if (!word_is(s, "burstrst")) return false;
   if (!parse_num(s + 8, &v) || v > 1u) return false;
-  set_knob(PHY_BURSTRST, v != 0);
+  bow_dphy_rx_des_rst(v != 0);
   print_phy();
   return true;
 }
@@ -390,7 +368,7 @@ static bool sensor_cmd(const char *a) {
   }
   ct.streaming = on;
   if (on) {
-    bow_printf("sensor: streaming %ux%u, receiver off (PHY_RDY %u)\n", ct.w, ct.h, phy_ready());
+    bow_printf("sensor: streaming %ux%u, receiver off (READY %u)\n", ct.w, ct.h, phy_ready());
   }
   return true;
 }
@@ -429,7 +407,7 @@ static void start_check(void) {
     /* Versal XPHY: the BISC delays sit at the early edge of every eye
      * (docs/camera_huins.md 6.3, 9) */
     bow_printf("  errors in frame %u of %u at the delays in use ", done + 1u, START_FRAMES);
-    bow_csi2rx_print_delays();
+    bow_dphy_rx_print_delays(stream_lanes() > 2u ? 4u : 2u);
     bow_puts(": after a PDI load or\n"
              "  phy reinit these are the BISC delays, early in the eye; cal loads the eye centres\n");
   }
@@ -451,7 +429,7 @@ static bool rx_running(void) {
 
 static bool execute(const char *line) {
   static uint32_t entries[CSI2RX_LOG_ENTRIES];
-  static uint32_t words[CSI2RX_RAW_WORDS];
+  static uint32_t words[DPHY_RAW_WORDS];
   const char *a;
   uint32_t v, v2;
 
@@ -512,16 +490,16 @@ static bool execute(const char *line) {
     bow_csi2rx_margin_t m;
     uint32_t k = 0, frames = 60;
     if ((a = parse_num(a, &k))) parse_num(a, &frames);
-    if (frames == 0 || k > CSI2RX_DLY_MAX) return false;
+    if (frames == 0 || k > DPHY_DLY_MAX) return false;
     if (!ct.streaming || !ct.calibrated) {
       bow_printf("error: not streaming or not calibrated (start, cal)\n");
       return false;
     }
     /* around the taps in use on every lane (after `delay`, or the BISC
-     * delays after `phy reinit`; DLY_VID: [24:16], the written [8:0] may be
-     * an old tap), k from the eye of the last calibration */
+     * delays after `phy reinit`; self-calibrating PHY: [24:16], the written
+     * [8:0] may be an old code), k from the eye of the last calibration */
     bow_csi2rx_cal_t c = ct.cal;
-    bow_csi2rx_get_delays(c.tap);
+    bow_dphy_rx_get_delays(c.tap);
     int r = bow_csi2rx_margin(&c, k, frames, tap_timeout_ms(), &m, true);
     bow_printf("csi2rx: margin %s", r > 0 ? "ok " : r == 0 ? "low " : "");
     bow_csi2rx_print_margin(&m, r);
@@ -529,11 +507,11 @@ static bool execute(const char *line) {
     return r > 0;
   }
   if ((a = match(line, "delay"))) {
-    if (!(a = parse_num(a, &v)) || !parse_num(a, &v2) || v >= ct.lanes || v2 > CSI2RX_DLY_MAX) {
+    if (!(a = parse_num(a, &v)) || !parse_num(a, &v2) || v >= ct.lanes || v2 > DPHY_DLY_MAX) {
       return false;
     }
-    bow_csi2rx_set_delay(v, v2);
-    bool now = bow_csi2rx_wait_delay(tap_timeout_ms());
+    bow_dphy_rx_set_delay(v, v2);
+    bool now = bow_dphy_rx_wait_delay(tap_timeout_ms());
     bow_printf("lane %u tap %u: %s\n", v, v2, now ? "in use" : "used from the next burst");
     return true;
   }
@@ -551,7 +529,7 @@ static bool execute(const char *line) {
   }
   if ((a = match(line, "raw"))) {
     if (!need_phy() || !rx_running()) return false;
-    if (!bow_csi2rx_raw(words, word_is(a, "now"), 3u * frame_ms() + 100u)) {
+    if (!bow_dphy_rx_raw(words, word_is(a, "now"), 3u * frame_ms() + 100u)) {
       bow_printf("error: no HS burst (streaming?)\n");
       return false;
     }
@@ -659,11 +637,11 @@ static void probe_hardware(void) {
 
   bool csi = bow_csi2rx_probe(&lanes, &phy);
   ct.phy = csi && phy;
-  ct.vid = ct.phy && (CSI2RX->INFO & CSI2RX_INFO_DLY_VID) != 0;
+  ct.vid = ct.phy && bow_dphy_rx_afe() == DPHY_AFE_VERSAL;
   ct.lanes = lanes == 0 ? 1u : lanes > CSI2RX_MAX_LANES ? CSI2RX_MAX_LANES : lanes;
   if (ct.phy) {
     bow_printf("csi2rx: Bow32 receiver, %u lanes, PHY clock %u MHz\n", lanes,
-               CSI2RX_INFO_MHZ(CSI2RX->INFO));
+               bow_dphy_rx_lp_mhz());
   } else if (csi) {
     bow_printf("csi2rx: Bow32 receiver, no D-PHY in this bitstream - ISP test pattern only\n");
   } else {

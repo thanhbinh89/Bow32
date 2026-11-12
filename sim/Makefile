@@ -12,7 +12,7 @@
 #   make run TEST=load WAVES=1 also dump build/sim/waves.fst (open with GTKWave)
 #   make run TEST=csi2_274 PLUSARGS="+DPHY_CORNER=2 +S274_CONTCLK=1"   more testbench plusargs
 #   make run TEST=csi2_274 FW=brst0   csi2_test built for BurstRxRst = 0 with SETTLE 115 ns
-#                              (model only: PA5 = 0 fails on silicon)
+#                              (model only: DES_RST_DIS = 1 fails on silicon)
 #   RUN_LOG=name               log build/sim/<name>.log instead of <test>.log
 #   JOBS=8                     C++ build jobs of Verilator (default 0: all cores)
 #
@@ -57,15 +57,17 @@ IMAGE_load  := $(SW_BUILD)/hello/hello.vmem
 
 # Firmware variant FW=brst0 (csi2_274): csi2_test built for the other PHY
 # setting of the Huins camera build, BurstRxRst = 0 (its receiver starts set
-# PA5 = 0) with SETTLE 115 ns (sw/common/include/cam_sensor.h), into
-# build/sim/sw-brst0/; the testbench then expects PA5 0 and SETTLE 115 ns.
-# Model only: on the Huins board PA5 = 0 broke the link at the first receiver
-# re-enable during a stream, at every SETTLE (docs/camera_huins.md 6.3).
+# the D-PHY's CTRL.DES_RST_DIS = 1) with SETTLE 115 ns (SETTLE target 140 ns:
+# sw/common/include/cam_sensor.h, sw/common/src/bow_dphy_rx.c), into
+# build/sim/sw-brst0/; the testbench then expects DES_RST_DIS 1 and SETTLE
+# 115 ns. Model only: on the Huins board the receive path reset off (PA5 = 0
+# before step 4) broke the link at the first receiver re-enable during a
+# stream, at every SETTLE (docs/camera_huins.md 6.3).
 FW ?=
 SW_BRST0 := $(BUILD)/sw-brst0/csi2_test
 ifeq ($(FW),brst0)
 FLASH_csi2_274 := $(SW_BRST0)/csi2_test.vmem
-FW_PLUSARGS    := +S274_PA5=0 +S274_SETTLE=115
+FW_PLUSARGS    := +S274_DESRST=0 +S274_SETTLE=115
 else ifneq ($(FW),)
 $(error unknown firmware variant FW=$(FW) (brst0))
 endif
@@ -120,7 +122,7 @@ sw:
 
 sw-brst0:
 	$(MAKE) -C $(REPO)/sw/apps/csi2_test all BUILD_DIR=$(SW_BRST0) \
-	  EXTRA_CFLAGS="-DCAM_BURST_RST=0 -DSETTLE_VID_NS=115u"
+	  EXTRA_CFLAGS="-DCAM_BURST_RST=0 -DDPHY_SETTLE_NS=140u"
 
 run: $(RUN_BIN) sw $(if $(FW),sw-$(FW))
 	cd $(BUILD) && $(RUN_BIN) +TEST=$(TEST) +ROM=$(ROM_VMEM) \
@@ -151,7 +153,7 @@ test: $(SIM_BIN) $(SIM_BIN_274) sw
 
 # Optional variants of the IMX274 tests (a few minutes each, not in CI): the
 # D-PHY corners and clock lane modes 'make test' does not run, BurstRxRst = 0
-# (the firmware variant brst0: PA5 = 0 with SETTLE 115 ns at the longest
+# (the firmware variant brst0: DES_RST_DIS = 1 with SETTLE 115 ns at the longest
 # HS-PREPARE, model only: it fails on silicon; the PHY model forced to 0
 # without glitch words, and in the
 # camera app with the FIFO drift), and the full size modes of the driver at

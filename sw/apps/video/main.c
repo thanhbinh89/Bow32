@@ -261,7 +261,7 @@ static bool start_cam(void) {
     return false;
   }
   if (cam_rx_start(sen, sen->dt()) != CSI2RX_OK) {
-    bow_printf("error: D-PHY not ready (CSI2RX STATUS.PHY_RDY = 0)\n");
+    bow_printf("error: D-PHY not ready (AFE_STATUS.READY = 0)\n");
     return false;
   }
   uint32_t max_exp = sen->exposure_max();
@@ -739,7 +739,7 @@ static void probe_hardware(void) {
   st.lanes = lanes;
   if (st.phy) {
     bow_printf("csi2rx: Bow32 receiver, %u lanes, PHY clock %u MHz\n", lanes,
-               CSI2RX_INFO_MHZ(CSI2RX->INFO));
+               bow_dphy_rx_lp_mhz());
   }
   if (!st.sensor) cam_print_prsnt(lanes);
   if (H264->ID == H264_ID_VALUE && DMA->ID == DMA_ID_VALUE) {

@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Bench of the CSI-2 controller alone at its PPI (Verilator --binary --timing): step 3 of
-// docs/ip/mipi_rx_arch.md, section 10. The PHY is bow_ppi_bfm, in one of two timings (cfg
-// 'ppi'):
-//   1  the D-PHY of Bow32: the DUT is bow_csi2rx (PPI of bow_ppi_pkg and the temporary
-//      band of v1, both driven by the BFM)
+// docs/ip/mipi_rx_arch.md, section 10 (since step 4 without the temporary band: the PHY's
+// registers, RAW and status are the D-PHY's). The PHY is bow_ppi_bfm, in one of two timings
+// (cfg 'ppi'):
+//   1  the D-PHY of Bow32: the DUT is bow_csi2rx as in bow_mipi_rx (PPI of bow_ppi_pkg
+//      driven by the BFM; INFO[6] = 1, but no D-PHY behind 0xC00: that window reads 0, the
+//      D-PHY's interrupt input is 0)
 //   2  a standard PHY: the DUT is the flat-port wrapper bow_csi2rx_ppi_flat
 // Both DUTs are built (same Lanes, FifoDepth); the one not in use gets no clocks.
 //
@@ -20,10 +22,8 @@
 // tlast, rd and poll results, 'fe' records, per segment invariants, burst end times),
 // which `csi2_model.py check DIR` compares with the reference model.
 //
-// Invariants per segment: ppi_ce_bad = STATUS reads whose CE differs from RxClkActiveHS,
-// read when it was stable for 5 CPU clocks (band of the BFM; flat wrapper: 2 flops);
-// ppi_overlap = lane programs of the BFM that overlap (a rendering error); at the end
-// irq_bad (irq_o = |(IRQ_STATUS & IRQ_EN)).
+// Invariants per segment: ppi_overlap = lane programs of the BFM that overlap (a rendering
+// error); at the end irq_bad (irq_o = |(IRQ_STATUS & IRQ_EN)).
 //
 // Clocks: CPU 50 MHz, video 200 MHz (PhyClkHz, the lp clock of the D-PHY of Bow32), byte
 // clock and the standard PHY's lp clock from the BFM; all unrelated.
@@ -37,7 +37,6 @@ module tb_csi2rx_ppi;
 
   parameter int unsigned Lanes     = 2;
   parameter int unsigned FifoDepth = 256;
-  parameter bit          DlyVid    = 1'b0;
   localparam int unsigned CpuPs = 20000, VidPs = 5000;    // 50 MHz, 200 MHz
   localparam int unsigned PhyClkHz = 200_000_000;
   localparam int unsigned CpuClkHz = 1_000_000_000 / (CpuPs / 1000);
@@ -82,41 +81,15 @@ module tb_csi2rx_ppi;
   assign enable     = std ? enable_s : enable_b;
   assign enable_clk = std ? enable_clk_s : enable_clk_b;
 
-  logic                  band_lp_rst_n, band_brst_n, band_drst_n, band_rst_src_n, band_clk_force;
-  logic [7:0]            band_settle, band_clk_settle, band_clk_miss;
-  logic [3:0]            band_lp_filter;
-  logic [Lanes-1:0][8:0] band_dly, band_dly_sys;
-  logic [Lanes-1:0][1:0] band_dly_req;
-  logic [Lanes:0][1:0]   band_lp_sys;
-  logic [Lanes:0]        band_hs_en_sys, band_ev_hs;
-  logic                  band_ce_sys, band_phy_rdy_sys, band_clk_force_lp;
-  logic [19:0]           band_meter_sys;
-  logic [Lanes-1:0]      band_lane_en_lp, band_raw_valid;
-  logic [Lanes-1:0][7:0] band_raw_data;
-
   bow_ppi_bfm #(.Lanes (Lanes)) u_bfm (
-    .clk_i               (clk),
-    .vid_clk_i           (vclk),
-    .lp_clk_o            (lp_clk),
-    .rx_byte_clk_hs_o    (byte_clk),
-    .ppi_hs_o            (ppi_hs),
-    .ppi_lp_o            (ppi_lp),
-    .ppi_lp_clk_o        (ppi_lp_clk),
-    .enable_i            (enable),
-    .enable_clk_i        (enable_clk),
-    .band_lp_rst_ni      (std ? vrst_n : band_lp_rst_n),
-    .band_clk_force_i    (std ? 1'b0 : band_clk_force),
-    .band_lp_sys_o       (band_lp_sys),
-    .band_hs_en_sys_o    (band_hs_en_sys),
-    .band_ce_sys_o       (band_ce_sys),
-    .band_phy_rdy_sys_o  (band_phy_rdy_sys),
-    .band_meter_sys_o    (band_meter_sys),
-    .band_dly_sys_o      (band_dly_sys),
-    .band_ev_hs_o        (band_ev_hs),
-    .band_lane_en_lp_o   (band_lane_en_lp),
-    .band_clk_force_lp_o (band_clk_force_lp),
-    .band_raw_data_o     (band_raw_data),
-    .band_raw_valid_o    (band_raw_valid)
+    .vid_clk_i        (vclk),
+    .lp_clk_o         (lp_clk),
+    .rx_byte_clk_hs_o (byte_clk),
+    .ppi_hs_o         (ppi_hs),
+    .ppi_lp_o         (ppi_lp),
+    .ppi_lp_clk_o     (ppi_lp_clk),
+    .enable_i         (enable),
+    .enable_clk_i     (enable_clk)
   );
 
   // ------------------------------------------- DUT 1: the controller, D-PHY of Bow32
@@ -140,49 +113,28 @@ module tb_csi2rx_ppi;
     .CpuClkHz   (CpuClkHz),
     .HasPhy     (1'b1),
     .FifoDepth  (FifoDepth),
-    .DlyVid     (DlyVid),
+    .DphyWin    (1'b1),                    // as in bow_mipi_rx (INFO[6])
     .PpiLpClkHz (PhyClkHz)
   ) u_dut (
-    .clk_i               (clk_b),
-    .rst_ni              (rst_n),
-    .bus_req_i           (req_b),
-    .bus_rsp_o           (rsp_b),
-    .irq_o               (irq_b),
-    .vid_clk_i           (vclk_b),
-    .vid_rst_ni          (vrst_n),
-    .m_axis_tvalid_o     (mv_b),
-    .m_axis_tready_i     (m_tready),
-    .m_axis_tdata_o      (md_b),
-    .m_axis_tuser_o      (mu_b),
-    .m_axis_tlast_o      (ml_b),
-    .rx_byte_clk_hs_i    (byte_clk_b),
-    .ppi_hs_i            (ppi_hs_b),
-    .ppi_lp_i            (ppi_lp_b),
-    .ppi_lp_clk_i        (ppi_lp_clk_b),
-    .enable_o            (enable_b),
-    .enable_clk_o        (enable_clk_b),
-    .band_lp_rst_no      (band_lp_rst_n),
-    .band_brst_no        (band_brst_n),
-    .band_drst_no        (band_drst_n),
-    .band_rst_src_no     (band_rst_src_n),
-    .band_clk_force_o    (band_clk_force),
-    .band_settle_o       (band_settle),
-    .band_lp_filter_o    (band_lp_filter),
-    .band_clk_settle_o   (band_clk_settle),
-    .band_clk_miss_o     (band_clk_miss),
-    .band_dly_o          (band_dly),
-    .band_dly_req_o      (band_dly_req),
-    .band_lp_sys_i       (band_lp_sys),
-    .band_hs_en_sys_i    (band_hs_en_sys),
-    .band_ce_sys_i       (band_ce_sys),
-    .band_phy_rdy_sys_i  (band_phy_rdy_sys),
-    .band_meter_sys_i    (band_meter_sys),
-    .band_dly_sys_i      (band_dly_sys),
-    .band_ev_hs_i        (band_ev_hs),
-    .band_lane_en_lp_i   (band_lane_en_lp),
-    .band_clk_force_lp_i (band_clk_force_lp),
-    .band_raw_data_i     (band_raw_data),
-    .band_raw_valid_i    (band_raw_valid)
+    .clk_i            (clk_b),
+    .rst_ni           (rst_n),
+    .bus_req_i        (req_b),
+    .bus_rsp_o        (rsp_b),
+    .irq_o            (irq_b),
+    .vid_clk_i        (vclk_b),
+    .vid_rst_ni       (vrst_n),
+    .m_axis_tvalid_o  (mv_b),
+    .m_axis_tready_i  (m_tready),
+    .m_axis_tdata_o   (md_b),
+    .m_axis_tuser_o   (mu_b),
+    .m_axis_tlast_o   (ml_b),
+    .rx_byte_clk_hs_i (byte_clk_b),
+    .ppi_hs_i         (ppi_hs_b),
+    .ppi_lp_i         (ppi_lp_b),
+    .ppi_lp_clk_i     (ppi_lp_clk_b),
+    .enable_o         (enable_b),
+    .enable_clk_o     (enable_clk_b),
+    .irq_i            (1'b0)                   // no D-PHY
   );
 
   // ------------------------------------------- DUT 2: the flat wrapper, standard PHY
@@ -244,8 +196,7 @@ module tb_csi2rx_ppi;
     .ulps_active_not_clk_i (ppi_lp_clk_s.ulps_active_not),
     .rx_ulps_clk_not_i     (ppi_lp_clk_s.rx_ulps_clk_not),
     .enable_o              (enable_s),
-    .enable_clk_o          (enable_clk_s),
-    .phy_ready_i           (1'b1)                    // no PhyReady
+    .enable_clk_o          (enable_clk_s)
   );
 
   string dir;
@@ -263,22 +214,13 @@ module tb_csi2rx_ppi;
   end
 
   // -------------------------------------------------------------- invariants
-  // STATUS.CE against RxClkActiveHS (stable for 5 CPU clocks before the read)
-  realtime     t_act = 0.0;
-  int unsigned ce_bad = 0, ce_bad0 = 0, overlaps0 = 0;
-  always @(u_bfm.rx_clk_active) t_act = csi2_now();
-
-  function automatic void status_read(logic [31:0] v, realtime t0);
-    if (t0 - t_act >= 5 * CpuPs / 1000.0 && v[11] != u_bfm.rx_clk_active) ce_bad++;
-  endfunction
+  int unsigned overlaps0 = 0;
 
   function automatic void seg_reset();
-    ce_bad0   = ce_bad;
     overlaps0 = u_bfm.overlaps;
   endfunction
 
   function automatic void seg_dump(int seg);
-    $fwrite(regs_fd, "inv %0d ppi_ce_bad %0d\n", seg, ce_bad - ce_bad0);
     $fwrite(regs_fd, "inv %0d ppi_overlap %0d\n", seg, u_bfm.overlaps - overlaps0);
   endfunction
 
@@ -286,7 +228,6 @@ module tb_csi2rx_ppi;
   task automatic bus_xfer(input bit we, input logic [31:0] addr, input logic [31:0] wdata,
                           output logic [31:0] rdata, input logic [3:0] be = 4'hF);
     bus_req_t r;
-    realtime  t0;
     r       = BUS_REQ_DEFAULT;
     r.req   = 1'b1;
     r.we    = we;
@@ -295,13 +236,11 @@ module tb_csi2rx_ppi;
     r.wdata = wdata;
     @(posedge clk);
     #1;
-    t0  = csi2_now();
     req = r;
     @(posedge clk);
     #1;
     rdata = rsp.rdata;
     req   = BUS_REQ_DEFAULT;
-    if (!we && addr == 32'h010) status_read(rdata, t0);
   endtask
 
   // One poll of IRQ_STATUS.FE (frame end records), then `cycles` CPU cycles
@@ -347,7 +286,7 @@ module tb_csi2rx_ppi;
   // ------------------------------------------------------------------- main
   initial begin : main
     string       line, cmd, key, b;
-    int          fd, n, v, seg, a, d, mask, val, us, k, m, dv;
+    int          fd, n, v, seg, a, d, mask, val, us, k, m;
     int          l, pa, pf, ps, pe, pk, pkl, ph;
     logic [31:0] rd, unused;
     realtime     t0;
@@ -355,16 +294,10 @@ module tb_csi2rx_ppi;
     if (!$value$plusargs("DIR=%s", dir)) $fatal(1, "+DIR=<test case> required");
     fd = $fopen({dir, "/cfg.txt"}, "r");
     if (fd == 0) $fatal(1, "cannot open %s/cfg.txt", dir);
-    dv = 0;
     while ($fgets(line, fd)) begin
-      if ($sscanf(line, "%s %d", key, v) == 2) begin
-        set_knob(key, v);
-        if (key == "dly_vid") dv = v;
-      end
+      if ($sscanf(line, "%s %d", key, v) == 2) set_knob(key, v);
     end
     $fclose(fd);
-    // INFO.DLY_VID of the DUT in use: the controller's parameter, 0 behind the flat wrapper
-    if (dv != (std ? 0 : int'(DlyVid))) $fatal(1, "dly_vid %0d, the DUT in use has %0d", dv, std ? 0 : DlyVid);
     out_fd  = $fopen({dir, "/out.txt"}, "w");
     regs_fd = $fopen({dir, "/regs.txt"}, "w");
 
@@ -417,8 +350,8 @@ module tb_csi2rx_ppi;
           u_bfm.push_burst(k, v, m, d);
         end
         "ppev": begin
-          n = $sscanf(line, "ppev %d %d", v, m);
-          u_bfm.push_ev(v, m);
+          n = $sscanf(line, "ppev %d", v);
+          u_bfm.push_ev(v);
         end
         "ppclk": begin
           n = $sscanf(line, "ppclk %d", v);
@@ -431,10 +364,10 @@ module tb_csi2rx_ppi;
         "ppon":  u_bfm.push_on();
         "ppoff": u_bfm.push_off();
         "lperr": begin
-          n = $sscanf(line, "lperr %d %d", mask, v);
+          n = $sscanf(line, "lperr %d", mask);
           wait (!u_bfm.busy());
-          @(negedge vclk);
-          u_bfm.lp_error(mask, v);
+          u_bfm.push_ev(mask);
+          wait (!u_bfm.busy());
         end
         "wait": begin
           while (u_bfm.busy()) service(4);
@@ -485,7 +418,7 @@ module tb_csi2rx_ppi;
     $fclose(out_fd);
     u_bfm.report();
     $display("tb_csi2rx_ppi: %0d bursts, %0d lanes, %s - dumps written", u_bfm.bursts_done, Lanes,
-             std ? "standard PHY through bow_csi2rx_ppi_flat" : "D-PHY of Bow32 (bow_csi2rx and its band)");
+             std ? "standard PHY through bow_csi2rx_ppi_flat" : "D-PHY of Bow32 (bow_csi2rx)");
     $finish;
   end
 

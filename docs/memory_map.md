@@ -33,7 +33,7 @@ Tệp này được sinh tự động từ `hw/top/data/bow32_memmap.yaml`. Sử
 | 5 | `gpiob` | `0x40005000` | `0x40005FFF` | 4 KiB | GPIO port B (8 pins, PB0/PB1 = UART1 TX/RX) |
 | 6 | `isp` | `0x40006000` | `0x40006FFF` | 4 KiB | ISP registers (image signal processor) |
 | 7 | `i2c0` | `0x40007000` | `0x40007FFF` | 4 KiB | I2C master 0 (camera control) |
-| 8 | `csi2rx` | `0x40008000` | `0x40008FFF` | 4 KiB | MIPI CSI-2 receiver (D-PHY RX + CSI-2 RX) |
+| 8 | `csi2rx` | `0x40008000` | `0x40008FFF` | 4 KiB | MIPI CSI-2 receiver: CSI-2 controller 0x000, D-PHY RX 0xC00 |
 | 9 | `h264` | `0x40009000` | `0x40009FFF` | 4 KiB | H.264 encoder (ISP output -> H.264 stream) |
 | 10 | `dma` | `0x4000A000` | `0x4000AFFF` | 4 KiB | DMA controller (2 channels, M2M / stream to memory) |
 | 11 | `mkv` | `0x4000B000` | `0x4000BFFF` | 4 KiB | MKV block cipher (TCVN 14263:2024): MKV-128 / MKV-256 |
@@ -54,7 +54,7 @@ Truy cập vào địa chỉ không được ánh xạ trả về bus error (Ibe
 | 4 | `0x80000014` | `gpiob` | GPIO port B pin edge |
 | 5 | `0x80000015` | `isp` | ISP frame done / capture done / error |
 | 6 | `0x80000016` | `i2c0` | I2C0 command done |
-| 7 | `0x80000017` | `csi2rx` | CSI-2 RX frame start / frame end / error / log or raw capture done |
+| 7 | `0x80000017` | `csi2rx` | CSI-2 RX frame start / frame end / error / log capture done / D-PHY (error, raw capture done) |
 | 8 | `0x80000018` | `h264` | H.264 encoder frame done / sequence done / error |
 | 9 | `0x80000019` | `dma` | DMA channel done / stream packet / bus error |
 | 10 | `0x8000001A` | `mkv` | MKV command done / command error |

@@ -25,21 +25,18 @@ package bow_csi2rx_pkg;
   // Pixel FIFO entry: up to 4 pixels, px0 in [9:0]
   localparam int unsigned GroupW = 45;     // {err, sof, eol, cnt-1 [1:0], px3..px0}
 
-  // CTRL / PHY_CFG fields (CPU domain; synchronised per bit where they are used)
+  // CTRL fields (CPU domain; synchronised per bit where they are used). The PHY fields
+  // (CLK_FORCE, PHY_CFG) are registers of the D-PHY since step 4 of
+  // docs/ip/mipi_rx_arch.md: CTRL.CLK_CONT and TIM0 of bow_dphy_rx_regs.
   typedef struct packed {
     logic       phy_en;
     logic       rx_en;
     logic       lanes2;       // 2 data lanes in use (CTRL.LANES)
     logic       lanes4;       // 4 data lanes in use (CTRL.LANES4, wins over lanes2)
-    logic       clk_force;    // clock lane always in HS (continuous clock)
     logic       vc_any;
     logic [1:0] vc;
     logic [5:0] dt;
     logic [7:0] extra;        // bytes after a packet in its burst before ERR EXTRA, 0 = off
-    logic [7:0] settle;       // data lane HS settle, video clock cycles
-    logic [3:0] lp_filter;
-    logic [7:0] clk_settle;
-    logic [7:0] clk_miss;
   } csi2_cfg_t;
 
   // Events of the packet layer: one cycle pulses in the byte clock domain,
@@ -60,15 +57,15 @@ package bow_csi2rx_pkg;
     logic extra;      // more than CTRL.EXTRA bytes after a packet in its burst
   } csi2_pkt_ev_t;
 
-  // All events as seen by the register file (synchronised to clk_i).
-  // Lane fields: [0] clock lane / data lane 0, see the field comments; the
-  // bits of lanes above the Lanes parameter are 0.
+  // All events as seen by the register file (synchronised to clk_i). Lane fields: [l] data
+  // lane l; the bits of lanes above the Lanes parameter are 0. The HS entries and the LP
+  // errors per lane are counted by the D-PHY since step 4 (CNT_BURSTn, CNT_CLK, CNT_LPERR);
+  // the controller keeps one flag for ERR_STATUS.LP.
   typedef struct packed {
     csi2_pkt_ev_t        pl;
     logic                skew;    // lanes did not lock together
     logic [MaxLanes-1:0] sot;     // sync byte not found, per data lane
-    logic [MaxLanes:0]   hs;      // HS entries: [0] clock lane, [1 + l] data lane l
-    logic [MaxLanes:0]   lp_err;  // unexpected LP sequence / watchdog, same order
+    logic                lp;      // ErrControl / ErrControlClk of the PPI (masked by the D-PHY)
     logic                deskew;  // deskew (skew calibration) burst on data lane 0
     logic                skip;    // the rest of a frame is skipped (bow_csi2_unpack)
   } csi2_ev_t;

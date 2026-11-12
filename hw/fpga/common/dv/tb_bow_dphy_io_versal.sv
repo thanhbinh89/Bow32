@@ -41,7 +41,8 @@
 //    of burst BurstRstAt while streaming): RX_RST pulses in the burst gaps exactly while it
 //    is 1, every burst decodes; reinit_i (Reinit 1: after burst ReinitAfter with the clock
 //    lane idle in LP-11, or toggling with ContClk = 1; Reinit 2: while the transmitter
-//    toggles the clock lane in HS, BISC then runs with a toggling strobe): phy_rdy_o falls
+//    toggles the clock lane in HS, BISC then runs with a toggling strobe; held 2 us, or
+//    ReinitNs, e.g. the 640 ns pulse of CMD.REINIT): phy_rdy_o falls
 //    within a few cycles and stays 0 while reinit_i = 1, the XPLL and the XPHYs are held in
 //    reset, user mode ends, no load, phy_rdy_o comes back with the strobe at the XPHY
 //    toggling (Reinit 2, ContClk 1) or static (Reinit 1) during the new BISC, the taps are
@@ -76,6 +77,8 @@ module tb_bow_dphy_io_versal #(
   parameter int Reinit      = 0,      // 1: reinit_i after burst ReinitAfter; 2: the same
                                       // while the clock lane toggles in HS (see Checks)
   parameter int ReinitAfter = 2,
+  parameter int ReinitNs    = 0,      // > 0: reinit_i only this long (CMD.REINIT of the D-PHY:
+                                      // 32 bus clock cycles, 640 ns at 50 MHz); 0: 2 us
   parameter bit HsGate      = 1'b1    // 1: HS receivers on only while phy_rdy_o (0: as
                                       // bow_dphy_lp, from the LP states alone)
 );
@@ -473,7 +476,7 @@ module tb_bow_dphy_io_versal #(
              prev[0], prev[1], prev[2], prev[3], clk_run ? "toggling" : "idle");
     reinit = 1'b1;
     fall = -1;
-    for (int c = 0; c < 400; c++) begin         // 2 us
+    for (int c = 0; c < ((ReinitNs > 0) ? ReinitNs / 5 : 400); c++) begin   // 2 us
       @(posedge ctrl_clk);
       if (!phy_rdy && fall < 0) fall = c;
       if (fall >= 0 && phy_rdy) err("phy_rdy_o 1 again while reinit_i = 1");

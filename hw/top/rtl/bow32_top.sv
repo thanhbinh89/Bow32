@@ -129,13 +129,16 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
 
   // MIPI D-PHY receive I/O of the CSI-2 receiver (on the KV260:
   // hw/fpga/common/rtl/bow_dphy_io_xusp.sv, on Versal:
-  // hw/fpga/common/rtl/bow_dphy_io_versal.sv). LP levels {P, N} and
-  // dphy_phy_rdy_i are asynchronous, HS/CE enables are video clock flops,
-  // data and rx_valid are in the byte clock domain (gated HS clock / 4), the
-  // input delay control in the byte clock domain (CsiDlyVid = 0) or in the
-  // video clock domain (CsiDlyVid = 1). A PHY with a word in every byte clock
-  // and no ready state (bow_dphy_io_xusp) ties dphy_rx_valid_i = '1 and
-  // dphy_phy_rdy_i = 1. Without a camera: CsiPhy = 0, dphy_byte_clk_i = 0,
+  // hw/fpga/common/rtl/bow_dphy_io_versal.sv). LP levels {P, N},
+  // dphy_phy_rdy_i and dphy_phy_status_i are asynchronous, HS/CE enables are
+  // video clock flops, dphy_reinit_o / dphy_burst_rst_en_o (the D-PHY's
+  // CMD.REINIT and ~CTRL.DES_RST_DIS, Versal: reinit_i / burst_rst_en_i) CPU
+  // clock flops, data and rx_valid are in the byte clock domain (gated HS clock
+  // / 4), the input delay control in the byte clock domain (CsiDlyVid = 0) or in
+  // the video clock domain (CsiDlyVid = 1). A PHY with a word in every byte clock
+  // and no ready state (bow_dphy_io_xusp) ties dphy_rx_valid_i = '1,
+  // dphy_phy_rdy_i = 1 and dphy_phy_status_i = '0, leaves dphy_reinit_o and
+  // dphy_burst_rst_en_o open. Without a camera: CsiPhy = 0, dphy_byte_clk_i = 0,
   // dphy_clk_lp_i = dphy_lp_i = '1 (LP-11), dphy_rx_valid_i = '1,
   // dphy_phy_rdy_i = 1, others '0.
   input  logic                     dphy_byte_clk_i,
@@ -148,6 +151,9 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
   input  logic [CsiLanes-1:0][7:0] dphy_rx_data_i,
   input  logic [CsiLanes-1:0]      dphy_rx_valid_i,
   input  logic                     dphy_phy_rdy_i,
+  input  logic [7:0]               dphy_phy_status_i,
+  output logic                     dphy_reinit_o,
+  output logic                     dphy_burst_rst_en_o,
   output logic [CsiLanes-1:0][8:0] dphy_dly_tap_o,
   output logic [CsiLanes-1:0]      dphy_dly_load_o,
   input  logic [CsiLanes-1:0][8:0] dphy_dly_tap_i,
@@ -495,6 +501,9 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
     .rx_data_i       (dphy_rx_data_i),
     .rx_valid_i      (dphy_rx_valid_i),
     .phy_rdy_i       (dphy_phy_rdy_i),
+    .phy_status_i    (dphy_phy_status_i),
+    .reinit_o        (dphy_reinit_o),
+    .burst_rst_en_o  (dphy_burst_rst_en_o),
     .dly_tap_o       (dphy_dly_tap_o),
     .dly_load_o      (dphy_dly_load_o),
     .dly_tap_i       (dphy_dly_tap_i)

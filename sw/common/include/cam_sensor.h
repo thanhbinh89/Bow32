@@ -114,26 +114,29 @@ void cam_print_not_found(const cam_detect_t *d);
  * PRSNT_M2C_L of FMC+01, GPIO PB5 (0 = module present), as a hint. */
 void cam_print_prsnt(uint32_t rx_lanes);
 
-/* Huins camera build (bow32_huins_vp1902_cam_top): GPIO PA5 (OUT & DIR) is
- * burst_rst_en_i of its Versal XPHY (BurstRxRst: the RX FIFOs restart at every
- * HS burst). CAM_BURST_RST 1 (default): cam_rx_start() sets PA5 = 1, the FIFO
- * latency stays at 0..3 words; with the driver's SETTLE of 95 ns the board
- * (2026-11-10, IMX274 at 4 x 1440 Mbit/s) ran clean for more than 3.2 M
- * bursts, and every SETTLE from 65 to 170 ns was clean. 0: PA5 = 0 (like the
- * PHY of AMD): on the board the link broke for good at the first receiver
- * re-enable during a stream (lane 0 SOT / ECC / CRC, SKEW and FRAME errors
- * until PA5 = 1 again), at every SETTLE: do not use it on silicon. The
- * option stays for the simulation, whose PHY model runs clean with it at
- * SETTLE 115 ns (make -C sim run TEST=csi2_274 FW=brst0: model only;
- * docs/camera_huins.md 6.3, docs/ip/csi2rx.md). */
+/* Huins camera build (Versal XPHY): CTRL.DES_RST_DIS of the receiver's D-PHY
+ * (docs/ip/dphy_rx.md; GPIO PA5 before step 4 of docs/ip/mipi_rx_arch.md)
+ * gates burst_rst_en_i of the XPHY (BurstRxRst: the RX FIFOs restart at every
+ * HS burst), on from reset. CAM_BURST_RST 1 (default): cam_rx_start() keeps it
+ * on (DES_RST_DIS = 0), the FIFO latency stays at 0..3 words; with the
+ * driver's SETTLE of 95 ns the board (2026-11-10, IMX274 at 4 x 1440 Mbit/s)
+ * ran clean for more than 3.2 M bursts, and every SETTLE from 65 to 170 ns was
+ * clean. 0: DES_RST_DIS = 1 (like the PHY of AMD): on the board the link
+ * broke for good at the first receiver re-enable during a stream (lane 0
+ * SOT / ECC / CRC, SKEW and FRAME errors until the reset was on again), at
+ * every SETTLE: do not use it on silicon. The option stays for the
+ * simulation, whose PHY model runs clean with it at SETTLE 115 ns (make -C
+ * sim run TEST=csi2_274 FW=brst0: model only; docs/camera_huins.md 6.3,
+ * docs/ip/csi2rx.md). */
 #ifndef CAM_BURST_RST
 #define CAM_BURST_RST 1
 #endif
 
 /* Receiver start for a stream of s with data type dt: bow_csi2rx_start() with
  * the lanes and lane rate of s. Before it, on the Huins camera build only
- * (Versal XPHY: INFO.DLY_VID = 1), PA5 = CAM_BURST_RST; the GPIOs of other
- * builds are not touched. Returns what bow_csi2rx_start() returns. */
+ * (Versal XPHY: the D-PHY's INFO says DPHY_AFE_VERSAL), DES_RST_DIS =
+ * !CAM_BURST_RST; other builds are not touched. Returns what
+ * bow_csi2rx_start() returns. */
 int cam_rx_start(const cam_sensor_t *s, uint32_t dt);
 
 /* Stream off and receiver stop (s NULL: receiver only). IMX219: stream off,

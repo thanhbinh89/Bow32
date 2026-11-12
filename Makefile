@@ -68,15 +68,15 @@ sw:
 LINT_CMD = $(VERILATOR) --lint-only -Wall hw/lint/verilator_waivers.vlt \
 	  -F hw/top/bow32_top.f -F hw/vendor/lowrisc_ibex_prim_generic.f --top-module bow32_top
 DPHYRX_LINT = $(VERILATOR) --lint-only -Wall hw/lint/verilator_waivers.vlt \
-	  -F hw/ip/common/common.f -F hw/ip/dphy_rx/dphy_rx.f --top-module bow_dphy_rx
+	  -F hw/ip/common/common.f -F hw/ip/bus/bus.f -F hw/ip/dphy_rx/dphy_rx.f --top-module bow_dphy_rx
 RX_LINT = $(VERILATOR) --lint-only -Wall hw/lint/verilator_waivers.vlt -F hw/ip/common/common.f \
 	  -F hw/ip/bus/bus.f -F hw/ip/dphy_rx/dphy_rx.f -F hw/ip/csi2rx/csi2rx.f
 RX_CFGS = "" "-GLanes=1" "-GLanes=4 -GDlyVid=1'b1 -GFifoDepth=512" \
 	  "-GHasPhy=1'b0 -GPhyClkHz=50000000"
 # the controller alone: the same, with the PHY's lp clock = vid_clk_i (PhyClkHz, 200 MHz default)
 CTRL_CFGS = "-GPpiLpClkHz=200000000" "-GLanes=1 -GPpiLpClkHz=200000000" \
-	  "-GLanes=4 -GDlyVid=1'b1 -GFifoDepth=512 -GPpiLpClkHz=200000000" \
-	  "-GHasPhy=1'b0 -GPhyClkHz=50000000 -GPpiLpClkHz=50000000"
+	  "-GLanes=4 -GFifoDepth=512 -GPpiLpClkHz=200000000" \
+	  "-GHasPhy=1'b0 -GPhyClkHz=50000000 -GPpiLpClkHz=50000000 -GDphyWin=1'b0"
 # arguments for bow_csi2rx alone that it must refuse, and the message it must refuse them with
 CTRL_BAD = "|PpiLpClkHz not set" "-GPpiLpClkHz=250000000|PPI lp clock 250000000 Hz != vid_clk_i"
 # the flat-port wrapper of the controller (standard PHY)

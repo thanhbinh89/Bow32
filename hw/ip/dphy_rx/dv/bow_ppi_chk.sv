@@ -3,7 +3,7 @@
 //
 // Checker of the PPI v1 outputs of bow_dphy_rx that the CSI-2 controller does not use yet
 // (docs/ip/mipi_rx_arch.md, sections 4.9, 5.2, 5.3), against the inputs of the LP state
-// machines: their filtered LP levels, their synchronised enables and CLK_FORCE. Neither the
+// machines: their filtered LP levels, their synchronised enables and CLK_CONT. Neither the
 // equivalence check (no reference has these outputs) nor the controller's tests see them;
 // step 3 and later build on them. A testbench binds it into every bow_dphy_rx:
 //
@@ -22,9 +22,11 @@
 //     * an enabled lane that was in LP-11 for 12 cycles is in Stop (the longest way there
 //       is Disable, 8 cycles, then Off and WaitStop).
 //   ErrControl[l], ErrControlClk: bit 0 is a one cycle pulse, only on a lane that was
-//     enabled and not in LP-11 the cycle before, never with Stopstate; bit 1 is 0.
+//     enabled and not in LP-11 the cycle before, never with Stopstate; bit 1 is 0. The
+//     D-PHY's masks (step 4): ErrControl[l] only while the lane's Enable is high,
+//     ErrControlClk never while CTRL.CLK_CONT.
 //   RxClkActiveHS: equals the byte clock gate (byte_ce_o); only on an enabled clock lane;
-//     together with StopstateClk only under CLK_FORCE (v1: the gate, section 5.3).
+//     together with StopstateClk only under CLK_CONT (v1: the gate, section 5.3).
 //   Idle values (v1): UlpsActiveNot, UlpsActiveNotClk, RxUlpsClkNot 1; RxUlpsEsc 0;
 //     ErrEsc, ErrSyncEsc 0; ErrSotHS 0 (byte domain).
 // The first violation ends the simulation ($fatal). Report = 1 (or the plusarg
@@ -43,7 +45,7 @@ module bow_ppi_chk import bow_ppi_pkg::*; #(
   input ppi_lp_clk_t         ppi_lp_clk_i,
   input logic [Lanes:0]      lane_en_i,     // synchronised enables, [0] clock lane
   input logic [Lanes:0][1:0] lp_i,          // filtered LP {P, N}, [0] clock lane
-  input logic                clk_force_i,   // synchronised CLK_FORCE
+  input logic                clk_force_i,   // synchronised CTRL.CLK_CONT (CLK_FORCE before step 4)
   input logic                byte_ce_i      // byte clock gate (byte_ce_o)
 );
 
@@ -127,13 +129,18 @@ module bow_ppi_chk import bow_ppi_pkg::*; #(
             fail($sformatf("ErrControl of the %s: not a single pulse after a wrong LP state of an enabled lane (pulse at t-1 %0d, enabled %0d, LP-11 %0d, Stopstate %0d)",
                            lane_name(i), err_q[i], en_q[i], lp11_q[i], stop[i]));
           end
+          // the D-PHY's masks (step 4): a data lane's error only while it is enabled
+          if (i != 0 && err[i] && !en[i]) begin
+            fail($sformatf("ErrControl of the %s while its Enable is low", lane_name(i)));
+          end
         end
+        if (err[0] && clk_force_i) fail("ErrControlClk while CTRL.CLK_CONT");
         // RxClkActiveHS
         if (act) n_act++;
         if (act && stop[0]) n_forced++;
         if (act != byte_ce_i) fail("RxClkActiveHS is not the byte clock gate");
         if (act && !en_q[0]) fail("RxClkActiveHS on a disabled clock lane");
-        if (act && stop[0] && !force_q) fail("RxClkActiveHS with StopstateClk without CLK_FORCE");
+        if (act && stop[0] && !force_q) fail("RxClkActiveHS with StopstateClk without CLK_CONT");
         // bit 1 of the error signals and the idle values
         if (ppi_lp_clk_i.err_control[1] || !ppi_lp_clk_i.ulps_active_not ||
             !ppi_lp_clk_i.rx_ulps_clk_not) begin

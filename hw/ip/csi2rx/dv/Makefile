@@ -3,8 +3,9 @@
 #
 # CSI-2 receiver unit tests: RTL vs the reference model (tools/csi2/csi2_model.py).
 # Whole receiver (bow_mipi_rx): the D-PHY side driven by csi2_tx_model.sv (lanes + receive
-# I/O model). PPI bench: the controller alone (bow_csi2rx), its PPI driven by bow_ppi_bfm.sv
-# (step 3 of docs/ip/mipi_rx_arch.md, section 10).
+# I/O model), the registers of the controller (0x000) and of the D-PHY (0xC00, step 4 of
+# docs/ip/mipi_rx_arch.md, section 10). PPI bench: the controller alone (bow_csi2rx), its
+# PPI driven by bow_ppi_bfm.sv (step 3).
 #
 #   make test                          test-rx, then test-ppi
 #   make test-rx                       aligner unit test, then random cases (SEEDS x lanes x
@@ -18,7 +19,8 @@
 #   make align                         aligner unit test only (tb_dphy_align.sv)
 #   make run SEED=7 LANES=1 ERRORS=1   one random case, dumps in build/csi2rx_dv/<name>
 #   make run TEST=clk                  one directed test (lp watchdog clk cmd ovf stop byteclk eye
-#                                      skew deskew extra loss ovf2 ovf8 be, dly with DUT_LANES=4)
+#                                      skew deskew extra loss ovf2 ovf8 be, dly with DUT_LANES=4;
+#                                      be also covers the D-PHY's registers)
 #   make run SEED=3 LANES=2 DUT_LANES=4 ERRORS=1    2 of the 4 lanes of the Huins receiver
 #   make run SEED=3 LANES=4 ERRORS=1 BURSTRST=1     ... with BurstRxRst = 1 in the PHY model
 #   make test SEEDS="1 2 3 4 5 6 7 8"
@@ -32,16 +34,19 @@
 # Lanes = 4 as on the Huins camera build (DlyVid = 1, FIFO 512) with the Versal
 # XPHY model of csi2_tx_model (RX FIFOs: latency, stale words, glitch words and
 # wraps, rx_valid gaps; PHY ready after a delay, PHY re-init, BISC taps, delays
-# in the video clock domain) at 180 MHz byte clock. Its BurstRxRst is 0 like
-# the shipped camera build (the FIFOs only restart at the PHY init), or 1
-# (BURSTRST=1: they restart at every burst).
+# in the video clock domain) at 180 MHz byte clock. Its re-init and BurstRxRst
+# inputs come from the D-PHY (CMD.REINIT, ~CTRL.DES_RST_DIS). BurstRxRst is 0
+# like the shipped camera build (the FIFOs only restart at the PHY init; the
+# test case writes DES_RST_DIS first), or 1 (BURSTRST=1: they restart at every
+# burst).
 #
-# PPI bench (tb_csi2rx_ppi.sv): one model per Lanes parameter with the parameters above and
+# PPI bench (tb_csi2rx_ppi.sv): one model per Lanes parameter (FIFO 512 with 4 lanes) and
 # two DUTs, the one of the case's timing clocked: MODE bow, the D-PHY of Bow32 (bow_csi2rx,
-# its PPI and the temporary band driven by bow_ppi_bfm), MODE std, a standard PHY through
-# the flat-port wrapper bow_csi2rx_ppi_flat. The model renders every burst of the test case
-# at the PPI (csi2_model.py gen --ppi MODE); the expected results come from the same
-# receiver model as above.
+# its PPI driven by bow_ppi_bfm; since step 4 no band: the PHY's registers are the
+# D-PHY's, the window 0xC00 reads 0 here), MODE std, a standard PHY through the flat-port
+# wrapper bow_csi2rx_ppi_flat. The model renders every burst of the test case at the PPI
+# (csi2_model.py gen --ppi MODE); the expected results come from the same receiver model
+# as above.
 
 REPO      := $(abspath ../../../..)
 BUILD     := $(REPO)/build/csi2rx_dv
@@ -74,6 +79,9 @@ DIRECTED24 := cmd stop skew dly deskew extra ovf2 loss
 PARAMS_1  := -GLanes=1
 PARAMS_2  := -GLanes=2
 PARAMS_4  := -GLanes=4 -GDlyVid=1\'b1 -GFifoDepth=512
+PPARAMS_1 := -GLanes=1
+PPARAMS_2 := -GLanes=2
+PPARAMS_4 := -GLanes=4 -GFifoDepth=512
 GENOPT_4   = --versal --fifo-depth 512 --burst-rst $(BURSTRST)
 
 sim_bin  = $(BUILD)/obj_l$(1)/Vtb_bow_csi2rx
@@ -164,7 +172,7 @@ PGENOPT_4 := --fifo-depth 512
 
 VPPI = $(VERILATOR) --binary --timing -j $(JOBS) -O2 -Wno-fatal -Wno-lint -Wno-style \
   -Wno-TIMESCALEMOD +define+BOW_CDC_JITTER \
-  --top-module tb_csi2rx_ppi $(PARAMS_$*) -Mdir $(BUILD)/obj_ppi_l$* -o Vtb_csi2rx_ppi \
+  --top-module tb_csi2rx_ppi $(PPARAMS_$*) -Mdir $(BUILD)/obj_ppi_l$* -o Vtb_csi2rx_ppi \
   $(FLISTS) $(PPI_SRCS)
 $(BUILD)/obj_ppi_l%/Vtb_csi2rx_ppi: $(SRCS)
 	@mkdir -p $(BUILD)
@@ -184,8 +192,8 @@ run-ppi: $(call ppi_bin,$(DUT_LANES))
 # errors, 1 of 2 with errors, 4 lanes with and without errors, 2 of 4 and 1 of 4 with
 # errors, RAW8 / continuous clock alternating as in test-rx; the directed tests of the
 # controller on 2 and on 4 lanes, some with 1 lane, 1 of 2, 2 of 4 and with the continuous
-# clock (2 and 4 lanes); lpmask on 1, 2 and 4 lanes (its mask edge cases only in the
-# timing of the D-PHY of Bow32). Then, in that timing only (the gaps of the XPHY), gaps on
+# clock (2 and 4 lanes); lpmask on 1, 2 and 4 lanes (ErrControlClk only in the timing of
+# the D-PHY of Bow32). Then, in that timing only (the gaps of the XPHY), gaps on
 # 1, 2 and 4 lanes. PJOBS cases run at a time (as in test-rx and the DDR / HyperRAM
 # benches), each prints its check line; the target fails if one failed.
 PPI_MODES      := bow std

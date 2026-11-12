@@ -65,8 +65,9 @@ set_property CLOCK_DELAY_GROUP bow_dphy_rx_clk \
 # full path, so that a constraint follows its flops when the receiver's
 # hierarchy changes (docs/ip/mipi_rx_arch.md, section 10, step 1): cells with
 # names of their own (byte clock meter, synchronisers) by those names, the
-# pixel FIFO, register file and capture flops by their path below u_csi2rx.
-# Each tail selects the same cells as the full path it replaced. tcl/build.tcl
+# pixel FIFO, register file and capture flops by their path below u_csi2rx
+# (the controller) or u_dphy_rx (the D-PHY's register file and RAW capture,
+# step 4). Each tail selects the same cells as the full path it replaced. tcl/build.tcl
 # also checks the cells of every constraint
 # (hw/fpga/common/tcl/bus_skew_checks.tcl): all in u_soc/u_csi2rx or
 # u_soc/u_h264/u_out, every destination reached from the sources, as many
@@ -82,14 +83,16 @@ set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_fifo/r
 set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */meter_gray_q_reg[*]}] \
              -to   [get_cells -hierarchical -filter {NAME =~ */u_sync_meter/g_bit[*].u_sync/sync_q_reg[0]}] \
              $dphy_byte_skew
-# LOG / RAW capture requests (CPU -> byte) and acknowledges (byte -> CPU)
+# LOG / RAW capture requests (CPU -> byte) and acknowledges (byte -> CPU); LOG in the
+# controller (u_csi2rx/u_regs, u_csi2rx/u_capture), RAW in the D-PHY since step 4
+# (u_dphy_rx/u_regs, u_dphy_rx/u_raw)
 set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_regs/log_req_q_reg[*]}] \
              -to   [get_cells -hierarchical -filter {NAME =~ */u_sync_log_req/g_bit[*].u_sync/sync_q_reg[0]}] 5.0
-set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_regs/raw_req_q_reg[*]}] \
+set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */u_dphy_rx/u_regs/raw_req_q_reg[*]}] \
              -to   [get_cells -hierarchical -filter {NAME =~ */u_sync_raw_req/g_bit[*].u_sync/sync_q_reg[0]}] 5.0
 set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_capture/log_ack_o_reg[*]}] \
              -to   [get_cells -hierarchical -filter {NAME =~ */u_sync_log_ack/g_bit[*].u_sync/sync_q_reg[0]}] 5.0
-set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_capture/raw_ack_o_reg[*]}] \
+set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */u_dphy_rx/u_raw/raw_ack_o_reg[*]}] \
              -to   [get_cells -hierarchical -filter {NAME =~ */u_sync_raw_ack/g_bit[*].u_sync/sync_q_reg[0]}] 5.0
 
 # ---- H.264 encoder output FIFO (u_soc/u_h264/u_out, bow_fifo_async) -----------------

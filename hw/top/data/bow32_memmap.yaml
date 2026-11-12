@@ -39,7 +39,7 @@ periph_bus:
   - {name: gpiob,      base: 0x40005000, size: 0x1000, desc: "GPIO port B (8 pins, PB0/PB1 = UART1 TX/RX)"}
   - {name: isp,        base: 0x40006000, size: 0x1000, desc: "ISP registers (image signal processor)"}
   - {name: i2c0,       base: 0x40007000, size: 0x1000, desc: "I2C master 0 (camera control)"}
-  - {name: csi2rx,     base: 0x40008000, size: 0x1000, desc: "MIPI CSI-2 receiver (D-PHY RX + CSI-2 RX)"}
+  - {name: csi2rx,     base: 0x40008000, size: 0x1000, desc: "MIPI CSI-2 receiver: CSI-2 controller 0x000, D-PHY RX 0xC00"}
   - {name: h264,       base: 0x40009000, size: 0x1000, desc: "H.264 encoder (ISP output -> H.264 stream)"}
   - {name: dma,        base: 0x4000A000, size: 0x1000, desc: "DMA controller (2 channels, M2M / stream to memory)"}
   - {name: mkv,        base: 0x4000B000, size: 0x1000, desc: "MKV block cipher (TCVN 14263:2024): MKV-128 / MKV-256"}
@@ -56,7 +56,7 @@ irq_fast:
   - {name: gpiob, line: 4, desc: "GPIO port B pin edge"}
   - {name: isp,   line: 5, desc: "ISP frame done / capture done / error"}
   - {name: i2c0,  line: 6, desc: "I2C0 command done"}
-  - {name: csi2rx, line: 7, desc: "CSI-2 RX frame start / frame end / error / log or raw capture done"}
+  - {name: csi2rx, line: 7, desc: "CSI-2 RX frame start / frame end / error / log capture done / D-PHY (error, raw capture done)"}
   - {name: h264,  line: 8, desc: "H.264 encoder frame done / sequence done / error"}
   - {name: dma,   line: 9, desc: "DMA channel done / stream packet / bus error"}
   - {name: mkv,   line: 10, desc: "MKV command done / command error"}
