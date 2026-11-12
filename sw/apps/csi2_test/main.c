@@ -322,7 +322,9 @@ static bool phy_reinit(void) {
   return r == DPHY_OK;
 }
 
-/* `phy [reinit | burstrst 0|1]` (Versal XPHY) */
+/* `phy [reinit | burstrst 0|1]`: the Versal XPHY only (ct.vid, from the D-PHY's
+ * INFO; the shell takes `phy` nowhere else): on the KV260 DES_RST_DIS would
+ * also stop the ISERDESE3 reset of the UltraScale+ adapter (step 5) */
 static bool phy_cmd(const char *a) {
   const char *s = skip_spaces(a);
   uint32_t v;

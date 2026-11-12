@@ -229,10 +229,14 @@ bool bow_dphy_rx_wait_ready(uint32_t timeout_ms);
  * not come back. */
 int bow_dphy_rx_reinit(uint32_t timeout_ms, uint32_t *us);
 
-/* Receive path reset of the PHY I/O while the byte clock gate is closed
- * (Versal: RX FIFO reset at every gate opening, burst_rst_en_i): on = 1 after
- * reset; off (CTRL.DES_RST_DIS = 1) only to test, the Huins board broke
- * without it. */
+/* Receive path reset of the PHY I/O while the byte clock gate is closed: the
+ * AFE's des_rst (step 5 of docs/ip/mipi_rx_arch.md; burst_rst_en_i of the
+ * Versal adapter before). Versal: RX_RST of the data slices, the RX FIFOs
+ * restart at every gate opening; UltraScale+ (KV260): the ISERDESE3 reset at
+ * every gate opening, which aligns its divider. on = 1 after reset; off
+ * (CTRL.DES_RST_DIS = 1) only to test, the Huins board broke without it, and
+ * the KV260 ISERDESE3 is then never reset. The firmware turns it off only on
+ * the Versal build (csi2_test `phy burstrst 0`, CAM_BURST_RST = 0). */
 void bow_dphy_rx_des_rst(bool on);
 bool bow_dphy_rx_des_rst_on(void);
 
