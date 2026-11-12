@@ -53,7 +53,9 @@
 //   vdrst_n     video datapath (FIFO read side, output): asserted while RX
 //               is off (rx_on = CTRL.PHY_EN & RX_EN, a CPU flop), so a stop
 //               drops partial packets, lines, the frame state and the FIFO.
-//               drst_n is released by the first byte clocks of a burst.
+//               drst_n is released by the first byte clocks of a burst. It also
+//               gates the aligner events of the PPI (ErrSotSyncHS, RxSkewCalHS:
+//               stale_q, below), since step 4 the aligners are not reset with it.
 // Clock domain crossings: configuration through one bow_sync per bit
 // (quasi-static), events through one bow_cdc_pulse per kind, commands to
 // the byte domain as gray request / ack counters, pixels through
@@ -482,9 +484,42 @@ module bow_csi2rx
   // is held in the packet layer and unpacker until the next event of the kind.
   logic [NumBEv-1:0] bev, bev_sys;
 
+  // The aligner events of the PPI (ErrSotSyncHS of every lane, RxSkewCalHS of lane 0) count
+  // only for a burst the controller saw start: not while the datapath is in reset (drst_n:
+  // RX off, asserted at once when CTRL clears RX_EN or PHY_EN, before RxActiveHS can fall),
+  // and not for the burst a lane was already in (RxActiveHS high) when drst_n was released,
+  // which the lane merge does not take either. Up to step 3 drst_n reset the aligners; since
+  // step 4 they have the D-PHY's own reset and keep running while RX is off, and this gate
+  // keeps CNT_SOT, ERR_STATUS.SOT, CNT_EXT[31:16] and IRQ_STATUS.ERR as they were: none for
+  // bursts while RX_EN = 0 and PHY_EN = 1, none for the burst in progress when RX comes on,
+  // no SoT error for a burst cut by a stop in its sync search. A stop ends the clock lane's
+  // HS state too (the same Enable), so the byte clock usually stops before RxActiveHS of the
+  // cut burst falls in this domain: it falls, and the sync error comes, with the first byte
+  // clocks of the next burst, after a restart released drst_n (and cleared the counters),
+  // on a lane that was still high at the release. stale_q[l]: set by drst_n, cleared one
+  // cycle after RxActiveHS of lane l was seen low (ErrSotSyncHS of a burst comes in the
+  // cycle after its RxActiveHS fell). A PHY event without RxActiveHS (a standard PHY,
+  // section 5.5 of the spec) counts from the second cycle after the release. The pixel
+  // datapath is not gated (px_drop): it is in reset or outside a frame then.
+  logic [Lanes-1:0] arm_lo_q, stale_q, sot_ev;
+  logic             dsk_ev;
+
+  always_ff @(posedge rx_byte_clk_hs_i or negedge drst_n) begin
+    if (!drst_n) begin
+      arm_lo_q <= '0;
+      stale_q  <= '1;
+    end else begin
+      arm_lo_q <= ~arm;
+      stale_q  <= stale_q & ~arm_lo_q;
+    end
+  end
+
+  assign sot_ev = al_sync_err & ~stale_q;
+  assign dsk_ev = al_deskew[0] & ~stale_q[0];
+
   // deskew bursts are counted on lane 0 (the other lanes then deskew too,
   // or the burst is a skew or sync error)
-  assign bev = {al_sync_err, px_skip, al_deskew[0], lm_skew, pkt_ev};
+  assign bev = {sot_ev, px_skip, dsk_ev, lm_skew, pkt_ev};
 
   for (genvar i = 0; i < NumBEv; i++) begin : g_cdc_bev
     bow_cdc_pulse u_cdc (

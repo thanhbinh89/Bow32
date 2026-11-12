@@ -169,6 +169,41 @@ void bow_dphy_rx_counters(bow_dphy_rx_cnt_t *c) {
   c->lp_err = DPHY->CNT_LPERR;
 }
 
+typedef struct {
+  bow_dphy_rx_cnt_t c;
+  uint32_t lp, hs;
+} snap_t;
+
+static void snap_read(snap_t *s) {
+  bow_dphy_rx_counters(&s->c);
+  s->lp = DPHY->LANE_LP;
+  s->hs = DPHY->LANE_HS;
+}
+
+static bool snap_same(const snap_t *a, const snap_t *b) {
+  for (uint32_t l = 0; l < DPHY_MAX_LANES; l++) {
+    if (a->c.burst[l] != b->c.burst[l]) return false;
+  }
+  return a->c.clk_burst == b->c.clk_burst && a->c.lp_err == b->c.lp_err && a->lp == b->lp &&
+         a->hs == b->hs;
+}
+
+void bow_dphy_rx_snapshot(bow_dphy_rx_cnt_t *c, uint32_t *lp, uint32_t *hs) {
+  /* one register per counter and LANE_LP / LANE_HS apart (before step 4
+   * STATUS held both lane states and CNT_BURST lanes 0 and 1): while bursts
+   * arrive, read everything again until two reads agree */
+  snap_t a, b;
+  snap_read(&a);
+  for (uint32_t i = 0; i < 8u; i++) {
+    snap_read(&b);
+    if (snap_same(&a, &b)) break;
+    a = b;
+  }
+  *c = a.c;
+  *lp = a.lp;
+  *hs = a.hs;
+}
+
 void bow_dphy_rx_clear(void) {
   DPHY->CMD = DPHY_CMD_CNT_CLR;
   DPHY->ERR_STATUS = DPHY_ERR_ALL;

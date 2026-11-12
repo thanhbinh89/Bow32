@@ -780,7 +780,9 @@ void bow_csi2rx_print_status(void) {
   uint32_t fi = CSI2RX->FRAME_INFO, li = CSI2RX->LINE_INFO;
   uint32_t ferr = CSI2RX->FRAME_ERR;
   uint32_t sum = CSI2RX->FRAME_SUM, ft = CSI2RX->FRAME_TIME, lt = CSI2RX->LINE_TIME;
-  uint32_t lp = DPHY->LANE_LP, hs = DPHY->LANE_HS, n = list_lanes(), d[DPHY_MAX_LANES];
+  uint32_t lp, hs, n = list_lanes(), d[DPHY_MAX_LANES];
+  bow_dphy_rx_cnt_t pc; /* the PHY line: one snapshot of the D-PHY */
+  bow_dphy_rx_snapshot(&pc, &lp, &hs);
   bool self_cal = bow_dphy_rx_self_cal();
   bow_dphy_rx_get_delays(d);
   /* BYTECLK covers 65536 CPU cycles: watch it for a whole frame */
@@ -810,8 +812,8 @@ void bow_csi2rx_print_status(void) {
     bow_printf(" d%u %s", l, lp_state(hs & DPHY_LANE_HS(l), DPHY_LANE_LP(lp, l)));
   }
   bow_puts(", bursts ");
-  put_list(c.burst, n);
-  bow_printf(" clk %u, delay ", c.clk_burst);
+  put_list(pc.burst, n);
+  bow_printf(" clk %u, delay ", pc.clk_burst);
   put_list(d, n);
   /* only a self-calibrating PHY (Versal XPHY) has a ready state */
   if (self_cal && !bow_dphy_rx_ready()) bow_puts(", PHY not ready");

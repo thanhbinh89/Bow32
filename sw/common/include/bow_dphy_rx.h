@@ -169,17 +169,18 @@ typedef struct {
  * of the LP receiver to the start of the sync search; 3 + LP_FILTER cycles of
  * synchroniser, filter and state machine. Integer steps as the driver had
  * them before: 22 at 912 Mbit/s and 200 MHz with 107 ns + 24 UI (UltraScale+),
- * 19 = 0x13 with 120 ns + 0 UI (Versal). lane_rate 0 (unknown): 70 ns.
- * Pure: no register access (tools/tests/test_dphy_settle.py runs it on the
- * host). */
+ * 19 = 0x13 with 120 ns + 0 UI (Versal, at every lane rate). lane_rate 0
+ * (unknown) with a UI part: 70 ns, as settle_cycles() before; without one the
+ * lane rate is not needed. Pure: no register access
+ * (tools/tests/test_dphy_settle.py runs it on the host). */
 static inline uint32_t bow_dphy_rx_settle(uint32_t settle_ns, uint32_t settle_ui,
                                           uint32_t lane_rate, uint32_t mhz, uint32_t lp_filter) {
   uint64_t n, lat = 3u + lp_filter;
-  if (lane_rate == 0) {
+  if (lane_rate == 0 && settle_ui != 0) {
     n = (70u * (uint64_t)mhz + 500u) / 1000u;
     return n < 1u ? 1u : n > 255u ? 255u : (uint32_t)n;
   }
-  uint64_t ui_ps = 1000000000000ull / lane_rate;
+  uint64_t ui_ps = lane_rate != 0 ? 1000000000000ull / lane_rate : 0u;
   n = (((uint64_t)settle_ns * 1000u + settle_ui * ui_ps) * mhz + 500000u) / 1000000u;
   n = n > lat ? n - lat : 1u;
   return n > 255u ? 255u : (uint32_t)n;
@@ -240,8 +241,11 @@ void bow_dphy_rx_get_delays(uint32_t *d);
 /* "97/112/88/120": the delays of bow_dphy_rx_get_delays() of the first n lanes. */
 void bow_dphy_rx_print_delays(uint32_t n);
 
-/* CNT_BURSTn, CNT_CLK, CNT_LPERR. */
+/* CNT_BURSTn, CNT_CLK, CNT_LPERR (one read each: for polling). */
 void bow_dphy_rx_counters(bow_dphy_rx_cnt_t *c);
+/* The counters above with LANE_LP and LANE_HS as one snapshot (for printing):
+ * read until two reads of them all agree, at most 9 times. */
+void bow_dphy_rx_snapshot(bow_dphy_rx_cnt_t *c, uint32_t *lp, uint32_t *hs);
 /* Clear CNT_* (CMD.CNT_CLR), ERR_STATUS and ERR_LANE. */
 void bow_dphy_rx_clear(void);
 

@@ -16,11 +16,13 @@
 #   make run-ppi MODE=std TEST=loss LANES=4   one PPI case (MODE bow|std, the options of run),
 #                                      dumps in build/csi2rx_dv/ppi_<MODE>_<name>
 #   make mutants-ppi                   controller / wrapper mutants that the PPI bench must kill
+#   make mutants-rx                    mutants only the whole receiver bench sees (RAW of the
+#                                      D-PHY, the controller's gate of the aligner events)
 #   make align                         aligner unit test only (tb_dphy_align.sv)
 #   make run SEED=7 LANES=1 ERRORS=1   one random case, dumps in build/csi2rx_dv/<name>
 #   make run TEST=clk                  one directed test (lp watchdog clk cmd ovf stop byteclk eye
-#                                      skew deskew extra loss ovf2 ovf8 be, dly with DUT_LANES=4;
-#                                      be also covers the D-PHY's registers)
+#                                      skew deskew extra loss ovf2 ovf8 be rxoff, dly and raw
+#                                      with LANES=4; be also covers the D-PHY's registers)
 #   make run SEED=3 LANES=2 DUT_LANES=4 ERRORS=1    2 of the 4 lanes of the Huins receiver
 #   make run SEED=3 LANES=4 ERRORS=1 BURSTRST=1     ... with BurstRxRst = 1 in the PHY model
 #   make test SEEDS="1 2 3 4 5 6 7 8"
@@ -65,14 +67,14 @@ ERRORS    ?= 0
 RAW8      ?= 0
 CONTCLK   ?= 0
 BURSTRST  ?= 0
-DIRECTED  := lp watchdog clk cmd ovf stop byteclk eye skew deskew extra loss ovf2 ovf8 be
+DIRECTED  := lp watchdog clk cmd ovf stop byteclk eye skew deskew extra loss ovf2 ovf8 be rxoff
 # directed tests also run with 1 lane (Lanes = 1), with 1 lane of 2, and with
 # the continuous clock (DLY read back while the byte clock runs); on the 4 lane
 # receiver all of them (+ dly), and some with 2 of its 4 lanes
-DIRECTED1 := cmd stop deskew extra ovf ovf2 loss be eye
+DIRECTED1 := cmd stop deskew extra ovf ovf2 loss be eye rxoff
 DIRECTED12 := deskew extra ovf ovf2 loss eye
 DIRECTEDC := be eye loss
-DIRECTED4 := $(DIRECTED) dly
+DIRECTED4 := $(DIRECTED) dly raw
 DIRECTED24 := cmd stop skew dly deskew extra ovf2 loss
 
 # Testbench parameters and model options per Lanes parameter
@@ -238,7 +240,14 @@ test:
 mutants-ppi:
 	$(PYTHON) mutants_ppi.py --build $(BUILD)/mutants_ppi --jobs $(MJOBS)
 
+# Mutants of the D-PHY's RAW capture and of the controller's gate of the aligner events
+# (mutants_rx.py): each must make a case of the whole receiver bench fail (raw, rxoff);
+# not in test or CI
+mutants-rx:
+	$(PYTHON) mutants_rx.py --build $(BUILD)/mutants_rx --jobs $(MJOBS)
+
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: build build-ppi align run run-ppi rx-cases ppi-cases test test-rx test-ppi mutants-ppi clean
+.PHONY: build build-ppi align run run-ppi rx-cases ppi-cases test test-rx test-ppi mutants-ppi \
+        mutants-rx clean

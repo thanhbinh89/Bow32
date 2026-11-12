@@ -8,7 +8,8 @@ UltraScale+ PHY, SETTLE_VID_NS = 95 ns for the Versal XPHY), copied below as the
 Bit for bit: 22 on the KV260 at 912 Mbit/s with a 200 MHz lp clock (107 ns + 24 UI),
 0x13 on the Huins build at 1440 Mbit/s (120 ns + 0 UI); the UltraScale+ target gives
 settle_cycles() at every lane rate and lp clock, the Versal one 95 ns at 200 MHz for
-every lane rate. Skipped without a C compiler.
+every lane rate, 0 (unknown) included, and the brst0 simulation firmware's 140 ns
+(DPHY_SETTLE_NS) the 115 ns it replaced. Skipped without a C compiler.
 Run: python3 -m unittest discover -s tools/tests
 """
 
@@ -60,9 +61,14 @@ int main(void) {
       }
     }
   }
-  for (uint32_t rate = 80000000u; rate <= 2500000000u; rate += 1000000u) {
+  /* Versal: every lane rate, 0 (unknown) included, as SETTLE_VID_NS (95, and 115 for the
+   * brst0 simulation firmware, DPHY_SETTLE_NS 140) at every lane rate */
+  for (uint32_t rate = 0; rate <= 2500000000u; rate = rate ? rate + 1000000u : 80000000u) {
     if (bow_dphy_rx_settle(120, 0, rate, 200, 2) != phy_cycles(95, 200)) bad_versal++;
+    if (bow_dphy_rx_settle(140, 0, rate, 200, 2) != phy_cycles(115, 200)) bad_versal++;
   }
+  printf("versal0 %u %u %u %u\n", bow_dphy_rx_settle(120, 0, 0, 200, 2), phy_cycles(95, 200),
+         bow_dphy_rx_settle(140, 0, 0, 200, 2), phy_cycles(115, 200));
   printf("sweep %u %u %u\n", n, bad_xusp, bad_versal);
   return 0;
 }
@@ -92,12 +98,14 @@ class DphySettleTest(unittest.TestCase):
         self.assertEqual(self.res["kv260sim"][0], self.res["kv260sim"][1])
 
     def test_huins(self):
-        """Versal (Huins): 120 ns + 0 UI gives 0x13 = 95 ns at 200 MHz, as SETTLE_VID_NS did."""
+        """Versal (Huins): 120 ns + 0 UI gives 0x13 = 95 ns at 200 MHz, as SETTLE_VID_NS did,
+        also with lane rate 0 (unknown); 140 ns (brst0) gives 23 = 115 ns."""
         self.assertEqual(self.res["huins"], [0x13, 0x13])
+        self.assertEqual(self.res["versal0"], [0x13, 0x13, 23, 23])
 
     def test_sweep(self):
         """The UltraScale+ target is settle_cycles() at every rate, lp clock and filter; the
-        Versal one is 95 ns at 200 MHz for every rate."""
+        Versal one is 95 ns (brst0: 115 ns) at 200 MHz for every rate, 0 included."""
         n, bad_xusp, bad_versal = self.res["sweep"]
         self.assertGreater(n, 100000)
         self.assertEqual(bad_xusp, 0)

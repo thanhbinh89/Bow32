@@ -89,8 +89,8 @@ MUTANTS = [
     ("lost_burst_pending_cleared_at_eob", [(CTRL, "    else if (lm_sop)                  lpl_pend_q <= 1'b0;",
                                             "    else if (lm_eob)                  lpl_pend_q <= 1'b0;", 1)]),
     ("sync_error_no_drop", [(CTRL, "lm_skew || (|al_sync_err) ||", "lm_skew ||", 1)]),
-    ("deskew_counted_on_last_lane", [(CTRL, "assign bev = {al_sync_err, px_skip, al_deskew[0], lm_skew, pkt_ev};",
-                                      "assign bev = {al_sync_err, px_skip, al_deskew[Lanes-1], lm_skew, pkt_ev};", 1)]),
+    ("deskew_counted_on_last_lane", [(CTRL, "  assign dsk_ev = al_deskew[0] & ~stale_q[0];",
+                                      "  assign dsk_ev = al_deskew[Lanes-1] & ~stale_q[Lanes-1];", 1)]),
     # flat wrapper (standard PHY)
     ("flat_no_byte_delay", [(FLAT, "    assign ppi_hs[l].rx_valid_hs     = valid_q[l];",
                              "    assign ppi_hs[l].rx_valid_hs     = rx_valid_hs_i[l];", 1),

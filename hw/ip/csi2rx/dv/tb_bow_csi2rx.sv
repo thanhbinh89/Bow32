@@ -290,6 +290,8 @@ module tb_bow_csi2rx;
       "v_lat_lane":    u_tx.v_lat_lane = v[0];
       "v_glitch_pct":  u_tx.v_glitch_pct = v;
       "v_gap_pm":      u_tx.v_gap_pm = v;
+      "v_gap_byte":    u_tx.v_gap_byte = v;
+      "l0_late_ns":    u_tx.l0_late_ns = v;
       "tready":        tready_pct = v;
       "dut_lanes":     if (v != int'(Lanes)) $fatal(1, "test case for %0d lanes, testbench built with %0d", v, Lanes);
       "vid_ps":        if (v != int'(VidPs)) $fatal(1, "vid_ps %0d", v);

@@ -95,8 +95,11 @@
 //   FwdDqsLocal 1: DQS_SRC LOCAL on inter-nibble receivers (AMD and the default: EXTERN).
 //
 // Run-time knobs (asynchronous levels, two flop synchronisers to ctrl_clk_i here; 0 = the
-// AMD-like behaviour above, the Huins camera top drives them from GPIO PA4 / PA5): the
-// questions only the silicon answers can be tried without a rebuild.
+// AMD-like behaviour above): the questions only the silicon answers can be tried without a
+// rebuild. The Huins camera top drives them from the registers of the receiver's D-PHY
+// (step 4 of docs/ip/mipi_rx_arch.md; GPIO PA4 / PA5 before): reinit_i from CMD.REINIT, a
+// pulse of 32 bus clock cycles (640 ns at 50 MHz), burst_rst_en_i = ~CTRL.DES_RST_DIS, 1
+// from reset.
 //   reinit_i       1 holds the PHY in its init reset, the state after a loss of XPLL lock:
 //                  XPLL RST, XPHY RST / RX_RST / TX_RST, CLKOUTPHYEN 0, phy_rdy_o = 0, user
 //                  mode and pending loads cleared (the loaded taps are lost). Its release

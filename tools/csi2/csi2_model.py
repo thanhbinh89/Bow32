@@ -19,8 +19,9 @@ Command line (used by hw/ip/csi2rx/dv):
                           [--fifo-depth N] [--test NAME]
         -> DIR/cfg.txt (testbench and TX model settings), DIR/stim.txt (commands,
            see tb_bow_csi2rx.sv). NAME: random (default), lp, watchdog, clk, cmd,
-           ovf, stop, byteclk, eye, skew, deskew, extra, loss, ovf2, ovf8, be, dly
-           (directed tests, see gen_<name>; dly needs --versal). --versal:
+           ovf, stop, byteclk, eye, skew, deskew, extra, loss, ovf2, ovf8, be, rxoff,
+           dly, raw (directed tests, see gen_<name>; dly needs --versal, raw --versal
+           with 4 lanes). --versal:
            receiver built with DlyVid = 1 and the Versal XPHY model of
            csi2_tx_model (RX FIFOs with a latency that the stale words of the
            previous burst, rx_valid gaps and glitch words change, PHY ready
@@ -34,15 +35,15 @@ Command line (used by hw/ip/csi2rx/dv):
         bow_ppi_bfm.sv): stim.txt keeps every line above (the expected results come
         from them, as for the whole receiver) and adds after each TX item its PPI
         rendering (Ppi: bytes per lane per burst with their cycles, RxActiveHS,
-        RxSyncHS, gaps, errors, the byte clock runs and the band's lp domain
-        events), in one of two timings: bow = the D-PHY of Bow32 (bow_dphy_rx v1:
-        RxActiveHS from the end of SETTLE, RxValidHS gaps like the Versal XPHY,
-        ErrSotSyncHS at the end of the burst, LP errors and HS entries as pulses
-        on vid_clk_i), std = a standard PHY through the flat-port wrapper
-        bow_csi2rx_ppi_flat (RxActiveHS with RxSyncHS, no gaps, ErrSotSyncHS early,
-        pulses on the PHY's own lp clock, no PhyReady, no ErrControlClk, no HS
-        entry pulses, no RAW). NAME: random, cmd, ovf, stop, skew, deskew, extra,
-        loss, ovf2, ovf8, be, clkstop, lpmask, and with bow gaps.
+        RxSyncHS, gaps, errors, the byte clock runs and the LP error pulses), in one
+        of two timings: bow = the D-PHY of Bow32 (bow_dphy_rx v1: RxActiveHS from the
+        end of SETTLE, RxValidHS gaps like the Versal XPHY, ErrSotSyncHS at the end
+        of the burst, LP errors as pulses on vid_clk_i), std = a standard PHY through
+        the flat-port wrapper bow_csi2rx_ppi_flat (RxActiveHS with RxSyncHS, no gaps,
+        ErrSotSyncHS early, pulses on the PHY's own lp clock, no ErrControlClk). Since
+        step 4 the PHY's registers, HS entry counters and RAW are the D-PHY's: not in
+        this bench. NAME: random, cmd, ovf, stop, skew, deskew, extra, loss, ovf2,
+        ovf8, be, clkstop, lpmask, and with bow gaps.
     csi2_model.py check DIR
         compares DIR/out.txt (m_axis transfers) and DIR/regs.txt (register reads,
         frame end records, invariants, burst end times) with the prediction.
@@ -2530,6 +2531,112 @@ def gen_stop(g):
     g.dump(log=False)
 
 
+def gen_rxoff(g):
+    """The aligners' PPI events (ErrSotSyncHS, RxSkewCalHS) while the controller's datapath
+    is off. Since step 4 of docs/ip/mipi_rx_arch.md the aligners have the D-PHY's own reset
+    and keep running while RX is off; the controller counts their events only for a burst
+    it saw start, as in steps 1-3, when its datapath reset reset the aligners: (1) RX_EN = 0
+    with PHY_EN = 1: a burst with a bad sync and a deskew burst set no CNT_SOT, CNT_EXT,
+    ERR_STATUS or IRQ_STATUS bit; (2) CTRL cleared (rx_off() of the driver) at a sweep of
+    times from the start of a line burst, through its sync search: no SoT error; (3) RX_EN
+    set at a sweep of times inside a burst with a bad sync, after RxActiveHS rose on every
+    lane: the burst is not the controller's, no SoT error; (4) RX on: a bad sync and a
+    deskew burst count again. Whole receiver only (the D-PHY's aligners)."""
+    if g.ppi:
+        raise SystemExit("test rxoff needs the D-PHY (no --ppi)")
+    g.phy_up()
+    ctrl = on(g)
+    off = ctrl & ~CTRL_RX_EN
+    g.emit("tready 100")
+    frame(g, 0, DT_RAW10, 32, 2, fnum=1)
+    # the stops cover the sync search of a 256 pixel line: up to its latest sync byte from
+    # the start of the burst (clock lane entry, data lane LP-01, HS-PREPARE, HS-ZERO with
+    # the most extra zero time and bytes), well before the end of its data
+    c = g.cfg
+    t_sync = (c["t_lp11_next"] + c["t_lpx"] + c["t_clk_prepare"] + c["t_clk_zero"] + c["t_clk_pre"] +
+              c["t_lpx"] + c["t_hs_prepare"] + c["t_hs_zero"] + 64 + 6 * c["byte_ps"] // 1000)
+
+    def clear():
+        g.wr("CNT_CLR", 1)
+        g.wr("ERR_STATUS", ERR_ALL)
+        g.wr("IRQ_STATUS", IRQ_ALL)
+
+    def burst(make, stop=False):
+        """Emit a burst from make() (retried until deterministic); its index."""
+        for _ in range(16):
+            n = g.rx.burst_idx
+            b = make()
+            if b is not None and g.pkt(b, stop=stop):
+                return n
+        raise SystemExit("rxoff: no deterministic burst")
+
+    def bad_sync():
+        return g.corrupt(g.line(0, DT_RAW10, 128), "sync")
+
+    def counts():
+        for name in ("CNT_SOT", "CNT_EXT", "ERR_STATUS", "IRQ_STATUS"):
+            g.rd(name)
+
+    g.wr("CTRL", off)                                # (1) RX_EN = 0, PHY_EN = 1
+    clear()
+    burst(bad_sync)
+    burst(g.deskew_burst)
+    counts()
+    for d in range(0, t_sync + 10, 10):              # (2) stops through the sync search
+        g.wr("CTRL", ctrl)
+        clear()
+        n = burst(lambda: g.line(0, DT_RAW10, 256), stop=True)
+        g.emit(f"waitbyte {n} 0")
+        g.emit(f"delay {d}")
+        g.wr("CTRL", 0, now=True)
+        g.emit("wait")
+        g.mark()                                     # any prefix of the line
+        g.rd("CNT_SOT")
+        g.rd("ERR_STATUS")
+    g.wr("CTRL", off)
+    for d in range(0, 200, 10):                      # (3) RX on in a burst with a bad sync
+        clear()
+        n = burst(bad_sync, stop=True)
+        g.emit(f"waitbyte {n} 1")                    # RxActiveHS high on every lane
+        g.emit(f"delay {d}")
+        g.wr("CTRL", ctrl, now=True)
+        g.emit("wait")
+        g.rd("CNT_SOT")
+        g.rd("ERR_STATUS")
+        g.wr("CTRL", off)
+    g.wr("DPHY_CMD", DCMD_CNT_CLR)                   # HS entries of (2): stop dependent
+    g.wr("CTRL", ctrl)                               # (4) RX on: counted again
+    clear()
+    burst(bad_sync)
+    burst(g.deskew_burst)
+    counts()
+    g.dump(log=False)
+
+
+def gen_raw(g):
+    """RAW capture of the D-PHY (bow_dphy_raw; whole receiver, Versal PHY model, 4 lanes):
+    it takes only the words the PHY delivered (rx_valid) and starts at the rise of lane 0's
+    RxActiveHS. The PHY model places one read gap in every burst a few words after the sync
+    (v_gap_byte, BurstRxRst = 1: no word on any lane in that byte clock), and data lane 0
+    enters HS later than the other lanes (l0_late_ns; its sync byte does not move), so the
+    other lanes' RxActiveHS rises while lane 0 is still in its HS-PREPARE noise. Six
+    captures of a 200 pixel line: on every lane the sync is followed by the lane's bytes up
+    to the end of the window, and lane 0's first word is the 00 of its HS-ZERO (check_raw)."""
+    if g.ppi or not g.cfg.get("versal") or g.cfg["lanes"] != 4:
+        raise SystemExit("test raw needs the Versal PHY model with 4 lanes")
+    g.phy_up()
+    on(g)
+    g.emit("tready 100")
+    frame(g, 0, DT_RAW10, 32, 2, fnum=1)
+    for _ in range(6):
+        g.wr("DPHY_RAW_CTRL", 1)
+        g.send(g.line(0, DT_RAW10, 200))
+        g.emit(f"poll {REG['DPHY_RAW_CTRL']:03x} 00000100 00000100 200")
+        for i in range(64):
+            g.rd(REG["DPHY_RAW"] + 8 * i)
+    g.dump(log=False)
+
+
 def gen_byteclk(g):
     """BYTECLK with a continuous clock (needs 2 x 65536 CPU cycles)."""
     g.phy_up()
@@ -3424,7 +3531,8 @@ TESTS = {"random": gen_random, "lp": gen_lp, "watchdog": gen_watchdog, "clk": ge
          "cmd": gen_cmd, "ovf": gen_ovf, "stop": gen_stop, "byteclk": gen_byteclk, "eye": gen_eye,
          "skew": gen_skew, "dly": gen_dly, "deskew": gen_deskew, "extra": gen_extra,
          "loss": gen_loss, "ovf2": gen_ovf2, "ovf8": gen_ovf8, "be": gen_be,
-         "clkstop": gen_clkstop, "gaps": gen_gaps, "lpmask": gen_lpmask}
+         "clkstop": gen_clkstop, "gaps": gen_gaps, "lpmask": gen_lpmask, "rxoff": gen_rxoff,
+         "raw": gen_raw}
 # The tests of the controller alone (--ppi): not those of the D-PHY (LP state machines,
 # watchdog, clock lane gate, byte clock meter, input delays); gaps only in the timing of the
 # D-PHY of Bow32 (a standard PHY has no gaps; lpmask has its mask edge cases there only)
@@ -3560,9 +3668,12 @@ def match_output(items, out, errs, max_extra):
     return sums
 
 
-def check_raw(group, errs):
+def check_raw(group, errs, start=False):
     """RAW capture of the first burst after ARM (the D-PHY's, whole receiver only): on
-    every lane the sync is followed by the bytes of that lane."""
+    every lane the sync is followed by the bytes of that lane, up to the end of the window
+    or of the lane's bytes. start (test raw: lane 0 enters HS after the other lanes): the
+    first word of lane 0 is 00, the capture started at the rise of lane 0's RxActiveHS (in
+    its HS-ZERO), not at that of another lane (lane 0 still in its HS-PREPARE noise)."""
     burst, lanes = group[0][0].a, group[0][0].b
     if burst is None:
         return
@@ -3574,6 +3685,9 @@ def check_raw(group, errs):
         if n < need:
             errs.append(f"RAW lane {l}: sync followed by the {need} first bytes of the burst not found "
                         f"(words {' '.join(f'{w:02x}' for w in words[:24])} ...)")
+        if start and l == 0 and words[0] != 0:
+            errs.append(f"RAW lane 0: first word {words[0]:02x}, not the 00 of its HS-ZERO at the "
+                        f"rise of its RxActiveHS")
 
 
 def check(d):
@@ -3615,7 +3729,7 @@ def check(d):
         elif e.kind == "raw":
             raw.append((e, gv))
             if len(raw) == 64:
-                check_raw(raw, errs)
+                check_raw(raw, errs, start=bool(cfg.get("l0_late_ns")))
                 raw = []
         if not ok:
             name = REG_NAME.get(a, "LOG[%d]" % ((a - 0x400) >> 2) if 0x400 <= a < 0x500 else
@@ -3672,6 +3786,18 @@ def cmd_gen(args):
             # search starts in HS-ZERO. These tests failed for about 1 in 3 Verilator seeds
             # before (the directed tests run with seed 1); the random cases keep the drift.
             cfg["v_glitch_pct"] = 0
+        if args.test == "rxoff":
+            # the stops and RX_EN / PHY_EN changes in bursts add FIFO latency for good with
+            # BurstRxRst = 0 (words written while the gate is closed), which moves the search
+            # of the deskew bursts into the HS-PREPARE noise (as in deskew, loss): the FIFOs
+            # restart at every burst, as on the board since step 4
+            cfg.update(v_burst_rst=1, v_glitch_pct=0)
+        if args.test == "raw":
+            # one read gap per burst, 24 packet bytes in (a few words after the sync: the FIFOs
+            # restart at every burst, BurstRxRst = 1), and data lane 0 late: its LP-01 40 ns
+            # longer than on the other lanes (their RxActiveHS rises in its HS-PREPARE noise,
+            # its own in its HS-ZERO; SETTLE of the TIM0 reset value)
+            cfg.update(v_burst_rst=1, v_gap_pm=0, v_gap_byte=24, l0_late_ns=40)
     elif args.burst_rst:
         raise SystemExit("--burst-rst needs --versal")
     if args.ppi:

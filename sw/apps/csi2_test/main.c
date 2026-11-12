@@ -158,7 +158,7 @@ static int sensor_start(bool configure) {
 
 bool stream_start(bool configure) {
   /* before the sensor leaves LP-11 (IMX274: LP-00 in standby); Versal XPHY:
-   * PA5 = CAM_BURST_RST (cam_sensor.h) */
+   * the D-PHY's DES_RST_DIS = !CAM_BURST_RST (cam_sensor.h) */
   if (cam_rx_start(ct.s, ct.s->dt()) != CSI2RX_OK) {
     bow_printf("error: D-PHY not ready (AFE_STATUS.READY = 0)\n");
     if (ct.vid) bow_puts("  phy: nibble status; sensor on + phy reinit: BISC with a running clock\n");

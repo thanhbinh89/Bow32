@@ -704,6 +704,12 @@ class PpiTest(unittest.TestCase):
             errs = []
             m.check_raw(group(first, lane1), errs)
             self.assertEqual(len(errs), bad, (first, lane1, errs))
+        # test raw (lane 0 enters HS after the other lanes): its first word is the 00 of its
+        # HS-ZERO, a capture started by another lane begins in its HS-PREPARE noise
+        for first, start, bad in ((0x00, True, 0), (0x5A, False, 0), (0x5A, True, 1)):
+            errs = []
+            m.check_raw(group(first), errs, start)
+            self.assertEqual(len(errs), bad, (first, start, errs))
 
 
 def perfect_dut(d):
@@ -777,7 +783,7 @@ class GenCheckTest(unittest.TestCase):
         v4 = ("--lanes", "4", "--versal", "--fifo-depth", "512")
         tx = sorted(t for t in m.TESTS if t not in ("clkstop", "gaps", "lpmask"))   # not PPI only
         with tempfile.TemporaryDirectory() as tmp:
-            cases = [(t, "--seed", "2") for t in tx if t != "dly"]
+            cases = [(t, "--seed", "2") for t in tx if t not in ("dly", "raw")]   # 4 lanes only
             cases += [(t, "--seed", "3", *v4) for t in tx]
             cases += [("cmd", "--seed", "1", "--lanes", "2", "--dut-lanes", "4", "--versal")]
             cases += [("random", "--seed", str(s), *o) for s in (1, 2) for o in
@@ -833,10 +839,22 @@ class GenCheckTest(unittest.TestCase):
                 self.gen(Path(tmp) / "x", "--burst-rst", "1")
             with self.assertRaises(SystemExit):
                 self.gen(Path(tmp) / "y", "--test", "skew", "--lanes", "1")
+            # raw and rxoff on the Versal PHY: the FIFOs restart at every burst (BurstRxRst 1:
+            # no latency drift from the stops); raw places a read gap per burst and has lane 0
+            # enter HS late; raw needs it with 4 lanes
+            for test, want in (("raw", (1, 0, 24, 40)), ("rxoff", (1, 0, 0, 0))):
+                self.gen(Path(tmp) / test, "--test", test, "--lanes", "4", "--versal")
+                cfg = m.read_cfg(Path(tmp) / test / "cfg.txt")
+                self.assertEqual((cfg["v_burst_rst"], cfg["v_gap_pm"], cfg.get("v_gap_byte", 0),
+                                  cfg.get("l0_late_ns", 0)), want)
+                self.assertNotIn(f"wr {m.REG['DPHY_CTRL']:03x}",
+                                 (Path(tmp) / test / "stim.txt").read_text())
             # PPI bench: the controller alone, no D-PHY model, no D-PHY tests
             for argv in (("--ppi", "bow", "--versal"), ("--ppi", "bow", "--test", "lp"),
                          ("--ppi", "std", "--test", "gaps"), ("--test", "lpmask"),
-                         ("--test", "clkstop"), ("--test", "gaps")):
+                         ("--test", "clkstop"), ("--test", "gaps"), ("--test", "raw"),
+                         ("--test", "raw", "--lanes", "2", "--dut-lanes", "4", "--versal"),
+                         ("--ppi", "bow", "--test", "rxoff")):
                 with self.assertRaises(SystemExit, msg=argv):
                     self.gen(Path(tmp) / "z", *argv)
 
