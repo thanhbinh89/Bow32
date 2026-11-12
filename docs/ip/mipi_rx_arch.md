@@ -78,7 +78,8 @@ runner của CI) để ai cũng chạy lại được là tuỳ chọn về sau.
    Controller CSI-2 của Bow32 được thiết kế để ghép với D-PHY của hãng khác (và D-PHY của Bow32 với
    controller khác) qua wrapper cổng phẳng, trong giới hạn của hồ sơ PPI ở mục 5.5. Bước 3 đạt mục
    tiêu này ở mức mô phỏng cho controller: `bow_csi2rx_ppi_flat` với thời gian kiểu PHY chuẩn chạy
-   sạch như thời gian của D-PHY Bow32 (mục 5.5, 10). Chưa thử với PHY của hãng nào: với một PHY cụ
+   sạch như thời gian của D-PHY Bow32 (mục 5.5, 10), với bốn điều mà phần dựng PHY chuẩn còn mượn
+   của D-PHY Bow32 (mục 5.5, *Bước 3*). Chưa thử với PHY của hãng nào: với một PHY cụ
    thể vẫn là mục tiêu thiết kế, chưa phải khả năng đã chứng minh. Mọi chỗ Bow32 lệch khỏi PPI
    công khai được ghi ở mục 5.3.
 5. **Hiệu chỉnh dựa trên dữ liệu.** Bài học của bo Huins (tự hiệu chỉnh BISC đặt điểm lấy mẫu ở
@@ -958,7 +959,10 @@ theo WC. Sau khi data lane về LP-11, lane clock còn chạy ít nhất T_CLK-P
 710 ns (~7 byte clock), ở 2,5 Gbit/s là 81 ns (~25 byte clock). `RxActiveHS` xuống sau ~35 ns (phát
 hiện LP-11) + 2 byte clock: còn ≥ 4 byte clock cho ghép lane đánh dấu cuối burst trước khi clock
 dừng, ở mọi tốc độ. Lattice đặt điều kiện tương tự (khoảng LP tối thiểu giữa hai burst tính theo
-byte clock) cho hard D-PHY của họ [S8].
+byte clock) cho hard D-PHY của họ [S8]. Mốc thời gian FS / dòng của controller v1 cần nhiều hơn:
+≥ 8 cạnh byte clock sau byte cuối của packet (mục 5.5), tức T_CLK-POST cộng trail; ở 80 Mbit/s
+ngân sách trên chỉ vừa đủ, sau wrapper cổng phẳng thì thiếu, tới khi bước 7 đưa packet sang
+`csi_clk`.
 
 ### 5.5 Hồ sơ PPI của controller
 
@@ -972,10 +976,10 @@ tới hết word cuối, các lane lệch nhau trong FIFO 8 byte, `RxActiveHS` c
 
 | Tín hiệu | Controller cần | Controller chịu được | Wrapper cho PHY chuẩn |
 |---|---|---|---|
-| `RxByteClkHS` | chạy suốt burst; ≥ 4 byte clock sau khi `RxActiveHS` xuống (mục 5.4; sau bước 7: chỉ đủ để đẩy dấu cuối burst qua FIFO). Đo ở bước 3: pixel, bộ đếm, LOG, `FRAME_ERR` vẫn đúng khi clock dừng sớm hơn, cả trước khi `RxActiveHS` xuống (việc cuối burst: kết thúc burst, SKEW, `ErrSotSyncHS`, cắt packet xong khi clock chạy lại); FS và dòng có mốc thời gian đúng (`FRAME_TIME`, `LINE_TIME`) khi clock còn ≥ 8 cạnh sau cạnh mang byte cuối của packet (đo: 7 thì sai) | dừng giữa các burst, đúng 4 cạnh sau cạnh `RxActiveHS` xuống, 0–3, trước khi nó xuống; chạy liên tục | PHY chạy thêm 2 byte clock sau khi `RxActiveHS` xuống (wrapper giữ `RxActiveHS`, dưới) và 1 sau byte cuối (9 cạnh) |
+| `RxByteClkHS` | chạy suốt burst; ≥ 4 byte clock sau khi `RxActiveHS` xuống (mục 5.4; sau bước 7: chỉ đủ để đẩy dấu cuối burst qua FIFO). Đo ở bước 3: pixel, bộ đếm, LOG, `FRAME_ERR` vẫn đúng khi clock dừng sớm hơn, cả trước khi `RxActiveHS` xuống (việc cuối burst: kết thúc burst, SKEW, `ErrSotSyncHS`, cắt packet xong khi clock chạy lại); FS và dòng có mốc thời gian đúng (`FRAME_TIME`, `LINE_TIME`) khi clock còn ≥ 8 cạnh sau cạnh mang byte cuối của packet (đo: 7 thì sai). Ở v1 số cạnh này là T_CLK-POST cộng trail sau byte cuối: ở 80 Mbit/s, với các số của mục 5.4 (clock chạy ~7 byte clock sau khi data lane về LP-11, `RxActiveHS` xuống ~2,4 byte clock sau LP-11, HS-TRAIL ~1,1 byte clock), ước lượng còn ~8 cạnh, đúng bằng giới hạn; sau wrapper (cần 9 ở PHY) thì thiếu. Bench chỉ chạy byte clock 5,6–10,4 ns và trail 8+ byte của D-PHY Bow32 che giới hạn này; bước 7 (packet ở `csi_clk`, mục 6.5) bỏ nó | dừng giữa các burst, đúng 4 cạnh sau cạnh `RxActiveHS` xuống, 0–3, trước khi nó xuống; chạy liên tục | PHY chạy thêm 2 byte clock sau khi `RxActiveHS` xuống (wrapper giữ `RxActiveHS`, dưới) và 1 sau byte cuối (9 cạnh) |
 | `RxActiveHS` | lên ≥ 1 chu kỳ trước `RxSyncHS` của lane sớm nhất (ghép lane chỉ nhận byte của một lane từ chu kỳ sau cạnh lên; cùng chu kỳ thì mất sync, mất burst); còn cao ≥ 1 chu kỳ sau byte cuối mà packet cần (word của byte đó rời FIFO ghép lane một chu kỳ sau); `RxActiveHS` của các lane chồng nhau trong một burst (một chu kỳ mọi lane cùng thấp là hết burst: lane trễ thành burst khác, SKEW hai lần) | lên ở bất kỳ chỗ nào từ cuối SETTLE (Bow32) tới 1 chu kỳ trước `RxSyncHS`; byte còn ra sau khi nó xuống (aligner của Bow32: tới 2 byte) bị bỏ | mọi tín hiệu miền byte trễ 1 chu kỳ, trừ cạnh lên của `RxActiveHS`; `RxActiveHS` giữ thêm 2 chu kỳ khi xuống: PHY được nâng `RxActiveHS` cùng `RxSyncHS` (PG202, PG435) và hạ nó ngay sau byte cuối; PHY giữ `RxActiveHS` thấp ≥ 3 chu kỳ giữa hai burst |
 | `RxSyncHS` | một xung mỗi burst đồng bộ được, cùng chu kỳ với byte đầu | — | trễ 1 chu kỳ |
-| `RxValidHS` | không có backpressure; mỗi lane đưa byte tới hết word cuối của packet (ghép lane lấy cả word, một byte mỗi lane: byte rác của HS-TRAIL làm đầy word; PHY cắt hết trail phải đưa thêm byte trên lane ngắn hơn, nếu không packet bị cắt); sau khi word đầu đã ra, các lane lệch nhau không quá FIFO 8 byte (byte vào FIFO đầy bị mất, không báo lỗi) | khe ở bất kỳ đâu trong burst: chung mọi lane, hay ở lane đang đi trước (XPHY); không khe | trễ 1 chu kỳ |
+| `RxValidHS` | không có backpressure; mỗi lane đưa byte tới hết word cuối của packet (ghép lane lấy cả word, một byte mỗi lane: byte rác của HS-TRAIL làm đầy word; PHY cắt hết trail phải đưa thêm byte trên lane ngắn hơn, nếu không packet bị cắt); sau khi word đầu đã ra, các lane lệch nhau không quá FIFO 8 byte (byte vào FIFO đầy bị mất, không báo lỗi). Trước word đầu, lệch ≥ 7 byte clock giữa byte đầu của các lane chỉ thành SKEW khi lane sớm đã đưa ≥ 9 byte (kể cả trail) tới hết chu kỳ ngay sau byte đầu của lane muộn (FIFO của nó tràn); với trail ngắn của PHY chuẩn, một packet ngắn lệch ≥ 7 được ghép đúng, hay thành hai burst (SKEW hai lần) nếu `RxActiveHS` không chồng nhau | khe ở bất kỳ đâu trong burst: chung mọi lane, hay ở lane đang đi trước (XPHY); không khe | trễ 1 chu kỳ |
 | `ErrSotSyncHS` | ≤ 1 xung mỗi burst | ở cuối burst (Bow32 v1) hay ngay sau HS-zero (v2, PHY khác); có hay không có `RxActiveHS` đi kèm | trễ 1 chu kỳ |
 | `RxSkewCalHS` | v1: xung (controller đếm ở lane 0 mọi chu kỳ nó cao, qua bộ đồng bộ xung); v1.x: cạnh lên | xung | cạnh lên thành xung 1 chu kỳ: chịu được mức (PG202) |
 | `ErrSotHS` | — (v1 chưa dùng) | đi cùng `RxSyncHS` | trễ 1 chu kỳ |
@@ -1002,13 +1006,30 @@ Các chức năng đó về D-PHY ở bước 4–5; khi đó dải phụ biến
 **Bước 3 (xong, mục 10).** `tb_csi2rx_ppi` chạy controller với `bow_ppi_bfm` ở hai chế độ: thời
 gian của D-PHY Bow32 (`RxActiveHS` lên ở cuối SETTLE, khe `RxValidHS` như XPHY, `ErrSotSyncHS` cuối
 burst, byte còn ra khi `RxActiveHS` đã xuống, lỗi lp và HS entry là xung `vid_clk_i`,
-`band_lane_en_lp` = `Enable` qua 2 flop như D-PHY), và thời gian PHY chuẩn qua wrapper
+`band_lane_en_lp` = `Enable` qua 2 flop như D-PHY, word thô của RAW có khe theo khe của lane 0),
+và thời gian PHY chuẩn qua wrapper
 (`RxActiveHS` lên cùng `RxSyncHS` và xuống ngay sau byte cuối, không khe, trail 0–3 byte,
 `ErrSotSyncHS` sớm có hoặc không có `RxActiveHS`, `RxSkewCalHS` xung hay mức, `ErrSotHS`, lỗi dạng
 xung ở clock lp riêng của PHY, không `ErrControlClk`, không `PhyReady`). Cả hai chạy sạch: mục tiêu
 4 của mục 1.1 đạt ở mức mô phỏng với hồ sơ như bảng trên. Ba việc của wrapper (trễ miền byte, giữ
 `RxActiveHS`, cạnh lên của `RxSkewCalHS`) là điều kiện: bỏ một việc thì chế độ PHY chuẩn hỏng
-(mutant của bước 3). Với PHY của một hãng cụ thể vẫn phải kiểm riêng.
+(mutant của bước 3). Mặt nạ enable lane của wrapper được kiểm ở trạng thái đã ổn định (`lpmask`:
+lỗi LP của lane mà `CTRL` đã tắt từ trước chỉ được đếm, của lane đang bật thì đánh dấu burst mất);
+hai flop đồng bộ của nó là cấu trúc CDC mà mô phỏng không nhắm được (lỗi của PHY tới controller
+qua bộ đồng bộ xung của wrapper, 2–3 chu kỳ video), nên chỉ chế độ D-PHY Bow32 kiểm chu kỳ cuối
+trước / đầu sau khi mặt nạ áp dụng.
+
+Phần dựng thời gian PHY chuẩn còn mượn bốn điều của D-PHY Bow32, nên chưa phủ một PHY làm khác
+ở những chỗ đó: (a) burst mà mô hình bỏ vì lệch lane có trail 9–12 byte mỗi lane thay cho 0–3,
+vì luật SKEW ≥ 7 của mô hình cần lane sớm làm tràn FIFO (cột Cần của `RxValidHS`); (b) đoạn 1 của
+`clkstop` dùng trail 8–12 byte để mốc thời gian còn đúng khi clock dừng đúng 4 cạnh sau khi
+`RxActiveHS` xuống (≥ 8 cạnh sau byte cuối, cột Cần của `RxByteClkHS`); (c) `RxActiveHS` của lane
+sớm được kéo dài tới sau khi lane muộn lên (điều kiện chồng nhau của cột Cần), nên bench không có
+PHY hạ `RxActiveHS` của một lane trước khi lane muộn lên; (d) lane khoá hay không là do mô hình
+aligner của Bow32 quyết (`lane_receive`): byte sync sai 1 bit thành `ErrSotSyncHS` không có
+`RxSyncHS`, trong khi một PHY v2 có thể nhận nó với `ErrSotHS` cùng `RxSyncHS` và đưa byte ra;
+`ErrSotHS` trong bench chỉ là cờ ngẫu nhiên trên sync đúng (controller v1 bỏ qua nó). Với PHY của
+một hãng cụ thể vẫn phải kiểm riêng.
 
 ## 6. Bộ điều khiển CSI-2 sau khi tách
 
@@ -1204,7 +1225,7 @@ trên KV260.
 | AFE (mô hình) | `bow_dphy_afe_model` tự kiểm (từ bước 8) | máy phát D-PHY mức bit | ngưỡng LP, termination, lấy mẫu, delay, cổng, `des_rst`, `clk_act` | có (Verilator) |
 | D-PHY số | `tb_bow_dphy_rx` (mới, bước 6) + `tb_dphy_align` (giữ) | máy phát mức bit → `bow_dphy_afe_model`, hoặc `csi2_tx_model` ở cổng AFE | PPI so với scoreboard, timer, FSM, lỗi, ULPS, deskew, thanh ghi | có: thêm `hw/ip/dphy_rx/dv` vào `ci.yml` |
 | Logic adapter | `bow_dphy_dly_xusp`, `bow_dphy_dly_xphy` (bước 5), trong `tb_bow_csi2rx` và bench riêng | ghi mã, `ready`, cổng | nạp khi mã đổi, `VtcWait` / `LdGap`, không nạp trước `ready`, `des_rst` | có (Verilator) |
-| Controller | `tb_csi2rx_ppi` (bước 3, `make -C hw/ip/csi2rx/dv test-ppi`): `bow_csi2rx` với PPI và dải phụ do BFM lái, và wrapper cổng phẳng `bow_csi2rx_ppi_flat` | `bow_ppi_bfm` theo `csi2_model.py gen --ppi bow\|std`, hai chế độ thời gian (mục 5.5): D-PHY Bow32, PHY chuẩn qua wrapper; kỳ vọng từ cùng mô hình bộ thu | như DV hôm nay: pixel, bộ đếm, `FRAME_ERR`, `FRAME_TIME` / `LINE_TIME`, LOG, RAW (D-PHY Bow32), `STATUS` (CE theo `RxClkActiveHS`); 14 mutant của controller và wrapper (`make mutants-ppi`) | có |
+| Controller | `tb_csi2rx_ppi` (bước 3, `make -C hw/ip/csi2rx/dv test-ppi`): `bow_csi2rx` với PPI và dải phụ do BFM lái, và wrapper cổng phẳng `bow_csi2rx_ppi_flat` | `bow_ppi_bfm` theo `csi2_model.py gen --ppi bow\|std`, hai chế độ thời gian (mục 5.5): D-PHY Bow32, PHY chuẩn qua wrapper; kỳ vọng từ cùng mô hình bộ thu | như DV hôm nay: pixel, bộ đếm, `FRAME_ERR`, `FRAME_TIME` / `LINE_TIME`, LOG, RAW (D-PHY Bow32), `STATUS` (CE theo `RxClkActiveHS`); 20 mutant của controller và wrapper (`make mutants-ppi`) | có |
 | Cả bộ thu | `tb_bow_csi2rx` (giữ, DUT = `bow_mipi_rx`) | `csi2_tx_model` (UltraScale+ / Versal) | như hôm nay: 105 case, một trong số đó là unit test aligner (301 case con); thêm `bow_ppi_chk` (`hw/ip/dphy_rx/dv`, bind vào `bow_dphy_rx`, cả trong `tb_bow32`): các đầu ra PPI v1 mà controller chưa dùng (`Stopstate*`, `RxClkActiveHS`, bit 1 của `ErrControl*`, giá trị nghỉ) | có |
 | Tương đương (bước 1–2) | D8: Yosys eqy, `bow_csi2rx` trước và sau khi tách (cổng không đổi). Bước 1 và 2 dùng Synopsys Formality, RTL với RTL, mọi cấu hình build (`hw/ip/dphy_rx/fm`, `make equiv STEP=<n>`: top và luật đổi tên của từng bước; D8 sửa đổi đã duyệt, mục 0) | — | tương đương hình thức; mọi cặp khớp có tên giống hệt sau luật đổi tên | eqy: có (thêm Yosys vào CI); Formality: không (cần license), chạy tay trước mỗi PR của bước 1–2 |
 | FPGA mức chân | `tb_bow_dphy_io_xusp`, `tb_bow_dphy_io_versal` (giữ; probe hộp trắng qua `bind`) | máy phát mức bit, unisim / secureip | adapter + phần số | không (cần Vivado) |
@@ -1258,9 +1279,10 @@ của sign-off (bước 11, mục 9.7).
   bộ thu xử lý như với cả bộ thu (kỳ vọng không đổi), rồi được dựng lại ở PPI (lớp `Ppi`: sự kiện
   của máy LP, lane đã vào HS, `lane_receive` / `burst_receive` cho byte và lệch lane), kèm phép
   kiểm luật ghép lane trên đúng các chu kỳ đã dựng (`ppi_merge`: khe, FIFO 8 byte) để kỳ vọng
-  của mô hình vẫn đúng. Mỗi case không nhanh hơn case của bench cả bộ thu (thời gian nằm ở mô hình
-  Python); bench nhanh hơn nhờ chạy các case song song, nên chạy được nhiều seed (mục 10, kết quả
-  bước 3).
+  của mô hình vẫn đúng. Bench này không nhanh hơn bench cả bộ thu: trên cùng case, mô phỏng
+  controller một mình không rẻ hơn mô phỏng cả bộ thu (máy phát mức bit và D-PHY số rẻ trong
+  Verilator), thời gian nằm ở mô hình Python, phần dựng PPI còn thêm vào bước sinh; cả hai bench
+  chạy các case song song (`PJOBS`) nên chạy được nhiều seed (mục 10, kết quả bước 3).
 - **Mutant:** mỗi thay đổi RTL của các bước 1–7 kèm mutant chứng minh test bắt được nó, như 57
   mutant của PR #17. Harness viết theo `hw/ip/mkv/dv` (Verilator, `make mutants`: bỏ một biện
   pháp nào cũng phải làm test fail); `hw/fpga/common/dv/mutants.py` là harness xsim của
@@ -1506,7 +1528,7 @@ lane và bộ đồng bộ của cùng một bộ thu).
 | 0 | Đặc tả này | `docs/ip/mipi_rx_arch.md` | — |
 | 1 | **1a. Bộ chọn không phụ thuộc phân cấp**, trước khi dời cell: XDC / tcl chọn cell bằng `get_cells -hierarchical -filter {NAME =~ */meter_gray_q_reg*}` (như luật BLI của `u_dphy` đã làm) và giữ phép đếm 9 / 11; danh sách duyệt CDC khớp theo đuôi đường; probe của `tb_bow_dphy_io_xusp` chuyển sang `bind` vào `bow_dphy_align`. **1b. Tách `bow_dphy_rx` bên trong `bow_csi2rx`**, cổng và thanh ghi không đổi: FSM LP, phát hiện cạnh clock, flop word, đồng bộ `arm`, aligner, `byte_rst`, nạp tap, đồng hồ đo vào module mới; RAW vẫn ở `bow_csi2_capture` (D-PHY xuất word thô) | 1a: `kv260_cam.xdc`, `huins_vp1902_cam.xdc`, `build.tcl` của hai bản build, `timing_checks_cam.tcl`, `tb_bow_dphy_io_xusp.sv`. 1b: mới `hw/ip/dphy_rx/rtl/bow_dphy_rx.sv`, `hw/ip/dphy_rx/dphy_rx.f`; chuyển `bow_dphy_lp.sv`, `bow_dphy_align.sv` sang `hw/ip/dphy_rx/rtl/`, `bow_csi2_sync.sv` sang `hw/ip/common/rtl/` với tên module mới `bow_sync_bus` (giữ tên instance `u_sync_*` và `g_bit` mà XDC dùng); đổi `bow_csi2rx.sv`, `csi2rx.f`, Makefile DV, filelist lint / FPGA / `sim` | 1a: trên RTL cũ, PDI Huins vẫn đủ 11 ràng buộc bus skew (9 của `kv260_cam` đếm ở lần build KV260 kế tiếp, D1), kiểm tra CDC không đổi, xsim chạy. 1b: tương đương với `bow_csi2rx` cũ (Synopsys Formality, D8 sửa đổi, mục 0); mọi test không đổi kết quả; LUT/FF lệch ≈ 0; `bow_dphy_rx` lint riêng được. **Xong** (bo Huins: `csi2_test` `test` PASS 17/17), kết quả dưới bảng |
 | 2 | **Đảo cấp:** `bow_mipi_rx` (cổng = `bow_csi2rx` hôm nay) chứa `bow_dphy_rx` + `bow_csi2rx` (controller, cổng PPI + dải cấu hình/trạng thái PHY tạm thời từ `bow_csi2rx_regs`); lỗi lp trên PPI là xung cùng clock (FPGA: `lp_clk` = `vid_clk`, kiểm khi elaborate), có `ErrControlClk` | mới: `hw/ip/dphy_rx/rtl/bow_ppi_pkg.sv`, `hw/ip/csi2rx/rtl/bow_mipi_rx.sv`; đổi: `bow_csi2rx.sv`, `bow_dphy_rx.sv`, `bow_dphy_lp.sv` (`stop_o`), `hw/top/rtl/bow32_top.sv` (một instance, giữ tên `u_csi2rx`), `tb_bow_csi2rx.sv`, `tb_bow_dphy_io_xusp.sv`, `sim/tb/tb_bow32.sv` (đường `cfg.phy_en` mới: `dut.u_csi2rx.u_csi2rx.cfg.phy_en`), file list, `Makefile` (lint), `timing_checks_cam.tcl` (CDC-11 giữa hai khối), `hw/ip/dphy_rx/fm` (`STEP=2`) | tương đương hình thức (Formality như bước 1, D8 sửa đổi, mục 0; luật đổi tên của bước 2 trong `hw/ip/dphy_rx/fm/equiv.tcl`): `bow_mipi_rx` so với `bow_csi2rx` cũ (cổng không đổi); controller chỉ cần PPI + một dải phụ đã liệt kê; dải phụ biến mất ở bước 4–5. **Xong** (bo Huins: `csi2_test` `test` PASS 17/17), kết quả dưới bảng |
-| 3 | **PPI BFM + bench controller**, hai chế độ thời gian: D-PHY Bow32 và PHY chuẩn qua wrapper cổng phẳng (mục 5.5) | mới: `hw/ip/csi2rx/dv/bow_ppi_bfm.sv`, `tb_csi2rx_ppi.sv`, `mutants_ppi.py`, `csi2_model.py gen --ppi` (lớp `Ppi`, `ppi_merge`, test `clkstop`, `gaps`, `lpmask`), wrapper cổng phẳng `hw/ip/csi2rx/rtl/bow_csi2rx_ppi_flat.sv` (không trong `csi2rx.f`); đổi: Makefile DV (`test` = `test-rx` + `test-ppi`, `run-ppi`, `mutants-ppi`), `ci.yml` (bước `test-ppi`), `Makefile` (lint wrapper), `tools/tests/test_csi2_model.py`. Ở v1, BFM lái hoặc nối dải phụ (`band_lane_en_lp` theo `Enable` với độ trễ đồng bộ như D-PHY thật, để luật burst mất chạy như trên bo) và phát lỗi lp dạng xung ở `vid_clk_i` | hành vi controller định nghĩa ở mức PPI (khe, lệch lane, lỗi, clock dừng sớm) ở cả hai chế độ; DV nhanh hơn (đạt nhờ chạy các case song song; mỗi case không nhanh hơn). **Xong** trong mô phỏng (không đổi RTL nào có sẵn: không cần Formality, PDI hay bo), kết quả dưới bảng |
+| 3 | **PPI BFM + bench controller**, hai chế độ thời gian: D-PHY Bow32 và PHY chuẩn qua wrapper cổng phẳng (mục 5.5) | mới: `hw/ip/csi2rx/dv/bow_ppi_bfm.sv`, `tb_csi2rx_ppi.sv`, `mutants_ppi.py`, `csi2_model.py gen --ppi` (lớp `Ppi`, `ppi_merge`, test `clkstop`, `gaps`, `lpmask`), wrapper cổng phẳng `hw/ip/csi2rx/rtl/bow_csi2rx_ppi_flat.sv` (không trong `csi2rx.f`); đổi: Makefile DV (`test` = `test-rx` + `test-ppi`, `run-ppi`, `mutants-ppi`; case của `test-rx` cũng chạy song song), `ci.yml` (bước `test-ppi`), `Makefile` (lint wrapper), `tools/tests/test_csi2_model.py`. Ở v1, BFM lái hoặc nối dải phụ (`band_lane_en_lp` theo `Enable` với độ trễ đồng bộ như D-PHY thật, để luật burst mất chạy như trên bo) và phát lỗi lp dạng xung ở `vid_clk_i` | hành vi controller định nghĩa ở mức PPI (khe, lệch lane, lỗi, clock dừng sớm) ở cả hai chế độ. DV nhanh hơn: **không đạt** (cùng case, cùng cách chạy song song, bench PPI không nhanh hơn bench cả bộ thu; chủ dự án quyết bỏ hay viết lại yêu cầu này, kết quả dưới bảng). **Xong** trong mô phỏng (không đổi RTL nào có sẵn: không cần Formality, PDI hay bo), kết quả dưới bảng |
 | 4 | **Tách thanh ghi + driver**, không alias: driver đọc `INFO[6]` (mục 6.3); RAW sang D-PHY; GPIO PA4/PA5/PB6/PB7 thành thanh ghi (`burst_rst_en_i` = ¬`CTRL.DES_RST_DIS`); công thức `SETTLE` thống nhất (mục 4.4) | mới: `bow_dphy_rx_regs.sv`, `bow_dphy_raw.sv` (nửa RAW của `bow_csi2_capture`), `sw/common/include/bow_dphy_rx.h` (tên `DPHY_*`), `sw/common/src/bow_dphy_rx.c`; đổi: `bow_csi2rx_regs.sv`, `bow_csi2_capture.sv`, `bow_mipi_rx.sv`, `bow_csi2rx.c`, `cam_sensor.c`, `csi2_test`, top camera Huins (bỏ bốn dây GPIO), `bow32_memmap.yaml` (mô tả), `sim/tb/tb_bow32.sv`, tài liệu | firmware mới chạy trên phần cứng mới; `SETTLE` từng bit như hôm nay (22 trên KV260 ở 912 Mbit/s, 200 MHz; `0x13` trên Huins); DV `be` phủ cửa sổ D-PHY. Kỳ vọng mô phỏng đổi, ghi trong PR: `csi2_274` so `TIM0` (`rd 40008c24` = `051e0213`) thay cho `rd 4000800c`, `csi2` (KV260) thêm phép so tương tự; dòng in của `phy` đổi từ "(PB6 PB7) … (PA4 PA5)" sang `AFE_STATUS` / `DLYn`; không còn kiểm PA5 (`des_rst` luôn bật); `phy reinit` đếm xung `reinit_i` thay cho xung PA4. Hành vi đổi theo ghi chú bước 2 (mục 10): lỗi LP của lane clock khi `CLK_CONT` = 1 và lỗi của một lane ở chu kỳ nó vừa tắt không còn vào `ERR_STATUS.LP` / `CNT_MISC[23:16]` của controller; aligner thôi bị reset khi RX tắt (DV `stop`) |
 | 5 | **Giao diện AFE + adapter:** `bow_dphy_rx` nói giao diện AFE (mã delay tĩnh + OWN, `des_rst` = ¬`clk_gate_en`, `pd`/`ready`, `hsrx_en`/`term_en` riêng); logic nạp tap và `des_rst` vào `bow_dphy_dly_xusp` / `bow_dphy_dly_xphy` (không primitive, chạy trong Verilator) bên trong hai adapter; bỏ `DlyVid`. Sáu nơi dùng `bow32_top` đổi trong cùng PR (hoặc giữ cổng cũ của `bow32_top` tới khi mọi nơi đã chuyển) | đổi: `bow_dphy_rx.sv`, `bow_dphy_io_xusp.sv`, `bow_dphy_io_versal.sv`, `csi2_tx_model.sv` (tên cổng AFE, núm `versal` giữ), sáu file dùng `bow32_top` (danh sách ở trên), `tb_bow_dphy_io_*.sv`, `Makefile` (lint mọi top); mới: `bow_dphy_dly_xusp.sv`, `bow_dphy_dly_xphy.sv`, stub UltraScale+ trong `hw/lint/` (`IDELAYE3`, `ISERDESE3`, `BUFGCE_DIV`, và `IBUFDS_DPHY` nếu stub Versal không khớp); XDC giữ tên instance | một RTL số cho hai họ FPGA; logic adapter vẫn trong CI; `make lint` phủ sáu top và `bow_dphy_io_xusp`; giao diện AFE hiện thực được bằng primitive; xsim mức chân + bo |
 | 6 | **D-PHY v1.x:** `T_INIT` (sau `ready` / `REINIT`), `HS_TMO`, `ESC_TMO`, `HSRX_EARLY`, `CLK_MISS_OFF`, `RxSkewCalHS` mọi lane, `CLK_TOG_DIV`, lỗi lp của PPI dạng bộ đếm gray (lấy mẫu ở clock của controller), ULPS, shadow + APPLY, bộ đếm gray phía bus, `CLK_LOST_EN`, LATE_EOT | đổi: `bow_dphy_rx*.sv`, `bow_dphy_lp.sv`, `bow_csi2rx.sv` (lấy mẫu bộ đếm gray); mới: `tb_bow_dphy_rx.sv` (máy phát mức bit), `hw/ip/dphy_rx/dv/Makefile`, bước CI trong `.github/workflows/ci.yml`, harness mutant (mục 8.3) | từng tính năng có test + mutant; mọi bit mới có reset = hành vi hôm nay, hai ngoại lệ có chủ ý (mục 4.12) |
@@ -1691,8 +1713,10 @@ với `bow_ppi_bfm` làm PHY, ở hai chế độ thời gian (mục 5.5). Chế
 PPI v1, dải phụ do BFM lái như D-PHY Bow32 lái nó (`band_lane_en_lp` / `band_clk_force_lp` =
 `Enable` / `CTRL.CLK_FORCE` qua 2 flop `vid_clk_i` reset bằng `band_lp_rst_no` như `u_sync_vcfg`,
 nên lỗi LP ở chu kỳ cuối trước khi mặt nạ của lane áp dụng đánh dấu burst mất, ở chu kỳ đầu sau
-thì không; `band_ev_hs` xung ở mỗi HS entry; word thô `00` từ cạnh lên `RxActiveHS`, `B8` 3 chu kỳ
-trước `RxSyncHS`, rồi byte của lane không khe; `STATUS` LP-11, HS 0, CE = `RxClkActiveHS` qua 2
+thì không; `band_ev_hs` xung ở mỗi HS entry; word thô của RAW với valid chung mọi lane (FIFO của
+XPHY đọc cùng nhịp), thấp ở chu kỳ mà lane 0 có khe 2 chu kỳ sau: word khác trước cạnh lên
+`RxActiveHS`, rồi `00`, `B8` (3 chu kỳ trước `RxSyncHS` khi không khe nào làm trễ) và byte của lane
+không khe, mỗi chu kỳ có valid một word; `STATUS` LP-11, HS 0, CE = `RxClkActiveHS` qua 2
 flop `clk_i`, `PHY_RDY` 1; `BYTECLK`, `DLYn[24:16]` 0). Chế độ `std`: DUT là wrapper cổng phẳng
 `bow_csi2rx_ppi_flat`, dải phụ do wrapper lái hay nối hằng (mục 5.5). Một model Verilator mỗi
 `Lanes` chứa cả hai DUT; DUT không dùng không có clock. Kích thích và kỳ vọng từ cùng mô hình bộ
@@ -1706,33 +1730,42 @@ cho word cuối, luật ghép lane (khe, FIFO 8 byte) kiểm trên đúng chu k�
 lại nếu khác quyết định của mô hình), byte clock còn ≥ 10 cạnh sau cạnh mang byte cuối của packet
 khi mô hình coi thời điểm sự kiện là chính xác (lề 2 trên mức đo được, dưới).
 
-**Kết quả bước 3 (2026-11-12)**, trên `320f2ec`, Verilator 5.020:
+**Kết quả bước 3 (2026-11-12)**, trên `320f2ec`, Verilator 5.020 (số sau các sửa của review,
+bullet cuối):
 
-- **Bench.** `make -C hw/ip/csi2rx/dv test-ppi`: 164/164 case đạt, cả hai chế độ. Mỗi chế độ 32
+- **Bench.** `make -C hw/ip/csi2rx/dv test-ppi`: 167/167 case đạt, cả hai chế độ. Mỗi chế độ 32
   random (seed 1–4 × {2 lane, 2 lane + lỗi, 1 lane + lỗi, 1 trên 2 + lỗi, 4 lane, 4 lane + lỗi, 2
   trên 4 + lỗi, 1 trên 4 + lỗi}, xen kẽ RAW8 và clock liên tục) và directed `cmd`, `ovf`, `stop`,
   `skew`, `deskew`, `extra`, `loss`, `ovf2`, `ovf8`, `be`, `clkstop` trên 2 và 4 lane, một phần với
-  1 lane, 1 trên 2, 2 trên 4, clock liên tục; `gaps`, `lpmask` (chỉ `bow`) trên 1, 2, 4 lane. Tổng
-  168 125 pixel, 15 420 lần đọc thanh ghi, 949 frame. `SEEDS="1 … 40"`: 740/740. Phủ (dòng
-  `bow_ppi_bfm:` của `sim.log`, cộng 164 case): `bow` 4153 burst; byte clock dừng đúng 4 cạnh sau
-  cạnh `RxActiveHS` cuối xuống ở 1168 burst, sớm hơn ở 353 (290 trong số đó trước khi nó xuống);
-  `RxActiveHS` lên trước `RxSyncHS` 9231 lần (lane × burst); 25 590 chu kỳ khe trên 373 897 byte;
-  8530 byte ra khi `RxActiveHS` đã xuống; 175 `ErrSotSyncHS` sau khi xuống; 34 xung `RxSkewCalHS`;
-  12 923 HS entry và 52 lỗi LP dạng xung `vid_clk_i`; 5 + 5 lỗi LP ở chu kỳ cuối trước / đầu sau
-  khi mặt nạ áp dụng. `std` 3929 burst; 111 dừng đúng 4 cạnh sau, 352 sớm hơn (170 trước khi
-  xuống); `RxActiveHS` lên cùng `RxSyncHS` 8718 lần, 112 lần lane không có `RxActiveHS` (chỉ
-  `ErrSotSyncHS` hay xung `RxSkewCalHS`); 170 `ErrSotSyncHS` sớm; `RxSkewCalHS` 20 xung, 14 mức;
-  873 `ErrSotHS`; 32 lỗi LP ở clock lp 25 MHz của PHY.
-- **Mutant** (`make -C hw/ip/csi2rx/dv mutants-ppi`, 21 case mỗi mutant, `--every`: case và chế độ
-  nào bắt): 14/14 chết. Controller: giới hạn lệch lane 6 → 5 (kiểm tràn trước word đầu coi FIFO 7
+  1 lane, 1 trên 2, 2 trên 4, clock liên tục; `lpmask` trên 1, 2, 4 lane (cạnh mặt nạ chỉ ở `bow`);
+  `gaps` (chỉ `bow`) trên 1, 2, 4 lane. Tổng 173 389 pixel, 15 801 lần đọc thanh ghi, 993 frame.
+  `SEEDS="1 … 40"`: 743/743. Phủ (dòng `bow_ppi_bfm:` của `sim.log`, cộng 167 case): `bow` 4296
+  burst; byte clock dừng đúng 4 cạnh sau cạnh `RxActiveHS` cuối xuống ở 1217 burst, sớm hơn ở 353
+  (290 trong số đó trước khi nó xuống); `RxActiveHS` lên trước `RxSyncHS` 9535 lần (lane × burst);
+  26 173 chu kỳ khe trên 384 331 byte; 8836 byte ra khi `RxActiveHS` đã xuống; 175 `ErrSotSyncHS`
+  sau khi xuống; 58 xung `RxSkewCalHS`; 13 385 HS entry và 73 lỗi LP dạng xung `vid_clk_i`; 5 + 5
+  lỗi LP ở chu kỳ cuối trước / đầu sau khi mặt nạ áp dụng; 11 919 chu kỳ không có word RAW. `std`
+  4096 burst; 111 dừng đúng 4 cạnh sau, 352 sớm hơn (170 trước khi xuống); `RxActiveHS` lên cùng
+  `RxSyncHS` 9078 lần, 125 lần lane không có `RxActiveHS` (chỉ `ErrSotSyncHS` hay xung
+  `RxSkewCalHS`); 170 `ErrSotSyncHS` sớm; `RxSkewCalHS` 33 xung, 25 mức; 913 `ErrSotHS`; 53 lỗi LP
+  ở clock lp 25 MHz của PHY.
+- **Mutant** (`make -C hw/ip/csi2rx/dv mutants-ppi`, 24 case mỗi mutant, `--every`: case và chế độ
+  nào bắt): 20/20 chết. Controller: giới hạn lệch lane 6 → 5 (kiểm tràn trước word đầu coi FIFO 7
   byte là đầy; các case `skew` ở cả hai chế độ), FIFO ghép lane 16 byte (cả hai), push không xét
   `RxValidHS` (chỉ `bow`: khe), burst kết thúc khi một lane xuống, bắt đầu khi mọi lane lên, CRC 1
-  byte (cả hai), bỏ mặt nạ enable lane của luật burst mất (chỉ `bow lpmask`), bỏ mặt nạ
-  `CLK_FORCE` (chỉ `bow`: lane clock không có `ErrControlClk` ở `std`), tắt luật burst mất, lỗi sync
-  không đánh dấu dòng sau, đếm deskew ở lane cuối (cả hai). Wrapper: bỏ trễ miền byte, bỏ giữ
-  `RxActiveHS`, `RxSkewCalHS` mức (chỉ `std`). Mutant đếm deskew ở lane cuối lúc đầu sống: test
-  `deskew` chỉ đọc `CNT_EXT` sau cả hai burst deskew một phần nên hai lỗi triệt tiêu; nay đọc sau
-  mỗi burst (kích thích của bench cả bộ thu cũng đổi: 3 case `deskew` nhiều lane thêm 1 lần đọc).
+  byte (cả hai), không cờ lỗi CRC khi word cuối của packet có byte payload (`loss` 4 lane, cả hai),
+  không báo EXTRA (`clkstop`, cả hai),
+  bỏ mặt nạ enable lane của luật burst mất (`lpmask` 2 lane, cả hai), bỏ mặt nạ `CLK_FORCE` (chỉ
+  `bow`: lane clock không có `ErrControlClk` ở `std`), tắt luật burst mất, burst mất đang chờ bị
+  xoá ở cuối burst thay vì ở packet sau (`loss`, cả hai), lỗi sync không đánh dấu dòng sau, đếm
+  deskew ở lane cuối (cả hai), RAW nhận cả word không valid, RAW bắt đầu ở cạnh lên của lane bất kỳ
+  (chỉ `bow gaps`). Wrapper: bỏ trễ miền byte, bỏ giữ `RxActiveHS`, `RxSkewCalHS` mức, mặt nạ enable
+  lane nối 1 (chỉ `std`). Mutant đếm deskew ở lane cuối lúc đầu sống: test `deskew` chỉ đọc
+  `CNT_EXT` sau cặp burst deskew một phần liền nhau (lane 0 riêng, rồi mọi lane trừ lane 0), lỗi
+  hai chiều triệt tiêu; cuối test nay có thêm hai burst đó, mỗi burst một mình với `CNT_EXT` đọc
+  sau nó (cặp liền nhau giữ nguyên như `main`). Không thành mutant: `Enable` vào mặt nạ của wrapper
+  không qua 2 flop (cấu trúc CDC, mục 5.5: không kích thích nào nhắm được 2 chu kỳ đó; sống, như
+  dự kiến).
 - **Hồ sơ PPI** (mục 5.5, sửa theo kết quả). Chế độ `std` chỉ sạch sau khi wrapper làm ba việc mà
   bảng cũ ghi là controller tự chịu được: controller v1 mất burst khi `RxActiveHS` lên cùng chu kỳ
   `RxSyncHS` (ghép lane chỉ nhận byte từ chu kỳ sau cạnh lên), mất word cuối khi `RxActiveHS` xuống
@@ -1743,19 +1776,47 @@ khi mô hình coi thời điểm sự kiện là chính xác (lề 2 trên mức
   liệu; thời điểm FS / dòng đúng khi clock còn ≥ 8 cạnh sau cạnh mang byte cuối của packet (đo
   bằng cách giảm lề của mô hình: 7 cạnh thì `FRAME_TIME` / `LINE_TIME` sai ở 7/12 case `std`, 6
   cạnh 10/12; 8 và 9 cạnh 0/12).
-- **Thời gian.** Một case của bench PPI không nhanh hơn một case của bench cả bộ thu: 30 case như
-  nhau (random 1, 2, 4 lane có lỗi, seed 1–4, và 9 test directed trên 2 và 4 lane) tốn 5,6 s ở
-  mỗi chế độ (sinh 2,4 s, mô phỏng 1,3–1,5 s, kiểm 1,8 s), so với 5,0 s qua cả bộ thu (2,0 / 1,2
-  / 1,8 s): thời gian nằm ở mô hình Python, mô phỏng máy phát mức bit và D-PHY số không đắt, phần
-  dựng PPI thêm vào bước sinh. Bench nhanh hơn nhờ chạy các case song song (`PJOBS`, như bench
-  DDR / HyperRAM): 164 case 3,1 s với 24 job, 9,3 s với 4, 36 s tuần tự, so với 25–29 s của
-  `test-rx` (105 case, tuần tự).
-- **Kiểm tra khác.** `make -C hw/ip/csi2rx/dv test` 269/269 (`test-rx` 105 như trước, `test-ppi`
-  164); `test-rx` với `SEEDS="5 … 12"` 149/149; `make lint` (thêm wrapper: 2, 1, 4 lane, clock
-  video 50 MHz); `make test-tools` 201 test (1 bỏ qua: PyAV; 40 của mô hình CSI-2, 4 mới cho PPI);
-  `make gen-check`; `make test` 15/15, log giống hệt `main` (cả số chu kỳ). Không đổi RTL nào có
-  sẵn (wrapper là file mới, không nằm trong `csi2rx.f` hay bản build nào): không cần Formality,
+- **Thời gian: "DV nhanh hơn" không đạt.** Trên cùng case, bench PPI không nhanh hơn bench cả bộ
+  thu: 26 case như nhau (random 1, 2 lane có và không có lỗi, seed 1–4, và 10 test directed trên 2
+  lane), tuần tự, tốn 5,7 s ở mỗi chế độ so với 5,2 s qua cả bộ thu (đo của review: 30 case gồm cả
+  4 lane, 5,6 s so với 5,0 s; sinh 2,4 / 2,0 s, mô phỏng 1,3–1,5 / 1,2 s, kiểm 1,8 / 1,8 s). Mô
+  phỏng controller một mình không rẻ hơn mô phỏng cả bộ thu (máy phát mức bit và D-PHY số rẻ trong
+  Verilator); thời gian nằm ở mô hình Python, sinh (phần dựng PPI thêm vào đó) rồi `check` chạy lại
+  mô hình trên item TX; bớt phần Python (ví dụ để `gen` ghi kỳ vọng cho `check`) làm cả hai bench
+  nhanh như nhau, không làm bench PPI nhanh hơn. Cả hai bench nay chạy case song song như nhau
+  (`PJOBS`, mặc định số CPU, như bench DDR / HyperRAM): `test-rx` 105 case 2,6 / 6,6 / 25,7 s với
+  24 / 4 / 1 job, `test-ppi` 167 case 3,0 / 9,6 / 37,8 s. Yêu cầu "DV nhanh hơn" của bước 3 vì vậy
+  chưa đạt và chờ chủ dự án quyết: bỏ, hay viết lại (ví dụ "chạy được nhiều seed trong thời gian
+  CI", hai bench đều đạt).
+- **Kiểm tra khác.** `make -C hw/ip/csi2rx/dv test` 272/272 (`test-rx` 105, `test-ppi` 167);
+  `test-rx` với `SEEDS="1 … 12"` 193/193; `make lint` (thêm wrapper: 2, 1, 4 lane, clock video 50
+  MHz); `make test-tools` 202 test (1 bỏ qua: PyAV; 41 của mô hình CSI-2, 5 mới cho PPI);
+  `make gen-check`; `make test` 15/15, log giống hệt `main` (cả số chu kỳ; chạy trên commit đầu
+  của bước 3, các sửa sau review không đụng RTL, `sim/` hay file nào `sim/` dùng). Không đổi RTL nào
+  có sẵn (wrapper là file mới, không nằm trong `csi2rx.f` hay bản build nào): không cần Formality,
   PDI hay chạy bo (D1).
+- **Sửa sau review** (commit thứ hai, không đổi RTL). Mặt nạ enable lane của wrapper chưa có test
+  nào chạm tới (nối nó bằng 1 vẫn qua mọi case): `lpmask` chạy cả ở `std` với các case đã ổn định
+  (lỗi của lane đã tắt chỉ đếm, của lane đang bật đánh dấu burst mất), và `lperr` của mô hình xét
+  enable lane (`Receiver.lp_loss`). Bốn mutant của controller mà review thấy sống nay chết: dòng
+  lỗi CRC 4 / 8 / 20 / 24 pixel (WC mod 4 = 1, 2) và một burst mất ở mức LP đi qua burst deskew
+  trên mọi lane được thêm vào cuối `loss` (hai mutant này chết cả ở `test-rx`: CRC ở `loss` 4 lane,
+  burst mất ở cả 7 case `loss`); BFM cho word thô của RAW khe theo khe của lane 0 (valid
+  thấp, word khác) và word khác trước cạnh lên `RxActiveHS`, `gaps` bắt RAW một dòng ở khe 0,75,
+  burst đó có lane 0 lên sau một lane khác, `check` kiểm word đầu của lane 0 là `00` (chỉ chế độ
+  `bow`). `deskew` giữ cặp burst deskew một phần liền nhau như `main` (lần đọc xen giữa của commit
+  đầu thêm cả một burst chỉ có clock và một `wait` giữa hai burst đó) và thêm hai burst đó riêng ở
+  cuối. Kích thích của bench cả bộ thu: 94 trong 104 case giống từng byte với `main`; 3 case
+  `deskew` và 7 case `loss` chỉ thêm một khối trước lần đọc cuối. `test-rx` chạy song song như
+  `test-ppi`; mỗi bản build model chạy lại Verilator một lần nếu nó hỏng (Verilator 5.020 đôi khi
+  abort lúc thoát sau một bản build tốt, "attempted to destroy locked Thread Pool", gặp ở lần
+  `build-ppi` đầu của phần sửa) và `touch` binary (Verilator không ghi lại model mà C++ không đổi,
+  binary cũ hơn nguồn làm mọi case chạy song song cùng build lại một lúc). `mutants_ppi.py` gọi
+  Verilator không kèm `PYTHONHOME` / `PYTHONPATH` của trình Python đang chạy (bản build một file của
+  một mutant nhỏ chạy `verilator_includer` bằng python3 của hệ thống); mutant tắt EXTRA, bản build
+  một file như thế với 1 lane, nay build được và vào danh sách. Mô tả khe của `gaps` sửa
+  thành tham số 0,4 / 0,75 (≈ 20 % / 38 % chu kỳ); mục 5.5 ghi bốn điều phần dựng PHY chuẩn mượn
+  của D-PHY Bow32, điều kiện SKEW ở lệch ≥ 7 và giới hạn mốc thời gian ở 80 Mbit/s.
 
 Bước 1–3 không đổi hành vi (refactor; bước 1–2 chứng minh bằng tương đương hình thức, cả hai bằng
 Formality, D8 sửa đổi, mục 0; bước 3 chỉ thêm DV và một wrapper không nằm trong bản build nào);

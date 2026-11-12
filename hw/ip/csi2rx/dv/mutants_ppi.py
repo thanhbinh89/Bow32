@@ -39,9 +39,10 @@ MERGE, PACKET, CTRL, FLAT = ("bow_csi2_lane_merge.sv", "bow_csi2_packet.sv", "bo
 # PPI cases: (timing, test, lanes, Lanes parameter, extra options), seed 1
 CASES = [(m, t, l, d, o) for m in ("bow", "std") for t, l, d, o in
          [("skew", 2, 2, ()), ("skew", 4, 4, ()), ("loss", 1, 1, ()), ("loss", 2, 2, ()),
-          ("deskew", 2, 2, ()), ("deskew", 4, 4, ()), ("random", 2, 2, ("--errors",)),
-          ("random", 4, 4, ("--errors",)), ("clkstop", 2, 2, ())]] + \
-        [("bow", "gaps", 2, 2, ()), ("bow", "lpmask", 1, 1, ()), ("bow", "lpmask", 2, 2, ())]
+          ("loss", 4, 4, ()), ("deskew", 2, 2, ()), ("deskew", 4, 4, ()),
+          ("random", 2, 2, ("--errors",)), ("random", 4, 4, ("--errors",)), ("clkstop", 2, 2, ()),
+          ("lpmask", 2, 2, ())]] + \
+        [("bow", "gaps", 2, 2, ()), ("bow", "lpmask", 1, 1, ())]
 
 # name, [(file, old text, new text, occurrences)]: every old text must occur that often
 MUTANTS = [
@@ -63,9 +64,16 @@ MUTANTS = [
                              "assign all_low = ~&(arm_i | ~act);", 1)]),
     ("merge_rise_all_lanes", [(MERGE, "assign rise    = |(arm_i & ~arm_q & act);",
                                "assign rise    = &((arm_i & ~arm_q) | ~act);", 1)]),
-    # packet layer: the CRC byte count of a long packet
+    # packet layer: the CRC byte count of a long packet; no CRC error flag (tuser[1]) when the
+    # last word holds payload bytes (4 lanes, WC mod 4 = 1 or 2: test loss)
     ("crc_one_byte", [(PACKET, "rem_q      <= {1'b0, wc} + 17'd2;",
                        "rem_q      <= {1'b0, wc} + 17'd1;", 2)]),
+    ("crc_err_lpay_off", [(PACKET, "err_dly_q <= acc_q && ((crc_n != '0) || fmt_q);",
+                           "err_dly_q <= acc_q && fmt_q;", 1)]),
+    # no EXTRA event (bytes after a packet: test clkstop). Small enough for Verilator's
+    # single-file build with Lanes = 1, which runs python3 (VERILATOR_ENV below)
+    ("extra_off", [(PACKET, "if ((extra_i != '0) && !xev_q && (xcnt_q > {1'b0, extra_i})) begin",
+                    "if (1'b0) begin", 1)]),
     # lost burst marking at the LP level and the masks from the band
     ("lost_burst_no_lane_mask", [(CTRL, "(|(ev_lp_err[Lanes:1] & band_lane_en_lp_i))",
                                   "(|ev_lp_err[Lanes:1])", 1)]),
@@ -73,9 +81,17 @@ MUTANTS = [
                                        "ev_lp_err[0]", 1)]),
     ("lost_burst_off", [(CTRL, "    else if (lpl_ev && (lpl_req_q == lpl_ack_s))   lpl_req_q <= ~lpl_req_q;",
                          "    else if (1'b0)                                 lpl_req_q <= ~lpl_req_q;", 1)]),
+    # the pending loss cleared by an end of burst, not by the next packet start (test loss:
+    # LP loss, a deskew burst on every lane, then the line)
+    ("lost_burst_pending_cleared_at_eob", [(CTRL, "    else if (lm_sop)                  lpl_pend_q <= 1'b0;",
+                                            "    else if (lm_eob)                  lpl_pend_q <= 1'b0;", 1)]),
     ("sync_error_no_drop", [(CTRL, "lm_skew || (|al_sync_err) ||", "lm_skew ||", 1)]),
     ("deskew_counted_on_last_lane", [(CTRL, "assign bev = {al_sync_err, px_skip, al_deskew[0], lm_skew, pkt_ev};",
                                       "assign bev = {al_sync_err, px_skip, al_deskew[Lanes-1], lm_skew, pkt_ev};", 1)]),
+    # RAW (band, bow only): every raw word taken, not only the valid ones (test gaps); the
+    # capture started by the rise of any lane's RxActiveHS (the start word: check_raw)
+    ("raw_valid_ignored", [(CTRL, ".rx_vld0_i     (band_raw_valid_i[0]),", ".rx_vld0_i     (1'b1),", 1)]),
+    ("raw_trigger_any_lane", [(CTRL, ".arm0_i        (arm[0]),", ".arm0_i        (|arm),", 1)]),
     # flat wrapper (standard PHY)
     ("flat_no_byte_delay", [(FLAT, "    assign ppi_hs[l].rx_valid_hs     = valid_q[l];",
                              "    assign ppi_hs[l].rx_valid_hs     = rx_valid_hs_i[l];", 1),
@@ -87,14 +103,27 @@ MUTANTS = [
                               "rx_active_hs_i[l];", 1)]),
     ("flat_skew_cal_level", [(FLAT, "    assign ppi_hs[l].rx_skew_cal_hs  = skew_edge_q[l];",
                               "    assign ppi_hs[l].rx_skew_cal_hs  = skew_q[l];", 1)]),
+    # no lane mask of the lost burst marking behind the wrapper (std lpmask: an error of a
+    # lane CTRL disabled before). Not a mutant: Enable without the 2 flops (a CDC structure;
+    # a standard PHY's ErrControl reaches the controller 2..3 video clocks after its pulse,
+    # through the wrapper's synchroniser, so no stimulus can aim at those 2 cycles)
+    ("flat_lane_en_tied_1", [(FLAT, ".band_lane_en_lp_i   (lane_en_lp),",
+                              ".band_lane_en_lp_i   ('1),", 1)]),
 ]
 
 
-def run(cmd, log, timeout=None, cwd=None):
+# Verilator gets the environment without the Python settings of this interpreter: a python3
+# wrapper (one that sets PYTHONHOME / PYTHONPATH for its own Python) would otherwise hand
+# them to the python3 that verilated.mk runs for a single-file build (verilator_includer),
+# which then fails on a stdlib of another version
+VERILATOR_ENV = {k: v for k, v in os.environ.items() if k not in ("PYTHONHOME", "PYTHONPATH")}
+
+
+def run(cmd, log, timeout=None, cwd=None, env=None):
     with open(log, "w") as fh:
         try:
             return subprocess.call(cmd, stdout=fh, stderr=subprocess.STDOUT, timeout=timeout,
-                                   cwd=cwd)
+                                   cwd=cwd, env=env)
         except subprocess.TimeoutExpired:
             return "timeout"
 
@@ -133,7 +162,7 @@ def build_tb(d, lanes, files):
     # one retry: under load Verilator 5.020 can abort at its exit ("attempted to destroy locked
     # Thread Pool") after a good build; a real build error fails twice
     for _ in range(2):
-        if run(cmd, os.path.join(d, f"build_l{lanes}.log")) == 0:
+        if run(cmd, os.path.join(d, f"build_l{lanes}.log"), env=VERILATOR_ENV) == 0:
             return os.path.join(obj, "Vtb_csi2rx_ppi")
     return None
 

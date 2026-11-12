@@ -10,9 +10,12 @@
 //            vid_clk_i (the D-PHY's lp clock); band_lane_en_lp / band_clk_force_lp are
 //            Enable / CTRL.CLK_FORCE through 2 vid_clk_i flops reset by band_lp_rst_ni, as
 //            u_sync_vcfg of the D-PHY (so an error in the last cycle before a lane's mask
-//            applies marks a lost burst, one in the first cycle after does not); RAW gets
-//            a word on every byte clock (00 from RxActiveHS on, B8 3 cycles before RxSyncHS,
-//            then the lane's bytes without the gaps); STATUS: LP-11, HS receivers off, CE =
+//            applies marks a lost burst, one in the first cycle after does not); RAW words
+//            with a valid common to all lanes (the XPHY's FIFOs are read in step), low where
+//            lane 0's RxValidHS has a gap 2 cycles later: other words before RxActiveHS
+//            rises, then per valid cycle the lane's raw stream (00 words, B8 3 cycles before
+//            RxSyncHS when no gap delays it, the lane's bytes without the gaps), other words
+//            in the cycles without a valid; STATUS: LP-11, HS receivers off, CE =
 //            RxClkActiveHS through 2 clk_i flops, PHY ready; byte clock meter and DLYn 0
 //   std = 1  a standard PHY, to the flat wrapper bow_csi2rx_ppi_flat: ErrControl pulses on
 //            its own lp clock (lp_clk_o, period lp_ns), no ErrControlClk, no band
@@ -50,7 +53,8 @@
 // events of its previous burst are over: a rendering error); report() prints what the run
 // covered (cov_*: bursts by the byte clock edges after the one at which the last RxActiveHS
 // falls, RxActiveHS before / with RxSyncHS, gap cycles, ErrSotSyncHS after the fall / early,
-// RxSkewCalHS pulse / level, ErrSotHS, bytes with RxActiveHS low, lp pulses, mask edges).
+// RxSkewCalHS pulse / level, ErrSotHS, bytes with RxActiveHS low, lp pulses, mask edges,
+// cycles without a RAW word).
 
 `timescale 1ns / 1ps
 
@@ -94,6 +98,7 @@ module bow_ppi_bfm import bow_ppi_pkg::*; import csi2_tx_pkg::csi2_now; #(
   int unsigned cov_act_early = 0, cov_act_sync = 0, cov_no_act = 0, cov_bytes = 0, cov_gaps = 0;
   int unsigned cov_err_late = 0, cov_err_early = 0, cov_skew_pulse = 0, cov_skew_level = 0;
   int unsigned cov_err_sot = 0, cov_low_bytes = 0, cov_hs = 0, cov_lp = 0, cov_edge1 = 0, cov_edge2 = 0;
+  int unsigned cov_raw_gaps = 0;
 
   // ------------------------------------------------------------------ knobs
   bit      std = 1'b0;
@@ -245,22 +250,39 @@ module bow_ppi_bfm import bow_ppi_pkg::*; import csi2_tx_pkg::csi2_now; #(
   int               tq_g [$], tq_n [$];   // t_end due at the edge of cycle tq_g of burst tq_n
   logic [Lanes-1:0] stop_q = '1;          // Stopstate: no burst event on the lane
 
+  int rprog [4], rpos [4];                // RAW: the program of the lane's raw stream, its position
+
+  initial for (int l = 0; l < 4; l++) rprog[l] = -1;
+
   // values of cycle g on every lane
   function automatic void drive(int g);
     ppi_hs_t [Lanes-1:0]   hs;
     logic [Lanes-1:0][7:0] raw;
     logic [Lanes-1:0]      stop;
-    int p, c, i, v;
+    logic                  rv;
+    int p, c, i, v, q, n00;
     hs   = '0;
     raw  = '0;
     stop = '1;
+    // drop the programs whose events are over
     for (int l = 0; l < int'(Lanes); l++) begin
-      // drop the programs whose events are over
       while (progs[l].size() != 0) begin
         p = progs[l][0];
         if (pstore[p] + pstore[p + 12] >= g) break;
         void'(progs[l].pop_front());
       end
+    end
+    // RAW (std = 0): the XPHY's FIFOs of all lanes are read in step, so one valid for every
+    // lane: low where lane 0's RxValidHS has a gap 2 cycles later (the aligner's latency)
+    rv = 1'b1;
+    if (progs[0].size() != 0) begin
+      p = progs[0][0];
+      i = g + 2 - pstore[p] - pstore[p + 3];
+      if (g >= pstore[p] && pstore[p + 3] >= 0 && i >= 0 && i < pstore[p + 9]) begin
+        rv = (bstore[pstore[p + 8] + i] >= 0);
+      end
+    end
+    for (int l = 0; l < int'(Lanes); l++) begin
       if (progs[l].size() == 0) continue;
       p = progs[l][0];
       c = g - pstore[p];
@@ -282,11 +304,28 @@ module bow_ppi_bfm import bow_ppi_pkg::*; import csi2_tx_pkg::csi2_now; #(
       hs[l].err_sot_sync_hs = (c == pstore[p + 4]);
       hs[l].rx_skew_cal_hs  = (pstore[p + 5] >= 0) && (c >= pstore[p + 5]) &&
                               (c < pstore[p + 5] + pstore[p + 6]);
-      // RAW words (std = 0): 00 from RxActiveHS on, B8, then the bytes without the gaps
-      if ((pstore[p + 3] >= 0) && (pstore[p + 1] >= 0) && (c >= pstore[p + 1])) begin
-        i = c - (pstore[p + 3] - 2);
-        if (c == pstore[p + 3] - 3)                 raw[l] = 8'hB8;
-        else if ((i >= 0) && (i < pstore[p + 11])) raw[l] = 8'(rstore[pstore[p + 10] + i]);
+      // RAW words (std = 0): other words before RxActiveHS rises; from it on, one word of
+      // the lane's raw stream per valid cycle (00 words, B8 3 cycles before RxSyncHS when
+      // no gap delays it, then the bytes without the gaps, then 00), other words where the
+      // raw valid is low
+      if (rprog[l] != p) begin
+        rprog[l] = p;
+        rpos[l]  = 0;
+      end
+      if (std) begin
+        // no RAW words on the PPI of a standard PHY
+      end else if (pstore[p + 1] >= 0 && c < pstore[p + 1]) begin
+        raw[l] = 8'($urandom_range(255, 1));
+      end else if (pstore[p + 3] >= 0 && pstore[p + 1] >= 0) begin
+        if (!rv) begin
+          raw[l] = 8'($urandom_range(255, 1));
+        end else begin
+          n00 = pstore[p + 3] - 3 - pstore[p + 1];
+          q   = rpos[l];
+          rpos[l]++;
+          if (q == n00)                                     raw[l] = 8'hB8;
+          else if (q > n00 && q - n00 - 1 < pstore[p + 11]) raw[l] = 8'(rstore[pstore[p + 10] + q - n00 - 1]);
+        end
       end
     end
     while (tq_g.size() != 0) begin
@@ -297,8 +336,9 @@ module bow_ppi_bfm import bow_ppi_pkg::*; import csi2_tx_pkg::csi2_now; #(
     end
     ppi_hs_o         = hs;
     band_raw_data_o  = raw;
-    band_raw_valid_o = std ? '0 : '1;
+    band_raw_valid_o = std ? '0 : {Lanes{rv}};
     stop_q           = stop;
+    if (!std && !rv) cov_raw_gaps++;
   endfunction
 
   initial begin : clock
@@ -502,11 +542,11 @@ module bow_ppi_bfm import bow_ppi_pkg::*; import csi2_tx_pkg::csi2_now; #(
   endfunction
 
   function automatic void report();
-    $display("bow_ppi_bfm: %s timing, %0d bursts (byte clock edges after the last fall of RxActiveHS: %0d stop 4 byte clocks after it, %0d more, %0d 0..3, %0d before it), lanes: %0d RxActiveHS before RxSyncHS, %0d with it, %0d without RxActiveHS; %0d bytes, %0d gap cycles, %0d bytes with RxActiveHS low; ErrSotSyncHS %0d after the fall, %0d early; RxSkewCalHS %0d pulses, %0d levels; ErrSotHS %0d; lp domain pulses: %0d HS entries, %0d ErrControl / ErrControlClk (mask edges: %0d last unmasked, %0d first masked cycle)",
+    $display("bow_ppi_bfm: %s timing, %0d bursts (byte clock edges after the last fall of RxActiveHS: %0d stop 4 byte clocks after it, %0d more, %0d 0..3, %0d before it), lanes: %0d RxActiveHS before RxSyncHS, %0d with it, %0d without RxActiveHS; %0d bytes, %0d gap cycles, %0d bytes with RxActiveHS low; ErrSotSyncHS %0d after the fall, %0d early; RxSkewCalHS %0d pulses, %0d levels; ErrSotHS %0d; lp domain pulses: %0d HS entries, %0d ErrControl / ErrControlClk (mask edges: %0d last unmasked, %0d first masked cycle); %0d cycles without a RAW word",
              std ? "standard PHY" : "D-PHY of Bow32", bursts_done, cov_post4, cov_post_more,
              cov_post_short, cov_post_before, cov_act_early, cov_act_sync, cov_no_act, cov_bytes,
              cov_gaps, cov_low_bytes, cov_err_late, cov_err_early, cov_skew_pulse, cov_skew_level,
-             cov_err_sot, cov_hs, cov_lp, cov_edge2, cov_edge1);
+             cov_err_sot, cov_hs, cov_lp, cov_edge2, cov_edge1, cov_raw_gaps);
   endfunction
 
   function automatic bit busy();

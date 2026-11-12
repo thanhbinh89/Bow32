@@ -7,8 +7,9 @@
 # (step 3 of docs/ip/mipi_rx_arch.md, section 10).
 #
 #   make test                          test-rx, then test-ppi
-#   make test-rx                       aligner unit test + random cases (SEEDS x lanes x errors)
-#                                      + directed tests of the whole receiver
+#   make test-rx                       aligner unit test, then random cases (SEEDS x lanes x
+#                                      errors) and directed tests of the whole receiver, PJOBS
+#                                      of them at a time
 #   make test-ppi                      the PPI bench: random cases (SEEDS) and directed tests in
 #                                      both timings, the D-PHY of Bow32 and a standard PHY
 #   make run-ppi MODE=std TEST=loss LANES=4   one PPI case (MODE bow|std, the options of run),
@@ -23,7 +24,8 @@
 #   make test SEEDS="1 2 3 4 5 6 7 8"
 # Options of 'run': LANES (lanes used), DUT_LANES (Lanes parameter, default LANES),
 # ERRORS=1, RAW8=1, CONTCLK=1, BURSTRST=1 (DUT_LANES=4). JOBS: C++ build jobs of
-# Verilator (default 0: all cores).
+# Verilator (default 0: all cores). PJOBS: cases of test-rx / test-ppi run at a time
+# (default: the number of CPUs; PJOBS=1: one after the other).
 #
 # One model per Lanes parameter: Lanes = 1 and 2 as on the KV260 (UltraScale+
 # PHY: a word every byte clock, IDELAY taps in the byte clock domain, FIFO 256),
@@ -82,6 +84,12 @@ FLISTS  := -F $(REPO)/hw/ip/common/common.f -F $(REPO)/hw/ip/bus/bus.f \
 PPI_CHK := $(REPO)/hw/ip/dphy_rx/dv/bow_ppi_chk.sv
 SRCS    := $(shell find $(REPO)/hw/ip/csi2rx $(REPO)/hw/ip/dphy_rx $(REPO)/hw/ip/common \
                     $(REPO)/hw/ip/bus -name '*.sv' -o -name '*.f')
+# A model build ($(1): the Verilator command), once more if it fails: Verilator 5.020 can
+# abort at its exit after a good build ("attempted to destroy locked Thread Pool"), a real
+# error fails twice. Then the binary is touched: Verilator leaves a model whose C++ did not
+# change as it was, and a binary older than SRCS would make every case of the parallel runs
+# (test-rx, test-ppi) build it again, all at once.
+vbuild = { $(1) || $(1); } && touch $@
 
 build: $(call sim_bin,1) $(call sim_bin,2) $(call sim_bin,4)
 build-ppi: $(call ppi_bin,1) $(call ppi_bin,2) $(call ppi_bin,4)
@@ -98,12 +106,13 @@ align: $(ALIGN_BIN)
 	  grep -q 'tb_dphy_align: PASS' $(BUILD)/align.log
 
 # One model per Lanes parameter
+VRX = $(VERILATOR) --binary --timing -j $(JOBS) -O2 -Wno-fatal -Wno-lint -Wno-style \
+  -Wno-TIMESCALEMOD +define+BOW_CDC_JITTER \
+  --top-module tb_bow_csi2rx $(PARAMS_$*) -Mdir $(BUILD)/obj_l$* -o Vtb_bow_csi2rx \
+  $(FLISTS) csi2_tx_model.sv $(PPI_CHK) tb_bow_csi2rx.sv
 $(BUILD)/obj_l%/Vtb_bow_csi2rx: $(SRCS)
 	@mkdir -p $(BUILD)
-	$(VERILATOR) --binary --timing -j $(JOBS) -O2 -Wno-fatal -Wno-lint -Wno-style -Wno-TIMESCALEMOD \
-	  +define+BOW_CDC_JITTER \
-	  --top-module tb_bow_csi2rx $(PARAMS_$*) -Mdir $(BUILD)/obj_l$* -o Vtb_bow_csi2rx \
-	  $(FLISTS) csi2_tx_model.sv $(PPI_CHK) tb_bow_csi2rx.sv
+	$(call vbuild,$(VRX))
 
 # One case: generate, simulate, compare
 flag = $(if $(filter 1,$($(1))),$(2))
@@ -115,38 +124,36 @@ run: $(call sim_bin,$(DUT_LANES))
 	  $(GENOPT_$(DUT_LANES)) > /dev/null
 	@$(call sim_bin,$(DUT_LANES)) +DIR=$(CASE) +verilator+seed+$(SEED) > $(CASE)/sim.log 2>&1 || \
 	  { echo "$(CASE): simulation failed"; tail -5 $(CASE)/sim.log; exit 1; }
-	@$(MODEL) check $(CASE)
+	@$(MODEL) check $(CASE) > $(CASE)/check.log 2>&1; r=$$?; cat $(CASE)/check.log; exit $$r
 
-# Every seed: 2 lanes with and without errors, 1 lane (Lanes = 1) with errors,
-# 1 lane used of 2 with and without errors; on the 4 lane receiver 4 lanes with
-# and without errors and 4 lanes with errors once more with BurstRxRst = 1, 2
-# of 4 with and without errors, 1 of 4 with errors (4th field: BurstRxRst);
-# RAW8 / continuous clock alternate. Then the aligner unit test and the
-# directed tests (lists above; BurstRxRst = 0).
-test-rx: build $(ALIGN_BIN)
-	@fail=0; $(MAKE) --no-print-directory align || fail=1; \
-	for s in $(SEEDS); do \
+# The aligner unit test, then the cases: every seed 2 lanes with and without errors, 1
+# lane (Lanes = 1) with errors, 1 lane used of 2 with and without errors; on the 4 lane
+# receiver 4 lanes with and without errors and 4 lanes with errors once more with
+# BurstRxRst = 1, 2 of 4 with and without errors, 1 of 4 with errors (4th field:
+# BurstRxRst); RAW8 / continuous clock alternate. Then the directed tests (lists above;
+# BurstRxRst = 0). The cases are independent: PJOBS of them run at a time (as in
+# test-ppi), each prints its check line; the target fails if one failed.
+PJOBS ?= $(shell nproc 2>/dev/null || echo 4)
+rx-cases:
+	@for s in $(SEEDS); do \
 	  r=$$((s % 2)); c=$$((s / 2 % 2)); \
 	  for cfg in "2 2 0 0" "2 2 1 0" "1 1 1 0" "1 2 0 0" "1 2 1 0" \
 	             "4 4 0 0" "4 4 1 0" "4 4 1 1" "2 4 0 1" "2 4 1 0" "1 4 1 1"; do \
 	    set -- $$cfg; \
-	    $(MAKE) --no-print-directory run TEST=random SEED=$$s LANES=$$1 DUT_LANES=$$2 \
-	      ERRORS=$$3 BURSTRST=$$4 RAW8=$$r CONTCLK=$$c || fail=1; \
+	    echo "TEST=random SEED=$$s LANES=$$1 DUT_LANES=$$2 ERRORS=$$3 BURSTRST=$$4 RAW8=$$r CONTCLK=$$c"; \
 	  done; \
 	done; \
-	for t in $(DIRECTED); do $(MAKE) --no-print-directory run TEST=$$t || fail=1; done; \
-	for t in $(DIRECTED1); do $(MAKE) --no-print-directory run TEST=$$t LANES=1 || fail=1; done; \
-	for t in $(DIRECTED12); do \
-	  $(MAKE) --no-print-directory run TEST=$$t LANES=1 DUT_LANES=2 || fail=1; \
-	done; \
-	for t in $(DIRECTEDC); do \
-	  $(MAKE) --no-print-directory run TEST=$$t CONTCLK=1 || fail=1; \
-	  $(MAKE) --no-print-directory run TEST=$$t CONTCLK=1 LANES=4 || fail=1; \
-	done; \
-	for t in $(DIRECTED4); do $(MAKE) --no-print-directory run TEST=$$t LANES=4 || fail=1; done; \
-	for t in $(DIRECTED24); do \
-	  $(MAKE) --no-print-directory run TEST=$$t LANES=2 DUT_LANES=4 || fail=1; \
-	done; \
+	for t in $(DIRECTED); do echo "TEST=$$t"; done; \
+	for t in $(DIRECTED1); do echo "TEST=$$t LANES=1"; done; \
+	for t in $(DIRECTED12); do echo "TEST=$$t LANES=1 DUT_LANES=2"; done; \
+	for t in $(DIRECTEDC); do echo "TEST=$$t CONTCLK=1"; echo "TEST=$$t CONTCLK=1 LANES=4"; done; \
+	for t in $(DIRECTED4); do echo "TEST=$$t LANES=4"; done; \
+	for t in $(DIRECTED24); do echo "TEST=$$t LANES=2 DUT_LANES=4"; done
+
+test-rx: build $(ALIGN_BIN)
+	@fail=0; $(MAKE) --no-print-directory align || fail=1; \
+	$(MAKE) --no-print-directory -s rx-cases | \
+	  xargs -P $(PJOBS) -L 1 $(MAKE) --no-print-directory run || fail=1; \
 	exit $$fail
 
 # ------------------------------------------------------------------- PPI bench
@@ -155,12 +162,13 @@ PPI_SRCS  := $(REPO)/hw/ip/csi2rx/rtl/bow_csi2rx_ppi_flat.sv csi2_tx_model.sv bo
              tb_csi2rx_ppi.sv
 PGENOPT_4 := --fifo-depth 512
 
+VPPI = $(VERILATOR) --binary --timing -j $(JOBS) -O2 -Wno-fatal -Wno-lint -Wno-style \
+  -Wno-TIMESCALEMOD +define+BOW_CDC_JITTER \
+  --top-module tb_csi2rx_ppi $(PARAMS_$*) -Mdir $(BUILD)/obj_ppi_l$* -o Vtb_csi2rx_ppi \
+  $(FLISTS) $(PPI_SRCS)
 $(BUILD)/obj_ppi_l%/Vtb_csi2rx_ppi: $(SRCS)
 	@mkdir -p $(BUILD)
-	$(VERILATOR) --binary --timing -j $(JOBS) -O2 -Wno-fatal -Wno-lint -Wno-style -Wno-TIMESCALEMOD \
-	  +define+BOW_CDC_JITTER \
-	  --top-module tb_csi2rx_ppi $(PARAMS_$*) -Mdir $(BUILD)/obj_ppi_l$* -o Vtb_csi2rx_ppi \
-	  $(FLISTS) $(PPI_SRCS)
+	$(call vbuild,$(VPPI))
 
 PNAME = ppi_$(MODE)_$(TEST)$(if $(filter random,$(TEST)),_s$(SEED))_l$(LANES)$(if $(filter-out $(LANES),$(DUT_LANES)),of$(DUT_LANES))$(call flag,ERRORS,_err)$(call flag,RAW8,_raw8)$(call flag,CONTCLK,_cont)
 PCASE = $(BUILD)/$(PNAME)
@@ -176,18 +184,18 @@ run-ppi: $(call ppi_bin,$(DUT_LANES))
 # errors, 1 of 2 with errors, 4 lanes with and without errors, 2 of 4 and 1 of 4 with
 # errors, RAW8 / continuous clock alternating as in test-rx; the directed tests of the
 # controller on 2 and on 4 lanes, some with 1 lane, 1 of 2, 2 of 4 and with the continuous
-# clock (2 and 4 lanes). Then, in the timing of the D-PHY of Bow32 only (the gaps of the
-# XPHY, the masks of the band), gaps and lpmask on 1, 2 and 4 lanes. The cases are
-# independent: PJOBS of them run at a time (as the cases of the DDR and HyperRAM benches),
-# each prints its check line; the target fails if one failed.
-PJOBS          ?= $(shell nproc 2>/dev/null || echo 4)
+# clock (2 and 4 lanes); lpmask on 1, 2 and 4 lanes (its mask edge cases only in the
+# timing of the D-PHY of Bow32). Then, in that timing only (the gaps of the XPHY), gaps on
+# 1, 2 and 4 lanes. PJOBS cases run at a time (as in test-rx and the DDR / HyperRAM
+# benches), each prints its check line; the target fails if one failed.
 PPI_MODES      := bow std
 PPI_DIRECTED   := cmd ovf stop skew deskew extra loss ovf2 ovf8 be clkstop
 PPI_DIRECTED1  := cmd stop deskew extra ovf loss be clkstop
 PPI_DIRECTED12 := deskew extra loss clkstop
 PPI_DIRECTED24 := cmd stop skew deskew extra loss clkstop
 PPI_DIRECTEDC  := be loss clkstop
-PPI_BOW        := gaps lpmask
+PPI_DIRECTED3  := lpmask
+PPI_BOW        := gaps
 ppi-cases:
 	@for m in $(PPI_MODES); do \
 	  for s in $(SEEDS); do \
@@ -204,6 +212,7 @@ ppi-cases:
 	  for t in $(PPI_DIRECTEDC); do \
 	    echo "MODE=$$m TEST=$$t CONTCLK=1"; echo "MODE=$$m TEST=$$t CONTCLK=1 LANES=4"; \
 	  done; \
+	  for t in $(PPI_DIRECTED3); do for l in 1 2 4; do echo "MODE=$$m TEST=$$t LANES=$$l"; done; done; \
 	done; \
 	for t in $(PPI_BOW); do for l in 1 2 4; do echo "MODE=bow TEST=$$t LANES=$$l"; done; done
 
@@ -224,4 +233,4 @@ mutants-ppi:
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: build build-ppi align run run-ppi ppi-cases test test-rx test-ppi mutants-ppi clean
+.PHONY: build build-ppi align run run-ppi rx-cases ppi-cases test test-rx test-ppi mutants-ppi clean

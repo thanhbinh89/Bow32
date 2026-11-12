@@ -42,7 +42,7 @@ Command line (used by hw/ip/csi2rx/dv):
         bow_csi2rx_ppi_flat (RxActiveHS with RxSyncHS, no gaps, ErrSotSyncHS early,
         pulses on the PHY's own lp clock, no PhyReady, no ErrControlClk, no HS
         entry pulses, no RAW). NAME: random, cmd, ovf, stop, skew, deskew, extra,
-        loss, ovf2, ovf8, be, clkstop, and with bow gaps, lpmask.
+        loss, ovf2, ovf8, be, clkstop, lpmask, and with bow gaps.
     csi2_model.py check DIR
         compares DIR/out.txt (m_axis transfers) and DIR/regs.txt (register reads,
         frame end records, invariants, burst end times) with the prediction.
@@ -759,12 +759,15 @@ class Receiver:
 
     def ppi_lp_error(self, mask, edge):
         """'lperr MASK EDGE' (PPI bench): ErrControl of the data lanes in MASK (bit 4:
-        ErrControlClk) without an LP sequence, at once (EDGE 0) or at the next edge of the
+        ErrControlClk, none behind the flat wrapper) without an LP sequence, at once (EDGE
+        0: with the masks as the stimulus set them, well before) or at the next edge of the
         controller's mask of that lane (the lane disabled, CLK_FORCE set): in the last lp
         clock cycle before it applies (EDGE 2: a lost burst) or the first one after (EDGE 1:
         masked). ERR_STATUS.LP and CNT_MISC[23:16] count every error."""
         for i in list(range(MAX_LANES)) + [CLK]:
             if mask >> i & 1:
+                if self.ppi == PPI_STD and i == CLK:
+                    continue
                 self.ev("lp")
                 if edge != 1:
                     self.lp_loss(i)
@@ -772,8 +775,10 @@ class Receiver:
     def lp_loss(self, i):
         """LP error of an enabled data lane, or of the clock lane while the
         byte clock is gated (no CLK_FORCE): the HS entry was refused, a burst
-        may be lost. It counts as a lost burst (drop) at the next packet start."""
-        if self.rx_on and (i != CLK or not self.ctrl & CTRL_CLK_FORCE):
+        may be lost. It counts as a lost burst (drop) at the next packet start.
+        A disabled data lane's error is masked (only 'lperr' gives one: the
+        state machine of a disabled lane is off)."""
+        if self.rx_on and self.lane_en(i) and (i != CLK or not self.ctrl & CTRL_CLK_FORCE):
             self.lp_lost = True
 
     def clock_on(self):
@@ -1499,7 +1504,9 @@ def run_stim(cfg, lines, rx=None):
 #                              at S (-1: no sync), ErrSotSyncHS at E, RxSkewCalHS in [K, K + KL),
 #                              ErrSotHS with RxSyncHS if H; B: a byte per cycle from S on (hex,
 #                              '--': no RxValidHS in that cycle, '-': no bytes). bow: RAW gets
-#                              00 words from A, B8 at S - 3, then the bytes without the gaps.
+#                              other words before A, then 00 words, B8 at S - 3, the bytes
+#                              without the gaps, one per cycle in which its valid (lane 0's
+#                              RxValidHS 2 cycles later, common to all lanes) is high.
 #   ppb N GAP STOP TEND        burst N: GAP ns of LP time (no byte clock unless it runs
 #                              continuously), then the byte clock runs STOP edges; lane events
 #                              after the last one happen when it runs again (stopped early);
@@ -1727,6 +1734,11 @@ class Ppi:
             if ln["a"] < 0:
                 ln["f"] = -1                   # no RxActiveHS
             lanes[l] = ln
+        # bow: in the burst that RAW captures from the rise of lane 0's RxActiveHS, another
+        # lane rises a cycle earlier (check_raw: the first word is lane 0's first HS word)
+        if not std and rx.raw.burst is b and 0 in lanes and len(lanes) >= 2:
+            lanes[0]["a"] = pre + 1
+            lanes[max(lanes)]["a"] = pre
         # std: the RxActiveHS of the lanes overlap (the controller takes one burst from the
         # first rise to the last fall; a lane low before a late lane rises would split it)
         if std:
@@ -2521,12 +2533,14 @@ def gen_deskew(g):
     """D-PHY skew calibration bursts (HS-zero, FFFFh, 0101..., raw bursts with
     no packet): no sync error, counted (CNT_EXT, lane 0), also between the
     lines of a frame; with 2 or 4 lanes, a deskew sync on some lanes only is a
-    skew error (lane 0 alone, all lanes but lane 0; CNT_EXT read after each: only
-    the first counts). Corrupted 0xB8 syncs
+    skew error (lane 0 alone, all lanes but lane 0, back to back: the first
+    counts). Corrupted 0xB8 syncs
     stay sync errors: 00 FF in the pixels, the 0xFF trail after 0x00, 0xFC /
     0xFE / 0xFF before the DI 0x2B, sync bits just before the end of the
     leader (on every lane; with 4 lanes the 2 lane patterns on lanes 0, 1 and
-    again on lanes 2, 3)."""
+    again on lanes 2, 3). At the end, the two partial deskew bursts once more,
+    each alone with CNT_EXT read after it (read only after the pair, a count
+    on another lane than lane 0 could cancel out)."""
     g.phy_up()
     on(g)
     g.emit("tready 100")
@@ -2550,9 +2564,8 @@ def gen_deskew(g):
     g.rd("ERR_STATUS")
     if lanes >= 2:
         deskew(1)
-        g.rd("CNT_EXT")                              # lane 0 alone: counted
         deskew(full & ~1)
-        g.rd("CNT_EXT")                              # the other lanes: not counted
+        g.rd("CNT_EXT")
         g.rd("CNT_MISC")
         g.rd("ERR_STATUS")
     frame(g, 0, DT_RAW10, 32, 3, fnum=2)
@@ -2593,6 +2606,11 @@ def gen_deskew(g):
         g.rd("CNT_EXT")
         g.rd("ERR_STATUS")
     frame(g, 0, DT_RAW10, 32, 3, fnum=5)
+    if lanes >= 2:
+        deskew(full & ~1)
+        g.rd("CNT_EXT")                              # the other lanes alone: not counted
+        deskew(1)
+        g.rd("CNT_EXT")                              # lane 0 alone: counted
     g.dump(log=False)
 
 
@@ -2682,7 +2700,10 @@ def gen_loss(g):
     between frames, which counts for the next one. A line without a pixel
     group later in a frame flags the next line. An HS entry refused by the
     clock lane flags the next line, unless CTRL.CLK_FORCE. ECC_CORR of an FE
-    header counts for the frame it ends, not for the next one."""
+    header counts for the frame it ends, not for the next one. A refused HS
+    entry stays pending across a burst without a packet (deskew on every
+    lane) until the next line. A CRC error flags its own line at tlast, also
+    when the packet's last word holds payload (4 lanes, WC mod 4 = 1, 2)."""
     g.phy_up()
     ctrl = on(g)
     g.emit("tready 100")
@@ -2839,6 +2860,26 @@ def gen_loss(g):
         g.rd("FRAME_ERR")
         frame(g, 0, DT_RAW10, 32, 1, fnum=fnum + 1)  # clean
         g.rd("FRAME_ERR")
+    # an HS entry refused at the LP level stays pending until the next packet start,
+    # across a burst without one (a deskew burst on every lane: an end of burst, no packet)
+    g.send(g.short(0, DT_FS, 26))
+    g.send(line())
+    lp_glitch()
+    g.send(g.deskew_burst())
+    g.send(line())                                   # err
+    g.send(line())
+    g.send(g.short(0, DT_FE, 26))
+    g.rd("FRAME_ERR")
+    # a CRC error flags its own line (tuser[1] with tlast), also when the last word of the
+    # packet holds payload bytes (4 lanes: WC mod 4 = 1 or 2, RAW10 of 4, 8, 20, 24 pixels)
+    g.send(g.short(0, DT_FS, 27))
+    for w in (4, 8, 20, 24):
+        c = g.corrupt(g.line(0, DT_RAW10, w), "crc")
+        assert g.pkt(c), burst_problem(g.rx, c)
+        g.send(line())
+    g.send(g.short(0, DT_FE, 27))
+    g.rd("FRAME_ERR")
+    g.rd("CNT_CRC")
     g.dump(log=False)
 
 
@@ -3092,10 +3133,12 @@ def gen_clkstop(g):
 
 def gen_gaps(g):
     """PPI, D-PHY of Bow32: RxValidHS gaps anywhere in the bursts, as from the FIFOs of
-    the Versal XPHY (in a cycle on every lane, or on a lane ahead of the others), on 40 %
-    of the cycles, then 75 %: RAW10 lines of 4..200 pixels, embedded data of every length
-    mod the lane count, a generic short packet, an ECC, a CRC and a sync error, lane
-    skew 0..4; then RAW8 lines of 1..64 pixels; LOG of every frame."""
+    the Versal XPHY (in a cycle on every lane, or on a lane ahead of the others), gap
+    parameter 0.4 then 0.75 (Ppi.gap: about 20 % then 38 % of the cycles of a burst):
+    RAW10 lines of 4..200 pixels, embedded data of every length mod the lane count, a
+    generic short packet, an ECC, a CRC and a sync error, lane skew 0..4; then RAW8 lines
+    of 1..64 pixels; LOG of every frame. RAW of the 200 pixel line of the second frame:
+    its words have the gaps too (band_raw_valid low, other words in those cycles)."""
     if not g.ppi or g.ppi.std:
         raise SystemExit("test gaps needs --ppi bow")
     r = g.rnd
@@ -3106,6 +3149,8 @@ def gen_gaps(g):
         g.ppi.gap = gap
         g.send(g.short(0, DT_FS, k + 1))
         for w in (4, 8, 12, 64, 200):
+            if k == 1 and w == 200:
+                g.wr("RAW_CTRL", 1)
             g.send(g.line(0, DT_RAW10, w))
         for n in range(1, 8):
             g.send(g.long(0, DT_EMB, [r.randrange(256) for _ in range(n)]))
@@ -3118,6 +3163,10 @@ def gen_gaps(g):
         g.send(g.short(0, DT_FE, k + 1))
         for name in ("CNT_PKT", "CNT_LINE", "CNT_ECC", "CNT_CRC", "CNT_SOT", "FRAME_ERR"):
             g.rd(name)
+        if k == 1:
+            g.emit(f"poll {REG['RAW_CTRL']:03x} 00000100 00000100 200")
+            for i in range(64):
+                g.rd(REG["RAW"] + 4 * i)
         g.wr("LOG_CTRL", 1 | 2 | 4)
     g.wr("CTRL", ctrl & ~CTRL_RX_EN)
     g.wr("CTRL", ctrl & ~(0x3F << 8) | DT_RAW8 << 8)
@@ -3129,38 +3178,57 @@ def gen_gaps(g):
 
 
 def gen_lpmask(g):
-    """PPI, D-PHY of Bow32: the masks of the lost burst marking come from the band with
-    the D-PHY's latency (band_lane_en_lp = Enable through 2 video clock flops,
-    band_clk_force_lp = CLK_FORCE likewise). ErrControl of the highest lane in the last
-    video clock cycle before its synchronised enable falls (CTRL lowers the lane count with
-    the receiver on, between bursts) marks a lost burst: the next line of the frame has
-    tuser[1]; in the first cycle after it does not. ErrControlClk likewise in the last /
-    first cycle around the rise of CLK_FORCE (written with the receiver on: this test
-    only). Every error counts in ERR_STATUS.LP and CNT_MISC[23:16]."""
-    if not g.ppi or g.ppi.std:
-        raise SystemExit("test lpmask needs --ppi bow")
+    """PPI: the masks of the lost burst marking (v1: band_lane_en_lp, band_clk_force_lp).
+    Both timings: ErrControl of the highest lane while it is enabled marks a lost burst
+    (the next line of the frame has tuser[1]); after CTRL lowered the lane count (receiver
+    on, the mask applied well before the error) it only counts. Behind the flat wrapper
+    the mask is Enable through its 2 video clock flops; the error comes through its pulse
+    synchroniser (2..3 video clocks), so only these settled cases are exact there. D-PHY
+    of Bow32 only, the masks with the D-PHY's latency (Enable / CLK_FORCE through 2 video
+    clock flops of the band): ErrControl of the highest lane in the last video clock cycle
+    before its synchronised enable falls (CTRL lowers the lane count between bursts) marks
+    a lost burst, in the first cycle after it does not; ErrControlClk likewise in the last
+    / first cycle around the rise of CLK_FORCE (written with the receiver on: this test
+    only; a standard PHY has no ErrControlClk). Every error counts in ERR_STATUS.LP and
+    CNT_MISC[23:16]."""
+    if not g.ppi:
+        raise SystemExit("test lpmask needs --ppi")
+    std = g.ppi.std
     lanes = g.cfg["lanes"]
     ctrl = on(g)
     g.emit("tready 100")
     frame(g, 0, DT_RAW10, 32, 2, fnum=1)
+    hi = 1 << (lanes - 1)
     cases = []
     if lanes >= 2:
         fewer = ctrl & ~(CTRL_LANES | CTRL_LANES4) | ctrl_lanes(lanes // 2)
-        cases += [(1 << (lanes - 1), fewer, 2), (1 << (lanes - 1), fewer, 1)]
-    cases += [(1 << CLK, ctrl | CTRL_CLK_FORCE, 2), (1 << CLK, ctrl | CTRL_CLK_FORCE, 1)]
+        if not std:
+            cases += [(hi, fewer, 2), (hi, fewer, 1)]
+        cases += [(hi, fewer, 0)]                        # disabled before the error: counted
+    if not std:
+        cases += [(1 << CLK, ctrl | CTRL_CLK_FORCE, 2), (1 << CLK, ctrl | CTRL_CLK_FORCE, 1)]
+    cases += [(hi, ctrl, 0)]                             # enabled: a lost burst
     for fnum, (mask, new, edge) in enumerate(cases, start=2):
         g.send(g.short(0, DT_FS, fnum))
         g.send(g.line(0, DT_RAW10, 32))
-        g.sync()
-        g.emit(f"lperr {mask} {edge}")
-        g.wr("CTRL", new, now=True)
-        g.send(g.line(0, DT_RAW10, 32))                  # tuser[1] with EDGE 2
+        if edge:
+            g.sync()
+            g.emit(f"lperr {mask} {edge}")
+            g.wr("CTRL", new, now=True)
+        else:
+            if new != ctrl:
+                g.wr("CTRL", new)
+            g.sync()
+            g.emit("delay 200")                          # the mask has applied
+            g.emit(f"lperr {mask} 0")
+        g.send(g.line(0, DT_RAW10, 32))                  # tuser[1] when lost
         g.send(g.line(0, DT_RAW10, 32))
         g.send(g.short(0, DT_FE, fnum))
         for name in ("FRAME_ERR", "CNT_MISC", "ERR_STATUS"):
             g.rd(name)
         g.wr("ERR_STATUS", ERR_ALL)
-        g.wr("CTRL", ctrl)
+        if new != ctrl:
+            g.wr("CTRL", ctrl)
     frame(g, 0, DT_RAW10, 32, 2, fnum=len(cases) + 2)
     g.dump(log=False)
 
@@ -3171,11 +3239,11 @@ TESTS = {"random": gen_random, "lp": gen_lp, "watchdog": gen_watchdog, "clk": ge
          "loss": gen_loss, "ovf2": gen_ovf2, "ovf8": gen_ovf8, "be": gen_be,
          "clkstop": gen_clkstop, "gaps": gen_gaps, "lpmask": gen_lpmask}
 # The tests of the controller alone (--ppi): not those of the D-PHY (LP state machines,
-# watchdog, clock lane gate, byte clock meter, input delays); gaps and lpmask only in the
-# timing of the D-PHY of Bow32 (a standard PHY has no gaps, the masks are the wrapper's)
+# watchdog, clock lane gate, byte clock meter, input delays); gaps only in the timing of the
+# D-PHY of Bow32 (a standard PHY has no gaps; lpmask has its mask edge cases there only)
 PPI_TESTS = ("random", "cmd", "ovf", "stop", "skew", "deskew", "extra", "loss", "ovf2", "ovf8",
              "be", "clkstop", "gaps", "lpmask")
-PPI_BOW_ONLY = ("gaps", "lpmask")
+PPI_BOW_ONLY = ("gaps",)
 
 
 # ------------------------------------------------------------------ checker
@@ -3305,9 +3373,12 @@ def match_output(items, out, errs, max_extra):
     return sums
 
 
-def check_raw(group, errs):
+def check_raw(group, errs, start=False):
     """RAW capture of the first burst after ARM: on every lane the sync is
-    followed by the bytes of that lane."""
+    followed by the bytes of that lane. start (PPI bench, D-PHY of Bow32: the
+    BFM's raw words are 00 from the rise of a lane's RxActiveHS on, other
+    words before): the first word of lane 0 is 00, the capture started at the
+    rise of lane 0's RxActiveHS."""
     burst, lanes = group[0][0].a, group[0][0].b
     if burst is None:
         return
@@ -3319,6 +3390,9 @@ def check_raw(group, errs):
         if n < need:
             errs.append(f"RAW lane {l}: sync followed by the {need} first bytes of the burst not found "
                         f"(words {' '.join(f'{w:02x}' for w in words[:24])} ...)")
+        if start and l == 0 and words[0] != 0:
+            errs.append(f"RAW lane 0: first word {words[0]:02x}, not the 00 of the rise of its "
+                        f"RxActiveHS")
 
 
 def check(d):
@@ -3360,7 +3434,7 @@ def check(d):
         elif e.kind == "raw":
             raw.append((e, gv))
             if len(raw) == 64:
-                check_raw(raw, errs)
+                check_raw(raw, errs, cfg.get("ppi") == PPI_BOW)
                 raw = []
         if not ok:
             name = REG_NAME.get(a, "LOG[%d]" % ((a - 0x400) >> 2) if 0x400 <= a < 0x500 else f"{a:03x}")

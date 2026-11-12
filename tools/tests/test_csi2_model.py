@@ -620,6 +620,32 @@ class PpiTest(unittest.TestCase):
         rx.ppi_lp_error(1 << m.CLK, 2)
         self.assertTrue(rx.lp_lost)
         self.assertEqual(read(rx, "CNT_MISC") >> 16 & 0xFF, 2)
+        # at once (EDGE 0): a lane CTRL disabled before is masked, an enabled one is not; a
+        # standard PHY has no ErrControlClk (neither counted nor a loss)
+        for mode in (m.PPI_BOW, m.PPI_STD):
+            rx = receiver(ppi=mode)
+            rx.write(m.REG["CTRL"], read(rx, "CTRL") & ~m.CTRL_LANES)     # 1 lane of 2
+            rx.ppi_lp_error(2, 0)
+            self.assertFalse(rx.lp_lost)
+            rx.ppi_lp_error(1 << m.CLK, 0)
+            self.assertEqual(rx.lp_lost, mode == m.PPI_BOW)
+            rx.ppi_lp_error(1, 0)
+            self.assertTrue(rx.lp_lost)
+            self.assertEqual(read(rx, "CNT_MISC") >> 16 & 0xFF, 3 if mode == m.PPI_BOW else 2)
+
+    def test_raw_start(self):
+        # RAW of the D-PHY of Bow32's timing: the sync and bytes on every lane, and the first
+        # word of lane 0 is the 00 of the rise of its RxActiveHS
+        b = m.Burst(0, m.DT_FS, 1)
+        per = m.lane_split(b.sent(), 2)
+        def group(first):
+            words = [[first, 0, 0, m.SYNC] + per[l] + [0] * 64 for l in range(2)]
+            return [(m.Expect("raw", i, a=b, b=2), words[0][i] | words[1][i] << 8)
+                    for i in range(64)]
+        for first, start, bad in ((0x00, True, 0), (0x5A, False, 0), (0x5A, True, 1)):
+            errs = []
+            m.check_raw(group(first), errs, start)
+            self.assertEqual(len(errs), bad, (first, start, errs))
 
 
 def perfect_dut(d):
@@ -751,7 +777,7 @@ class GenCheckTest(unittest.TestCase):
                 self.gen(Path(tmp) / "y", "--test", "skew", "--lanes", "1")
             # PPI bench: the controller alone, no D-PHY model, no D-PHY tests
             for argv in (("--ppi", "bow", "--versal"), ("--ppi", "bow", "--test", "lp"),
-                         ("--ppi", "std", "--test", "gaps"), ("--ppi", "std", "--test", "lpmask"),
+                         ("--ppi", "std", "--test", "gaps"), ("--test", "lpmask"),
                          ("--test", "clkstop"), ("--test", "gaps")):
                 with self.assertRaises(SystemExit, msg=argv):
                     self.gen(Path(tmp) / "z", *argv)

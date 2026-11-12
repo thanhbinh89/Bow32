@@ -15,16 +15,23 @@
   (`hw/ip/csi2rx/rtl/`, không trong `csi2rx.f`; `RxActiveHS` cùng `RxSyncHS`, không khe,
   `ErrSotSyncHS` sớm, lỗi dạng xung ở clock lp của PHY, không `PhyReady`). `csi2_model.py gen
   --ppi bow|std` dựng mỗi item TX ở PPI từ chính mô hình bộ thu (kỳ vọng không đổi; luật ghép lane
-  kiểm trên chu kỳ đã dựng), test mới `clkstop`, `gaps`, `lpmask`; 164 case (lane 1, 2, 4, khe, lệch
-  lane tới 6 / 7, lỗi ECC / CRC / SoT / LP, byte clock dừng 4 cạnh sau khi `RxActiveHS` xuống hay
-  sớm hơn, tràn FIFO, lọc DT / VC, EXTRA, LOG) chạy song song, cả hai chế độ sạch; `make
-  mutants-ppi`: 14 mutant của controller và wrapper đều chết. Hồ sơ PPI của controller sửa theo kết
-  quả: v1 cần `RxActiveHS` lên trước `RxSyncHS` ít nhất 1 chu kỳ và còn cao 1 chu kỳ sau byte cuối,
+  kiểm trên chu kỳ đã dựng), test mới `clkstop`, `gaps` (cả RAW có khe), `lpmask` (hai chế độ: lỗi
+  LP của lane đã tắt chỉ đếm, cạnh mặt nạ chỉ ở D-PHY Bow32); 167 case (lane 1, 2, 4, khe, lệch lane
+  tới 6 / 7, lỗi ECC / CRC / SoT / LP, byte clock dừng 4 cạnh sau khi `RxActiveHS` xuống hay sớm
+  hơn, tràn FIFO, lọc DT / VC, EXTRA, LOG) chạy song song, cả hai chế độ sạch; `make mutants-ppi`:
+  20 mutant của controller và wrapper đều chết. Hồ sơ PPI của controller sửa theo kết quả: v1 cần
+  `RxActiveHS` lên trước `RxSyncHS` ít nhất 1 chu kỳ và còn cao 1 chu kỳ sau byte cuối,
   `RxSkewCalHS` dạng xung, mỗi lane đưa byte tới hết word cuối, các lane lệch nhau trong FIFO 8 byte
-  và `RxActiveHS` của chúng chồng nhau; wrapper làm thay PHY chuẩn ba việc đầu (trễ miền byte 1
-  chu kỳ, giữ `RxActiveHS` 2 chu kỳ, cạnh lên của `RxSkewCalHS`) và ghi hệ quả của phần dải phụ nối
-  hằng. Không đổi RTL nào có sẵn; `make lint` thêm wrapper (4 cấu hình); test `deskew` đọc
-  `CNT_EXT` sau mỗi burst deskew một phần (mutant đếm deskew ở lane cuối lúc đầu sống).
+  và `RxActiveHS` của chúng chồng nhau; SKEW ở lệch ≥ 7 cần lane sớm làm tràn FIFO; mốc thời gian ở
+  80 Mbit/s sát giới hạn; wrapper làm thay PHY chuẩn ba việc đầu (trễ miền byte 1 chu kỳ, giữ
+  `RxActiveHS` 2 chu kỳ, cạnh lên của `RxSkewCalHS`) và ghi hệ quả của phần dải phụ nối hằng; phần
+  dựng PHY chuẩn còn mượn bốn điều của D-PHY Bow32 (mục 5.5). Không đổi RTL nào có sẵn; `make
+  lint` thêm wrapper (4 cấu hình). Bench cả bộ thu: `test-rx` chạy case song song như `test-ppi`
+  (`PJOBS`); test `deskew` thêm ở cuối hai burst deskew một phần, mỗi burst với `CNT_EXT` đọc sau nó
+  (mutant đếm deskew ở lane cuối lúc đầu sống), `loss` thêm ở cuối burst mất ở mức LP qua một burst
+  deskew và dòng lỗi CRC có byte payload ở word cuối (4 lane). Yêu cầu "DV nhanh hơn" của bước 3
+  chưa đạt: trên cùng case bench PPI không nhanh hơn bench cả bộ thu (thời gian nằm ở mô hình
+  Python), chờ chủ dự án quyết.
 - Đặc tả kiến trúc bộ thu MIPI cho ASIC, chưa có RTL ([docs/ip/mipi_rx_arch.md](docs/ip/mipi_rx_arch.md)):
   camera → AFE (D-PHY analog) → giao diện AFE → D-PHY số `bow_dphy_rx` → PPI → bộ điều khiển
   CSI-2; hợp đồng AFE có timing bằng số (phát / bắt nửa chu kỳ trên `hs_byte_clk`, `des_rst`
