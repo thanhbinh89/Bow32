@@ -104,22 +104,23 @@ set fh [open [file join $out_dir timing_summary.rpt] r]
 set timing_met [regexp {All user specified timing constraints are met} [read $fh]]
 close $fh
 
-# Gray coded buses (set_bus_skew): one "Slack (MET)" per constraint. A
-# constraint whose cells are not found (renamed RTL) is missing from the
-# report, so count them: 9 set_bus_skew lines in constr/kv260_cam.xdc
-# (CSI-2 receiver 7, H.264 output FIFO 2).
+# Gray coded buses and the delay codes (set_bus_skew): one "Slack (MET)" per
+# constraint. A constraint whose cells are not found (renamed RTL) is missing
+# from the report, so count them: 10 set_bus_skew lines in
+# constr/kv260_cam.xdc (CSI-2 receiver 7, DLYn codes + OWN into the adapter
+# 1, H.264 output FIFO 2).
 set skew [report_bus_skew -return_string]
 set fh [open [file join $out_dir bus_skew.rpt] w]
 puts $fh $skew
 close $fh
 set skew_met [regexp -all {Slack \(MET\)} $skew]
-if {[regexp {Slack \(VIOLATED\)} $skew] || $skew_met != 9} {
+if {[regexp {Slack \(VIOLATED\)} $skew] || $skew_met != 10} {
   puts "CRITICAL WARNING: bus skew violated or not constrained ($skew_met met), see bus_skew.rpt"
 }
 # The cells of every constraint (hw/fpga/common/tcl/bus_skew_checks.tcl): the
 # CSI-2 receiver's selectors match on the tail of cell names
-# (constr/kv260_cam.xdc)
-set skew_bad [bow32_bus_skew_checks $skew {u_soc/u_csi2rx/ u_soc/u_h264/u_out/}]
+# (constr/kv260_cam.xdc); the delay code synchronisers are in the adapter
+set skew_bad [bow32_bus_skew_checks $skew {u_soc/u_csi2rx/ u_soc/u_h264/u_out/ u_dphy/u_dly/}]
 foreach p $skew_bad {
   puts "CRITICAL WARNING: bus skew $p"
 }

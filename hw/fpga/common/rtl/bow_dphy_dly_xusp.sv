@@ -20,8 +20,11 @@
 //   a lane is dly_code while dly_own = 1, else the adapter's own value, 0 (DELAY_VALUE). The
 //   synchronised value (dly_own ? dly_code : 0) is loaded (CNTVALUEIN, then LOAD for one
 //   cycle) when it was the same in two consecutive cycles and differs from the tap loaded
-//   last. A code is a bus of independent synchronisers, its bits written in one bus cycle:
-//   a mix of old and new bits shows for one cycle at most and is never loaded. tap_ld_q
+//   last. Code and OWN are a bus of independent synchronisers, the bits of a lane written in
+//   one bus cycle; the board XDC bounds their skew to one byte clock period (set_bus_skew
+//   in hw/fpga/kv260_cam/constr/kv260_cam.xdc), so a mix of old and new bits shows for one
+//   cycle at most and is never loaded (without that bound a mix could stay for two cycles
+//   and be loaded for a burst, then the right tap). tap_ld_q
 //   mirrors the IDELAYE3 and has no reset (neither has the IDELAYE3): 0 after configuration,
 //   as DELAY_VALUE. Only while the byte clock runs: a code written between bursts is loaded
 //   at the start of the next one. dly_own 1 -> 0 loads the tap 0, lane by lane.
