@@ -52,6 +52,11 @@ jobs:
       - name: CSI-2 receiver unit test (AFE unit tests, D-PHY TX model, RTL vs. Python model)
         run: make -C hw/ip/csi2rx/dv test-rx
 
+      # The digital D-PHY alone, with the bit level transmitter on its AFE interface: its
+      # D-PHY v1.x functions (docs/ip/mipi_rx_arch.md, step 6), 2 and 4 lanes
+      - name: D-PHY receiver unit test (v1.x functions, self-checking bench)
+        run: make -C hw/ip/dphy_rx/dv test
+
       # The controller alone at its PPI (bow_ppi_bfm): the timing of the D-PHY of Bow32 and
       # of a standard PHY through the flat-port wrapper (docs/ip/mipi_rx_arch.md, 5.5)
       - name: CSI-2 controller PPI bench (both timings, RTL vs. Python model)

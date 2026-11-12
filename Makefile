@@ -19,7 +19,7 @@ help:
 	@echo "  make sim         build the Verilator testbench (KV260 and IMX274 builds)"
 	@echo "  make test        run all system simulation tests, then a summary"
 	@echo "  make test-tools  unit tests of the host tools (tools/tests)"
-	@echo "  make test-ip     unit tests of the ISP, CSI-2 RX, H.264, MKV, DDR and HyperRAM IPs (RTL vs. models)"
+	@echo "  make test-ip     unit tests of the ISP, CSI-2 RX, D-PHY RX, H.264, MKV, DDR and HyperRAM IPs (RTL vs. models)"
 	@echo "  make test-fpga-dv  pin level tests in xsim (needs Vivado): KV260 D-PHY I/O + CSI-2 RX,"
 	@echo "                   DDR / HyperRAM pads + clocks, Versal clocks, Versal D-PHY (XPHY)"
 	@echo "  make run TEST=x  run one test (boot|load|break|flash|irq|gpio|camera|csi2|h264|mkv|ddr|hyperram,"
@@ -185,6 +185,7 @@ test-tools:
 test-ip:
 	$(MAKE) -C hw/ip/isp/dv test
 	$(MAKE) -C hw/ip/csi2rx/dv test
+	$(MAKE) -C hw/ip/dphy_rx/dv test
 	$(MAKE) -C hw/ip/h264/dv test
 	$(MAKE) -C hw/ip/mkv/dv test
 	$(MAKE) -C hw/ip/ddr/dv test
