@@ -34,10 +34,10 @@ nối chúng vào adapter ([ip/mipi_rx_arch.md](ip/mipi_rx_arch.md) mục 3.2, 1
 `BurstRxRst` qua `bow_dphy_dly_xphy`; `dphy_status_i` ({PHY_RDY, DLY_RDY của mọi nibble,
 LOCKED_FB, LOCKED}, `AFE_STATUS[15:8]`) đọc `PHY_RDY` của mô hình và 1. Bước 4: `dphy_reinit_o`,
 `dphy_burst_rst_en_o`, `dphy_phy_status_i`; trước bước 4 GPIO PA4 / PA5 / PB6 / PB7.
-`bow_ppi_chk` và `bow_afe_chk` (bước 5: luật của tín hiệu AFE, [ip/dphy_rx.md](ip/dphy_rx.md)) được
-bind vào bộ thu ở cả hai bản dựng. Test `camera274`, `csi2_274`, `video274` (và `geo274` của
-`test-extra`) chạy trên bản này, các test khác trên bản mặc định (chạy nhầm bản thì
-testbench báo lỗi ngay).
+`bow_ppi_chk` và `bow_afe_chk` (bước 5: luật của tín hiệu AFE, cả giá trị reset và luật `lane_pd`
+từ review, [ip/dphy_rx.md](ip/dphy_rx.md)) được bind vào bộ thu ở cả hai bản dựng. Test
+`camera274`, `csi2_274`, `video274` (và `geo274` của `test-extra`) chạy trên bản này, các test
+khác trên bản mặc định (chạy nhầm bản thì testbench báo lỗi ngay).
 
 ```bash
 make sw            # firmware: build/sw/
@@ -50,7 +50,8 @@ make -C sim run TEST=csi2_274 FW=brst0   # csi2_test build cho BurstRxRst = 0 + 
 make -C sim test-extra       # biến thể của test IMX274 không có trong make test / CI (bên dưới)
 make -C sim build JOBS=8     # dựng cả hai bản, tối đa 8 job C++ (mặc định 0: mọi core)
 make -C sim lint             # kết nối của testbench tới bow32_top và các mô hình, cả hai bản
-                             # (chân thiếu / không nối là lỗi; cũng trong make lint)
+                             # (chân thiếu là lỗi, đầu vào nối rỗng .pin () cũng vậy:
+                             # hw/lint/empty_inputs.py; đầu ra rỗng thì được; cũng trong make lint)
 make test-ip       # test riêng của ISP, bộ thu CSI-2, H.264, MKV, DDR, HyperRAM (bên dưới)
 make test-tools    # unit test của công cụ Python (gồm mô hình CSI-2, MKV, tool DDR, HyperRAM)
 ```
@@ -392,8 +393,9 @@ FRAME/LINE_INFO, FRAME_SUM, `FRAME_ERR`, FRAME/LINE_TIME, LOG và các bất bi�
 
 ```bash
 make -C hw/ip/csi2rx/dv test                          # test-rx rồi test-ppi
-make -C hw/ip/csi2rx/dv test-rx                       # cả bộ thu: 111 case, 1/2/4 lane, song song
+make -C hw/ip/csi2rx/dv test-rx                       # unit test, rồi cả bộ thu: 110 case, song song
 make -C hw/ip/csi2rx/dv align                         # chỉ unit test của aligner
+make -C hw/ip/csi2rx/dv afe AFE_SEED=3                # chỉ unit test của phía AFE (bước 5)
 make -C hw/ip/csi2rx/dv test-rx SEEDS="1 2 3 4 5 6 7 8"
 make -C hw/ip/csi2rx/dv run SEED=7 LANES=1 ERRORS=1   # thêm DUT_LANES=1|2|4 RAW8=1 CONTCLK=1
 make -C hw/ip/csi2rx/dv run SEED=3 LANES=4 ERRORS=1 BURSTRST=1   # PHY Versal với BurstRxRst = 1
@@ -402,7 +404,7 @@ make -C hw/ip/csi2rx/dv test-ppi                      # controller ở PPI: 167 
 make -C hw/ip/csi2rx/dv test-ppi SEEDS="$(seq -s ' ' 1 40)" PJOBS=8
 make -C hw/ip/csi2rx/dv run-ppi MODE=std TEST=loss LANES=4   # một case (MODE bow|std)
 make -C hw/ip/csi2rx/dv mutants-ppi                   # 19 mutant phải làm bench PPI hỏng
-make -C hw/ip/csi2rx/dv mutants-rx                    # 12 mutant phải làm bench cả bộ thu hỏng
+make -C hw/ip/csi2rx/dv mutants-rx                    # 28 mutant: unit test AFE hay bench cả bộ thu hỏng
 ```
 
 - Unit test aligner (`tb_dphy_align.sv`, chạy đầu tiên trong `test`): word
@@ -472,23 +474,39 @@ make -C hw/ip/csi2rx/dv mutants-rx                    # 12 mutant phải làm be
   mọi chu kỳ. `deskew` và `loss` chạy
   không có word glitch (trễ trôi đưa cửa sổ dò vào nhiễu HS-PREPARE; trên `main` hai test đó hỏng
   ở ~1/3 seed Verilator); xem [ip/csi2rx.md](ip/csi2rx.md) mục *Kiểm chứng*.
+- Unit test của phía AFE (`make afe`, chạy sau aligner trong `test-rx`, từ review bước 5):
+  `tb_afe_dly.sv`, logic không primitive của hai adapter với mô hình primitive (mã + OWN ghi ở pha
+  bất kỳ, bit lệch tới một chu kỳ clock của adapter; UltraScale+: reset `ISERDESE3` theo `des_rst`,
+  `LOAD` của `IDELAYE3` mỗi thay đổi, không nạp mã đang dùng hay mã trộn; Versal: `RX_RST` = `ready`
+  ∧ `des_rst`, `RX_EN_VTC` = 1 và không `LD` khi không `ready`, hợp đồng `LD` của XPHY, OWN xuống /
+  lên, nạp lại lane OWN khi `ready` lên), và `tb_dphy_afe.sv`, `bow_dphy_rx` một mình với mô hình
+  AFE, hai bản dựng (ASIC: `AfeKind` 0, `AfePdRst` 1; FPGA): giá trị reset, `AFE_STATUS` từng bit,
+  `pd` / `lprx_en` / `lane_pd` với xung PD ngắn, OWN, `CMD.REINIT`, `DES_RST_DIS`. `AFE_SEED` (mặc
+  định 1) cho phần ngẫu nhiên; log ở `build/csi2rx_dv/afe_dly.log`, `dphy_afe_asic.log`,
+  `dphy_afe_fpga.log`.
 - Mỗi case giữ file trong `build/csi2rx_dv/<case>/` (`sim.log` cho CI, có dòng thống kê FIFO
   của PHY Versal); một binary Verilator cho mỗi giá trị `Lanes` (`build/csi2rx_dv/obj_l1`,
-  `obj_l2`, `obj_l4`) và một cho aligner (`obj_align`). Sau unit test aligner, các case chạy song
+  `obj_l2`, `obj_l4`), một cho aligner (`obj_align`) và cho mỗi unit test AFE (`obj_afe_dly`,
+  `obj_dphy_afe_asic`, `obj_dphy_afe_fpga`). Sau các unit test, các case chạy song
   song `PJOBS` case (mặc định số CPU; `PJOBS=1`: lần lượt), mỗi case in dòng kết quả của nó: ~3 s
   với 24 job, ~26 s tuần tự. Mỗi bản build model chạy lại Verilator một lần nếu nó hỏng (Verilator
   5.020 đôi khi abort lúc thoát sau một bản build tốt) và `touch` binary.
 - `make test-tools` chạy 42 unit test của mô hình (`tools/tests/test_csi2_model.py`) và 3 test
   của công thức `SETTLE` (`tools/tests/test_dphy_settle.py`, biên dịch `bow_dphy_rx_settle()` bằng
-  `cc` của máy host; Versal ở mọi lane rate kể cả 0, và đích 140 ns của firmware `brst0`).
+  `cc` của máy host; Versal ở mọi lane rate kể cả 0, và đích 140 ns của firmware `brst0`), và 3
+  test của kiểm tra đầu vào nối rỗng (`tools/tests/test_empty_inputs.py`, cần Verilator).
 - `make -C hw/ip/csi2rx/dv mutants-rx` (`mutants_rx.py`, không trong `test` hay CI): các mutant mà
   chỉ bench cả bộ thu thấy, trên bản sao của `hw/ip/dphy_rx/rtl`, `hw/ip/csi2rx/rtl` và logic
   delay của hai adapter: RAW nhận cả word không valid, RAW bắt đầu ở cạnh lên của lane bất kỳ
   (test `raw`), cổng sự kiện aligner của controller bỏ hẳn, chỉ trong reset, bỏ cho deskew (test
   `rxoff`), và từ bước 5 giao diện AFE: `des_rst` trễ một chu kỳ, `des_rst` bỏ qua
   `DES_RST_DIS`, OWN giữ khi READY xuống, `lprx_en` không theo PD, XPHY không chờ sau
-  `RX_EN_VTC`, XPHY nạp lại cùng mã, `IDELAYE3` không bao giờ nạp (test `raw`, `dly`, `be`):
-  12/12 chết, ~40 s.
+  `RX_EN_VTC`, XPHY nạp lại cùng mã, `IDELAYE3` không bao giờ nạp (test `raw`, `dly`, `be`).
+  Từ review bước 5 các unit test của phía AFE chạy trước các case, và có thêm 16 mutant mà chỉ
+  chúng thấy (`lane_pd` theo READY cũ, OWN đặt khi READY = 0, `des_rst` = 0 lúc reset, CAL_DONE /
+  CAL_ERR đổi chỗ, XPHY giữ user mode / `RX_RST` / không xoá khi chưa ready, OWN xuống không nhả,
+  không cần ổn định 2 chu kỳ, `ISERDESE3` không reset, tap bỏ qua OWN, `LOAD` mỗi chu kỳ…):
+  28/28 chết, ~3 phút (`MJOBS`=2).
 - **Bench PPI** (`tb_csi2rx_ppi.sv`, `bow_ppi_bfm.sv`; `test-ppi`, bước CI riêng): controller
   `bow_csi2rx` một mình, PHY là BFM chơi phần dựng PPI của `csi2_model.py gen --ppi bow|std` (mỗi
   item TX của test case kèm byte mỗi lane mỗi burst với chu kỳ, `RxActiveHS`, `RxSyncHS`, khe,

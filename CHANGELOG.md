@@ -22,8 +22,18 @@
   KV260 `hw/lint/kv260_bd_stubs.sv`; kết nối của `tb_bow32`, `make -C sim lint`) và
   `bow_dphy_io_xusp`. Formality: `make -C hw/ip/dphy_rx/fm equiv` mặc định
   `STEP=5 REF=3d3985a` (bộ thu sau wrapper cổng của bước 4, `hw/ip/dphy_rx/fm/bow_mipi_rx_s4.sv`).
-  `make mutants-rx` thêm 7 mutant của giao diện AFE (12/12 chết); DV `dly` và `be` thêm phần của
-  bước 5; bench xsim Versal kiểm luật nạp mới (cùng mã, OWN xuống / lên).
+  DV `dly` và `be` thêm phần của bước 5; bench xsim Versal kiểm luật nạp mới (cùng mã, OWN xuống /
+  lên). Sửa sau review: `lane_pd` chỉ xuống theo READY mới sau PD (mục 3.6; bản đầu nhả nó theo
+  READY cũ của bộ đồng bộ sau một xung PD ngắn), DV `dly` thêm xung PD hai lần ghi liền nhau;
+  `bow_afe_chk` kiểm `lane_pd` bằng mô hình tham chiếu và giá trị reset của mục 3.6 khi reset bật;
+  bench đơn vị `tb_afe_dly` (logic hai adapter với mô hình primitive, bit mã lệch tới một chu kỳ)
+  và `tb_dphy_afe` (điều khiển và trạng thái AFE của `bow_dphy_rx`, bản ASIC và FPGA) trong
+  `test-rx` (CI, `make -C hw/ip/csi2rx/dv afe`); `make mutants-rx` 28/28 (7 mutant của bản đầu, 16
+  mới; chạy bench đơn vị trước); `make -C sim lint` báo cả đầu vào nối rỗng
+  (`hw/lint/empty_inputs.py`, test host `tools/tests/test_empty_inputs.py`); `kv260_cam.xdc` thêm
+  bus skew của mã delay + OWN vào adapter (10 ràng buộc); kiểm tra ngoài ngữ cảnh của phần bộ thu
+  KV260: `make -C hw/fpga/kv260_cam rx-ooc`; đặc tả mục 3.5–3.6: hợp đồng `ready` của AFE và hai miền
+  reset của điều khiển AFE.
 - Bộ thu CSI-2, bước 4 của kế hoạch chuyển MIPI RX ([docs/ip/mipi_rx_arch.md](docs/ip/mipi_rx_arch.md)
   mục 4.10, 6.3, 10; [docs/ip/dphy_rx.md](docs/ip/dphy_rx.md)): **thanh ghi riêng của D-PHY** ở
   `0x4000_8C00` (offset `0xC00` của cửa sổ `CSI2RX`, `bow_mipi_rx` chia cửa sổ), tập con v1 của đặc

@@ -50,7 +50,7 @@ bỏ. **Offset hay trường ghi "sau" chưa có ở v1: đọc 0, ghi bị bỏ
 | 0x008 | `INFO2` | R | [7:0] `SETTLE_NS`, [15:8] `SETTLE_UI`, [23:16] byte trail của AFE, [31:24] 0. KV260: `0x0000186B`, Huins: `0x00080078` | |
 | 0x00C | `CTRL` | RW | [1] CLK_CONT (0): lane clock liên tục, bộ thu + cổng lane clock bật suốt khi `EnableClk` (thay `CTRL.CLK_FORCE` của controller); [6] DES_RST_DIS (0): 1 giữ `des_rst` của AFE ở 0, tức tắt reset đường thu khi cổng đóng (adapter Versal: `RX_RST` của slice dữ liệu; adapter UltraScale+, từ bước 5: reset `ISERDESE3`; chỉ để thử, bo Huins hỏng khi tắt) | [0] EN, [2] ULPS_EN, [3] HSRX_EARLY, [4] SOT_TOL, [5] DSK_EN, [7] CLK_LOST_EN, [15:8] LANE_EN, [16] CLK_MISS_OFF: bước 6, 8, 10 |
 | 0x010 | `CMD` | W | [1] REINIT: chạy lại hiệu chỉnh của AFE (`cal_start` của giao diện AFE = 1 trong 32 chu kỳ bus; trước bước 5 `reinit_o`; adapter Versal: XPLL, BISC, VT chạy lại, mã đã nạp mất, OWN xoá; adapter UltraScale+: không có); [3] CNT_CLR: xoá `CNT_*` của D-PHY. Đọc 0 | [0] APPLY, [2] AFE_CAL (`cal_start`; REINIT khi đó đưa các FSM về `WaitStop`), [4] DSK_RUN, [15:8] DLY_REL, [16] DLY_CLK_REL: bước 6, 8 |
-| 0x014 | `AFE_CTRL` | RW | [0] PD (`AfePdRst`; FPGA: 0): `pd` của giao diện AFE; khi 1 thì `lprx_en` = 0 và `lane_pd` = 1 ở mọi lane. Adapter Versal: PHY giữ ở reset khởi động như sau khi mất khoá XPLL (READY xuống, OWN mọi lane xoá); PD = 0 chạy lại XPLL, BISC, VT như sau reset. Adapter UltraScale+: không tắt được (READY vẫn 1). Không bao giờ từ `Enable`: stop / start không đụng tới AFE (từ bước 5) | [3:1] TST_MODE, [15:8] ATB_SEL: khi AFE có điểm móc test |
+| 0x014 | `AFE_CTRL` | RW | [0] PD (`AfePdRst`; FPGA: 0): `pd` của giao diện AFE; khi 1 thì `lprx_en` = 0 và `lane_pd` = 1 ở mọi lane; `lane_pd` về 0 khi READY mới (0 từ lúc PD lên, rồi 1) với PD = 0. Adapter Versal: PHY giữ ở reset khởi động như sau khi mất khoá XPLL (READY xuống, OWN mọi lane xoá); PD = 0 chạy lại XPLL, BISC, VT như sau reset. Adapter UltraScale+: không tắt được (READY vẫn 1). Không bao giờ từ `Enable`: stop / start không đụng tới AFE (từ bước 5) | [3:1] TST_MODE, [15:8] ATB_SEL: khi AFE có điểm móc test |
 | 0x018 | `AFE_STATUS` | R | [0] READY (`afe_ready_i` qua 2 flop), [1] CAL_DONE, [2] CAL_ERR (`afe_cal_done_i`, `afe_cal_err_i` qua 2 flop, từ bước 5; hai adapter FPGA: 0), [15:8] `status` thô của AFE qua 2 flop (Versal: [11] PHY_RDY mọi nibble, [10] DLY_RDY mọi nibble, [9] XPLL LOCKED_FB, [8] LOCKED; thay GPIO PB6 / PB7 của top Huins; UltraScale+: 0) | |
 | 0x01C, 0x020 | `AFE_TRIM0/1` | — | sau (v1 lái `trim` = 0) | khi một AFE định nghĩa bit trim |
 | 0x024 | `TIM0` | RW | bố cục và đơn vị của `PHY_CFG` cũ (chu kỳ `lp_clk`): [7:0] SETTLE (14), [11:8] LP_FILTER (2), [23:16] CLK_SETTLE (30), [31:24] CLK_MISS (8, 0 = tắt); reset `0x081E020E`. Chỉ đổi khi PHY tắt (`CTRL.PHY_EN` = 0 của controller): v1 qua `bow_sync` từng bit | |
@@ -126,7 +126,11 @@ Giá trị `INFO` ở bảng: KV260 (2 lane, `lp_clk` 200 MHz, `AfeKind` 1) và 
   `CMD.AFE_CAL` đến ở bước 6.
 - **AFE_CTRL.PD** (bước 5) là `pd` của giao diện AFE: `AFE_CTRL.PD` = 1 giữ AFE tắt (`lprx_en` = 0,
   `lane_pd` = 1; adapter Versal: reset khởi động, như mức `reinit_i` = 1 của bước 4) tới khi phần
-  mềm xoá nó; `lane_pd` về 0 khi D-PHY đã thấy READY với PD = 0. Driver v1 không dùng nó (FPGA:
+  mềm xoá nó; `lane_pd` về 0 khi D-PHY thấy một READY **mới** với PD = 0: READY = 0 ít nhất một
+  chu kỳ kể từ lần PD lên gần nhất (hay từ reset), rồi 1 (sửa sau review: READY qua 2 flop còn
+  đọc 1 vài chu kỳ sau khi PD lên, và một xung PD ngắn từng nhả `lane_pd` theo READY cũ ấy suốt
+  lúc AFE khởi động lại; AFE giữ READY = 1 qua PD, như adapter UltraScale+, thì `lane_pd` ở 1 sau
+  xung PD; hai adapter FPGA không dùng `lane_pd`). Driver v1 không dùng nó (FPGA:
   PD = 0 từ reset). Chỉ đến từ thanh ghi, không từ `Enable`: stop / start không chạy lại BISC.
 - **DES_RST_DIS** thay GPIO PA5: reset đường thu khi cổng đóng **luôn bật** từ reset, chỉ tắt
   bằng bit thử này. Từ bước 5 đó là `des_rst` của giao diện AFE: flop miền lp trong máy LP lane
@@ -165,7 +169,7 @@ dùng tín hiệu.
 | D | `clk_dly_code`, `clk_dly_own`, `clk_dly_q` | 9, 1, 9 | | | 0, 0, không dùng (`INFO[22]` = 0) |
 | D | `mon_en[l]`, `mon_code[l]`, `mon_data[l]` | 1, 9, 8 | | | 0, 0, không dùng (sampler giám sát: v3) |
 | E | `pd` | 1 | số → AFE | bus, flop | `AFE_CTRL.PD` (reset `AfePdRst`) |
-| E | `lane_pd[l]`, `clk_lane_pd` | 1 | số → AFE | bus, flop | 1 từ reset và khi PD, 0 khi đã thấy READY với PD = 0 (một flop; `LANE_EN`, ULPS: bước 6) |
+| E | `lane_pd[l]`, `clk_lane_pd` | 1 | số → AFE | bus, flop | 1 từ reset và khi PD, 0 khi thấy READY mới (0 từ lúc PD lên, rồi 1) với PD = 0 (một flop; `LANE_EN`, ULPS: bước 6) |
 | E | `ready` | 1 | AFE → số | bất đồng bộ | 2 flop → `AFE_STATUS.READY`; READY = 0 xoá OWN |
 | E | `cal_start` | 1 | số → AFE | bus, flop | `CMD.REINIT`: 32 chu kỳ bus |
 | E | `cal_done`, `cal_err` | 1 | AFE → số | bất đồng bộ | 2 flop → `AFE_STATUS[1]`, `[2]` |
@@ -174,12 +178,14 @@ dùng tín hiệu.
 | F | `tst_mode`, `tst_data[l]`, `atb_sel` | 3, 8, 8 | số → AFE | | 0 |
 | F | `hs_raw[l]`, `clk_hs_raw` | 1 | AFE → số | bất đồng bộ | không dùng |
 
-**Chỗ v1 lệch bảng của mục 3.2** (đã duyệt cùng bước 5, [mipi_rx_arch.md](mipi_rx_arch.md) mục 10):
+**Chỗ v1 lệch bảng của mục 3.2** (review của bước 5 chấp nhận chúng; chúng chờ chủ dự án duyệt
+trong PR, [mipi_rx_arch.md](mipi_rx_arch.md) mục 10):
 
 - `dly_code`, `dly_own`, `pd`, `lprx_en`, `lane_pd`, `cal_start` là flop **miền bus** (bảng: lp).
   AFE coi mọi điều khiển là bất đồng bộ (mục 3.1), nên miền nguồn không đổi gì cho nó; giữ ở miền
-  bus thì không thêm bus 9 bit mỗi lane qua bus → lp (phép đếm 9 / 11 ràng buộc bus skew không
-  đổi). Mã delay sang miền lp cùng bộ máy deskew, chủ thứ hai của mã (bước 8, mục 4.10 *Mã delay*).
+  bus thì không thêm bus 9 bit mỗi lane qua bus → lp; mã + OWN vào bộ đồng bộ của adapter có một
+  `set_bus_skew` trên mỗi bo (Huins: 11 ràng buộc như trước; KV260 thêm nó ở review: 10). Mã delay
+  sang miền lp cùng bộ máy deskew, chủ thứ hai của mã (bước 8, mục 4.10 *Mã delay*).
 - `cal_start` là xung 32 chu kỳ bus (640 ns ở 50 MHz) thay cho "≥ 4 chu kỳ lp".
 - `term_en` = `hsrx_en`, `lprx_en` và `lane_pd` một flop cho mọi lane: tới bước 6.
 - `scan_mode`, `tst_clk`: chưa có cổng (DFT, bước 9).
@@ -188,8 +194,19 @@ dùng tín hiệu.
   F) và nối cố định phần còn lại; wrapper ASIC (`bow_mipi_rx_apb`, bước 9) đưa ra đủ.
 
 `hw/ip/dphy_rx/dv/bow_afe_chk.sv` kiểm các luật trên ở mọi chu kỳ của mọi bench (bind vào mọi
-`bow_dphy_rx`): `des_rst` = ¬cổng ∧ enable của chu kỳ trước, `hsrx_en` = `term_en`, `lprx_en` =
-¬`pd`, `lane_pd` (1 khi PD, không 0 trước READY), OWN chỉ khi READY, các nối cố định bằng 0.
+`bow_dphy_rx`, tham số `Lanes`, `TrimW`, `AfePdRst` của nó): `des_rst` = ¬cổng ∧ enable của chu kỳ
+trước, `hsrx_en` = `term_en`, `lprx_en` = ¬`pd`, `lane_pd` theo mô hình tham chiếu của luật READY
+mới (nhả sớm hay không bao giờ nhả đều hỏng), OWN chỉ khi READY, các nối cố định bằng 0; suốt lúc
+reset bật (từ cạnh clock thứ hai) giá trị reset của mục 3.6 ở cả hai miền: `pd` = `AfePdRst`,
+`lprx_en`, `lane_pd` = 1, OWN = 0 (bus, `rst_ni`), cổng 0, `des_rst` 1, `hsrx_en` = `term_en` = 0 (lp,
+reset lp). Bench đơn vị `hw/ip/csi2rx/dv/tb_dphy_afe.sv` (`make -C hw/ip/csi2rx/dv afe`, review bước 5)
+phủ phần mà bench cả bộ thu không chạm tới (`bow_mipi_rx` nối cố định `cal_done` / `cal_err`, adapter
+FPGA không có `lane_pd`): `bow_dphy_rx` một mình với mô hình AFE, bản ASIC (`AfeKind` 0, `AfePdRst`
+1, 4 lane) và FPGA (`AfeKind` 1, `AfePdRst` 0, 2 lane): giá trị reset lúc bật nguồn và reset giữa
+chừng, `INFO`, `AFE_STATUS` từng bit (READY, CAL_DONE, CAL_ERR, `status`), PD và `lane_pd` (bật AFE,
+xung PD hai lần ghi liền nhau và dài thêm 1–3 chu kỳ, `ready` xuống muộn, `ready` kẹt ở 1, xung ngẫu
+nhiên), OWN chỉ khi READY (lần ghi khi READY = 0 chỉ đặt CODE), `CMD.REINIT` 32 chu kỳ,
+`DES_RST_DIS`.
 
 ## SETTLE
 
@@ -254,6 +271,12 @@ Tóm tắt bước 5:
   `dly` thêm một đoạn bước 5 (ghi lại cùng mã: không nạp; `AFE_CTRL.PD` = 1 rồi 0: OWN xoá, ghi
   lại cùng mã: nạp), `be` phủ byte enable của `AFE_CTRL`; `make mutants-rx` 12/12 (7 mutant mới
   của `des_rst`, OWN, `lprx_en` và logic delay của hai adapter).
+- **Sau review** ([mipi_rx_arch.md](mipi_rx_arch.md) mục 10, *Sửa sau review bước 5*): luật
+  `lane_pd` mới, `dly` thêm xung PD hai lần ghi liền nhau; bench đơn vị `tb_afe_dly` (logic hai
+  adapter với mô hình primitive: `RX_EN_VTC` / `RX_RST` / không `LD` khi không `ready`, OWN xuống / lên,
+  nạp lại khi `ready` lên, reset `ISERDESE3`, số lần nạp, không nạp mã trộn khi bit lệch tới một chu
+  kỳ) và `tb_dphy_afe` (trên), cả hai trong `test-rx` (CI); `make mutants-rx` 28/28 (16 mới);
+  `make -C sim lint` báo cả đầu vào nối rỗng (`hw/lint/empty_inputs.py`).
 - **xsim:** UltraScale+ kiểm `des_rst` = ¬cổng ở mọi cạnh `vid_clk` và đếm `LOAD` của `IDELAYE3`
   (0 trước lần ghi đầu, 1 mỗi lane sau `DLYn`, ghi lại cùng mã không nạp); Versal thêm `SAME`
   (cùng mã: 0 `LD`) và `OWN` (OWN của một lane xuống: không `LD`; lên lại: 1 `LD`).
