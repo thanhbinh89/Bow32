@@ -73,7 +73,9 @@ sw:
 # their block design wrappers, hw/lint/kv260_bd_stubs.sv), MPS4, Huins RAM
 # card and Huins camera with its clock module; the sixth user of bow32_top, the
 # system testbench sim/tb/tb_bow32.sv, its pin connections only (make -C sim
-# lint, both builds: a missing or unconnected pin is an error).
+# lint, both builds: a pin missing from an instance is an error, and so is an
+# input connected to nothing, .pin (), which hw/lint/empty_inputs.py finds in
+# Verilator's netlist; an empty output is a normal no-connect).
 LINT_CMD = $(VERILATOR) --lint-only -Wall hw/lint/verilator_waivers.vlt \
 	  -F hw/top/bow32_top.f -F hw/vendor/lowrisc_ibex_prim_generic.f --top-module bow32_top
 DPHYRX_LINT = $(VERILATOR) --lint-only -Wall hw/lint/verilator_waivers.vlt \
