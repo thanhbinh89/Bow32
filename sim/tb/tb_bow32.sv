@@ -1448,6 +1448,9 @@ module tb_bow32 #(
   int unsigned f274_num = 0;           // FS frame number
   int unsigned s274_frames = 0, s274_late = 0;
   bit          s274_contclk = 1'b1;
+  // csi2_274: one CRC error (a payload bit of image line 0) in the n-th frame
+  // output after the next stream start (0: none); cleared when sent
+  int unsigned s274_crc_frame = 0, s274_crc_sent = 0;
 
   localparam logic [9:0] S274On  = 10'h3C0;   // colour bars, as the IMX219 model
   localparam logic [9:0] S274Off = 10'h040;
@@ -1682,8 +1685,8 @@ module tb_bow32 #(
     csi2_flags_t f, fl;
     csi2_bytes_t pay, pkt;
     realtime     t0, tw, hmax_ns;
-    int unsigned d, k, y, nslot;
-    bit          bad_done;
+    int unsigned d, k, y, nslot, nout;
+    bit          bad_done, crc_frame;
     logic [15:0] crc;
     if (Imx274) forever begin
       // reset, standby, start sequence: LP-00 / LP-11, clock lane LP
@@ -1692,6 +1695,7 @@ module tb_bow32 #(
         #1000;
       end
       void'(s274_latch(1'b1));
+      nout = 0;                                                          // frames output
       // the first frame after the start is not output
       t0 = csi2_now();
       tw = t0 + real'(f274_hmax) * real'(f274_vmax) * 1000.0 / 72.0;
@@ -1708,6 +1712,8 @@ module tb_bow32 #(
           inj_frame = inj_req;
           inj_req   = 1'b0;
           bad_done  = 1'b0;
+          nout++;
+          crc_frame = (s274_crc_frame != 0 && nout == s274_crc_frame);
           u_csi.contclk = s274_contclk;
           u_csi.push_short(0, 8'h00, f274_num, f);                       // FS
           nslot = 1 + f274_ob + f274_h;
@@ -1731,6 +1737,11 @@ module tb_bow32 #(
               fl  = f;
               if (inj_frame && y == 8) fl.hdr_flip_a = 8'sd9;
               if (inj_frame && y == 16) fl.pay_flip = 3;
+              if (crc_frame && y == 0) begin
+                fl.pay_flip    = 5;
+                s274_crc_frame = 0;
+                s274_crc_sent++;
+              end
               if (inj_frame && y >= 24 && !bad_done) begin
                 pkt = csi2_header(0, 32'h2B, pay.size());
                 foreach (pay[i]) pkt.push_back(pay[i]);
@@ -2781,11 +2792,13 @@ module tb_bow32 #(
       // setting, BurstRxRst = 0 with SETTLE 115 ns (sim/Makefile FW=brst0):
       // model only, on the Huins board PA5 = 0 broke at the first receiver
       // re-enable during a stream. Then 'margin' at the taps in use of every
-      // lane (lane 2 moved by 'delay'), and 'stat' with the receiver off
-      // after 'stop' (the 4 lanes of the build).
+      // lane (lane 2 moved by 'delay'), 'stat' with the receiver off after
+      // 'stop' (the 4 lanes of the build), and the link check of 'start' over
+      // 16 whole frames: one CRC error in the 6th frame (s274_crc_frame)
+      // fails it with the hint to run cal, a clean start passes after 16.
       "csi2_274": begin
-        int unsigned us, pa5, settle, tq [4];
-        string       dl;
+        int unsigned us, pa5, settle, tq [4], fr0;
+        string       dl, crc_at;
         expect_text(0, "csi2_test: Bow32 MIPI CSI-2 receiver test");
         expect_text(0, "camera: IMX274 found (id 0274)");
         expect_text(0, "csi2rx: Bow32 receiver, 4 lanes, PHY clock 200 MHz");
@@ -2857,7 +2870,34 @@ module tb_bow32 #(
         expect_text(0, " sot 0/0/0/0 ovf ", mark);
         expect_text(0, " d3 ", mark);
         expect_text(0, {", delay ", dl, "\nok\n> "}, mark);
+        // the link check of 'start' takes 16 whole frames: a CRC error in
+        // the 6th frame, after the 64 packets (19 per 1920x8 frame) it took
+        // before, fails it with the hint to run cal; a clean one passes only
+        // after 16 frames. The check counts the frames that start after it
+        // clears the counters: with 357 us frames the first one can start
+        // during the I2C write after the sensor's master start (SYNCDRV,
+        // ~0.4 ms), so the error is in frame 5 or 6 of the check.
+        s274_crc_frame = 6;
+        mark = send_cmd("start");
+        expect_text(0, "ok\n> ", mark);
+        crc_at = log0_line("  errors in frame ", mark);
+        if (s274_crc_sent != 1 ||
+            log0_line("streaming 1920x8 RAW10, link check ", mark) != "failed (ERR_STATUS 008), try cal" ||
+            (crc_at != {"5 of 16 at the delays in use ", dl, ": after a PDI load or"} &&
+             crc_at != {"6 of 16 at the delays in use ", dl, ": after a PDI load or"}) ||
+            log0_line("  phy reinit these are the BISC delays", mark) !=
+              ", early in the eye; cal loads the eye centres") begin
+          $fatal(1, "csi2_test: 'start' with a CRC error in its 6th frame (%0d sent) answered '%s'",
+                 s274_crc_sent, log0.substr(mark, log0.len() - 1));
+        end
+        fr0 = s274_frames;
         video_cmd("start", "streaming 1920x8 RAW10, link check ok\nok\n> ");
+        if (s274_frames - fr0 < 16) begin
+          $fatal(1, "csi2_test: 'start' said 'link check ok' after %0d frames, expected 16",
+                 s274_frames - fr0);
+        end
+        $display("[%0t] tb   | csi2_274: start link check: CRC error of sensor frame 6 found (frame %s), clean after %0d frames",
+                 $time, crc_at.substr(0, 6), s274_frames - fr0);
         mark = send_cmd("irq");
         expect_text(0, "FS interrupts in 4 frames\nok\n> ", mark);
         mark = send_cmd("stat");
