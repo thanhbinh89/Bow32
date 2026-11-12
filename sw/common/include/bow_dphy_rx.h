@@ -11,12 +11,20 @@
  *
  * Every name has the prefix DPHY_ (struct DPHY, macros DPHY_*): the window
  * has registers whose names the controller has too (ID, INFO, CTRL, IRQ_*,
- * ERR_STATUS, BYTECLK, RAW_CTRL). Registers of later steps (TIM1, TIM2,
- * LANE_STOP, AFE_TRIM, deskew, PRBS, ...) are not in v1: they read 0. Since
- * step 5 the D-PHY speaks the AFE interface (docs/ip/mipi_rx_arch.md section
- * 3.2): DLYn drives static delay codes and OWN (the AFE loads a changed code
- * by itself), AFE_CTRL.PD the AFE's power down, CMD.REINIT its re-calibration
- * (cal_start).
+ * ERR_STATUS, BYTECLK, RAW_CTRL). Registers of later steps (AFE_TRIM, deskew,
+ * PRBS, LANE_MAP, ...) read 0. Since step 5 the D-PHY speaks the AFE interface
+ * (docs/ip/mipi_rx_arch.md section 3.2): DLYn drives static delay codes and OWN
+ * (the AFE loads a changed code by itself), AFE_CTRL.PD the AFE's power down,
+ * CMD.AFE_CAL its re-calibration (cal_start; CMD.REINIT up to step 5).
+ *
+ * Since step 6 (v1.x) CTRL and TIM0..TIM2 are shadow registers: a write
+ * changes what they read, the D-PHY takes them all at once at CMD.APPLY
+ * (bow_dphy_rx_apply(); the functions of this driver that write them apply).
+ * Every new bit is 0 (TIM1.HS_TMO 2^20) after reset, the behaviour of v1:
+ * T_INIT (TIM2), the HS and escape timeouts, HSRX_EARLY, CLK_MISS_OFF,
+ * CLK_TOG_DIV, ULPS_EN, CLK_LOST_EN; LATE_EOT is always reported
+ * (ERR_STATUS[7], CNT_MISC). CMD.REINIT sends the lane state machines back to
+ * WaitStop and makes T_INIT due again.
  *
  * Kinds of PHY I/O (INFO[7:5], DPHY_AFE_*):
  *   UltraScale+ (KV260, IDELAYE3): a code written to DLYn is applied at the
@@ -47,11 +55,11 @@ typedef struct {
   volatile uint32_t AFE_STATUS;   /* 0x018 R   DPHY_AFE_* */
   volatile uint32_t AFE_TRIM[2];  /* 0x01C     (later step) */
   volatile uint32_t TIM0;         /* 0x024 RW  DPHY_TIM0_*, lp clock cycles */
-  volatile uint32_t TIM1;         /* 0x028     (later step) */
-  volatile uint32_t TIM2;         /* 0x02C     (later step) */
+  volatile uint32_t TIM1;         /* 0x028 RW  DPHY_TIM1_*: HS_TMO, CLK_TOG_DIV (shadow) */
+  volatile uint32_t TIM2;         /* 0x02C RW  DPHY_TIM2_*: T_INIT, ESC_TMO (shadow) */
   volatile uint32_t LANE_LP;      /* 0x030 R   DPHY_LANE_LP*: filtered LP {P, N} */
   volatile uint32_t LANE_HS;      /* 0x034 R   DPHY_LANE_HS* */
-  volatile uint32_t LANE_STOP;    /* 0x038     (later step) */
+  volatile uint32_t LANE_STOP;    /* 0x038 R   DPHY_LANE_STOP* / DPHY_LANE_ULPS*: Stopstate, ULPS */
   volatile uint32_t IRQ_STATUS;   /* 0x03C R/W1C DPHY_IRQ_* */
   volatile uint32_t IRQ_EN;       /* 0x040 RW  same bits */
   volatile uint32_t ERR_STATUS;   /* 0x044 R/W1C DPHY_ERR_*, sticky */
@@ -60,8 +68,8 @@ typedef struct {
   volatile uint32_t CNT_BURST[8]; /* 0x050 R   HS entries of data lane l (32 bit, saturating) */
   volatile uint32_t CNT_CLK;      /* 0x070 R   HS entries of the clock lane */
   volatile uint32_t CNT_LPERR;    /* 0x074 R   LP errors of every lane */
-  volatile uint32_t CNT_DSK;      /* 0x078     (later step) */
-  volatile uint32_t CNT_MISC;     /* 0x07C     (later step) */
+  volatile uint32_t CNT_DSK;      /* 0x078 R   [31:16] ULPS entries ([15:0] deskew bursts: step 8) */
+  volatile uint32_t CNT_MISC;     /* 0x07C R   [31:16] HS_TMO + CLK_LOST + LATE_EOT + ESC_TMO */
   volatile uint32_t DLY[8];       /* 0x080 RW  DPHY_DLY_*; lanes the receiver does not have: RAZ/WI */
   uint32_t reserved0[24];         /* 0x0A0 */
   volatile uint32_t RAW_CTRL;     /* 0x100 RW  DPHY_RAW_* */
@@ -90,6 +98,7 @@ _Static_assert(__builtin_offsetof(bow_dphy_rx_regs_t, RAW) == 0x200, "DPHY RAW o
 #define DPHY_INFO_LP_MHZ(i)    (((i) >> 8) & 0x3FFu)  /* lp clock (MHz): the PHY timer clock */
 #define DPHY_INFO_DLY_W(i)     (((i) >> 18) & 0xFu)   /* delay code bits */
 #define DPHY_INFO_SELF_CAL     (1u << 23)             /* delays of a self-calibration (BISC) */
+#define DPHY_INFO_ULPS         (1u << 27)             /* escape mode entry, ULPS (step 6) */
 #define DPHY_AFE_ASIC          0u
 #define DPHY_AFE_XUSP          1u /* UltraScale+ (bow_dphy_io_xusp, KV260) */
 #define DPHY_AFE_VERSAL        2u /* Versal XPHY (bow_dphy_io_versal, Huins) */
@@ -98,11 +107,23 @@ _Static_assert(__builtin_offsetof(bow_dphy_rx_regs_t, RAW) == 0x200, "DPHY RAW o
 #define DPHY_INFO2_SETTLE_UI(i) (((i) >> 8) & 0xFFu)   /* ... and UI part */
 #define DPHY_INFO2_TRAIL(i)     (((i) >> 16) & 0xFFu)  /* bytes per lane the PHY adds after a burst */
 
-#define DPHY_CTRL_CLK_CONT    (1u << 1) /* clock lane always HS (continuous clock only) */
-#define DPHY_CTRL_DES_RST_DIS (1u << 6) /* test only: no receive path reset while the gate is closed */
+/* CTRL (shadow: CMD.APPLY) */
+#define DPHY_CTRL_CLK_CONT     (1u << 1)  /* clock lane always HS (continuous clock only) */
+#define DPHY_CTRL_ULPS_EN      (1u << 2)  /* escape mode entry and ULPS (else LP-10 is an LP error) */
+#define DPHY_CTRL_HSRX_EARLY   (1u << 3)  /* HS receivers on from HS-Rqst (LP-01), not LP-00; not
+                                           * for the FPGA adapters: one pin switches HS receiver
+                                           * and termination, so this terminates LP-01 */
+#define DPHY_CTRL_DES_RST_DIS  (1u << 6)  /* test only: no receive path reset while the gate is closed */
+#define DPHY_CTRL_CLK_LOST_EN  (1u << 7)  /* CLK_LOST: a data lane in HS without the clock lane */
+#define DPHY_CTRL_CLK_MISS_OFF (1u << 16) /* clock lane HS receiver + termination off at the clock
+                                           * miss (T_CLK-MISS), not at LP-11 */
 
-#define DPHY_CMD_REINIT  (1u << 1) /* AFE re-calibration, cal_start (Versal: XPLL lock, BISC, VT
-                                    * tracking again); CMD.AFE_CAL from step 6 */
+/* CMD (write; read [0] APPLY pending) */
+#define DPHY_CMD_APPLY   (1u << 0) /* take the shadow CTRL / TIM0..2 (step 6) */
+#define DPHY_CMD_REINIT  (1u << 1) /* lane state machines back to WaitStop, T_INIT due again (step 6;
+                                    * up to step 5: the AFE re-calibration, now CMD.AFE_CAL) */
+#define DPHY_CMD_AFE_CAL (1u << 2) /* AFE re-calibration, cal_start (Versal: XPLL lock, BISC, VT
+                                    * tracking again) */
 #define DPHY_CMD_CNT_CLR (1u << 3) /* clear CNT_* */
 
 #define DPHY_AFE_CTRL_PD (1u << 0) /* AFE powered down (0 after reset on the FPGAs; Versal: the
@@ -122,6 +143,17 @@ _Static_assert(__builtin_offsetof(bow_dphy_rx_regs_t, RAW) == 0x200, "DPHY RAW o
 #define DPHY_TIM0_LP_FILTER(n)  (((uint32_t)(n) & 0xFu) << 8)
 #define DPHY_TIM0_CLK_SETTLE(n) (((uint32_t)(n) & 0xFFu) << 16)
 #define DPHY_TIM0_CLK_MISS(n)   (((uint32_t)(n) & 0xFFu) << 24) /* 0: no clock miss detection */
+/* TIM1, TIM2 (step 6, lp clock cycles; 0: off) */
+#define DPHY_TIM1_HS_TMO(n)      ((uint32_t)(n) & 0xFFFFFFu)   /* HS watchdog of a data lane */
+#define DPHY_TIM1_CLK_TOG_DIV(n) (((uint32_t)(n) & 0xFu) << 24) /* clock lane activity every
+                                                                * 2^n byte clocks */
+#define DPHY_TIM1_RESET          0x00100000u                   /* HS_TMO 2^20 (the v1 watchdog) */
+#define DPHY_TIM1_HS_TMO_OF(v)   ((v) & 0xFFFFFFu)
+#define DPHY_TIM2_T_INIT(n)      ((uint32_t)(n) & 0xFFFFFu)    /* LP-11 before Stop once ready rose
+                                                                * or after CMD.REINIT */
+#define DPHY_TIM2_ESC_TMO(n)     (((uint32_t)(n) & 0xFFFu) << 20) /* escape entry to command, in
+                                                                  * 64 cycle units */
+#define DPHY_TIM2_T_INIT_OF(v)   ((v) & 0xFFFFFu)
 
 /* LANE_LP: [1:0] clock lane, [2l+3:2l+2] data lane l; LANE_HS: [0] clock
  * lane, [l+1] data lane l */
@@ -133,13 +165,25 @@ _Static_assert(__builtin_offsetof(bow_dphy_rx_regs_t, RAW) == 0x200, "DPHY RAW o
 #define DPHY_LANE_HS_GATE      (1u << 16) /* byte clock gate open */
 #define DPHY_LANE_HS_CLK_ACT   (1u << 17) /* RxClkActiveHS (v1: the gate) */
 #define DPHY_LANE_HS_BYTECLK_OK (1u << 18)
+/* LANE_STOP: [0] StopstateClk, [l+1] Stopstate of data lane l; [16] ULPS of the
+ * clock lane, [l+17] of data lane l */
+#define DPHY_LANE_STOP_CLK     (1u << 0)
+#define DPHY_LANE_STOP(l)      (1u << (1u + (l)))
+#define DPHY_LANE_ULPS_CLK     (1u << 16)
+#define DPHY_LANE_ULPS(l)      (1u << (17u + (l)))
 
 #define DPHY_IRQ_ERR      (1u << 0) /* an ERR_STATUS bit was set */
+#define DPHY_IRQ_ULPS     (1u << 1) /* a lane entered or left ULPS */
 #define DPHY_IRQ_RAW_DONE (1u << 3)
-#define DPHY_IRQ_ALL      0x09u
+#define DPHY_IRQ_ALL      0x0Bu
 
-#define DPHY_ERR_CONTROL  (1u << 2) /* LP sequence error or HS watchdog, any lane */
-#define DPHY_ERR_ALL      0x04u
+#define DPHY_ERR_CONTROL  (1u << 2)  /* LP sequence error or HS watchdog, any lane */
+#define DPHY_ERR_HS_TMO   (1u << 3)  /* HS watchdog (TIM1.HS_TMO) */
+#define DPHY_ERR_ESC      (1u << 4)  /* escape command other than ULPS */
+#define DPHY_ERR_CLK_LOST (1u << 6)  /* data lane in HS without the clock lane (CLK_LOST_EN) */
+#define DPHY_ERR_LATE_EOT (1u << 7)  /* the byte clock stopped before RxActiveHS fell */
+#define DPHY_ERR_ESC_TMO  (1u << 10) /* escape mode longer than TIM2.ESC_TMO */
+#define DPHY_ERR_ALL      0x4DCu
 #define DPHY_ERR_LANE_CONTROL(l) (1u << (8u + (l)))
 #define DPHY_ERR_LANE_CLK        (1u << 16)
 #define DPHY_ERR_LANE_ALL        0x10F00u
@@ -165,7 +209,7 @@ _Static_assert(__builtin_offsetof(bow_dphy_rx_regs_t, RAW) == 0x200, "DPHY RAW o
 
 /* Return codes */
 #define DPHY_OK         0
-#define DPHY_ENOREINIT -1 /* READY did not fall after CMD.REINIT: no re-init in this PHY */
+#define DPHY_ENOREINIT -1 /* READY did not fall after CMD.AFE_CAL: no re-init in this PHY */
 #define DPHY_ENOTRDY   -2 /* READY did not come back */
 
 typedef struct {
@@ -214,19 +258,50 @@ uint32_t bow_dphy_rx_lp_mhz(void);
 /* TIM0 for the lane rate (bit/s per lane, 0: unknown): SETTLE of
  * bow_dphy_rx_settle() from INFO2, LP_FILTER 2, CLK_SETTLE 150 ns, CLK_MISS =
  * one byte clock period (8 UI) + 3 cycles (the clock lane activity is seen as
- * byte clock edges; 40 ns with lane rate 0). Only while the PHY is off
- * (CSI2RX CTRL.PHY_EN = 0): the lp domain takes TIM0 bit by bit. */
+ * byte clock edges; 40 ns with lane rate 0); then CMD.APPLY. Only while the PHY
+ * is off (CSI2RX CTRL.PHY_EN = 0). TIM1 and TIM2 keep their values. */
 void bow_dphy_rx_timing(uint32_t lane_rate);
+
+/* CMD.APPLY: the D-PHY takes the shadow CTRL / TIM0..2; waits until it has
+ * (CMD reads 0, a few lp clocks; false after ~1000 CPU cycles). The fields
+ * that change a running lane only while the PHY is off. */
+bool bow_dphy_rx_apply(void);
+/* CTRL = (CTRL & ~clear) | set, then apply (the DPHY_CTRL_* bits). */
+void bow_dphy_rx_ctrl(uint32_t set, uint32_t clear);
+/* lp clock cycles of ns, rounded up (the timers of TIM0..2) */
+uint32_t bow_dphy_rx_lp_cycles(uint32_t ns);
+/* TIM1.HS_TMO (cycles, 0: no HS watchdog), TIM1.CLK_TOG_DIV, TIM2.T_INIT,
+ * TIM2.ESC_TMO (64 cycle units), each with an apply; DPHY_TIM1_RESET is the
+ * reset value of TIM1, TIM2 resets to 0. */
+void bow_dphy_rx_set_hs_tmo(uint32_t cycles);
+void bow_dphy_rx_set_clk_tog_div(uint32_t div);
+void bow_dphy_rx_set_t_init(uint32_t cycles);
+void bow_dphy_rx_set_esc_tmo(uint32_t units);
+
+/* The v1.x status of the D-PHY in one read each (not polled by the receiver's
+ * start / stop): ERR_STATUS, LANE_STOP, CNT_MISC[31:16], CNT_DSK[31:16]. */
+typedef struct {
+  uint32_t err;       /* ERR_STATUS (DPHY_ERR_*) */
+  uint32_t stop;      /* LANE_STOP */
+  uint32_t misc;      /* HS_TMO + CLK_LOST + LATE_EOT + ESC_TMO events */
+  uint32_t ulps;      /* ULPS entries */
+} bow_dphy_rx_v1x_t;
+void bow_dphy_rx_v1x(bow_dphy_rx_v1x_t *s);
+/* AFE_CTRL.PD = !on; with on, READY within timeout_ms (true). Never during a
+ * stream: the Versal adapter restarts XPLL and BISC (the FPGAs come up with
+ * PD = 0). */
+bool bow_dphy_rx_power(bool on, uint32_t timeout_ms);
 
 /* AFE_STATUS.READY. */
 bool bow_dphy_rx_ready(void);
 /* READY within timeout_ms. */
 bool bow_dphy_rx_wait_ready(uint32_t timeout_ms);
-/* CMD.REINIT (the PHY loses its loaded codes, OWN clears, Versal: XPLL lock +
- * BISC + VT tracking again), then READY again within timeout_ms: DPHY_OK and
- * *us = microseconds from the command to READY; DPHY_ENOREINIT if READY did
- * not fall (a PHY without re-init, e.g. UltraScale+), DPHY_ENOTRDY if it did
- * not come back. */
+/* CMD.AFE_CAL with CMD.REINIT (the PHY loses its loaded codes, OWN clears,
+ * Versal: XPLL lock + BISC + VT tracking again; the lane state machines go
+ * back to WaitStop and T_INIT is due again), then READY again within
+ * timeout_ms: DPHY_OK and *us = microseconds from the command to READY;
+ * DPHY_ENOREINIT if READY did not fall (a PHY without re-init, e.g.
+ * UltraScale+), DPHY_ENOTRDY if it did not come back. */
 int bow_dphy_rx_reinit(uint32_t timeout_ms, uint32_t *us);
 
 /* Receive path reset of the PHY I/O while the byte clock gate is closed: the
@@ -236,7 +311,8 @@ int bow_dphy_rx_reinit(uint32_t timeout_ms, uint32_t *us);
  * every gate opening, which aligns its divider. on = 1 after reset; off
  * (CTRL.DES_RST_DIS = 1) only to test, the Huins board broke without it, and
  * the KV260 ISERDESE3 is then never reset. The firmware turns it off only on
- * the Versal build (csi2_test `phy burstrst 0`, CAM_BURST_RST = 0). */
+ * the Versal build (csi2_test `phy burstrst 0`, CAM_BURST_RST = 0). Applied
+ * at once (CMD.APPLY). */
 void bow_dphy_rx_des_rst(bool on);
 bool bow_dphy_rx_des_rst_on(void);
 

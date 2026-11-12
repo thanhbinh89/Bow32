@@ -145,7 +145,8 @@ module tb_bow_csi2rx;
     .lane_en_i    (lane_en),
     .lp_i         (lp_st),
     .clk_force_i  (clk_force),
-    .byte_ce_i    (byte_ce)
+    .byte_ce_i    (byte_ce),
+    .tinit_i      (cfg_lp_q.tinit)
   );
 
   // The AFE v1 outputs of the D-PHY (hw/ip/dphy_rx/dv/bow_afe_chk.sv): des_rst = ~gate at the
@@ -161,6 +162,7 @@ module tb_bow_csi2rx;
     .gate_i         (afe_clk_gate_en_o),
     .des_rst_i      (afe_des_rst_o),
     .des_rst_en_i   (des_rst_en),
+    .hsrx_early_i   (cfg_lp_q.hsrx_early),
     .clk_hsrx_en_i  (afe_clk_hsrx_en_o),
     .hsrx_en_i      (afe_hsrx_en_o),
     .clk_term_en_i  (afe_clk_term_en_o),
@@ -171,6 +173,7 @@ module tb_bow_csi2rx;
     .clk_lane_pd_i  (afe_clk_lane_pd_o),
     .lane_pd_i      (afe_lane_pd_o),
     .ready_i        (phy_rdy_sys),
+    .ulps_rx_i      (ulps_rx_sys),
     .dly_own_i      (afe_dly_own_o),
     .clk_dly_code_i (afe_clk_dly_code_o),
     .clk_dly_own_i  (afe_clk_dly_own_o),

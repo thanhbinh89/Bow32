@@ -106,15 +106,15 @@ close $fh
 
 # Gray coded buses and the delay codes (set_bus_skew): one "Slack (MET)" per
 # constraint. A constraint whose cells are not found (renamed RTL) is missing
-# from the report, so count them: 10 set_bus_skew lines in
-# constr/kv260_cam.xdc (CSI-2 receiver 7, DLYn codes + OWN into the adapter
-# 1, H.264 output FIFO 2).
+# from the report, so count them: 11 set_bus_skew lines in
+# constr/kv260_cam.xdc (CSI-2 receiver 8 with the D-PHY's event counters of
+# step 6, DLYn codes + OWN into the adapter 1, H.264 output FIFO 2).
 set skew [report_bus_skew -return_string]
 set fh [open [file join $out_dir bus_skew.rpt] w]
 puts $fh $skew
 close $fh
 set skew_met [regexp -all {Slack \(MET\)} $skew]
-if {[regexp {Slack \(VIOLATED\)} $skew] || $skew_met != 10} {
+if {[regexp {Slack \(VIOLATED\)} $skew] || $skew_met != 11} {
   puts "CRITICAL WARNING: bus skew violated or not constrained ($skew_met met), see bus_skew.rpt"
 }
 # The cells of every constraint (hw/fpga/common/tcl/bus_skew_checks.tcl): the

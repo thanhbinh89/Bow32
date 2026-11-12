@@ -4,7 +4,8 @@
  *
  * MIPI D-PHY receiver driver (bow_dphy_rx.h): timing, ready state and re-init,
  * input delays, counters, raw PHY words and the byte clock meter of the
- * D-PHY's registers at 0x4000_8C00.
+ * D-PHY's registers at 0x4000_8C00; since step 6 the shadow registers (CTRL,
+ * TIM0..2, CMD.APPLY) and the v1.x timers and status.
  */
 #include "bow_dphy_rx.h"
 
@@ -12,7 +13,8 @@
 #include "bow_probe.h"
 #include "bow_time.h"
 
-#define READY_FALL_US 20u /* CMD.REINIT: READY falls within a few cycles of the pulse */
+#define READY_FALL_US 20u   /* CMD.AFE_CAL: READY falls within a few cycles of the pulse */
+#define APPLY_READS   64u   /* CMD.APPLY: the lp domain takes it within a few lp clocks */
 
 static uint32_t ms_cycles(uint32_t ms) { return ms * (bow_clk_hz() / 1000u); }
 
@@ -72,6 +74,51 @@ void bow_dphy_rx_timing(uint32_t lane_rate) {
   DPHY->TIM0 = DPHY_TIM0_SETTLE(settle) | DPHY_TIM0_LP_FILTER(2) |
                DPHY_TIM0_CLK_SETTLE(lp_cycles(150, mhz)) |
                DPHY_TIM0_CLK_MISS(clk_miss_cycles(lane_rate, mhz));
+  bow_dphy_rx_apply();
+}
+
+bool bow_dphy_rx_apply(void) {
+  DPHY->CMD = DPHY_CMD_APPLY;
+  for (uint32_t i = 0; i < APPLY_READS; i++) {
+    if (!(DPHY->CMD & DPHY_CMD_APPLY)) return true;
+  }
+  return false;
+}
+
+void bow_dphy_rx_ctrl(uint32_t set, uint32_t clear) {
+  DPHY->CTRL = (DPHY->CTRL & ~clear) | set;
+  bow_dphy_rx_apply();
+}
+
+uint32_t bow_dphy_rx_lp_cycles(uint32_t ns) {
+  return (uint32_t)(((uint64_t)ns * bow_dphy_rx_lp_mhz() + 999u) / 1000u);
+}
+
+void bow_dphy_rx_set_hs_tmo(uint32_t cycles) {
+  DPHY->TIM1 = (DPHY->TIM1 & ~DPHY_TIM1_HS_TMO(~0u)) | DPHY_TIM1_HS_TMO(cycles);
+  bow_dphy_rx_apply();
+}
+
+void bow_dphy_rx_set_clk_tog_div(uint32_t div) {
+  DPHY->TIM1 = (DPHY->TIM1 & ~DPHY_TIM1_CLK_TOG_DIV(~0u)) | DPHY_TIM1_CLK_TOG_DIV(div);
+  bow_dphy_rx_apply();
+}
+
+void bow_dphy_rx_set_t_init(uint32_t cycles) {
+  DPHY->TIM2 = (DPHY->TIM2 & ~DPHY_TIM2_T_INIT(~0u)) | DPHY_TIM2_T_INIT(cycles);
+  bow_dphy_rx_apply();
+}
+
+void bow_dphy_rx_set_esc_tmo(uint32_t units) {
+  DPHY->TIM2 = (DPHY->TIM2 & ~DPHY_TIM2_ESC_TMO(~0u)) | DPHY_TIM2_ESC_TMO(units);
+  bow_dphy_rx_apply();
+}
+
+void bow_dphy_rx_v1x(bow_dphy_rx_v1x_t *s) {
+  s->err = DPHY->ERR_STATUS;
+  s->stop = DPHY->LANE_STOP;
+  s->misc = DPHY->CNT_MISC >> 16;
+  s->ulps = DPHY->CNT_DSK >> 16;
 }
 
 bool bow_dphy_rx_ready(void) { return (DPHY->AFE_STATUS & DPHY_AFE_READY) != 0; }
@@ -84,9 +131,14 @@ bool bow_dphy_rx_wait_ready(uint32_t timeout_ms) {
   return true;
 }
 
+bool bow_dphy_rx_power(bool on, uint32_t timeout_ms) {
+  DPHY->AFE_CTRL = on ? 0u : DPHY_AFE_CTRL_PD;
+  return !on || bow_dphy_rx_wait_ready(timeout_ms);
+}
+
 int bow_dphy_rx_reinit(uint32_t timeout_ms, uint32_t *us) {
   uint32_t mhz = bow_clk_hz() / 1000000u, t0 = bow_cycles(), dt;
-  DPHY->CMD = DPHY_CMD_REINIT;
+  DPHY->CMD = DPHY_CMD_AFE_CAL | DPHY_CMD_REINIT;
   while (bow_dphy_rx_ready()) {
     if (expired(t0, READY_FALL_US * mhz)) return DPHY_ENOREINIT;
   }
@@ -101,9 +153,9 @@ int bow_dphy_rx_reinit(uint32_t timeout_ms, uint32_t *us) {
 
 void bow_dphy_rx_des_rst(bool on) {
   if (on) {
-    DPHY->CTRL &= ~DPHY_CTRL_DES_RST_DIS;
+    bow_dphy_rx_ctrl(0, DPHY_CTRL_DES_RST_DIS);
   } else {
-    DPHY->CTRL |= DPHY_CTRL_DES_RST_DIS;
+    bow_dphy_rx_ctrl(DPHY_CTRL_DES_RST_DIS, 0);
   }
 }
 

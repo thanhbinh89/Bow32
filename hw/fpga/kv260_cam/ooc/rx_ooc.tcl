@@ -24,8 +24,9 @@
 #   * the ISERDESE3 RST, IDELAYE3 LOAD and CNTVALUEIN of every lane are driven by the
 #     adapter's logic (u_dphy/u_dly);
 #   * report_cdc: every critical row is one of the reviewed kinds (reset synchroniser CLR
-#     pins, the merged lane enable flop, the byte clock gate, the HS enable and the data
-#     pins into the ISERDESE3), as in tcl/timing_checks_cam.tcl of the Huins build.
+#     pins, the merged lane enable flop, the byte clock gate, the HS receiver and (step 6)
+#     termination enables and the data pins into the ISERDESE3), as in
+#     tcl/timing_checks_cam.tcl of the Huins build.
 # Reports in <out_dir>: timing_summary.rpt, bus_skew.rpt, cdc.rpt, clocks.rpt,
 # clock_interaction.rpt, check_timing.rpt, methodology.rpt, util.rpt, rx_ooc_routed.dcp.
 
@@ -195,10 +196,12 @@ proc cdc_known {id from to} {
           $to in {u_dphy/u_byte_bufg/CE u_dphy/u_hs_bufg/CE}} {
         return 1
       }
-      # the HS receiver enable (HSRX_DISABLE) and the data pins (false path: the capture is
-      # calibrated at run time) in front of the ISERDESE3
+      # the HS receiver enable and, since step 6, the termination enable (its own flop:
+      # HSRX_DISABLE = ~(hsrx_en | term_en), one pin of IBUFDS_DPHY for both; term_en only
+      # while hsrx_en, both change in LP states only, bow_afe_chk) and the data pins (false
+      # path: the capture is calibrated at run time) in front of the ISERDESE3
       return [expr {[regexp {^u_dphy/g_lane\[\d+\]\.u_iserdes/D$} $to] &&
-                    ([regexp {/g_lp\[\d+\]\.u_lp/hs_en_q_reg/C$} $from] ||
+                    ([regexp {/g_lp\[\d+\]\.u_lp/(hs_en|term)_q_reg/C$} $from] ||
                      [regexp {^mipi_phy_if_raspi_data_p\[\d+\]$} $from])}]
     }
   }

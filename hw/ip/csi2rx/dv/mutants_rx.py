@@ -36,11 +36,11 @@ CSI_RTL = os.path.join(REPO, "hw", "ip", "csi2rx", "rtl")
 AFE_RTL = os.path.join(REPO, "hw", "fpga", "common", "rtl")
 # dphy_rx.f, then csi2rx.f, in order, then the AFE adapters' logic that csi2_tx_model runs (as
 # AFE_DLY of the Makefile)
-DPHY_FILES = ["bow_dphy_lp.sv", "bow_dphy_align.sv", "bow_dphy_raw.sv", "bow_dphy_rx_regs.sv",
-              "bow_dphy_rx.sv"]
+DPHY_FILES = ["bow_ppi_err_tx.sv", "bow_dphy_lp.sv", "bow_dphy_align.sv", "bow_dphy_raw.sv",
+              "bow_dphy_rx_regs.sv", "bow_dphy_rx.sv"]
 AFE_FILES = ["bow_dphy_dly_xusp.sv", "bow_dphy_dly_xphy.sv"]
 FILES = [(DPHY_RTL, f) for f in DPHY_FILES] + \
-        [(CSI_RTL, f) for f in ("bow_csi2rx_pkg.sv", "bow_csi2_lane_merge.sv",
+        [(CSI_RTL, f) for f in ("bow_csi2rx_pkg.sv", "bow_ppi_err_rx.sv", "bow_csi2_lane_merge.sv",
                                  "bow_csi2_packet.sv", "bow_csi2_unpack.sv", "bow_csi2rx_out.sv",
                                  "bow_csi2_capture.sv", "bow_csi2rx_regs.sv", "bow_csi2rx.sv",
                                  "bow_mipi_rx.sv")] + \
@@ -82,12 +82,12 @@ MUTANTS = [
     # (the burst a lane was in when RX came on counted); deskew bursts not gated
     ("aligner_events_ungated", [(CTRL, "  assign sot_ev = al_sync_err & ~stale_q;",
                                  "  assign sot_ev = al_sync_err;", 1),
-                                (CTRL, "  assign dsk_ev = al_deskew[0] & ~stale_q[0];",
-                                 "  assign dsk_ev = al_deskew[0];", 1)]),
-    ("aligner_events_reset_only", [(CTRL, "      stale_q  <= stale_q & ~arm_lo_q;",
-                                    "      stale_q  <= '0;", 1)]),
-    ("aligner_deskew_ungated", [(CTRL, "  assign dsk_ev = al_deskew[0] & ~stale_q[0];",
-                                 "  assign dsk_ev = al_deskew[0];", 1)]),
+                                (CTRL, "  assign dsk_ev = al_deskew[0] & ~dsk_last_q & ~stale_q[0];",
+                                 "  assign dsk_ev = al_deskew[0] & ~dsk_last_q;", 1)]),
+    ("aligner_events_reset_only", [(CTRL, "      stale_q    <= stale_q & ~arm_lo_q;",
+                                    "      stale_q    <= '0;", 1)]),
+    ("aligner_deskew_ungated", [(CTRL, "  assign dsk_ev = al_deskew[0] & ~dsk_last_q & ~stale_q[0];",
+                                 "  assign dsk_ev = al_deskew[0] & ~dsk_last_q;", 1)]),
     # step 5, the AFE interface: des_rst one lp cycle after the gate (from its flop, not its
     # next state); des_rst not held off by CTRL.DES_RST_DIS; des_rst 0 in reset (section 3.6:
     # 1); OWN kept when READY falls (a restart of the AFE would keep a code it lost); OWN set
@@ -105,13 +105,17 @@ MUTANTS = [
                              "    own_d      = own_q;", 1)]),
     ("own_set_not_ready", [(REGS, "        if (ready_i) own_d[l] = 1'b1;",
                             "        own_d[l] = 1'b1;", 1)]),
-    ("lprx_en_without_pd", [(REGS, "      lprx_en_q <= !pd_d;", "      lprx_en_q <= 1'b1;", 1)]),
-    ("lane_pd_stale_ready", [(REGS, "      lane_pd_q <= pd_d || (lane_pd_q && !(ready_i && rdy_low_q));",
-                              "      lane_pd_q <= pd_d || (lane_pd_q && !ready_i);", 1)]),
-    ("lane_pd_low_kept", [(REGS, "      rdy_low_q <= (pd_d && !pd_q) ? 1'b0 : (rdy_low_q || !ready_i);",
-                           "      rdy_low_q <= rdy_low_q || !ready_i;", 1)]),
-    ("lane_pd_ignores_ready", [(REGS, "      lane_pd_q <= pd_d || (lane_pd_q && !(ready_i && rdy_low_q));",
-                                "      lane_pd_q <= pd_d;", 1)]),
+    ("lprx_en_without_pd", [(REGS, "      lprx_en_q  <= !pd_d;", "      lprx_en_q  <= 1'b1;", 1)]),
+    ("lane_pd_stale_ready", [(REGS, "  assign lane_pd_d   = pd_d || (lane_pd_q && !(ready_i && rdy_low_q));",
+                              "  assign lane_pd_d   = pd_d || (lane_pd_q && !ready_i);", 1)]),
+    ("lane_pd_low_kept", [(REGS, "      rdy_low_q  <= (pd_d && !pd_q) ? 1'b0 : (rdy_low_q || !ready_i);",
+                           "      rdy_low_q  <= rdy_low_q || !ready_i;", 1)]),
+    ("lane_pd_ignores_ready", [(REGS, "  assign lane_pd_d   = pd_d || (lane_pd_q && !(ready_i && rdy_low_q));",
+                                "  assign lane_pd_d   = pd_d;", 1)]),
+    # step 6: CMD.REINIT (the state machines) also starting the AFE's re-calibration, which
+    # is CMD.AFE_CAL now (tb_dphy_afe)
+    ("reinit_starts_cal", [(REGS, "      if (cmd_w && wd[2]) begin",
+                            "      if (cmd_w && (wd[2] || wd[1])) begin", 1)]),
     ("cal_bits_swapped", [(DPHY, "    .d_i ({afe_cal_err_i, afe_cal_done_i}),",
                            "    .d_i ({afe_cal_done_i, afe_cal_err_i}),", 1)]),
     # the adapters' delay logic: the XPHY sequencer without the wait after RX_EN_VTC 1 -> 0,

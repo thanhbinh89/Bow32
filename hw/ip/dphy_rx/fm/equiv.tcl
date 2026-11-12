@@ -66,6 +66,37 @@
 # without a step 4 counterpart (des_rst, term_en, lprx_en, lane_pd, the delay codes and OWN
 # as AFE ports, pd) are not compare points here: the checkers of the simulations
 # (hw/ip/dphy_rx/dv/bow_afe_chk.sv) and the adapters' tests cover them.
+#
+# Step 6 (the D-PHY v1.x functions). The receiver as a whole is not equivalent to step 5 by
+# design, whatever the new register bits hold: the D-PHY's configuration reaches its lp
+# domain through the shadow registers and CMD.APPLY (step 5: a two flop synchroniser of
+# every bit), its events reach the register file as gray counters (step 5: pulse
+# synchronisers), the PPI errors are gray counters (step 5: pulses) and the register map
+# grew (INFO[27], TIM1, TIM2, LANE_STOP, CNT_MISC, CNT_DSK[31:16]). Step 6 therefore proves
+# the two parts whose function must not change while the new functions are off, each
+# against the same module of a tree of step 5 (e.g. 1c76364), with the new inputs held at
+# the values the D-PHY gives them after reset:
+#   * the controller bow_csi2rx (configurations kv260 .. sim, the parameters bow_mipi_rx
+#     gives it): ErrControl / ErrControlClk held at 0 on both sides (v1 pulses and v1.x
+#     gray counters cannot be compared cycle by cycle: the new sampler u_lperr, constant
+#     then, has no counterpart) and the new flop of the deskew count (dsk_last_q, the
+#     previous RxSkewCalHS) held at 0: the proof of the rising edge count for a pulse of
+#     one byte clock, the RxSkewCalHS of v1 (dsk_last_q is 0 whenever such a pulse is 1);
+#   * the lane state machine bow_dphy_lp, data lane (lp_data) and clock lane (lp_clk), with
+#     the new inputs at the values of the reset configuration: HSRX_EARLY, CLK_MISS_OFF,
+#     ULPS_EN, ESC_TMO, T_INIT 0, HS_TMO 2^20 (the watchdog of v1), no T_INIT or REINIT
+#     pulse. The new states use the state values v1 left unused and go to Off without
+#     ULPS_EN, as v1 did from those values, so every compare point is checked for every
+#     state value, the unreachable ones included. The upper watchdog bits (tmr_hi_q) are
+#     held at 0: with HS_TMO 2^20 the count restarts at 0 in every Hs and the watchdog
+#     fires at 2^20 - 1, so they never leave their reset value (an invariant Formality's
+#     combinational check cannot see). The new flops (these bits, the termination, the
+#     T_INIT flag, the escape decoder, the new event pulses) have no counterpart, nor do
+#     the new ports.
+# What step 6 changed is listed per part (step6_constants, step6_new); every other point
+# must be matched by name and pass, as in the other steps. Not proven here: the D-PHY's
+# register file and top (APPLY, gray event counters, the new registers), the PPI signals
+# themselves: the D-PHY bench hw/ip/dphy_rx/dv and the receiver benches cover them.
 
 # Configurations: the parameter sets of the builds that instantiate the receiver
 # (hw/top/rtl/bow32_top.sv, the board tops, sim/tb/tb_bow32.sv)
@@ -75,6 +106,8 @@ array set cfg_params {
   lanes1  {Lanes = 1, PhyClkHz = 200000000, CpuClkHz = 50000000, HasPhy = 1, FifoDepth = 256, DlyVid = 0}
   nophy   {Lanes = 2, PhyClkHz = 50000000, CpuClkHz = 50000000, HasPhy = 0, FifoDepth = 256, DlyVid = 0}
   sim     {Lanes = 2, PhyClkHz = 107526882, CpuClkHz = 50000000, HasPhy = 1, FifoDepth = 256, DlyVid = 0}
+  lp_data {ClockLane = 0}
+  lp_clk  {ClockLane = 1}
 }
 if {![info exists cfg_params($cfg)]} {
   puts "EQUIV $cfg: unknown configuration ([lsort [array names cfg_params]])"
@@ -97,6 +130,7 @@ array set step_top {
   3 bow_mipi_rx
   4 bow_mipi_rx
   5 bow_mipi_rx_s4
+  6 bow_csi2rx
 }
 array set step_rules {
   1 {u_dphy_rx/ {}}
@@ -104,6 +138,7 @@ array set step_rules {
   3 {}
   4 {}
   5 {u_mipi/ {}}
+  6 {}
 }
 array set step_blocks {
   0 {rx {}}
@@ -112,6 +147,7 @@ array set step_blocks {
   3 {dphy u_dphy_rx/ ctrl u_csi2rx/}
   4 {dphy u_dphy_rx/ ctrl u_csi2rx/}
   5 {dphy u_mipi/u_dphy_rx/ ctrl u_mipi/u_csi2rx/}
+  6 {part {}}
 }
 # Step 5 (see the header):
 #   step_files        implementation files read after its file lists
@@ -121,13 +157,24 @@ array set step_blocks {
 #   step_moved        reference cells without a counterpart (name prefixes)
 #   step_new          implementation cells without a counterpart (name prefixes)
 array set step_files       {5 {hw/ip/dphy_rx/fm/bow_mipi_rx_s4.sv}}
-array set step_ref_step    {5 4}
+array set step_ref_step    {5 4 6 5}
 array set step_dont_verify {5 {byte_rst_o burst_rst_en_o dly_tap_o dly_load_o}}
 array set step_constants   {5 {u_mipi/u_dphy_rx/u_regs/pd_q_reg 0}}
 array set step_moved {5 {u_dphy_rx/g_dly_byte. u_dphy_rx/g_dly_vid. u_dphy_rx/dly_load_o_reg
                          u_dphy_rx/dly_tap_o_reg u_dphy_rx/u_iserdes_rst/
                          u_dphy_rx/u_regs/dly_req_q_reg}}
 array set step_new   {5 {u_mipi/u_dphy_rx/u_sync_cal/ u_mipi/u_dphy_rx/u_regs/pd_q_reg}}
+# Step 6 (see the header), per part: ctrl (bow_csi2rx) or lp (bow_dphy_lp)
+#   step6_top        the module compared (the same on both sides)
+#   step6_constants  {side point value}: side ref, impl or both; point a port bit or a cell
+#   step6_new        implementation cells and ports without a counterpart (name prefixes)
+array set step6_top {ctrl bow_csi2rx lp bow_dphy_lp}
+array set step6_new {
+  ctrl {u_lperr/ dsk_last_q_reg}
+  lp   {tmr_hi_q_reg term_q_reg pend_q_reg esc_sr_q_reg esc_cnt_q_reg esc_mark_q_reg ev_tmo_o
+        ev_esc_o ev_esc_tmo_o ev_ulps_o ev_wake_o hsrx_early_i miss_off_i ulps_en_i hs_tmo_i
+        esc_tmo_i tinit_i tinit_set_i force_wait_i term_en_o ulps_o ulps_rx_o}
+}
 if {![info exists step]} {
   set step 2
 }
@@ -135,8 +182,15 @@ if {$step < 1 || ![info exists step_top($step)]} {
   puts "EQUIV $cfg: unknown step $step ([lsort [array names step_rules]])"
   exit 1
 }
+if {[string match lp_* $cfg] && $step != 6} {
+  puts "EQUIV $cfg: configuration $cfg is a part of step 6 (STEP=6)"
+  exit 1
+}
 # the step of a tree, from its files (a tree of step 3 has the RTL of step 2)
 proc tree_step {root} {
+  if {[file exists [file join $root hw ip csi2rx rtl bow_ppi_err_rx.sv]]} {
+    return 6
+  }
   if {[file exists [file join $root hw ip dphy_rx fm bow_mipi_rx_s4.sv]]} {
     return 5
   }
@@ -163,6 +217,19 @@ if {[info exists step_ref_step($step)] && $ref_step != $step_ref_step($step)} {
 }
 set impl_top $step_top($step)
 set ref_top  $step_top($ref_step)
+# step 6: one part, the same module on both sides; the controller with the parameters
+# bow_mipi_rx gives it (its PPI lp clock is vid_clk_i)
+set part {}
+if {$step == 6} {
+  set part [expr {[string match lp_* $cfg] ? "lp" : "ctrl"}]
+  set impl_top $step6_top($part)
+  set ref_top  $step6_top($part)
+  if {$part eq "ctrl"} {
+    regexp {PhyClkHz = (\d+)} $params -> phy_hz
+    regsub {, DlyVid = \d+} $params {} params
+    append params ", DphyWin = 1, PpiLpClkHz = $phy_hz"
+  }
+}
 # the rules from the implementation's step down to the reference's
 set rename_rules {}
 for {set s $step} {$s > $ref_step} {incr s -1} {
@@ -262,6 +329,50 @@ if {[info exists step_constants($step)]} {
     incr n_constants
   }
 }
+# step 6: {side point value}, see the header
+set step6_constants {}
+if {$part eq "ctrl"} {
+  regexp {Lanes = (\d+)} $params -> lanes
+  foreach b {0 1} {
+    lappend step6_constants both "ppi_lp_clk_i\[err_control\]\[$b\]" 0
+    for {set l 0} {$l < $lanes} {incr l} {
+      lappend step6_constants both "ppi_lp_i\[$l\]\[err_control\]\[$b\]" 0
+    }
+  }
+  lappend step6_constants impl dsk_last_q_reg 0
+} elseif {$part eq "lp"} {
+  foreach p {hsrx_early_i miss_off_i ulps_en_i tinit_set_i force_wait_i} {
+    lappend step6_constants impl $p 0
+  }
+  for {set b 0} {$b < 24} {incr b} {
+    lappend step6_constants impl "hs_tmo_i\[$b\]" [expr {$b == 20}]
+  }
+  for {set b 0} {$b < 20} {incr b} {
+    lappend step6_constants impl "tinit_i\[$b\]" 0
+  }
+  for {set b 0} {$b < 12} {incr b} {
+    lappend step6_constants impl "esc_tmo_i\[$b\]" 0
+  }
+  # the upper watchdog bits: 0 from the reset on with HS_TMO 2^20 (the count restarts at 0
+  # in every Hs and the watchdog fires at 2^20 - 1, before a carry into bit 20)
+  for {set b 0} {$b < 4} {incr b} {
+    lappend step6_constants impl "tmr_hi_q_reg\[$b\]" 0
+  }
+}
+foreach {side pt v} $step6_constants {
+  set designs [expr {$side eq "both" ? [list $ref $impl] : [list [set $side]]}]
+  foreach d $designs {
+    if {[sizeof_collection [get_ports -quiet "$d/$pt"]] == 1} {
+      set_constant -type port "$d/$pt" $v
+    } elseif {[sizeof_collection [get_cells -quiet "$d/$pt"]] == 1} {
+      set_constant -type cell "$d/$pt" $v
+    } else {
+      puts "EQUIV $cfg: no port or cell $pt in $d"
+      exit 1
+    }
+    incr n_constants
+  }
+}
 
 report_designs             > designs.rpt
 report_black_boxes         > black_boxes.rpt
@@ -323,7 +434,7 @@ proc check_pairs {} {
       continue
     }
     set bi [block_of $::step $i]
-    set br [block_of $::ref_step $r]
+    set br [block_of [expr {$::step == 6 ? 6 : $::ref_step}] $r]
     dict incr count $bi
     if {$bi eq "wrapper" || ($::ref_step > 0 && $br ne $bi)} {
       incr outside
@@ -357,6 +468,9 @@ proc known_unmatched {} {
   foreach {- side name} [regexp -all -inline -line {^\s+(Ref|Impl)\s+\S+\s+(\S+)\s*$} $txt] {
     set n [strip $name]
     set lst [expr {$side eq "Ref" ? [list_or_empty step_moved] : [list_or_empty step_new]}]
+    if {$::step == 6 && $side eq "Impl"} {
+      set lst $::step6_new($::part)
+    }
     set hit {}
     foreach prefix $lst {
       if {[string first $prefix $n] == 0} {
@@ -419,8 +533,8 @@ foreach {rpt re what} {
   constants.rpt    {User Defined Constants:\s+None}     "user constants"
   dont_verify.rpt  {Don't verify points:\s+None}        "don't-verify points"
 } {
-  # step 5: the listed exceptions are checked below instead
-  if {$step == 5 && $rpt in {unmatched.rpt constants.rpt dont_verify.rpt}} {
+  # steps 5 and 6: the listed exceptions are checked below instead
+  if {$step in {5 6} && $rpt in {unmatched.rpt constants.rpt dont_verify.rpt}} {
     continue
   }
   if {![regexp $re [slurp $rpt]]} {
@@ -435,6 +549,22 @@ if {$step == 5} {
   set ncon [regexp -all -line {pd_q_reg} [slurp constants.rpt]]
   if {$n_constants != 1 || $ncon != 1} {
     lappend bad "user constants: $ncon in constants.rpt, $n_constants set (step 5: PD only)"
+  }
+}
+if {$step == 6} {
+  if {[llength $unmatched_bad] != 0} {
+    lappend bad "[llength $unmatched_bad] unmatched points not listed in step6_new\
+                 (unmatched_known.rpt)"
+  }
+  # every constant of the part once in constants.rpt (a line per point: its name, then the
+  # value), nothing else; no don't-verify point
+  set ctxt [slurp constants.rpt]
+  set ncon [regexp -all -line {^\s+[01]\s+\S+\s+[ri]:/} $ctxt]
+  if {$ncon != $n_constants} {
+    lappend bad "user constants: $ncon in constants.rpt, $n_constants set (step6_constants)"
+  }
+  if {![regexp {Don't verify points:\s+None} [slurp dont_verify.rpt]]} {
+    lappend bad "don't-verify points (dont_verify.rpt)"
   }
 }
 # names: the reference's after the rename rules, every pair matched by name
@@ -474,6 +604,12 @@ if {$step == 5 && (![info exists dv_total] || $dv_total != $n_dv_ports || $dv_po
   lappend bad "don't-verify points: [expr {[info exists dv_total] ? $dv_total : 0}] in status.rpt,\
                $n_dv_ports port bits listed"
 }
+# (no "Not Compared" section: no constant register and no unread flop, e.g. the clock lane
+# state machine of step 6)
+if {![regexp {Not Compared} $st]} {
+  set creg 0
+  set unread 0
+}
 foreach v {total port dff creg unread} {
   if {![info exists $v]} {
     set $v ?
@@ -492,6 +628,21 @@ set summary "step $ref_step -> $step, $ref_top -> $impl_top: $total compare poin
              unverified, $n_pairs matched pairs ($n_unread unread) with the reference's names\
              ($n_moved through the rename rules) and $blocks, no black box, user match or\
              constant; not compared: $creg constant registers, $unread unread flops"
+if {$step == 6} {
+  set per {}
+  dict for {k v} $unmatched_known {
+    lappend per "$k $v"
+  }
+  set held [expr {$part eq "ctrl" ?
+    "ErrControl / ErrControlClk 0 on both sides, dsk_last_q 0 (RxSkewCalHS a pulse, v1)" :
+    "the new inputs at the reset configuration (HS_TMO 2^20, the rest 0), tmr_hi_q 0"}]
+  set summary "step $ref_step -> $step, part $part ($impl_top on both sides): $total compare\
+               points matched and passing ($port ports, $dff flops), 0 failing / aborted /\
+               unverified, $n_pairs matched pairs ($n_unread unread) with the reference's\
+               names, no black box, user match or don't-verify point; held: $held\
+               ($n_constants user constants); unmatched only the new cells and ports\
+               ([join $per {, }]); not compared: $creg constant registers, $unread unread flops"
+}
 if {$step == 5} {
   set per {}
   dict for {k v} $unmatched_known {

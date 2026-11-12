@@ -410,6 +410,8 @@ class ReceiverTest(unittest.TestCase):
         rx.lp_item(2, "00", 100)                         # LP-00 from Stop
         rx.idle()
         rx.write(m.REG["DPHY_TIM0"], m.TIM0_RESET & ~0xF00 | 4 << 8)
+        self.assertEqual(rx.atim0, m.TIM0_RESET)                     # a shadow (step 6) ...
+        rx.write(m.REG["DPHY_CMD"], m.DCMD_APPLY)                    # ... until CMD.APPLY
         rx.lp_item(1, "10", 9)                           # glitch below LP_FILTER
         self.assertEqual(read(rx, "DPHY_CNT_LPERR"), 2)
         self.assertEqual(read(rx, "DPHY_ERR_LANE"), 0x300)          # data lanes 0 and 1
@@ -423,7 +425,10 @@ class ReceiverTest(unittest.TestCase):
         # the D-PHY masks ErrControlClk while CTRL.CLK_CONT: counted there, not passed on
         rx = receiver()
         rx.write(m.REG["DPHY_CTRL"], m.DCTRL_CLK_CONT)
-        self.assertEqual(read(rx, "DPHY_CTRL"), m.DCTRL_CLK_CONT)
+        self.assertEqual(read(rx, "DPHY_CTRL"), m.DCTRL_CLK_CONT)  # the shadow
+        self.assertFalse(rx.clk_cont)
+        rx.write(m.REG["DPHY_CMD"], m.DCMD_APPLY)
+        self.assertTrue(rx.clk_cont)
         rx.idle()
         rx.lp_item(1 << m.CLK, "10", 100)
         rx.idle()
@@ -432,6 +437,7 @@ class ReceiverTest(unittest.TestCase):
         self.assertEqual(read(rx, "ERR_STATUS"), 0)
         self.assertFalse(rx.lp_lost)
         rx.write(m.REG["DPHY_CTRL"], 0)
+        rx.write(m.REG["DPHY_CMD"], m.DCMD_APPLY)
         rx.idle()
         rx.lp_item(1 << m.CLK, "10", 100)
         rx.idle()
@@ -441,7 +447,7 @@ class ReceiverTest(unittest.TestCase):
         # the D-PHY's interrupt is IRQ_STATUS[5] of the controller
         self.assertEqual(read(rx, "IRQ_STATUS") & m.IRQ_PHY, 0)
         rx.write(m.REG["DPHY_IRQ_EN"], 0xFF)
-        self.assertEqual(read(rx, "DPHY_IRQ_EN"), m.DIRQ_ERR | m.DIRQ_RAW)
+        self.assertEqual(read(rx, "DPHY_IRQ_EN"), m.DIRQ_ERR | m.DIRQ_ULPS | m.DIRQ_RAW)
         self.assertEqual(read(rx, "IRQ_STATUS") & m.IRQ_PHY, m.IRQ_PHY)
         rx.write(m.REG["IRQ_STATUS"], 0xFF)                       # not W1C there
         self.assertEqual(read(rx, "IRQ_STATUS") & m.IRQ_PHY, m.IRQ_PHY)
@@ -459,7 +465,8 @@ class ReceiverTest(unittest.TestCase):
     def test_four_lane_registers(self):
         rx = receiver(lanes=4, versal=True, fifo_depth=512)
         self.assertEqual(read(rx, "INFO"), 0x0200C854)              # Huins camera build
-        self.assertEqual(read(rx, "DPHY_INFO"), 0x00A4C844)         # its D-PHY: XPHY, 9 bit taps
+        self.assertEqual(read(rx, "DPHY_INFO"), 0x08A4C844)         # its D-PHY: XPHY, 9 bit
+                                                                    # taps, ULPS (step 6)
         self.assertEqual(read(rx, "DPHY_INFO2"), 0x00080078)        # 120 ns + 0 UI, trail 8
         self.assertEqual(read(rx, "DPHY_ID"), m.DPHY_ID_VALUE)
         self.assertEqual(read(rx, "CTRL"), 0x2B83)
@@ -516,9 +523,10 @@ class ReceiverTest(unittest.TestCase):
         rx.close_seg()
         self.assertEqual(rx.seg_expect[1]["dly_loads1"], "=2")
         self.assertEqual(rx.seg_expect[1]["dly_loads0"], "=0")
-        # PHY re-init (CMD.REINIT): READY and CNTVALUEOUT drop, the written tap stays in
-        # DLYn[8:0], OWN 0, the BISC tap comes back once the PHY is ready again
-        rx.write(m.REG["DPHY_CMD"], m.DCMD_REINIT)
+        # PHY re-init (CMD.AFE_CAL; CMD.REINIT up to step 5): READY and CNTVALUEOUT drop, the
+        # written tap stays in DLYn[8:0], OWN 0, the BISC tap comes back once the PHY is ready
+        # again
+        rx.write(m.REG["DPHY_CMD"], m.DCMD_AFE_CAL)
         self.assertEqual(read(rx, "DPHY_AFE_STATUS"), 0)
         self.assertEqual(read(rx, "DPHY_DLY1"), 2)
         self.assertFalse(rx.byte_clock_ok())
@@ -530,10 +538,10 @@ class ReceiverTest(unittest.TestCase):
         rx.bus_access()
         rx.time_step()
         self.assertEqual(read(rx, "DPHY_DLY1"), own | 3 | 3 << 16)
-        # the UltraScale+ PHY has no re-init: CMD.REINIT changes nothing
+        # the UltraScale+ PHY has no re-init: CMD.AFE_CAL changes nothing
         rx = receiver()
         rx.write(m.REG["DPHY_DLY0"], 0x40)
-        rx.write(m.REG["DPHY_CMD"], m.DCMD_REINIT)
+        rx.write(m.REG["DPHY_CMD"], m.DCMD_AFE_CAL)
         self.assertEqual(read(rx, "DPHY_AFE_STATUS"), 0x0F01)
         self.assertEqual(read(rx, "DPHY_DLY0") & (own | 0x1FF), own | 0x40)
 
