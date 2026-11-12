@@ -163,52 +163,61 @@ static bool check_frames(const suite_t *s, uint32_t first_ms, uint32_t n, uint32
 
 /* ------------------------------------------------------------------ checks */
 /* Clock lane and every data lane of the stream in LP state lp, no HS, byte
- * clock gate closed. */
-static bool idle(uint32_t st, uint32_t lp) {
-  if (CSI2RX_ST_LP_CLK(st) != lp) return false;
+ * clock gate closed (the D-PHY's LANE_LP and LANE_HS). */
+static bool idle(uint32_t lpst, uint32_t hs, uint32_t lp) {
+  if (DPHY_LANE_LP_CLK(lpst) != lp) return false;
   for (uint32_t l = 0; l < stream_lanes(); l++) {
-    if (CSI2RX_ST_LP(st, l) != lp) return false;
+    if (DPHY_LANE_LP(lpst, l) != lp) return false;
   }
-  return !(st & (CSI2RX_ST_HS_CLK | CSI2RX_ST_HS_DATA | CSI2RX_ST_CE));
+  return !(hs & (DPHY_LANE_HS_CLK | DPHY_LANE_HS_DATA | DPHY_LANE_HS_GATE));
 }
 
 static bool check_phy_idle(const suite_t *s) {
   bow_csi2rx_cnt_t c;
-  uint32_t start, st, lp = 3u, bursts, n = stream_lanes();
+  uint32_t start, lpst, hs, lp = 3u, bursts, n = stream_lanes();
   bool i274 = sensor_imx274();
   if (ct.streaming) stream_stop();
   if (cam_rx_start(ct.s, CSI2_DT_RAW10) != CSI2RX_OK) {
-    return fail("D-PHY not ready (STATUS.PHY_RDY = 0)");
+    return fail("D-PHY not ready (AFE_STATUS.READY = 0)");
   }
   /* the sensor may still finish a frame (probe or last stop); in standby the
    * IMX219 lanes are LP-11, the IMX274 ones LP-00 (datasheet; LP-11 of every
    * lane is accepted too) */
   start = bow_cycles();
   for (;;) {
-    st = CSI2RX->STATUS;
-    if (i274) lp = CSI2RX_ST_LP_CLK(st) == 0u ? 0u : 3u;
-    if (idle(st, lp)) break;
+    lpst = DPHY->LANE_LP;
+    hs = DPHY->LANE_HS;
+    if (i274) lp = DPHY_LANE_LP_CLK(lpst) == 0u ? 0u : 3u;
+    if (idle(lpst, hs, lp)) break;
     if (expired(start, s->wait_ms)) {
-      if (i274) return fail("STATUS %06x: lanes not all in LP-00 or LP-11, or HS on", st);
-      return fail("STATUS %04x: lanes not in LP-11 or HS on", st);
+      if (i274) {
+        return fail("LANE_LP %03x LANE_HS %05x: lanes not all in LP-00 or LP-11, or HS on", lpst,
+                    hs);
+      }
+      return fail("LANE_LP %03x LANE_HS %05x: lanes not in LP-11 or HS on", lpst, hs);
     }
   }
   bow_csi2rx_clear();
   bow_delay_ms(s->quick ? 1u : 20u);
-  st = CSI2RX->STATUS;
+  lpst = DPHY->LANE_LP;
+  hs = DPHY->LANE_HS;
   bow_csi2rx_counters(&c);
   bursts = c.clk_burst;
   for (uint32_t l = 0; l < n; l++) bursts += c.burst[l];
-  if (!idle(st, lp) || bursts) {
+  if (!idle(lpst, hs, lp) || bursts) {
     if (n > 2) {
-      return fail("HS while the sensor is in standby: STATUS %06x, bursts %u/%u/%u/%u clk %u", st,
-                  c.burst[0], c.burst[1], c.burst[2], c.burst[3], c.clk_burst);
+      return fail("HS while the sensor is in standby: LANE_LP %03x LANE_HS %05x, "
+                  "bursts %u/%u/%u/%u clk %u", lpst, hs, c.burst[0], c.burst[1], c.burst[2],
+                  c.burst[3], c.clk_burst);
     }
-    return fail("HS while the sensor is in standby: STATUS %04x, bursts %u/%u clk %u", st,
-                c.burst[0], c.burst[1], c.clk_burst);
+    return fail("HS while the sensor is in standby: LANE_LP %03x LANE_HS %05x, bursts %u/%u clk %u",
+                lpst, hs, c.burst[0], c.burst[1], c.clk_burst);
   }
-  if (i274) return pass("all lanes LP-%s, no HS (STATUS %06x)", lp ? "11" : "00 (standby)", st);
-  return pass("all lanes LP-11, no HS (STATUS %04x)", st);
+  if (i274) {
+    return pass("all lanes LP-%s, no HS (LANE_LP %03x LANE_HS %05x)", lp ? "11" : "00 (standby)",
+                lpst, hs);
+  }
+  return pass("all lanes LP-11, no HS (LANE_LP %03x LANE_HS %05x)", lpst, hs);
 }
 
 static bool check_link_up(const suite_t *s) {
@@ -232,7 +241,7 @@ static bool check_link_up(const suite_t *s) {
   for (;;) {
     bow_csi2rx_counters(&b);
     /* continuous clock: one HS entry only, the gate stays open */
-    bool clk = b.clk_burst > a.clk_burst || (CSI2RX->STATUS & CSI2RX_ST_CE);
+    bool clk = b.clk_burst > a.clk_burst || (DPHY->LANE_HS & DPHY_LANE_HS_GATE);
     bool all = true;
     for (uint32_t l = 0; l < n; l++) all = all && b.burst[l] > a.burst[l];
     if (all && clk) break;
@@ -265,8 +274,9 @@ static bool check_calibrate(const suite_t *s) {
     return false;
   }
   for (uint32_t l = 0; l < n; l++) {
-    uint32_t d = bow_csi2rx_read_delay(l);
-    if (CSI2RX_DLY_TAP(d) != cal.tap[l] || CSI2RX_DLY_OUT(d) != cal.tap[l]) {
+    uint32_t d = bow_dphy_rx_read_delay(l);
+    if (DPHY_DLY_CODE(d) != cal.tap[l] || DPHY_DLY_Q(d) != cal.tap[l] || !(d & DPHY_DLY_OWN) ||
+        (d & DPHY_DLY_PEND)) {
       return fail("lane %u: DLY %08x, expected tap %u", l, d, cal.tap[l]);
     }
   }
@@ -466,7 +476,7 @@ static bool check_timing(const suite_t *s) {
   if (!bow_csi2rx_wait_frame(s->wait_ms)) return fail("no frame end");
   uint32_t ft = CSI2RX->FRAME_TIME, lt = CSI2RX->LINE_TIME;
   if (!s->quick) bow_csi2rx_clear(); /* clock lane HS entries during the measurement */
-  uint32_t byte_hz = bow_csi2rx_byteclk_hz(s->quick ? 0u : 100u);
+  uint32_t byte_hz = bow_dphy_rx_byteclk_hz(s->quick ? 0u : 100u);
   uint32_t f_us = muldiv(ft, 1000000u, clk), l_ns = muldiv(lt, 1000000000u, clk);
   if (s->quick) {
     if (lt == 0 || ft <= ct.h * lt) {

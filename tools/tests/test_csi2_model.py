@@ -267,8 +267,12 @@ class ReceiverTest(unittest.TestCase):
         self.assertEqual(read(rx, "CNT_PKT"), 6)
         self.assertEqual(read(rx, "CNT_LINE"), 3)
         self.assertEqual(read(rx, "CNT_DROP"), 1)
-        self.assertEqual(read(rx, "CNT_BURST"), 6 | 6 << 16)
-        self.assertEqual(read(rx, "CNT_MISC") & 0xFFFF, 6)          # clock lane HS entries
+        # HS entries: the D-PHY's counters (step 4); the controller's old ones read 0
+        self.assertEqual(read(rx, "DPHY_CNT_BURST0"), 6)
+        self.assertEqual(read(rx, "DPHY_CNT_BURST1"), 6)
+        self.assertEqual(read(rx, "DPHY_CNT_CLK"), 6)              # clock lane HS entries
+        self.assertEqual(read(rx, "CNT_BURST"), 0)
+        self.assertEqual(read(rx, "CNT_MISC"), 0)
         self.assertEqual(rx.read(m.REG["FRAME_TIME"]).kind, "exact")  # one FS only: 0
         lines = [it for it in rx.items if isinstance(it, m.LineOut)]
         self.assertEqual([it.sof for it in lines], [True, False, False])
@@ -405,30 +409,79 @@ class ReceiverTest(unittest.TestCase):
         rx.lp_item(1, "11", 100)                         # aborted request: no error
         rx.lp_item(2, "00", 100)                         # LP-00 from Stop
         rx.idle()
-        rx.write(m.REG["PHY_CFG"], m.PHY_CFG_RESET & ~0xF00 | 4 << 8)
+        rx.write(m.REG["DPHY_TIM0"], m.TIM0_RESET & ~0xF00 | 4 << 8)
         rx.lp_item(1, "10", 9)                           # glitch below LP_FILTER
-        self.assertEqual(read(rx, "CNT_MISC") >> 16 & 0xFF, 2)
-        self.assertEqual(read(rx, "CNT_BURST"), 0)
+        self.assertEqual(read(rx, "DPHY_CNT_LPERR"), 2)
+        self.assertEqual(read(rx, "DPHY_ERR_LANE"), 0x300)          # data lanes 0 and 1
+        self.assertEqual(read(rx, "DPHY_ERR_STATUS"), m.DERR_CONTROL)
+        self.assertEqual(read(rx, "DPHY_IRQ_STATUS"), m.DIRQ_ERR)
+        self.assertEqual(read(rx, "ERR_STATUS"), 1 << m.ERR["lp"])  # passed on the PPI
+        self.assertEqual(read(rx, "DPHY_CNT_BURST0"), 0)
+        self.assertEqual(read(rx, "DPHY_TIM0"), 0x081E040E)
+
+    def test_dphy_masks(self):
+        # the D-PHY masks ErrControlClk while CTRL.CLK_CONT: counted there, not passed on
+        rx = receiver()
+        rx.write(m.REG["DPHY_CTRL"], m.DCTRL_CLK_CONT)
+        self.assertEqual(read(rx, "DPHY_CTRL"), m.DCTRL_CLK_CONT)
+        rx.idle()
+        rx.lp_item(1 << m.CLK, "10", 100)
+        rx.idle()
+        self.assertEqual(read(rx, "DPHY_CNT_LPERR"), 1)
+        self.assertEqual(read(rx, "DPHY_ERR_LANE"), 1 << 16)
+        self.assertEqual(read(rx, "ERR_STATUS"), 0)
+        self.assertFalse(rx.lp_lost)
+        rx.write(m.REG["DPHY_CTRL"], 0)
+        rx.idle()
+        rx.lp_item(1 << m.CLK, "10", 100)
+        rx.idle()
+        self.assertEqual(read(rx, "DPHY_CNT_LPERR"), 2)
+        self.assertEqual(read(rx, "ERR_STATUS"), 1 << m.ERR["lp"])
+        self.assertTrue(rx.lp_lost)
+        # the D-PHY's interrupt is IRQ_STATUS[5] of the controller
+        self.assertEqual(read(rx, "IRQ_STATUS") & m.IRQ_PHY, 0)
+        rx.write(m.REG["DPHY_IRQ_EN"], 0xFF)
+        self.assertEqual(read(rx, "DPHY_IRQ_EN"), m.DIRQ_ERR | m.DIRQ_RAW)
+        self.assertEqual(read(rx, "IRQ_STATUS") & m.IRQ_PHY, m.IRQ_PHY)
+        rx.write(m.REG["IRQ_STATUS"], 0xFF)                       # not W1C there
+        self.assertEqual(read(rx, "IRQ_STATUS") & m.IRQ_PHY, m.IRQ_PHY)
+        rx.write(m.REG["DPHY_IRQ_STATUS"], m.DIRQ_ERR)
+        self.assertEqual(read(rx, "IRQ_STATUS") & m.IRQ_PHY, 0)
+        # CMD.CNT_CLR clears the D-PHY's counters, not the controller's
+        rx.write(m.REG["DPHY_CMD"], m.DCMD_CNT_CLR)
+        self.assertEqual(read(rx, "DPHY_CNT_LPERR"), 0)
+        # the controller's old PHY registers read 0 and take no write (no alias)
+        for n in m.OLD_PHY_REGS:
+            rx.write(m.REG[n], 0xFFFFFFFF)
+            self.assertEqual(read(rx, n), 0, n)
+        self.assertEqual(read(rx, "DPHY_TIM0"), m.TIM0_RESET)
 
     def test_four_lane_registers(self):
         rx = receiver(lanes=4, versal=True, fifo_depth=512)
-        self.assertEqual(read(rx, "INFO"), 0x0200C834)              # Huins camera build
+        self.assertEqual(read(rx, "INFO"), 0x0200C854)              # Huins camera build
+        self.assertEqual(read(rx, "DPHY_INFO"), 0x00A4C844)         # its D-PHY: XPHY, 9 bit taps
+        self.assertEqual(read(rx, "DPHY_INFO2"), 0x00080078)        # 120 ns + 0 UI, trail 8
+        self.assertEqual(read(rx, "DPHY_ID"), m.DPHY_ID_VALUE)
         self.assertEqual(read(rx, "CTRL"), 0x2B83)
         px = [(5 * i) & 0x3FF for i in range(16)]
         rx.burst(m.Burst(0, m.DT_FS, 1))
         rx.burst(m.Burst(0, m.DT_RAW10, 20, m.raw10_pack(px)))
         rx.burst(m.Burst(0, m.DT_FE, 1))
-        self.assertEqual(read(rx, "CNT_BURST"), 3 | 3 << 16)
-        self.assertEqual(read(rx, "CNT_BURST23"), 3 | 3 << 16)
+        for n in m.DPHY_BURST_REGS + ("DPHY_CNT_CLK",):
+            self.assertEqual(read(rx, n), 3, n)
         self.assertEqual(read(rx, "FRAME_SUM"), sum(px))
-        e = rx.read(m.REG["STATUS"])
-        self.assertEqual((e.value, e.mask), (0x000F403F | 3 << 16, 0x3F5FFF))  # LP-11 x 5, PHY_RDY
-        # lane 2 only with LP-01: STATUS[17:16]; LP-00 from Stop on lane 3: LP error
+        self.assertEqual(read(rx, "DPHY_LANE_LP"), 0x3FF)           # LP-11 x 5
+        e = rx.read(m.REG["DPHY_LANE_HS"])
+        self.assertEqual((e.value, e.mask), (0, 0x3001F))
+        self.assertEqual(read(rx, "DPHY_AFE_STATUS"), 0x0F01)       # READY
+        self.assertEqual(read(rx, "STATUS"), 0)
+        # lane 2 only with LP-01: LANE_LP[7:6]; LP-00 from Stop on lane 3: LP error
         rx.lp_item(4, "01", 3000)
-        self.assertEqual(rx.read(m.REG["STATUS"]).value >> 16 & 0xF, 0b1101)
+        self.assertEqual(rx.read(m.REG["DPHY_LANE_LP"]).value >> 6 & 0xF, 0b1101)
         rx.idle()
         rx.lp_item(8, "00", 200)
-        self.assertEqual(read(rx, "CNT_MISC") >> 16 & 0xFF, 1)
+        self.assertEqual(read(rx, "DPHY_CNT_LPERR"), 1)
+        self.assertEqual(read(rx, "DPHY_ERR_LANE"), 1 << 11)
         # 2 of the 4 lanes: lanes 2/3 off (their FSMs stay in Off)
         rx.write(m.REG["CTRL"], m.CTRL_PHY_EN | m.CTRL_RX_EN | m.CTRL_LANES | m.DT_RAW10 << 8)
         self.assertEqual(rx.lanes, 2)
@@ -439,38 +492,50 @@ class ReceiverTest(unittest.TestCase):
     def test_dly_vid(self):
         cfg = dict(m.DEFAULT_CFG, lanes=4, dut_lanes=4, **m.VERSAL_CFG)
         rx = m.Receiver(cfg)
-        self.assertEqual(read(rx, "STATUS") & m.STATUS_PHY_RDY, 0)
-        self.assertEqual(read(rx, "DLY2"), 0)                       # CNTVALUEOUT 0 before init
+        own = m.DLY_OWN
+        self.assertEqual(read(rx, "DPHY_AFE_STATUS"), 0)           # not READY
+        self.assertEqual(read(rx, "DPHY_DLY2"), 0)                  # CNTVALUEOUT 0 before init
         rx.phy_ready()
-        self.assertEqual(read(rx, "DLY2"), cfg["bisc2"] << 16)     # BISC tap, nothing loaded
-        rx.write(m.REG["DLY2"], 0x155)
+        self.assertEqual(read(rx, "DPHY_DLY2"), cfg["bisc2"] << 16)  # BISC tap, nothing loaded
+        rx.write(m.REG["DPHY_DLY2"], 0x155)
         rx.bus_access()
-        e = rx.read(m.REG["DLY2"])
-        self.assertEqual((e.value & 0x1FF, e.mask), (0x155, 0x1FF))  # load in flight
+        e = rx.read(m.REG["DPHY_DLY2"])
+        self.assertEqual((e.value & 0x800001FF, e.mask), (own | 0x155, 0xFE007FFF))  # in flight
         rx.time_step()
-        self.assertEqual(read(rx, "DLY2"), 0x155 | 0x155 << 16)    # no byte clock needed
-        rx.write(m.REG["DLY2"], 0x10)
+        self.assertEqual(read(rx, "DPHY_DLY2"), own | 0x155 | 0x155 << 16)  # no byte clock needed
+        rx.write(m.REG["DPHY_DLY2"], 0x10)
         rx.bus_access()
-        rx.write(m.REG["DLY2"], 0x11)                              # back to back: may merge
+        rx.write(m.REG["DPHY_DLY2"], 0x11)                         # back to back: may merge
         rx.close_seg()
         self.assertEqual(rx.seg_expect[0]["dly_loads2"], "any")
         rx.mark(1)
-        rx.write(m.REG["DLY1"], 1)
+        rx.write(m.REG["DPHY_DLY1"], 1)
         rx.bus_access()
         rx.bus_access()
-        rx.write(m.REG["DLY1"], 2)
+        rx.write(m.REG["DPHY_DLY1"], 2)
         rx.close_seg()
         self.assertEqual(rx.seg_expect[1]["dly_loads1"], "=2")
         self.assertEqual(rx.seg_expect[1]["dly_loads0"], "=0")
-        # PHY re-init: PHY_RDY and CNTVALUEOUT drop, the written tap stays in
-        # DLYn[8:0], the BISC tap comes back once the PHY is ready again
-        rx.phy_reinit()
-        self.assertEqual(read(rx, "STATUS") & m.STATUS_PHY_RDY, 0)
-        self.assertEqual(read(rx, "DLY1"), 2)
+        # PHY re-init (CMD.REINIT): READY and CNTVALUEOUT drop, the written tap stays in
+        # DLYn[8:0], OWN 0, the BISC tap comes back once the PHY is ready again
+        rx.write(m.REG["DPHY_CMD"], m.DCMD_REINIT)
+        self.assertEqual(read(rx, "DPHY_AFE_STATUS"), 0)
+        self.assertEqual(read(rx, "DPHY_DLY1"), 2)
         self.assertFalse(rx.byte_clock_ok())
         rx.phy_ready()
-        self.assertEqual(read(rx, "STATUS") & m.STATUS_PHY_RDY, m.STATUS_PHY_RDY)
-        self.assertEqual(read(rx, "DLY1"), 2 | cfg["bisc1"] << 16)
+        self.assertEqual(read(rx, "DPHY_AFE_STATUS"), 0x0F01)
+        self.assertEqual(read(rx, "DPHY_DLY1"), 2 | cfg["bisc1"] << 16)
+        # a write while the PHY is ready again: OWN, PEND until CNTVALUEOUT has the code
+        rx.write(m.REG["DPHY_DLY1"], 3)
+        rx.bus_access()
+        rx.time_step()
+        self.assertEqual(read(rx, "DPHY_DLY1"), own | 3 | 3 << 16)
+        # the UltraScale+ PHY has no re-init: CMD.REINIT changes nothing
+        rx = receiver()
+        rx.write(m.REG["DPHY_DLY0"], 0x40)
+        rx.write(m.REG["DPHY_CMD"], m.DCMD_REINIT)
+        self.assertEqual(read(rx, "DPHY_AFE_STATUS"), 0x0F01)
+        self.assertEqual(read(rx, "DPHY_DLY0") & (own | 0x1FF), own | 0x40)
 
     def test_log_modes(self):
         for mode, first, n in [(0, 0, 64), (2, 3, 64), (4, None, None), (6, 3, 4)]:
@@ -560,7 +625,7 @@ class PpiTest(unittest.TestCase):
                     self.assertEqual(sorted(ln), list(range(lanes)))
                     for l, x in ln.items():
                         if mode == "bow":
-                            self.assertGreaterEqual(x["s"] - x["a"], 4)     # RAW: 00 .. B8 first
+                            self.assertGreaterEqual(x["s"] - x["a"], 4)     # SETTLE .. sync
                         else:
                             self.assertEqual(x["a"], x["s"])                # with RxSyncHS
                             self.assertNotIn(-1, x["b"])                    # no gaps
@@ -598,50 +663,49 @@ class PpiTest(unittest.TestCase):
             self.assertGreaterEqual(sk[1]["s"] - sk[0]["s"], 7)
 
     def test_receiver(self):
-        # what the band (bow) and the flat wrapper (std) give the controller
+        # the controller alone (both timings): the D-PHY's window reads 0, the old PHY
+        # registers of the controller too; INFO[6] (DphyWin) only in the timing of Bow32's
+        # D-PHY (bow_csi2rx as in bow_mipi_rx; the flat wrapper has none)
         for mode in (m.PPI_BOW, m.PPI_STD):
             rx = receiver(ppi=mode)
-            rx.write(m.REG["RAW_CTRL"], 1)
+            self.assertEqual(read(rx, "INFO") >> 6 & 1, int(mode == m.PPI_BOW))
+            rx.write(m.REG["DPHY_RAW_CTRL"], 1)
             rx.burst(m.Burst(0, m.DT_FS, 1))
-            self.assertEqual(read(rx, "CNT_BURST"), 0 if mode == m.PPI_STD else 1 | 1 << 16)
-            self.assertEqual(read(rx, "CNT_MISC") & 0xFFFF, 0 if mode == m.PPI_STD else 1)
-            self.assertEqual(read(rx, "RAW_CTRL") & 0x101, 1 if mode == m.PPI_STD else 0x100)
+            for n in ("DPHY_ID", "DPHY_CNT_BURST0", "DPHY_RAW_CTRL", "DPHY_TIM0", "CNT_BURST",
+                      "CNT_MISC", "RAW_CTRL", "BYTECLK", "PHY_CFG"):
+                self.assertEqual(read(rx, n), 0, (mode, n))
             rx.idle()
-            rx.lp_item(1 << m.CLK, "00", 200)             # clock lane LP error: no ErrControlClk
-            self.assertEqual(read(rx, "CNT_MISC") >> 16 & 0xFF, 0 if mode == m.PPI_STD else 1)
-            e = rx.read(m.REG["STATUS"])
-            self.assertEqual((e.value, e.mask), (0x403F | 1 << 12, 0x3FF7FF))   # LP-11, in frame
-            self.assertEqual(read(rx, "BYTECLK"), 0)
-        # 'lperr': counted always, a lost burst unless in the first masked cycle
-        rx = receiver(ppi=m.PPI_BOW)
-        rx.burst(m.Burst(0, m.DT_FS, 1))
-        rx.ppi_lp_error(2, 1)
-        self.assertFalse(rx.lp_lost)
-        rx.ppi_lp_error(1 << m.CLK, 2)
-        self.assertTrue(rx.lp_lost)
-        self.assertEqual(read(rx, "CNT_MISC") >> 16 & 0xFF, 2)
-        # at once (EDGE 0): a lane CTRL disabled before is masked, an enabled one is not; a
-        # standard PHY has no ErrControlClk (neither counted nor a loss)
+            # a clock lane LP error: ErrControlClk (none from a standard PHY)
+            rx.lp_item(1 << m.CLK, "00", 200)
+            self.assertEqual(read(rx, "ERR_STATUS"), 0 if mode == m.PPI_STD else 1 << m.ERR["lp"])
+            self.assertEqual(read(rx, "STATUS"), 1 << 12)            # in frame
+        # 'lperr': the controller takes the OR of the errors on the PPI (the D-PHY masks them):
+        # also of a lane it has disabled; a standard PHY has no ErrControlClk
         for mode in (m.PPI_BOW, m.PPI_STD):
             rx = receiver(ppi=mode)
             rx.write(m.REG["CTRL"], read(rx, "CTRL") & ~m.CTRL_LANES)     # 1 lane of 2
-            rx.ppi_lp_error(2, 0)
-            self.assertFalse(rx.lp_lost)
-            rx.ppi_lp_error(1 << m.CLK, 0)
+            rx.ppi_lp_error(1 << m.CLK)
             self.assertEqual(rx.lp_lost, mode == m.PPI_BOW)
-            rx.ppi_lp_error(1, 0)
+            rx.ppi_lp_error(2)
             self.assertTrue(rx.lp_lost)
-            self.assertEqual(read(rx, "CNT_MISC") >> 16 & 0xFF, 3 if mode == m.PPI_BOW else 2)
+            self.assertEqual(read(rx, "ERR_STATUS"), 1 << m.ERR["lp"])
 
-    def test_raw_start(self):
-        # RAW of the D-PHY of Bow32's timing: the sync and bytes on every lane, and the first
-        # word of lane 0 is the 00 of the rise of its RxActiveHS
+    def test_raw_check(self):
+        # RAW (the D-PHY's): the sync and bytes on every lane, after any words
         b = m.Burst(0, m.DT_FS, 1)
         per = m.lane_split(b.sent(), 2)
-        def group(first):
+        def group(first, lane1=None):
             words = [[first, 0, 0, m.SYNC] + per[l] + [0] * 64 for l in range(2)]
+            if lane1 is not None:
+                words[1][4] = lane1
             return [(m.Expect("raw", i, a=b, b=2), words[0][i] | words[1][i] << 8)
                     for i in range(64)]
+        for first, lane1, bad in ((0x00, None, 0), (0x5A, None, 0), (0x00, per[1][0] ^ 1, 1)):
+            errs = []
+            m.check_raw(group(first, lane1), errs)
+            self.assertEqual(len(errs), bad, (first, lane1, errs))
+        # test raw (lane 0 enters HS after the other lanes): its first word is the 00 of its
+        # HS-ZERO, a capture started by another lane begins in its HS-PREPARE noise
         for first, start, bad in ((0x00, True, 0), (0x5A, False, 0), (0x5A, True, 1)):
             errs = []
             m.check_raw(group(first), errs, start)
@@ -719,7 +783,7 @@ class GenCheckTest(unittest.TestCase):
         v4 = ("--lanes", "4", "--versal", "--fifo-depth", "512")
         tx = sorted(t for t in m.TESTS if t not in ("clkstop", "gaps", "lpmask"))   # not PPI only
         with tempfile.TemporaryDirectory() as tmp:
-            cases = [(t, "--seed", "2") for t in tx if t != "dly"]
+            cases = [(t, "--seed", "2") for t in tx if t not in ("dly", "raw")]   # 4 lanes only
             cases += [(t, "--seed", "3", *v4) for t in tx]
             cases += [("cmd", "--seed", "1", "--lanes", "2", "--dut-lanes", "4", "--versal")]
             cases += [("random", "--seed", str(s), *o) for s in (1, 2) for o in
@@ -775,10 +839,22 @@ class GenCheckTest(unittest.TestCase):
                 self.gen(Path(tmp) / "x", "--burst-rst", "1")
             with self.assertRaises(SystemExit):
                 self.gen(Path(tmp) / "y", "--test", "skew", "--lanes", "1")
+            # raw and rxoff on the Versal PHY: the FIFOs restart at every burst (BurstRxRst 1:
+            # no latency drift from the stops); raw places a read gap per burst and has lane 0
+            # enter HS late; raw needs it with 4 lanes
+            for test, want in (("raw", (1, 0, 24, 40)), ("rxoff", (1, 0, 0, 0))):
+                self.gen(Path(tmp) / test, "--test", test, "--lanes", "4", "--versal")
+                cfg = m.read_cfg(Path(tmp) / test / "cfg.txt")
+                self.assertEqual((cfg["v_burst_rst"], cfg["v_gap_pm"], cfg.get("v_gap_byte", 0),
+                                  cfg.get("l0_late_ns", 0)), want)
+                self.assertNotIn(f"wr {m.REG['DPHY_CTRL']:03x}",
+                                 (Path(tmp) / test / "stim.txt").read_text())
             # PPI bench: the controller alone, no D-PHY model, no D-PHY tests
             for argv in (("--ppi", "bow", "--versal"), ("--ppi", "bow", "--test", "lp"),
                          ("--ppi", "std", "--test", "gaps"), ("--test", "lpmask"),
-                         ("--test", "clkstop"), ("--test", "gaps")):
+                         ("--test", "clkstop"), ("--test", "gaps"), ("--test", "raw"),
+                         ("--test", "raw", "--lanes", "2", "--dut-lanes", "4", "--versal"),
+                         ("--ppi", "bow", "--test", "rxoff")):
                 with self.assertRaises(SystemExit, msg=argv):
                     self.gen(Path(tmp) / "z", *argv)
 

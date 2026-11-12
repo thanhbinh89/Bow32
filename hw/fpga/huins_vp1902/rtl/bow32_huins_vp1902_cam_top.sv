@@ -38,21 +38,27 @@
 // Reset: USER_RESET_N (front panel H_RESET, active low) and the MMCM locked: SoC reset =
 // rst_n_i & locked (bow_rstmgr inside the SoC), video domain and PHY reset = the same,
 // synchronised to clk_vid (the PHY then runs XPLL lock + BISC again, phy_rdy after ~40 us
-// in simulation, AM010: up to 1.3 ms). Software can re-initialise the PHY alone with PA4.
+// in simulation, AM010: up to 1.3 ms). Software can re-initialise the PHY alone with
+// CMD.REINIT of the D-PHY registers (below).
+//
+// D-PHY run-time knobs and status of bow_dphy_io_versal (the PA4 / PA5 / PB6 / PB7 GPIO
+// pins up to step 3 of docs/ip/mipi_rx_arch.md; since step 4 registers of the receiver's
+// D-PHY at 0x4000_8C00, docs/ip/dphy_rx.md):
+//   reinit_i        dphy_reinit_o: CMD.REINIT, a 32 cycle clk_sys pulse (XPLL and XPHY
+//                   resets, AFE_STATUS.READY = 0, loaded DLYn taps lost, then XPLL lock, BISC
+//                   and VT tracking again: ~40 us in simulation, AM010: up to 1.3 ms)
+//   burst_rst_en_i  dphy_burst_rst_en_o = ~CTRL.DES_RST_DIS, 1 from reset: RX_RST of the
+//                   data slices while the byte clock gate is closed (FIFOs drained before
+//                   every burst); DES_RST_DIS = 1 (test bit only: the board broke without the
+//                   reset) = AMD's choice
+//   phy_status_o    AFE_STATUS[11:8] = {PHY_RDY all, DLY_RDY all, XPLL LOCKED_FB, LOCKED}
+//   (all clk_sys flops or synchronised to clk_sys inside the SoC; the PHY synchronises its
+//   inputs to clk_vid)
 //
 // UARTs: as the RAM card build (CP2102N "UART0" = Bow32 UART0, "UART1" = PB0 / PB1).
-// GPIO (PA4 / PA5 / PB6 / PB7: the D-PHY knobs and status of bow_dphy_io_versal, for the
-// bring-up questions only the silicon answers; after reset every PA pin is an input, so
-// both knobs are 0 = the AMD-like behaviour):
+// GPIO:
 //   PA0..PA3  F_LED1..4  outputs: lit while the pin is an output driving 1
-//   PA4       D-PHY re-init (u_dphy reinit_i): output 1 holds the PHY in its init reset
-//             (XPLL and XPHY resets, CSI2RX STATUS.PHY_RDY = 0, loaded DLYn taps lost); 0 or
-//             input: XPLL lock, BISC and VT tracking run again (~40 us in simulation, AM010:
-//             up to 1.3 ms). Hold 1 for >= 10 us (synchronised in clk_vid)
-//   PA5       D-PHY per-burst reset (u_dphy burst_rst_en_i): output 1 = RX_RST of the data
-//             slices while the byte clock gate is closed (FIFOs drained before every burst);
-//             0 or input = no per-burst reset (AMD's choice)
-//   PA6       no pin
+//   PA4..PA6  no pin (PA4 / PA5 were the D-PHY knobs up to step 3)
 //             (IN of PA0..PA7 reads back the driven level)
 //   PA7       sensor XCLR: output 1 = sensor running; input (reset state) or 0 = sensor
 //             held in reset (the KV260 "PA7 = 1 -> camera on"); F_LED8 shows it
@@ -61,18 +67,14 @@
 //   PB2..PB4  F_PB1..3    push buttons, input only, IN = 1 while pressed
 //   PB5       PRSNT_M2C_L of FMC+01, IN = 0 while the camera module is fitted (the raw
 //             level, unlike the RAM card build where PB5 = 1 means "card fitted")
-//   PB6       D-PHY PHY_RDY of all XPHY nibbles, input only: the raw XPHY status (not gated
-//             by the init sequencer like STATUS.PHY_RDY, which also needs XPLL LOCKED)
-//   PB7       D-PHY DLY_RDY of all XPHY nibbles, input only (BISC delay calibration done;
-//             PB7 = 1 while PB6 stays 0: the calibration finished, PHY_RDY did not follow)
-//   (PB6 / PB7 cross clk_vid -> clk_sys in the GPIO input synchronisers)
+//   PB6, PB7  read 0 (the D-PHY status up to step 3: AFE_STATUS of the D-PHY now)
 // Status LEDs (not GPIO):
 //   F_LED5    D-PHY byte clock seen in the last ~84 ms (clock lane HS bursts)
 //   F_LED6    frame activity: toggles every 8 frames at the ISP output
 //   F_LED7    XPLL of the D-PHY bank locked
 //   F_LED8    PA7 (sensor out of reset)
 //   F_LED9    heartbeat (1.5 Hz while the SoC is out of reset)
-//   F_LED10   D-PHY ready (XPLL locked, BISC done: CSI2RX STATUS.PHY_RDY)
+//   F_LED10   D-PHY ready (XPLL locked, BISC done: AFE_STATUS.READY of the D-PHY)
 //   F_LED11   camera module fitted (PRSNT_M2C_L = 0)
 //   F_LED12   MMCM locked (SoC and video clocks)
 //
@@ -166,10 +168,11 @@ module bow32_huins_vp1902_cam_top #(
   // D-PHY receive I/O. The nibble plan (Dphy* parameters) is the one of the camera pins,
   // derived at build time (tcl/cam_plan.tcl) and checked against the placed pins before
   // opt_design (tcl/pre_opt_cam.tcl, tcl/cam_xphy.tcl). The XDC refers to the instance
-  // name u_dphy. reinit_i / burst_rst_en_i: GPIO PA4 / PA5 (below).
+  // name u_dphy. reinit_i / burst_rst_en_i / phy_status_o: registers of the receiver's
+  // D-PHY (above).
   // ---------------------------------------------------------------------------
   logic                     dphy_byte_clk, dphy_byte_ce, dphy_byte_rst, dphy_clk_hs_en;
-  logic                     dphy_phy_rdy, dphy_reinit_q, dphy_burst_rst_q;
+  logic                     dphy_phy_rdy, dphy_reinit, dphy_burst_rst_en;
   logic [3:0]               dphy_status;
   logic [1:0]               dphy_clk_lp;
   logic [CsiLanes-1:0][1:0] dphy_lp;
@@ -198,8 +201,8 @@ module bow32_huins_vp1902_cam_top #(
     .ctrl_clk_i     (clk_vid),
     .ctrl_rst_ni    (vid_rst_n),
     .pll_clkin_i    (xpll_clk),
-    .reinit_i       (dphy_reinit_q),
-    .burst_rst_en_i (dphy_burst_rst_q),
+    .reinit_i       (dphy_reinit),
+    .burst_rst_en_i (dphy_burst_rst_en),
     .phy_rdy_o      (dphy_phy_rdy),
     .phy_status_o   (dphy_status),
     .byte_clk_o     (dphy_byte_clk),
@@ -271,6 +274,9 @@ module bow32_huins_vp1902_cam_top #(
     .dphy_rx_data_i   (dphy_rx_data),
     .dphy_rx_valid_i  (dphy_rx_valid),
     .dphy_phy_rdy_i   (dphy_phy_rdy),
+    .dphy_phy_status_i ({4'h0, dphy_status}),
+    .dphy_reinit_o    (dphy_reinit),
+    .dphy_burst_rst_en_o (dphy_burst_rst_en),
     .dphy_dly_tap_o   (dphy_dly_tap),
     .dphy_dly_load_o  (dphy_dly_load),
     .dphy_dly_tap_i   (dphy_dly_tap_out),
@@ -381,21 +387,8 @@ module bow32_huins_vp1902_cam_top #(
   // ---------------------------------------------------------------------------
   // GPIO and user components
   // ---------------------------------------------------------------------------
-  // PA0..PA7: output only (LEDs F_LED1..4, D-PHY knobs on PA4 / PA5, XCLR on PA7), IN =
-  // driven level
+  // PA0..PA7: output only (LEDs F_LED1..4, XCLR on PA7; PA4..PA6 no pin), IN = driven level
   assign gpioa_i = gpioa_oe & gpioa_o;
-
-  // D-PHY knobs PA4 (reinit_i) and PA5 (burst_rst_en_i): one clk_sys flop each, so that
-  // the PHY's synchronisers see a flop, not the AND of the GPIO OUT and OE registers
-  always_ff @(posedge clk_sys or negedge sys_rst_n) begin
-    if (!sys_rst_n) begin
-      dphy_reinit_q    <= 1'b0;
-      dphy_burst_rst_q <= 1'b0;
-    end else begin
-      dphy_reinit_q    <= gpioa_oe[4] & gpioa_o[4];
-      dphy_burst_rst_q <= gpioa_oe[5] & gpioa_o[5];
-    end
-  end
 
   // PB0: UART1 TX after reset, a real pad (the CP2102N input has no driver)
   IOBUF u_pad_pb0 (
@@ -405,13 +398,12 @@ module bow32_huins_vp1902_cam_top #(
     .IO (uart1_tx_io)
   );
 
-  // PB1..PB7: input only; their outputs never reach a pad. PB6 / PB7: the D-PHY status
-  // (PHY_RDY and DLY_RDY of all nibbles, synchronised to clk_vid in u_dphy).
+  // PB1..PB7: input only; their outputs never reach a pad. PB6 / PB7: 0 (the D-PHY status
+  // is AFE_STATUS of the receiver's D-PHY since step 4).
   assign gpiob_i[1]   = uart1_rx_i;
   assign gpiob_i[4:2] = pb_i;
   assign gpiob_i[5]   = fmc_prsnt_n_i;
-  assign gpiob_i[6]   = dphy_status[3];
-  assign gpiob_i[7]   = dphy_status[2];
+  assign gpiob_i[7:6] = 2'b00;
 
   // ---------------------------------------------------------------------------
   // Status LEDs
@@ -475,6 +467,6 @@ module bow32_huins_vp1902_cam_top #(
   assign led_o[11]  = locked;
 
   logic unused;
-  assign unused = ^{gpiob_o[7:1], gpiob_oe[7:1], dphy_status[1]};
+  assign unused = ^{gpiob_o[7:1], gpiob_oe[7:1]};
 
 endmodule

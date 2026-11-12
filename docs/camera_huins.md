@@ -9,6 +9,18 @@ trên KV260 ([camera_kv260.md](camera_kv260.md), [video_kv260.md](video_kv260.md
 đọc, hãy chạy được Bow32 trên bo này theo [ddr_huins.md](ddr_huins.md) (JTAG, console
 "UART0"). Chi tiết bộ thu: [ip/csi2rx.md](ip/csi2rx.md).
 
+> **Bước 4 của kế hoạch chuyển (2026-11-12, chưa chạy bo; [ip/mipi_rx_arch.md](ip/mipi_rx_arch.md)
+> mục 10, [ip/dphy_rx.md](ip/dphy_rx.md)).** Thanh ghi PHY nay ở D-PHY `0x4000_8C00`, không có
+> alias: núm PA4 thành `CMD.REINIT` (một xung 32 chu kỳ), PA5 thành `CTRL.DES_RST_DIS` (0 từ reset,
+> tức `BurstRxRst` = 1 ngay từ reset), PB6 / PB7 thành `AFE_STATUS` (`rd 40008c18`: [0] READY,
+> [8] XPLL LOCKED, [9] LOCKED_FB, [10] DLY_RDY, [11] PHY_RDY của mọi nibble); top camera không
+> còn nối bốn chân đó (PA4…PA6 không ra chân, PB6 / PB7 đọc 0). `PHY_CFG` (`rd 4000800c`) thành
+> `TIM0` của D-PHY (`rd 40008c24`, cùng bố cục: vẫn `051e0213`). `phy` in
+> `phy: READY 1, every nibble PHY_RDY 1 DLY_RDY 1, XPLL LOCKED 1 LOCKED_FB 1 (AFE_STATUS 00000f01),
+> DES_RST_DIS 0`; `phy reinit` in `phy: READY n us after CMD.REINIT`. PDI và firmware phải cùng
+> commit: firmware mới trên PDI cũ in `csi2rx: bitstream before the D-PHY split, rebuild it`.
+> Các lần chạy bo 1–3 dưới đây ghi lệnh và kết quả theo bản trước bước 4 (PA4 / PA5, `STATUS`).
+>
 > **Trạng thái: đã chạy trên bo ngày 2026-11-11 (lần chạy bo 3)**: PDI của `cd289e3` (RTL như main
 > `458dd33`, như lần 2) với firmware `5c68b53` (ba sửa sau lần 2, mục 7). Mọi kiểm tra đạt: link
 > check 16 frame của `start` trong `csi2_test` bắt lỗi ở trễ BISC 7 / 7 lần và in gợi ý `cal` (mục
@@ -81,7 +93,7 @@ trên KV260 ([camera_kv260.md](camera_kv260.md), [video_kv260.md](video_kv260.md
       ▲         RAW10                          XPLL, BUFGCE)           0x4000_8000                                                        bow32_cam.py)
       │                                                                     ▲ thanh ghi (peripheral bus)
       └── I2C0 (IMX274 ở 0x1A, không có switch) ◄── Ibex ───────────────────┘
-          PA7 = XCLR (1 = cảm biến chạy), PA4/PA5 = núm của D-PHY
+          PA7 = XCLR (1 = cảm biến chạy); núm của D-PHY: thanh ghi ở 0x4000_8C00 (trước bước 4: PA4/PA5)
 ```
 
 Tài liệu của Huins (user guide, schematic, netlist) là tài liệu mật: thư mục
@@ -294,9 +306,10 @@ PDI của bản cuối: 45 mục, 1 mục có waiver):
 
 Reset SoC = `USER_RESET_N` (nút "H_RESET") AND MMCM khoá. Miền video và D-PHY reset theo cùng
 điều kiện; sau reset D-PHY tự chạy: XPLL khoá → BISC → `PHY_RDY` (LED10; trong mô phỏng
-~40 µs, AM010: tới 1,3 ms). PA4 khởi động lại riêng D-PHY (mục 5). Trên bản này
-`INFO.DLY_VID` = 1, nên `bow_csi2rx_start()` chờ `STATUS.PHY_RDY` tối đa 10 ms rồi mới bật bộ
-thu (với `DLY_VID` = 0, như trên KV260, nó không chờ).
+~40 µs, AM010: tới 1,3 ms). `CMD.REINIT` của D-PHY (trước bước 4: PA4) khởi động lại riêng I/O
+của D-PHY (mục 5). Trên bản này AFE của D-PHY tự hiệu chỉnh (`INFO[23]` của D-PHY; trước bước 4:
+`INFO.DLY_VID` = 1), nên `bow_csi2rx_start()` chờ `AFE_STATUS.READY` tối đa 10 ms rồi mới bật bộ
+thu (PHY UltraScale+ của KV260: không chờ).
 
 ## 5. Nạp PDI qua JTAG
 
@@ -381,26 +394,24 @@ mất khi tắt bo; boot ROM chờ ở loader khi flash chưa có ứng dụng (
 | U_LED7 | XPLL của bank 705 khoá |
 | U_LED8 | PA7 = XCLR: cảm biến ra khỏi reset |
 | U_LED9 | nhịp tim 1,5 Hz khi SoC đã ra khỏi reset |
-| U_LED10 | D-PHY sẵn sàng (XPLL khoá, BISC xong: `CSI2RX.STATUS.PHY_RDY`) |
+| U_LED10 | D-PHY sẵn sàng (XPLL khoá, BISC xong: `AFE_STATUS.READY` của D-PHY; trước bước 4 `CSI2RX.STATUS.PHY_RDY`) |
 | U_LED11 | có một bo trên FMC+01 (`PRSNT_M2C_L` = 0; không phân biệt bo camera với bo RAM) |
 | U_LED12 | MMCM khoá (clock SoC và video) |
 
-GPIO (sau reset mọi chân PA là input, nên cả hai núm của D-PHY = 0):
+GPIO (sau reset mọi chân PA là input; từ bước 4 các núm của D-PHY là thanh ghi, không còn GPIO):
 
 | Chân | Việc |
 |------|------|
 | PA0..PA3 | LED U_LED1..4 |
-| **PA4** | khởi động lại D-PHY: output 1 giữ PHY ở reset khởi động (`STATUS.PHY_RDY` = 0, tap đã nạp bị bỏ); về 0 hoặc input: XPLL khoá, BISC, theo dõi VT chạy lại. Giữ ≥ 10 µs (`csi2_test`: `phy reinit`) |
-| **PA5** | `BurstRxRst`: output 1 = reset FIFO RX của XPHY mỗi khi cổng byte clock đóng (mỗi burst bắt đầu lại); 0 hoặc input = không reset (như PHY của AMD). Firmware đặt PA5 = 1 khi khởi động bộ thu trên bản Versal (`INFO.DLY_VID` = 1); `csi2_test`: `phy burstrst 0\|1` |
-| PA6 | không ra chân |
+| PA4, PA5, PA6 | không ra chân (bước 4). Trước bước 4: PA4 = khởi động lại D-PHY (output 1 giữ PHY ở reset khởi động), nay `CMD.REINIT` của D-PHY (xung 32 chu kỳ, `csi2_test`: `phy reinit`); PA5 = `BurstRxRst` (output 1 = reset FIFO RX của XPHY mỗi khi cổng byte clock đóng), nay ¬`CTRL.DES_RST_DIS` của D-PHY: 1 từ reset, firmware ghi lại mỗi lần khởi động bộ thu, `csi2_test`: `phy burstrst 0\|1` |
 | **PA7** | XCLR: output 1 = cảm biến chạy; sau reset PA7 là input nên cảm biến bị giữ reset (giống "PA7 = 1 → bật camera" của KV260) |
 | PB0 / PB1 | UART1 |
 | PB2..PB4 | nút U_PB SW01..03 (1 khi nhấn) |
 | **PB5** | `PRSNT_M2C_L` của FMC+01, 0 = có module (khác bản bo RAM, nơi PB5 = 1 nghĩa là có bo) |
-| **PB6** | `PHY_RDY` của mọi nibble XPHY: trạng thái thô của XPHY (không qua bộ tuần tự khởi động như `STATUS.PHY_RDY`, vốn cần thêm XPLL khoá) |
-| **PB7** | `DLY_RDY` của mọi nibble (hiệu chỉnh trễ của BISC xong; PB7 = 1 mà PB6 = 0: hiệu chỉnh xong, `PHY_RDY` không lên) |
+| PB6, PB7 | đọc 0 (bước 4). Trước bước 4: `PHY_RDY` và `DLY_RDY` của mọi nibble XPHY, nay `AFE_STATUS[11]` / `[10]` của D-PHY (trạng thái thô, không qua bộ tuần tự khởi động như `AFE_STATUS.READY`, vốn cần thêm XPLL khoá; `DLY_RDY` = 1 mà `PHY_RDY` = 0: hiệu chỉnh xong, `PHY_RDY` không lên), cùng `AFE_STATUS[8]` / `[9]` = XPLL LOCKED / LOCKED_FB |
 
-PB6 / PB7 đi qua bộ đồng bộ đầu vào của GPIO (`rd 40005000`: bit 6, 7). I2C0 nối thẳng cảm
+`AFE_STATUS` đi qua bộ đồng bộ của D-PHY (`rd 40008c18`; trước bước 4 PB6 / PB7 qua bộ đồng bộ
+đầu vào của GPIO, `rd 40005000`: bit 6, 7). I2C0 nối thẳng cảm
 biến (IMX274 ở địa chỉ 7 bit 0x1A, không có switch I2C; pull-up trong FPGA, chạy ở 100 kHz).
 
 ## 6. Nạp và chạy ứng dụng
@@ -495,26 +506,30 @@ với 0x905; trên bo lần 2 (0x906).
 | `camera: no IMX219 on I2C (error -1)`, `camera: no IMX274 on I2C (error -1)` rồi `camera: FMC+01 PRSNT_M2C_L (PB5) = 1: no module on the site` | không có gì trả lời ở 0x1A, không có bo trên FMC+01 |
 | như trên nhưng `PB5 = 0: a module is plugged in` | có bo nhưng cảm biến không trả lời: SW192 (LED "1.2"), XCLR (LED8 phải sáng sau probe), I2C (mục 8) |
 | `camera: unknown sensor at 0x1a: MDSEL1..4 .. .. .. .., HMAX ...., VMAX ...... (IMX274 after reset: 03 31 00 09, 0104, 000905 or 000906, BLKLEVEL reads back)` | có thiết bị trả lời ở 0x1A nhưng không có giá trị sau reset của IMX274: dòng in đúng các giá trị đã đọc (thêm `BLKLEVEL 33 read back as ..` khi chỉ phép ghi / đọc lại sai). So với giá trị trong ngoặc: một giá trị lệch ít (như VMAX 0x906 của lần chạy đầu, khi driver chỉ nhận 0x905) là biến thể của cảm biến; mọi giá trị khác hẳn: XCLR (LA22_N, PA7) không reset được cảm biến, hoặc một thiết bị khác ở 0x1A |
-| `error: D-PHY not ready (CSI2RX STATUS.PHY_RDY = 0)` (sau `start` / `cam`, sau 10 ms) | XPLL + BISC chưa xong: LED7 / LED10, `phy` của `csi2_test`, thử lại BISC (mục 6.3) |
+| `error: D-PHY not ready (AFE_STATUS.READY = 0)` (sau `start` / `cam`, sau 10 ms; trước bước 4: `(CSI2RX STATUS.PHY_RDY = 0)`) | XPLL + BISC chưa xong: LED7 / LED10, `phy` của `csi2_test`, thử lại BISC (mục 6.3) |
 | `csi2rx: Bow32 receiver, no D-PHY in this bitstream - ISP test pattern only` | đang chạy PDI bo RAM → nạp PDI camera |
+| `csi2rx: bitstream before the D-PHY split, rebuild it` | PDI trước bước 4 (thanh ghi PHY còn ở controller) với firmware mới: build PDI cùng commit với firmware (mục 4) |
 
 ### 6.3 Bring-up bằng `csi2_test`
 
 `csi2_test` mặc định 1080p30 (HMAX 400 / VMAX 6000) và test pattern `tp 3` (màu đơn 555h).
-Trên bản Versal (`INFO.DLY_VID` = 1) có thêm `phy`, `phy reinit`, `phy burstrst 0|1` và
-`sensor on|off` (trên KV260 các lệnh này là `unknown command`):
+Trên bản Versal (AFE của D-PHY tự hiệu chỉnh, `INFO[23]` của D-PHY) có thêm `phy`, `phy reinit`,
+`phy burstrst 0|1` và `sensor on|off` (trên KV260 các lệnh này là `unknown command`). Khối dưới là
+lần chạy bo 3 (trước bước 4); từ bước 4 `phy` in `AFE_STATUS` của D-PHY thay cho `STATUS` / PB6 /
+PB7 / PA4 / PA5, `phy-idle` của `test` in `LANE_LP` / `LANE_HS` (dòng chú thích `# bước 4:`; bộ
+lệnh và mọi kết quả khác không đổi):
 
 ```
-> phy                     # sau khi nạp PDI: PHY_RDY, trạng thái thô PB6/PB7, hai núm, trễ BISC
-phy: STATUS.PHY_RDY 1, every nibble PHY_RDY 1 DLY_RDY 1 (PB6 PB7), reinit 0 burstrst 0 (PA4 PA5)
-     delays in use 123/76/119/129
+> phy                     # sau khi nạp PDI: READY, trạng thái thô của XPHY, DES_RST_DIS, trễ BISC
+phy: READY 1, every nibble PHY_RDY 1 DLY_RDY 1, XPLL LOCKED 1 LOCKED_FB 1 (AFE_STATUS 00000f01), DES_RST_DIS 0
+     delays in use 123/76/119/129    # bước 4; lần 3: phy: STATUS.PHY_RDY 1, ... (PB6 PB7), reinit 0 burstrst 0 (PA4 PA5)
 > stat                    # bộ thu tắt, cảm biến ở standby: LP-00 trước stream đầu, đủ 4 lane
 csi2rx: no data
   frames 0 lines/frame 0 wc 0 dt 00 sum 00000000 frame errors 000
   errors: ecc 0/0 crc 0 trunc 0 sot 0/0/0/0 ovf 0 misc 0 extra 0 (dropped by DT/VC 0)
   timing: frame 0 us, line 0 ns, byte clock 0 kHz
   phy: lp clk 00 d0 00 d1 00 d2 00 d3 00, bursts 0/0/0/0 clk 0, delay 123/76/119/129
-> start                   # bộ thu (PA5 = 1, SETTLE 95 ns), cảm biến, link check 16 frame ở trễ BISC
+> start                   # bộ thu (DES_RST_DIS = 0, trước bước 4 PA5 = 1; SETTLE 95 ns), cảm biến, link check 16 frame ở trễ BISC
 streaming 1920x1080 RAW10, link check failed (ERR_STATUS 008), try cal   # lần 3, vừa nạp lại PDI
   errors in frame 1 of 16 at the delays in use 123/76/120/129: after a PDI load or
   phy reinit these are the BISC delays, early in the eye; cal loads the eye centres
@@ -558,7 +573,7 @@ csi2rx: link ok
   phy: lp clk HS d0 11 d1 11 d2 11 d3 11, bursts 65535/65535/65535/65535 clk 91, delay 300/184/260/228
 > test                    # mọi check: 1080p30 rồi 720p60 (HMAX 300 / VMAX 4000); lần 2: 37 s
 csi2_test: 1920x1080, frame 33333 us, 60 frames per check, calibration step 8
-[PASS] phy-idle all lanes LP-11, no HS (STATUS 0f403f)
+[PASS] phy-idle all lanes LP-11, no HS (LANE_LP 3ff LANE_HS 00000)   # bước 4; lần 3: (STATUS 0f403f)
 [PASS] link-up bursts 2/2/2/2, clock lane 1
 ...                       # bản đồ eye như cal 8 (từ tap đang dùng: link ok)
 [PASS] calibrate taps 300/184/260/228 eye 352/360/352/352
@@ -647,21 +662,22 @@ biến còn bị reset và các lane ở LP-00; nếu BISC cần strobe đang ch
 chưa bật bộ thu rồi khởi động lại PHY (cách xử lý; lần 1 và lần 2 không cần, xem dưới khối):
 
 ```
-> phy                     # PB7 = 1, PB6 = 0: hiệu chỉnh xong, PHY_RDY không lên; cả hai 0: BISC chưa xong
+> phy                     # DLY_RDY 1, PHY_RDY 0: hiệu chỉnh xong, PHY_RDY không lên; cả hai 0: BISC chưa xong
 > sensor on               # cảm biến stream, bộ thu tắt: lane clock chạy
-sensor: streaming 1920x1080, receiver off (PHY_RDY 0)
-> phy reinit              # xung PA4 10 us: XPLL khoá + BISC lại, lần này có strobe
-phy: PHY_RDY n us after the reinit pulse
-phy: STATUS.PHY_RDY 1, every nibble PHY_RDY 1 DLY_RDY 1 (PB6 PB7), ...
+sensor: streaming 1920x1080, receiver off (READY 0)
+> phy reinit              # CMD.REINIT (xung 32 chu kỳ; trước bước 4 xung PA4 10 us): XPLL khoá + BISC lại, có strobe
+phy: READY n us after CMD.REINIT
+phy: READY 1, every nibble PHY_RDY 1 DLY_RDY 1, XPLL LOCKED 1 LOCKED_FB 1 (AFE_STATUS 00000f01), DES_RST_DIS 0
      delays in use a/b/c/d
 > start                   # dừng cảm biến, bật bộ thu, chạy lại cảm biến
 ```
 
 `phy reinit` cũng dùng được lúc đang stream (in thêm `phy: the receiver ran through it:
 start`: gõ `start`); nó bỏ mọi tap đã nạp (lane về trễ BISC mới, theo dõi VT bật lại).
-`phy: PHY_RDY still 0 10 ms after the reinit pulse`: xem VCCIO (SW192), LED7. `error: PHY_RDY
-stayed 1 during the reinit pulse (no PA4 knob in this bitstream?)`: PDI có trước núm PA4 →
-build lại. `sensor off` đưa cảm biến về standby. Sau `sensor on` bộ thu tắt: `cal`, `log` và
+`phy: READY still 0 10 ms after CMD.REINIT`: xem VCCIO (SW192), LED7. `error: AFE_STATUS.READY
+stayed 1 after CMD.REINIT (no re-init in this PHY?)`: PHY không có re-init (READY không xuống trong
+20 µs) → kiểm PDI (trước bước 4 các thông báo là `phy: PHY_RDY ... after the reinit pulse` và `error:
+PHY_RDY stayed 1 during the reinit pulse (no PA4 knob ...)`). `sensor off` đưa cảm biến về standby. Sau `sensor on` bộ thu tắt: `cal`, `log` và
 `raw` báo `error: receiver off (sensor on): start`. Cả ba lần không cần cách này:
 `PHY_RDY` = 1 ngay sau khi nạp PDI (PB6 = PB7 = 1). `phy reinit` khi cảm biến ở standby (trước
 stream đầu, hay sau `stop`): lần 2 `phy: PHY_RDY 76 us after the reinit pulse` (75–76 µs) cả ba
@@ -672,37 +688,42 @@ lần, trễ 123/76/119/129 (hai lần) và 122/76/118/129; lần 1 cũng 75–7
 chạy, và có strobe cũng không đặt trễ khác; lần 3 `phy reinit` lúc đang stream cho cùng trễ như
 lúc nghỉ trên cả ba PDI.
 
-**`BurstRxRst` và SETTLE.** Firmware bật PA5 = 1 (FIFO RX của XPHY bắt đầu lại mỗi burst) khi khởi
-động bộ thu và giữ `SETTLE` 95 ns. Đo trên bo lần 1 (720p60, tap đã hiệu chỉnh): với PA5 = 1,
+**`BurstRxRst` và SETTLE.** Firmware giữ `BurstRxRst` = 1 (FIFO RX của XPHY bắt đầu lại mỗi
+burst): từ bước 4 là `CTRL.DES_RST_DIS` = 0 của D-PHY (giá trị reset, ghi lại mỗi lần khởi động bộ
+thu), trước đó PA5 = 1; và giữ `SETTLE` 95 ns. Các lần đo dưới đây (trước bước 4) gọi nó là PA5. Đo trên bo lần 1 (720p60, tap đã hiệu chỉnh): với PA5 = 1,
 `SETTLE` 95 ns chạy 4462 frame (hơn 3,2 triệu burst) không lỗi, và mọi `SETTLE` từ 13 tới 34 chu kỳ
 (65–170 ns) đều sạch; 8–12 chu kỳ có lỗi misc (SKEW / FRAME), 35 chu kỳ có lỗi SOT, từ 36 chu kỳ
 không còn frame. 95 ns cách mép dưới 30 ns (tâm cửa sổ ~118 ns). Với PA5 = 0 (`phy burstrst 0`) link
 chỉ sạch tới lần bật lại bộ thu đầu tiên trong lúc stream; sau đó lane 0 hỏng hẳn (`ERR_STATUS` 14b:
 SOT, ECC_CORR, CRC, SKEW, FRAME; `misc` 255 mỗi giây, mất frame) ở mọi `SETTLE` đã thử (50–150 ns)
-và chỉ hết khi PA5 = 1 lại. **Không dùng PA5 = 0 trên bo.** Firmware cuối không đổi gì ở đây: mỗi
-lần khởi động bộ thu đặt PA5 = 1 và `SETTLE` 95 ns (mô phỏng `csi2_274`: testbench kiểm chân PA5 và
-`rd 4000800c` sau `test`). Lần 2 (RTL đã gộp main): sau `start`, `phy` in `burstrst 1` và `rd
+và chỉ hết khi PA5 = 1 lại. **Không dùng `BurstRxRst` = 0 (PA5 = 0, từ bước 4 `phy burstrst 0`)
+trên bo.** Firmware cuối không đổi gì ở đây: mỗi lần khởi động bộ thu đặt `BurstRxRst` = 1 và
+`SETTLE` 95 ns (mô phỏng `csi2_274`: testbench kiểm `burst_rst_en` của D-PHY và `rd 40008c24` sau
+`test`; trước bước 4 chân PA5 và `rd 4000800c`). Lần 2 (RTL đã gộp main): sau `start`, `phy` in `burstrst 1` và `rd
 4000800c` = `051e0213`; quét lại `SETTLE` (720p60, PA5 = 1, tap đã hiệu chỉnh, 3 s ≈ 180 frame mỗi
 giá trị) cho đúng cửa sổ của lần 1: 13, 16, 19, 23, 27, 30, 34 chu kỳ (65–170 ns) sạch; 12 chu kỳ
 `misc 31`; 35 chu kỳ `sot 0/0/0/1`, `misc 2`. Mô phỏng trước đó dự đoán cửa sổ ~80–116 ns với
 PA5 = 1 và cho rằng PA5 = 0 chạy được với `SETTLE` ~115 ns: silicon khác
-([ip/csi2rx.md](ip/csi2rx.md), mục *Bốn lane, PHY Versal và IMX274*). `SETTLE` là `PHY_CFG[7:0]`
-(`0x4000_800C`, chu kỳ 5 ns), chỉ đổi được khi `PHY_EN` = 0, và `start` / `mode` ghi lại giá trị
-của driver: quét lại theo các lệnh dưới đây (giữ PA5 = 1).
+([ip/csi2rx.md](ip/csi2rx.md), mục *Bốn lane, PHY Versal và IMX274*). `SETTLE` là `TIM0[7:0]` của
+D-PHY (`0x4000_8C24`, chu kỳ 5 ns; trước bước 4 `PHY_CFG[7:0]` ở `0x4000_800C`, cùng bố cục), chỉ
+đổi được khi `PHY_EN` = 0, và `start` / `mode` ghi lại giá trị của driver: quét lại theo các lệnh
+dưới đây (giữ `BurstRxRst` = 1).
 
 ```
 > start
 > rd 40008008              # CTRL của driver (lần 2): 00c02b87 (EXTRA 192, DT 0x2B, 4 lane, PHY_EN, RX_EN; lần 1: 00002b87)
-> rd 4000800c              # PHY_CFG của driver (lần 2): 051e0213 (SETTLE 0x13 = 19 chu kỳ = 95 ns)
+> rd 40008c24              # TIM0 của D-PHY: 051e0213 (SETTLE 0x13 = 19 chu kỳ = 95 ns; lần 2: rd 4000800c, PHY_CFG)
 > wr 40008008 c02b84       # CTRL: tắt PHY_EN, RX_EN, giữ các trường khác
-> wr 4000800c 051e0217     # SETTLE 0x17 = 23 chu kỳ = 115 ns, các trường khác như driver
+> wr 40008c24 051e0217     # SETTLE 0x17 = 23 chu kỳ = 115 ns, các trường khác như driver
 > wr 40008008 c02b87       # bật lại PHY_EN, RX_EN
-> wr 40008020 1            # CNT_CLR
+> wr 40008020 1            # CNT_CLR (controller)
+> wr 40008c10 8            # CMD.CNT_CLR (bộ đếm của D-PHY)
 > stat
 ```
 
-Tuỳ chọn build `CAM_BURST_RST=0` cùng `SETTLE_VID_NS=115` (`sw/common/include/cam_sensor.h`,
-`sw/common/src/bow_csi2rx.c`: mọi lần khởi động bộ thu đặt PA5 = 0) chỉ còn cho mô phỏng:
+Tuỳ chọn build `CAM_BURST_RST=0` cùng `DPHY_SETTLE_NS=140u` (đích 140 ns → `SETTLE` 23 = 115 ns;
+`sw/common/include/cam_sensor.h`, `sw/common/src/cam_sensor.c`, `sw/common/src/bow_dphy_rx.c`: mọi
+lần khởi động bộ thu ghi `DES_RST_DIS` = 1; trước bước 4 `SETTLE_VID_NS=115` và PA5 = 0) chỉ còn cho mô phỏng:
 `make -C sim run TEST=csi2_274 FW=brst0` (cũng trong `make -C sim test-extra`) chạy sạch trên mô
 hình PHY, bo thật thì không.
 
@@ -1035,7 +1056,7 @@ các mục nó đo lại. **Chưa đo** / **chưa xem** là các kiểm tra vậ
 | 4 | sau `make jtag`, bo RAM ở FMC+10 | OE# của bo RAM (FMC+10 LA10_P, LA08_N) | ≥ 1,26 V (VIH của TXV0108 ở VCCA 1,8 V): level shifter cô lập | **chưa đo** |
 | 5 | bật nguồn, nạp PDI | cuộn lọc hồng ngoại (LA28 thả nổi), FMC_FLASH (LA16_N = 1) | không nghe / thấy bộ lọc hồng ngoại bật tắt; FMC_FLASH làm sáng gì, dòng tiêu thụ đổi bao nhiêu | **chưa xem** |
 | 6 | `csi2_test` khởi động | I2C ở 0x1A: ACK, thời gian sườn lên ở 100 kHz | `camera: IMX274 found`; sườn lên ≤ 1 µs (I2C chuẩn); chậm hơn: hạ tốc độ hoặc thêm pull-up về VADJ | Lần 2: firmware cuối không sửa tìm thấy cảm biến ở cả ba ứng dụng (`camera: IMX274 found (id 0274)`), `sr 30f8` … `sr 30fa` = `06 09 00` (VMAX 0x000906 sau reset). Lần 1: ACK ở 100 kHz; đọc burst và từng byte như nhau; MDSEL1..4 03 31 00 09, HMAX 0x0104, **VMAX 0x000906** (datasheet 0x905: firmware của lần 1 từ chối cảm biến, mục 6.2); BLKLEVEL ghi / đọc lại 0x33 đúng; XCLR reset được cảm biến. Sườn lên **chưa đo** (không có scope) |
-| 7 | `phy`, `phy reinit` | trễ BISC của 4 lane, PB6 / PB7, thời gian tới `PHY_RDY` | trễ của các lane gần nhau (lane nhận strobe chuyển tiếp có thể lệch hơn); `PHY_RDY` sau ~40 µs (mô phỏng) tới 1,3 ms (AM010) | Lần 2: 123/76/119/129 sau khi nạp PDI và sau hai lần `phy reinit`, 122/76/118/129 sau lần thứ ba; PB6 = PB7 = 1; `PHY_RDY` 75–76 µs sau xung PA4. Lần 1: 122/75/118/130 sau khi nạp, 122/75/118/130 hoặc 123/76/120/129 sau `phy reinit`, như nhau khi lane clock chạy. Lần 3: 124/76/120/129 và 123/76/120/129 sau hai lần nạp, 122–123/75–76/118–120/129–130 sau mỗi `phy reinit`, như nhau khi đang stream; `PHY_RDY` 75–112 µs. Trễ BISC ở mép sớm của eye, thấp hơn tâm 0,26–0,48 UI (mục 9) |
+| 7 | `phy`, `phy reinit` | trễ BISC của 4 lane, `AFE_STATUS` (trước bước 4: PB6 / PB7), thời gian tới `READY` (`PHY_RDY`) | trễ của các lane gần nhau (lane nhận strobe chuyển tiếp có thể lệch hơn); `PHY_RDY` sau ~40 µs (mô phỏng) tới 1,3 ms (AM010) | Lần 2: 123/76/119/129 sau khi nạp PDI và sau hai lần `phy reinit`, 122/76/118/129 sau lần thứ ba; PB6 = PB7 = 1; `PHY_RDY` 75–76 µs sau xung PA4. Lần 1: 122/75/118/130 sau khi nạp, 122/75/118/130 hoặc 123/76/120/129 sau `phy reinit`, như nhau khi lane clock chạy. Lần 3: 124/76/120/129 và 123/76/120/129 sau hai lần nạp, 122–123/75–76/118–120/129–130 sau mỗi `phy reinit`, như nhau khi đang stream; `PHY_RDY` 75–112 µs. Trễ BISC ở mép sớm của eye, thấp hơn tâm 0,26–0,48 UI (mục 9) |
 | 8 | `stat` trước `start`, sau `stop` | trạng thái LP của lane ở standby | LP-00 (datasheet) hay LP-11; lỗi LP (`misc`) ở mỗi lần dừng / chạy là bình thường với LP-00 | Cả hai lần: LP-00 trên cả 5 lane trước stream đầu (sau khi nạp PDI; lần 2 cả trong `camera` trước `cam`), LP-11 trên cả 5 lane sau `stop` (`STATUS` 0x000f403f, cũng là trạng thái cuối của lần 2); `misc` 0. Bộ thu tắt: lần 2 liệt kê đủ 4 lane (firmware của lần 1: 2 lane) |
 | 9 | `raw` sau `start` | byte sync của từng lane | `b8` ngay sau HS-zero, `sync byte at bit ...` trên mọi lane. Thấy `1d` mà không có sync: thứ tự bit ngược (`BitRev` = 1 của `bow_dphy_io_versal`, build lại) | Lần 2: `b8` ngay sau HS-zero; lane 1 ở bit 104 (word 13 + 0), lane 0 / 2 / 3 ở bit 105 (word 13 + 1), như lần 1 (lane 1 ở bit 8k + 0, các lane khác trễ 1 bit trong cùng word); không có `1d`: thứ tự bit đúng |
 | 10 | `raw` lặp lại nhiều phút | vị trí sync của từng lane | không đổi theo thời gian; lệch giữa các lane ≤ 6 byte clock (từ 7 trở lên bộ thu báo SKEW) | Lần 1: 7 lần trong 2 phút: lệch giữa các lane không đổi (lane 1 +0, các lane khác +1 bit), word 13 hoặc 15 như nhau trên mọi lane; 8209 frame không lỗi. Lần 2: một lần `raw`, cùng lệch |
@@ -1043,8 +1064,8 @@ các mục nó đo lại. **Chưa đo** / **chưa xem** là các kiểm tra vậ
 | 12 | `stat` | `clk` (số lần lane clock vào HS) theo số frame; byte clock | 1 mỗi frame: lane clock liên tục trong frame; 1 mỗi burst: tắt sau mỗi dòng (đồng hồ đo byte clock khi đó đọc thấp). 180 MHz = INCK 24 MHz (202,5 MHz: dao động 27 MHz) | Cả hai lần: `clk` 1 mỗi frame (HS suốt frame, LP-11 giữa các frame); byte clock 180078 kHz (INCK 24 MHz) |
 | 13 | `test`, `stat` | `trunc`, `ovf`, `line`, `frame` | `trunc` 0 và `ovf` 0 ở 1080p và 720p; line = 2 · HMAX / 72 MHz (11111 ns ở HMAX 400), frame = HMAX · VMAX / 72 MHz | Cả hai lần: `trunc` 0, `ovf` 0 ở 1080p và 720p; dòng 11100–11120 ns ở HMAX 400 (`LINE_TIME` đếm chu kỳ CPU 20 ns), frame 33333 µs; 720p60: 8320–8340 ns, 16666 µs |
 | 14 | `test` | dòng integrity và isp | tổng và mean của 555h / AAAh (có cộng BLKLEVEL không), `tp 11` ra sọc dọc (không thì thử `tp 12`), màu và thứ tự sọc, mức xám | Lần 2 như lần 1, đúng từng bit: 555h `2a257400`, mean 341; AAAh `544ae800`, mean 682 (đúng 0x155 / 0x2AA × 2 073 600: không cộng BLKLEVEL); 720p `12bb5000` / `2576a000`; `isp colour bars` 6 màu, 555h qua ISP: xám 145. `tp 11`: 8 sọc dọc đúng thứ tự ở 1080p, 6 sọc ở 720p |
-| 15 | ≥ 10⁴ burst mỗi cách | `BurstRxRst`: PA5 = 1 (mặc định) so với `phy burstrst 0` (mục 6.3) | PA5 = 1 sạch | Lần 1: PA5 = 1: 0 lỗi, hơn 3,2 triệu burst. PA5 = 0 hỏng hẳn sau lần bật lại bộ thu đầu tiên (lane 0 SOT / ECC / CRC, SKEW, FRAME; `misc` 255 mỗi giây) tới khi PA5 = 1 lại. Firmware giữ PA5 = 1 (lần 2: `phy` sau `start` in `burstrst 1`); PA5 = 0 không thử lại |
-| 16 | cảm biến đang stream | quét `SETTLE` theo mục 6.3 (giữ PA5 = 1) | lỗi SOT, ECC, CRC, misc mỗi giá trị → cửa sổ thật | Lần 2 (RTL gộp main, ~180 frame 720p60 mỗi giá trị): sạch 13…34 chu kỳ (65…170 ns); 12: `misc 31`; 35: `sot 0/0/0/1`, `misc 2`: đúng cửa sổ của lần 1 (lần 1 thêm: 8–12 misc, từ 36 không còn frame). 95 ns của driver cách mép dưới 30 ns |
+| 15 | ≥ 10⁴ burst mỗi cách | `BurstRxRst`: 1 (mặc định: `DES_RST_DIS` = 0 từ bước 4, PA5 = 1 trước đó) so với `phy burstrst 0` (mục 6.3) | PA5 = 1 sạch | Lần 1: PA5 = 1: 0 lỗi, hơn 3,2 triệu burst. PA5 = 0 hỏng hẳn sau lần bật lại bộ thu đầu tiên (lane 0 SOT / ECC / CRC, SKEW, FRAME; `misc` 255 mỗi giây) tới khi PA5 = 1 lại. Firmware giữ PA5 = 1 (lần 2: `phy` sau `start` in `burstrst 1`); PA5 = 0 không thử lại |
+| 16 | cảm biến đang stream | quét `SETTLE` theo mục 6.3 (giữ `BurstRxRst` = 1) | lỗi SOT, ECC, CRC, misc mỗi giá trị → cửa sổ thật | Lần 2 (RTL gộp main, ~180 frame 720p60 mỗi giá trị): sạch 13…34 chu kỳ (65…170 ns); 12: `misc 31`; 35: `sot 0/0/0/1`, `misc 2`: đúng cửa sổ của lần 1 (lần 1 thêm: 8–12 misc, từ 36 không còn frame). 95 ns của driver cách mép dưới 30 ns |
 | 17 | `camera`: `flip 0 1` trên cảnh thật | thứ tự Bayer khi lật dọc, frame ngay sau lệnh | RGGB: màu đúng ngay sau lệnh | Lần 2: firmware cuối cho màu đúng không cần ép: ISP `BAYER` 0 sau `flip 0 1`, mean RGB 96,9/96,3/96,1, lật lại khớp ảnh không lật (sai khác 2,2), sọc màu đúng thứ tự. Lần 1: GBRG của driver cho ảnh tím (mean RGB 140/9/149); ép ISP `BAYER` = RGGB thì màu đúng (99/99,5/99,3) |
 | 18 | `camera`: `cam` đầu tiên | frame đầu sau khi thoát standby | có frame, frame đầu không hỏng; nếu không: thử thêm 10 ms sau các lệnh ghi của bước 1 (firmware) | Lần 2: `cam` đầu ở trễ BISC mới (122/76/118/129) tự hiệu chỉnh: 296/184/264/224, eye 352/352/352/336, `margin ok +-88/+-88/+-88/+-84` (9 × 8 frame); không có `kept`; frame đầu tốt (1 frame, 1091 burst, 0 lỗi); `video` cũng vậy. Lần 1: frame đầu tốt; link check thấy lỗi và app hiệu chỉnh (cùng tap), 64 frame không lỗi |
 | 19 | sau `cal`, bo nóng / nguội hoặc chạy lâu | lỗi ECC / CRC trong `csi` | lane đã nạp tap thôi theo dõi VT: so với trễ BISC (sau `phy reinit`, VT bật lại) | Lần 3: 30 phút 1080p30, `csi2_test` trên cảnh thật (mục 6.4): 53 999 frame, mọi bộ đếm lỗi 0 ở cả 7 mẫu, tap giữ 296/184/264/224, `margin` cuối ±86/±90/±86/±86 tap 0 lỗi, `cal 8` cuối chỉ dời mép trên của lane 0 một bước 8 tap. Lần 2: 5 phút 1080p30 (AE/AWB bật) ngay sau `cam`: 9012 frame, mọi bộ đếm lỗi 0, tap giữ 296/184/264/224. Lần 1: 0 lỗi trong ~15 phút qua các ứng dụng (hơn 18 000 frame). Chưa thử nóng / nguội, chưa chạy lâu với app `camera` |
@@ -1129,11 +1150,12 @@ main (đoạn trên).
 | LED12 tắt | không có clock 200 MHz: SW12 phải OFF |
 | LED7 tắt (LED12 sáng) | XPLL của bank 705 không khoá: clock 200 MHz qua SLR, xem `clock_utilization.rpt` |
 | LED7 sáng, LED10 tắt | BISC không xong: VCCIO của FMC+01 (SW192 phải 1,2 V, LED "1.2", TP29); thử lại BISC với lane clock chạy (`sensor on`, `phy reinit`, mục 6.3) |
-| `phy reinit`: `error: PHY_RDY stayed 1 during the reinit pulse ...` | PDI có trước núm PA4: build lại |
+| `phy reinit`: `error: AFE_STATUS.READY stayed 1 after CMD.REINIT ...` (trước bước 4: `error: PHY_RDY stayed 1 during the reinit pulse ...`) | PHY không khởi động lại: PDI không phải bản camera Versal của cùng commit: build lại |
+| `csi2rx: bitstream before the D-PHY split, rebuild it` | PDI trước bước 4 với firmware mới (không có alias, mục 6.2): build PDI cùng commit |
 | LED11 tắt | module/bo chuyển chưa cắm vào FMC+01 |
 | I2C không có ACK ở 0x1A | PA7 (XCLR) phải là output 1 (LED8); SW192 = 1,2 V; module cắm chặt trên bo chuyển |
 | LED5 không bao giờ sáng | cảm biến chưa stream (lane clock không vào HS) |
-| lỗi ECC/CRC/SoT | `cal` (trễ BISC nằm ở mép sớm của eye: `cam` đầu luôn hiệu chỉnh, `csi2_test` cần `cal` sau `start`); PA5 phải là 1 (`phy`: `burstrst 1`), `SETTLE` (mục 6.3); SW192; bo chuyển |
+| lỗi ECC/CRC/SoT | `cal` (trễ BISC nằm ở mép sớm của eye: `cam` đầu luôn hiệu chỉnh, `csi2_test` cần `cal` sau `start`); `BurstRxRst` phải là 1 (`phy`: `DES_RST_DIS 0`; trước bước 4 `burstrst 1`), `SETTLE` (mục 6.3); SW192; bo chuyển |
 | `csi2_test`: `start` in `link check failed (ERR_STATUS 008), try cal` (bản Versal: thêm `errors in frame k of 16 at the delays in use ...`); firmware của lần 2: `link check ok` nhưng `stat` sau đó có `crc` > 0 | bình thường ở trễ BISC (sau khi nạp PDI hay `phy reinit`; lần 3: mọi lần); link check của firmware lần 2 chỉ 64 packet, nay 16 frame; `cal 8` (mục 6.3) |
 | `stat` / `csi`: `csi2rx: link errors` mà `frames 0` và mọi bộ đếm lỗi là 0, ngay sau `wr 40008020 1` | chưa có frame nào kết thúc sau khi xoá bộ đếm: firmware in nhầm (việc còn mở, mục 7); chờ một frame rồi xem lại |
 | `stat`: `extra` rất lớn, `frame errors c00`, `sum 00000000`, `no LP-11 between packets?` | `CTRL.EXTRA` thấp hơn trail (49–52 byte trên 4 lane): mọi frame bị bỏ; `start` ghi lại 192 của driver (mục 6.3) |
@@ -1170,15 +1192,18 @@ các cổng LP / HS enable / byte clock với bộ thu:
   3 1,33 dòng mỗi frame 1080p ở 123/76/119/130, 48,6 ở 122/75/118/130; lần 2 0,2–1,5; lần 1 ~11 %
   dòng. `margin 0 2` quanh trễ BISC (lần 2, sau `phy reinit`, rồi `start`): lỗi ở tâm và ở 6 trong
   8 điểm (`csi2rx: margin low ...`); `cal 8` ngay sau đó lại cho 300/184/264/228. Vì vậy app
-  `camera` / `video` luôn hiệu chỉnh ở `cam` đầu, `csi2_test` cần `cal`. `phy reinit` (PA4) đưa mọi
+  `camera` / `video` luôn hiệu chỉnh ở `cam` đầu, `csi2_test` cần `cal`. `phy reinit` (`CMD.REINIT`; trước bước 4 PA4) đưa mọi
   lane về trễ BISC mới và bật lại theo dõi VT; BISC lúc lane clock đang stream cho cùng trễ như lúc
   nghỉ.
 - **Câu hỏi mở: vì sao BISC không căn giữa** (mục 9.1). Ứng dụng luôn hiệu chỉnh từng lane nên
   ảnh không bị ảnh hưởng.
 - **Núm lúc chạy** (mức bất đồng bộ, đồng bộ vào `ctrl_clk_i`; 0 = như PHY của AMD):
-  `reinit_i` (PA4) giữ PHY ở reset khởi động như khi mất khoá XPLL, nhả ra thì XPLL, BISC, VT
-  chạy lại; `burst_rst_en_i` (PA5) = 1: `RX_RST` của các slice dùng khi cổng byte clock đóng,
-  FIFO bắt đầu lại mỗi burst. Trạng thái `{PHY_RDY, DLY_RDY}` của mọi nibble ra PB6 / PB7.
+  `reinit_i` giữ PHY ở reset khởi động như khi mất khoá XPLL, nhả ra thì XPLL, BISC, VT chạy lại;
+  `burst_rst_en_i` = 1: `RX_RST` của các slice dùng khi cổng byte clock đóng, FIFO bắt đầu lại mỗi
+  burst. Từ bước 4 cả hai đến từ thanh ghi của D-PHY: `reinit_o` (xung 32 chu kỳ bus khi ghi
+  `CMD.REINIT`; xsim `reinit_pulse` kiểm xung 640 ns đó) và `burst_rst_en_o` (¬`CTRL.DES_RST_DIS`,
+  1 từ reset); trạng thái {PHY_RDY, DLY_RDY của mọi nibble, LOCKED_FB, LOCKED} vào `AFE_STATUS[15:8]`
+  của D-PHY. Trước bước 4: PA4, PA5 và PB6 / PB7.
 - **XPLL** 1500 MHz cho BISC/VT; **byte clock** = `FIFO_WR_CLK` của nibble strobe qua BUFGCE,
   dừng giữa các burst như byte clock của KV260. Dữ liệu ra có `rx_valid` theo từng lane.
 - Ràng buộc: [constr/huins_vp1902_cam.xdc](../hw/fpga/huins_vp1902/constr/huins_vp1902_cam.xdc),

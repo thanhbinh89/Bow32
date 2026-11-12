@@ -209,13 +209,12 @@ static uint32_t tap_ms(void) { return cam_frame_us(sen) * 12u / 10000u + 3u; }
 static bool margin(uint32_t k, uint32_t frames, bool verbose) {
   bow_csi2rx_margin_t m;
   bow_csi2rx_cal_t c = cam.cal; /* eye widths; none: k = CSI2RX_MARGIN_MIN */
-  bow_csi2rx_get_delays(c.tap);
+  bow_dphy_rx_get_delays(c.tap);
   c.lanes = bow_csi2rx_lanes();
   if (!cam.calibrated) {
     bow_puts("csi2rx: not calibrated: margin around the delays in use ");
-    bow_csi2rx_print_delays();
-    bow_puts((CSI2RX->INFO & CSI2RX_INFO_DLY_VID) ? " (loading them ends the VT tracking)\n"
-                                                    : "\n");
+    bow_dphy_rx_print_delays(c.lanes > 2u ? 4u : 2u);
+    bow_puts(bow_dphy_rx_self_cal() ? " (loading them ends the VT tracking)\n" : "\n");
   }
   int r = bow_csi2rx_margin(&c, k, frames, tap_ms(), &m, verbose);
   bow_printf("csi2rx: margin %s", r > 0 ? "ok " : r == 0 ? "low " : "");
@@ -287,7 +286,7 @@ static bool start_cam(void) {
   }
   /* the IMX219 is still in LP-11, the IMX274 in LP-00 until its start */
   if (cam_rx_start(sen, sen->dt()) != CSI2RX_OK) {
-    bow_printf("error: D-PHY not ready (CSI2RX STATUS.PHY_RDY = 0)\n");
+    bow_printf("error: D-PHY not ready (AFE_STATUS.READY = 0)\n");
     return false;
   }
   uint32_t max_exp = sen->exposure_max();
@@ -731,7 +730,7 @@ static bool execute(const char *line) {
       return false;
     }
     if ((a = parse_num(a, &k, false))) parse_num(a, &frames, false);
-    if (frames == 0 || k > CSI2RX_DLY_MAX) return false;
+    if (frames == 0 || k > DPHY_DLY_MAX) return false;
     bool ok = margin(k, frames, true);
     ISP->STATUS = ISP_ST_ERRORS; /* frames cut by a point with errors */
     return ok;
@@ -805,7 +804,7 @@ static void probe_hardware(void) {
   cam.lanes = lanes;
   if (cam.phy) {
     bow_printf("csi2rx: Bow32 receiver, %u lanes, PHY clock %u MHz\n", lanes,
-               CSI2RX_INFO_MHZ(CSI2RX->INFO));
+               bow_dphy_rx_lp_mhz());
   } else if (cam.csi) {
     bow_printf("csi2rx: Bow32 receiver, no D-PHY in this bitstream - ISP test pattern only\n");
   } else {

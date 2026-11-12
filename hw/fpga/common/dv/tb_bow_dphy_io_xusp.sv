@@ -27,15 +27,20 @@
 //    apart, also across the gaps (CE freezes both dividers); BUFGCE_DIV CE
 //    changes only while the clock lane is static in HS-0; the ISERDES RST is
 //    high whenever the gate opens and is released once per burst while the
-//    clock runs, at least 20 byte clocks before the sync byte; a DLY write
-//    reaches IDELAYE3 CNTVALUEOUT at the next burst and reads back.
-//  * receiver, with the PHY_CFG and CTRL.EXTRA of the driver (bow_csi2rx_start
-//    for 2 x 912 Mbit/s, 200 MHz): RAW10 pixels on m_axis with tuser/tlast
-//    (random tready), ID, INFO, PHY_CFG, STATUS, counters, CNT_EXT,
-//    FRAME_INFO, LINE_INFO, FRAME_SUM, FRAME_ERR, ERR_STATUS after each
-//    frame; a D-PHY v1.2 skew calibration burst (HS-zero, FFFFh, 0101...)
-//    counted as deskew, not as a sync error; raw capture (RAW_CTRL ARM) of a
-//    burst; frames with T_HS-TRAIL at T_EOT max (no EXTRA from the trail),
+//    clock runs, at least 20 byte clocks before the sync byte; a DLYn write
+//    (D-PHY) reaches IDELAYE3 CNTVALUEOUT at the next burst and reads back
+//    (DLYn.Q, PEND until then, OWN).
+//  * receiver, with the D-PHY's TIM0 and the CTRL.EXTRA of the driver
+//    (bow_dphy_rx_timing / bow_csi2rx_start for 2 x 912 Mbit/s, 200 MHz):
+//    RAW10 pixels on m_axis with tuser/tlast (random tready); the
+//    controller's ID, INFO, STATUS, counters, CNT_EXT, FRAME_INFO, LINE_INFO,
+//    FRAME_SUM, FRAME_ERR, ERR_STATUS and the D-PHY's ID, INFO, INFO2, TIM0,
+//    LANE_LP, LANE_HS, CNT_BURSTn, CNT_CLK after each frame (step 4 of
+//    docs/ip/mipi_rx_arch.md: the D-PHY's registers at 0xC00, the
+//    controller's old PHY registers read 0); a D-PHY v1.2 skew calibration
+//    burst (HS-zero, FFFFh, 0101...) counted as deskew, not as a sync error;
+//    raw capture (the D-PHY's RAW_CTRL ARM) of a burst; frames with
+//    T_HS-TRAIL at T_EOT max (no EXTRA from the trail),
 //    with T_HS-PREPARE min and with T_HS-PREPARE max (noise until 85 ns +
 //    6 UI, ending with a false 0x00 0xB8), both with T_HS-PREPARE + T_HS-ZERO
 //    exactly at its minimum 145 ns + 10 UI on every lane (the bit phase is
@@ -406,6 +411,9 @@ module tb_bow_dphy_io_xusp;
     .rx_data_i       (rx_data),
     .rx_valid_i      ('1),
     .phy_rdy_i       (1'b1),
+    .phy_status_i    (8'h00),
+    .reinit_o        (),
+    .burst_rst_en_o  (),
     .dly_tap_o       (dly_tap),
     .dly_load_o      (dly_load),
     .dly_tap_i       (dly_tap_out)
@@ -694,16 +702,29 @@ module tb_bow_dphy_io_xusp;
     reg_check("CNT_CRC",    12'h034, 0);
     reg_check("CNT_SOT",    12'h038, 0);
     reg_check("CNT_DROP",   12'h03C, 1);
-    reg_check("CNT_BURST",  12'h040, {16'(pkts), 16'(pkts)});
-    reg_check("CNT_MISC",   12'h044, pkts);
+    reg_check("CNT_MISC",   12'h044, 0);
     reg_check("CNT_EXT",    12'h048, 0);         // no EXTRA (trail bytes < 62), no deskew
+    // HS entries: the D-PHY's counters (one burst per packet); the old offsets read 0
+    reg_check("DPHY CNT_BURST0", 12'hC50, pkts);
+    reg_check("DPHY CNT_BURST1", 12'hC54, pkts);
+    reg_check("DPHY CNT_CLK",    12'hC70, pkts);
+    reg_check("DPHY CNT_LPERR",  12'hC74, 0);
+    reg_check("CNT_BURST (old)", 12'h040, 0);
     reg_check("ERR_STATUS", 12'h01C, 0);
     reg_check("FRAME_ERR",  12'h04C, 0);
     reg_check("FRAME_INFO", 12'h050, {fnum, 16'(Height)});
     reg_check("LINE_INFO",  12'h054, {8'h00, 2'b00, 6'h2B, 16'(Wc)}, 32'h00FF_FFFF);
     reg_check("FRAME_SUM",  12'h058, frame_sum);
     // all lanes LP-11, no HS receiver on, gate closed, not in a frame
-    reg_check("STATUS",     12'h010, 32'h0000_003F, 32'h0000_1FFF);
+    reg_check("STATUS",       12'h010, 0);
+    reg_check("DPHY LANE_LP", 12'hC30, 32'h0000_003F);
+    reg_check("DPHY LANE_HS", 12'hC34, 0, 32'h0003_001F);
+  endtask
+
+  // the counters of a frame: the controller's (CNT_CLR) and the D-PHY's (CMD.CNT_CLR)
+  task automatic cnt_clr();
+    reg_wr(12'h020, 32'h1);
+    reg_wr(12'hC10, 32'h8);
   endtask
 
   // ------------------------------------------------------------- the test
@@ -728,16 +749,24 @@ module tb_bow_dphy_io_xusp;
     vrst_n = 1'b1;
     repeat (10) @(posedge clk);
 
-    reg_check("ID",      12'h000, 32'h4353_3201);
-    reg_check("INFO",    12'h004, {16'd256, 8'd200, 3'd0, 1'b1, 4'(Lanes)});
-    reg_check("PHY_CFG", 12'h00C, 32'h081E_020E);              // reset value
+    reg_check("ID",        12'h000, 32'h4353_3201);
+    // FIFO 256, 200 MHz, D-PHY at 0xC00 (INFO[6]), PHY
+    reg_check("INFO",      12'h004, {16'd256, 8'd200, 1'b0, 1'b1, 1'b0, 1'b1, 4'(Lanes)});
+    reg_check("DPHY ID",   12'hC00, 32'h4450_5201);
+    // UltraScale+ AFE (1), 200 MHz lp clock, 9 bit taps; 107 ns + 24 UI, no trail words
+    reg_check("DPHY INFO", 12'hC04, {8'h00, 1'b0, 1'b0, 4'd9, 10'd200, 3'd1, 1'b0, 4'(Lanes)});
+    reg_check("DPHY INFO2", 12'hC08, {8'h00, 8'd0, 8'd24, 8'd107});
+    reg_check("DPHY TIM0", 12'hC24, 32'h081E_020E);            // reset value
+    reg_check("PHY_CFG (old)", 12'h00C, 0);
     if ($value$plusargs("SETTLE=%d", settle)) phy_cfg[7:0] = 8'(settle);
-    reg_wr(12'h00C, phy_cfg);                                  // the driver's (PHY_EN = 0)
-    reg_check("PHY_CFG", 12'h00C, phy_cfg);
+    reg_wr(12'hC24, phy_cfg);                                  // the driver's (PHY_EN = 0)
+    reg_check("DPHY TIM0", 12'hC24, phy_cfg);
     // EXTRA 62, DT 0x2B, 2 lanes, RX_EN, PHY_EN
     reg_wr(12'h008, {8'd0, Extra, 2'b00, 6'h2B, 5'd0, 1'b1, 1'b1, 1'b1});
     #1_000_000;
-    reg_check("STATUS idle", 12'h010, 32'h0000_003F, 32'h0000_1FFF);
+    reg_check("STATUS idle", 12'h010, 0);
+    reg_check("DPHY LANE_LP idle", 12'hC30, 32'h0000_003F);
+    reg_check("DPHY LANE_HS idle", 12'hC34, 0, 32'h0003_001F);
     if (n_byte_clk != 0) err("byte clock running before the first burst");
 
     $display("%t frame 1", $time);
@@ -746,7 +775,7 @@ module tb_bow_dphy_io_xusp;
 
     // skew calibration burst: counted on lane 0, no sync error, no packet
     $display("%t deskew burst", $time);
-    reg_wr(12'h020, 32'h1);                      // CNT_CLR
+    cnt_clr();
     send_deskew();
     #1_000_000;
     reg_check("CNT_EXT deskew",    12'h048, 32'h0001_0000);
@@ -754,28 +783,30 @@ module tb_bow_dphy_io_xusp;
     reg_check("CNT_PKT deskew",    12'h028, 0);
     reg_check("ERR_STATUS deskew", 12'h01C, 0);
 
-    // IDELAY taps: loaded at the next burst (lane 1: more than one UI)
-    reg_wr(12'h070, 32'd37);
-    reg_wr(12'h074, 32'd300);
-    reg_check("DLY0 before burst", 12'h070, 32'd37, 32'h01FF_01FF);
-    reg_check("DLY1 before burst", 12'h074, 32'd300, 32'h01FF_01FF);
-    reg_wr(12'h020, 32'h1);                      // CNT_CLR
+    // IDELAY taps (the D-PHY's DLYn): loaded at the next burst (lane 1: more than one
+    // UI); until then PEND (OWN: written while the PHY is ready)
+    reg_wr(12'hC80, 32'd37);
+    reg_wr(12'hC84, 32'd300);
+    reg_check("DLY0 before burst", 12'hC80, {1'b1, 6'd0, 9'd0, 1'b1, 6'd0, 9'd37});
+    reg_check("DLY1 before burst", 12'hC84, {1'b1, 6'd0, 9'd0, 1'b1, 6'd0, 9'd300});
+    reg_check("DLY0 (old)", 12'h070, 0);
+    cnt_clr();
     $display("%t frame 2 (taps 37/300)", $time);
     send_frame(16'd2);
     check_frame(16'd2);
-    reg_check("DLY0", 12'h070, {7'd0, 9'd37, 7'd0, 9'd37});
-    reg_check("DLY1", 12'h074, {7'd0, 9'd300, 7'd0, 9'd300});
+    reg_check("DLY0", 12'hC80, {1'b1, 6'd0, 9'd37, 1'b0, 6'd0, 9'd37});
+    reg_check("DLY1", 12'hC84, {1'b1, 6'd0, 9'd300, 1'b0, 6'd0, 9'd300});
     if (u_phy.g_lane[0].u_idelay.CNTVALUEOUT !== 9'd37 ||
         u_phy.g_lane[1].u_idelay.CNTVALUEOUT !== 9'd300) begin
       err("IDELAYE3 CNTVALUEOUT");
     end
 
-    // Raw capture of the next burst (armed with a stopped byte clock). The
-    // 64 words from the rise of lane 0 hs_active and the acknowledge need
+    // Raw capture (the D-PHY's) of the next burst (armed with a stopped byte clock).
+    // The 64 words from the rise of lane 0 hs_active and the acknowledge need
     // byte clocks: the packet keeps the clock running well beyond them.
     $display("%t raw capture", $time);
-    reg_wr(12'h084, 32'h1);
-    reg_check("RAW_CTRL armed", 12'h084, 32'h1, 32'h101);
+    reg_wr(12'hD00, 32'h1);
+    reg_check("RAW_CTRL armed", 12'hD00, 32'h1, 32'h101);
     pl.delete();
     for (int i = 0; i < 120; i++) pl.push_back(8'($urandom));
     long_pkt(8'h12, pl, pkt);
@@ -790,10 +821,10 @@ module tb_bow_dphy_io_xusp;
       end
       e.sync = 8'hB8;
       d = '0;
-      for (int t = 0; t < 100 && !d[8]; t++) reg_rd(12'h084, d);
+      for (int t = 0; t < 100 && !d[8]; t++) reg_rd(12'hD00, d);
       if (!d[8]) err("RAW_CTRL: no DONE");
       for (int w = 0; w < 64; w++) begin
-        reg_rd(12'h800 + 12'(4 * w), d);
+        reg_rd(12'hE00 + 12'(8 * w), d);
         for (int l = 0; l < Lanes; l++) raw[l][w] = d[8 * l +: 8];
       end
       for (int l = 0; l < Lanes; l++) begin
@@ -808,7 +839,7 @@ module tb_bow_dphy_io_xusp;
     // below CTRL.EXTRA
     $display("%t frame 3 (T_HS-TRAIL %0d ps)", $time, 105_000 + 12 * UI);
     THsTrail = 105_000 + 12 * UI;
-    reg_wr(12'h020, 32'h1);
+    cnt_clr();
     send_frame(16'd3);
     check_frame(16'd3);
     THsTrail = 70_000;
@@ -826,7 +857,7 @@ module tb_bow_dphy_io_xusp;
       THsZero    = 145_000 + 10 * UI - THsPrepare;
       $display("%t frame %0d (T_HS-PREPARE %0d ps, T_HS-ZERO %0d ps)", $time, f, THsPrepare,
                THsZero);
-      reg_wr(12'h020, 32'h1);
+      cnt_clr();
       send_frame(16'(f));
       check_frame(16'(f));
     end

@@ -377,6 +377,8 @@ test-vclk: check-tools $(foreach c,$(VCLK_CFGS),$(call vclk_snap,$(c)))
 #                    return to the BISC delays)
 #   reinit_toggle    reinit_i while the clock lane toggles in HS (BISC with a running
 #                    strobe), reinit_cont the same with the continuous clock
+#   reinit_pulse     reinit_i for 640 ns only: the pulse of the D-PHY's CMD.REINIT (32 cycles
+#                    of the 50 MHz bus clock, step 4 of docs/ip/mipi_rx_arch.md)
 # One xsim library + snapshot directory per configuration in $(DPHYV_DIR)/<cfg>/, the run
 # in $(DPHYV_DIR)/<cfg>/run; rebuilt when a source or WAVES changes. DPHYV_RTL replaces
 # the PHY under test (a broken copy, say), DPHYV_DIR the output directory. Needs the
@@ -387,7 +389,8 @@ DPHYV_TOP  := tb_bow_dphy_io_versal
 DPHYV_SRCS  = $(DPHYV_RTL) $(CURDIR)/$(DPHYV_TOP).sv
 DPHYV_CFGS ?= base rden0 envtc_late burstrst skew80 sweep contclk contclk_late glitch \
               glitch_burstrst vtmode p1 p1_skew80 p1_contclk p1_glitch p2 p2_sweep p2_glitch \
-              p2_vtmode burstrst_on reinit_idle reinit_toggle reinit_cont p2_reinit_toggle
+              p2_vtmode burstrst_on reinit_idle reinit_toggle reinit_cont p2_reinit_toggle \
+              reinit_pulse
 DPHYV_GEN_base             :=
 DPHYV_GEN_rden0            := RdenReg=0
 DPHYV_GEN_envtc_late       := EnVtcEarly=0
@@ -412,6 +415,7 @@ DPHYV_GEN_reinit_idle      := Reinit=1 Bursts=4
 DPHYV_GEN_reinit_toggle    := Reinit=2 HsGate=0 Bursts=4
 DPHYV_GEN_reinit_cont      := Reinit=1 ContClk=1 Bursts=4
 DPHYV_GEN_p2_reinit_toggle := Plan=2 Reinit=2 HsGate=0 BurstRst=1 Bursts=4
+DPHYV_GEN_reinit_pulse     := Reinit=1 ReinitNs=640 Bursts=4
 DPHYV_CFG ?= base
 dphyv_snap = $(DPHYV_DIR)/$(1)/xsim.dir/$(DPHYV_TOP)_sim/xsimk
 

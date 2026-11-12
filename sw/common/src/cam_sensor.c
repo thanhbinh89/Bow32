@@ -270,17 +270,11 @@ void cam_print_prsnt(uint32_t rx_lanes) {
 }
 
 /* ------------------------------------------------- receiver start (board) */
-#define CAM_PA5_BURSTRST GPIO_PIN(5) /* Huins camera top: burst_rst_en_i */
-
 int cam_rx_start(const cam_sensor_t *s, uint32_t dt) {
-  if (CSI2RX->INFO & CSI2RX_INFO_DLY_VID) {
-#if CAM_BURST_RST
-    bow_gpio_set(GPIOA, CAM_PA5_BURSTRST);
-    bow_gpio_output(GPIOA, CAM_PA5_BURSTRST);
-#else
-    bow_gpio_clear(GPIOA, CAM_PA5_BURSTRST);
-#endif
-  }
+  /* Versal XPHY: the RX FIFO reset at every gate opening (the D-PHY's
+   * CTRL.DES_RST_DIS = 0, on from reset) back on, unless the simulation
+   * variant CAM_BURST_RST = 0 */
+  if (bow_dphy_rx_afe() == DPHY_AFE_VERSAL) bow_dphy_rx_des_rst(CAM_BURST_RST != 0);
   return bow_csi2rx_start(s->lanes, dt, cam_lane_rate(s));
 }
 

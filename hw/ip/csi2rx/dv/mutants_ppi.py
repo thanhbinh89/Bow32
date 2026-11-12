@@ -31,8 +31,7 @@ TIMEOUT = 300    # seconds per simulation
 FILES = ["bow_csi2rx_pkg.sv", "bow_csi2_lane_merge.sv", "bow_csi2_packet.sv",
          "bow_csi2_unpack.sv", "bow_csi2rx_out.sv", "bow_csi2_capture.sv",
          "bow_csi2rx_regs.sv", "bow_csi2rx.sv", "bow_mipi_rx.sv", "bow_csi2rx_ppi_flat.sv"]
-PARAMS = {1: ["-GLanes=1"], 2: ["-GLanes=2"],
-          4: ["-GLanes=4", "-GDlyVid=1'b1", "-GFifoDepth=512"]}
+PARAMS = {1: ["-GLanes=1"], 2: ["-GLanes=2"], 4: ["-GLanes=4", "-GFifoDepth=512"]}
 MERGE, PACKET, CTRL, FLAT = ("bow_csi2_lane_merge.sv", "bow_csi2_packet.sv", "bow_csi2rx.sv",
                              "bow_csi2rx_ppi_flat.sv")
 
@@ -74,11 +73,15 @@ MUTANTS = [
     # single-file build with Lanes = 1, which runs python3 (VERILATOR_ENV below)
     ("extra_off", [(PACKET, "if ((extra_i != '0) && !xev_q && (xcnt_q > {1'b0, extra_i})) begin",
                     "if (1'b0) begin", 1)]),
-    # lost burst marking at the LP level and the masks from the band
-    ("lost_burst_no_lane_mask", [(CTRL, "(|(ev_lp_err[Lanes:1] & band_lane_en_lp_i))",
-                                  "(|ev_lp_err[Lanes:1])", 1)]),
-    ("lost_burst_no_clk_force_mask", [(CTRL, "(ev_lp_err[0] && !band_clk_force_lp_i)",
-                                       "ev_lp_err[0]", 1)]),
+    # lost burst marking at the LP level: the OR of ErrControl / ErrControlClk on the PPI
+    # (the D-PHY masks them since step 4): without ErrControlClk, lane 0 only, masked by the
+    # controller's own enables again (lpmask: an error on a lane CTRL disabled)
+    ("lost_burst_no_clk", [(CTRL, "    lp_err = ppi_lp_clk_i.err_control[0];",
+                            "    lp_err = 1'b0;", 1)]),
+    ("lost_burst_lane0_only", [(CTRL, "lp_err |= ppi_lp_i[l].err_control[0];",
+                                "lp_err |= ppi_lp_i[0].err_control[0];", 1)]),
+    ("lost_burst_lane_mask", [(CTRL, "lp_err |= ppi_lp_i[l].err_control[0];",
+                               "lp_err |= ppi_lp_i[l].err_control[0] & lane_en_sys[1 + l];", 1)]),
     ("lost_burst_off", [(CTRL, "    else if (lpl_ev && (lpl_req_q == lpl_ack_s))   lpl_req_q <= ~lpl_req_q;",
                          "    else if (1'b0)                                 lpl_req_q <= ~lpl_req_q;", 1)]),
     # the pending loss cleared by an end of burst, not by the next packet start (test loss:
@@ -86,12 +89,8 @@ MUTANTS = [
     ("lost_burst_pending_cleared_at_eob", [(CTRL, "    else if (lm_sop)                  lpl_pend_q <= 1'b0;",
                                             "    else if (lm_eob)                  lpl_pend_q <= 1'b0;", 1)]),
     ("sync_error_no_drop", [(CTRL, "lm_skew || (|al_sync_err) ||", "lm_skew ||", 1)]),
-    ("deskew_counted_on_last_lane", [(CTRL, "assign bev = {al_sync_err, px_skip, al_deskew[0], lm_skew, pkt_ev};",
-                                      "assign bev = {al_sync_err, px_skip, al_deskew[Lanes-1], lm_skew, pkt_ev};", 1)]),
-    # RAW (band, bow only): every raw word taken, not only the valid ones (test gaps); the
-    # capture started by the rise of any lane's RxActiveHS (the start word: check_raw)
-    ("raw_valid_ignored", [(CTRL, ".rx_vld0_i     (band_raw_valid_i[0]),", ".rx_vld0_i     (1'b1),", 1)]),
-    ("raw_trigger_any_lane", [(CTRL, ".arm0_i        (arm[0]),", ".arm0_i        (|arm),", 1)]),
+    ("deskew_counted_on_last_lane", [(CTRL, "  assign dsk_ev = al_deskew[0] & ~stale_q[0];",
+                                      "  assign dsk_ev = al_deskew[Lanes-1] & ~stale_q[Lanes-1];", 1)]),
     # flat wrapper (standard PHY)
     ("flat_no_byte_delay", [(FLAT, "    assign ppi_hs[l].rx_valid_hs     = valid_q[l];",
                              "    assign ppi_hs[l].rx_valid_hs     = rx_valid_hs_i[l];", 1),
@@ -103,12 +102,9 @@ MUTANTS = [
                               "rx_active_hs_i[l];", 1)]),
     ("flat_skew_cal_level", [(FLAT, "    assign ppi_hs[l].rx_skew_cal_hs  = skew_edge_q[l];",
                               "    assign ppi_hs[l].rx_skew_cal_hs  = skew_q[l];", 1)]),
-    # no lane mask of the lost burst marking behind the wrapper (std lpmask: an error of a
-    # lane CTRL disabled before). Not a mutant: Enable without the 2 flops (a CDC structure;
-    # a standard PHY's ErrControl reaches the controller 2..3 video clocks after its pulse,
-    # through the wrapper's synchroniser, so no stimulus can aim at those 2 cycles)
-    ("flat_lane_en_tied_1", [(FLAT, ".band_lane_en_lp_i   (lane_en_lp),",
-                              ".band_lane_en_lp_i   ('1),", 1)]),
+    # the wrapper's ErrControl synchronisers: lane 0's for every lane (std lpmask, loss)
+    ("flat_err_lane0_only", [(FLAT, "      .src_pulse_i (err_control_i[l]),",
+                              "      .src_pulse_i (err_control_i[0]),", 1)]),
 ]
 
 

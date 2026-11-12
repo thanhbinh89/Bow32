@@ -135,6 +135,9 @@ module bow32_kv260_cam_top #(
     .dphy_rx_data_i   (dphy_rx_data),
     .dphy_rx_valid_i  ('1),
     .dphy_phy_rdy_i   (1'b1),
+    .dphy_phy_status_i ('0),                // no PHY status, no re-init, no FIFO
+    .dphy_reinit_o    (),
+    .dphy_burst_rst_en_o (),
     .dphy_dly_tap_o   (dphy_dly_tap),
     .dphy_dly_load_o  (dphy_dly_load),
     .dphy_dly_tap_i   (dphy_dly_tap_out),

@@ -13,8 +13,9 @@
 
 typedef struct {
   /* hardware found at start-up; lanes = data lanes of the receiver, s = the
-   * sensor (cam_imx219 when none was found: its formulas); vid = the D-PHY
-   * is the Versal XPHY (INFO.DLY_VID: PHY_RDY, `phy` and `sensor` commands) */
+   * sensor (cam_imx219 when none was found: its formulas); vid = the PHY I/O
+   * is the Versal XPHY (the D-PHY's INFO: AFE_STATUS.READY, `phy` and
+   * `sensor` commands) */
   bool sensor, phy, vid;
   uint32_t lanes;
   const cam_sensor_t *s;

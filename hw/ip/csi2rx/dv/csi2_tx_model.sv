@@ -65,7 +65,10 @@
 //   * A byte clock without a read on all lanes (FIFO_EMPTY seen for one more
 //     cycle) comes with probability v_gap_pm per mille, only while every FIFO
 //     is at its minimum (vlat[l] + 1 words before the read): one extra word
-//     of latency, at most one per restart or wrap.
+//     of latency, at most one per restart or wrap. v_gap_byte (test knob, 0 =
+//     off) places one: at the first read of a burst after the TX has sent
+//     v_gap_byte of its packet bytes, once per burst, under the same rule (with
+//     BurstRxRst = 1 the FIFOs are at their minimum then).
 //   * Input delays in the ctrl_clk_i domain (CTRL_CLK = video clock of the
 //     receiver): after phy_rdy_o, dly_tap_o[l] = bisc[l] (BISC result) until
 //     a load. A load (dly_load_i one cycle with dly_tap_i) shows in
@@ -103,9 +106,12 @@
 // runt, eye_lo[l] / eye_hi[l], and the timings in ns: t_lpx, t_hs_prepare,
 // t_hs_zero, t_hs_trail, t_hs_exit, t_clk_prepare, t_clk_zero, t_clk_pre,
 // t_clk_post, t_clk_trail, t_lp11_next (clock lane LP-11 between bursts);
-// Versal PHY: versal, t_phy_rdy, bisc[l], v_lat_lane, v_glitch_pct, v_gap_pm
-// (set these at time 0), v_burst_rst, phy_reinit, t_reinit (any time: run
-// time inputs of the PHY).
+// l0_late_ns (test knob, 0 = off): data lane 0 enters HS later than the other
+// lanes, its LP-01 l0_late_ns longer and its HS-ZERO as much shorter (its sync
+// byte does not move);
+// Versal PHY: versal, t_phy_rdy, bisc[l], v_lat_lane, v_glitch_pct, v_gap_pm,
+// v_gap_byte (set these at time 0), v_burst_rst, phy_reinit, t_reinit (any
+// time: run time inputs of the PHY).
 // Status for checks (times in ns from csi2_now()):
 //   bursts, bursts_done           bursts started / finished
 //   cur_burst, cur_byte           burst being sent (-1: none), its packet bytes sent so far
@@ -261,7 +267,8 @@ module csi2_tx_model import csi2_tx_pkg::*; #(
   int unsigned t_phy_rdy = 2000, t_reinit = 20_000;
   int unsigned bisc [ML] = '{97, 112, 88, 120};
   bit          v_burst_rst = 1'b0, v_lat_lane = 1'b0, phy_reinit = 1'b0;
-  int unsigned v_glitch_pct = 20, v_gap_pm = 0;
+  int unsigned v_glitch_pct = 20, v_gap_pm = 0, v_gap_byte = 0;
+  int unsigned l0_late_ns = 0;
 
   // ----------------------------------------------------------------- status
   int unsigned bursts = 0, bursts_done = 0;
@@ -420,7 +427,7 @@ module csi2_tx_model import csi2_tx_pkg::*; #(
   function automatic void build_burst(item_t it);
     csi2_bytes_t b;
     int unsigned n, nl [ML], rb [ML], sb [ML], db [ML], de [ML], hs_steps [ML], ph [ML];
-    int unsigned p_zero, nhs, tstep, klast, i, idx, cnt;
+    int unsigned p_zero, nhs, tstep, klast, i, idx, cnt, d0;
     logic        trail [ML];
     step_t       s;
     b.delete();
@@ -433,6 +440,7 @@ module csi2_tx_model import csi2_tx_pkg::*; #(
     end
     n = b.size();
     p_zero = nsteps(t_hs_zero + ((it.f.zero_ns >= 0) ? int'(it.f.zero_ns) : $urandom_range(64)));
+    d0 = (l0_late_ns != 0) ? nsteps(l0_late_ns) : 0;   // lane 0 late: d0 more steps of LP-01
     for (int l = 0; l < int'(ML); l++) begin
       nl[l] = (l < lanes && n > l) ? (n - l + lanes - 1) / lanes : 0;
       // (random phases of lanes 0/1 drawn even if unused: same draws as with 2 lanes)
@@ -441,6 +449,7 @@ module csi2_tx_model import csi2_tx_pkg::*; #(
       else                            ph[l] = 0;
       rb[l] = 8 * nsteps(t_hs_prepare) + ph[l];
       sb[l] = rb[l] + 8 * (p_zero + 32'(it.f.zeros[l]));
+      if (l == 0) rb[l] += 8 * d0;              // HS-ZERO shorter: the sync stays
       db[l] = sb[l] + 8;
       de[l] = db[l] + 8 * nl[l];
       hs_steps[l] = (de[l] + 8 * nsteps(t_hs_trail) + 7) / 8;
@@ -475,7 +484,9 @@ module csi2_tx_model import csi2_tx_pkg::*; #(
       s.lp = '1;
       cnt = 0;
       for (int l = 0; l < int'(lanes); l++) begin
-        if (k < hs_steps[l]) begin
+        if (l == 0 && k < d0) begin
+          s.lp[l] = 2'b01;                      // lane 0 late: still LP-01
+        end else if (k < hs_steps[l]) begin
           s.hs[l] = 1'b1;
           for (int j = 0; j < 8; j++) begin
             i = 8 * k + j;
@@ -682,6 +693,7 @@ module csi2_tx_model import csi2_tx_pkg::*; #(
   } vword_t;
 
   vword_t      vq [ML][$];
+  int          v_gap_last = -1;         // burst of the last gap placed by v_gap_byte
   int unsigned vlat [ML] = '{default: 0};
   int unsigned vtend [ML] = '{default: 0};
   int unsigned vtend_done = 0;
@@ -783,10 +795,15 @@ module csi2_tx_model import csi2_tx_pkg::*; #(
     bit     gap;
     vword_t v;
     gap = (v_gap_pm != 0) && ($urandom_range(999) < v_gap_pm);
+    if (v_gap_byte != 0 && cur_burst >= 0 && cur_byte >= v_gap_byte && cur_burst != v_gap_last)
+      gap = 1'b1;
     for (int l = 0; l < int'(Lanes); l++) begin
       if (vq[l].size() != vlat[l] + 1) gap = 1'b0;
     end
-    if (gap) v_gaps++;
+    if (gap) begin
+      v_gaps++;
+      if (v_gap_byte != 0 && cur_burst >= 0) v_gap_last = cur_burst;
+    end
     for (int l = 0; l < int'(Lanes); l++) begin
       if (!gap && vq[l].size() > vlat[l]) begin
         v = vq[l].pop_front();

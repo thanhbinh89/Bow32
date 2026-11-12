@@ -2,7 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Unit testbench of the Bow32 CSI-2 receiver (Verilator --binary --timing): the DUT is
-// bow_mipi_rx, the digital D-PHY and the CSI-2 controller joined by the PPI.
+// bow_mipi_rx, the digital D-PHY and the CSI-2 controller joined by the PPI. The register
+// window is the receiver's: the controller at 0x000, the D-PHY at 0xC00 (step 4 of
+// docs/ip/mipi_rx_arch.md, docs/ip/dphy_rx.md). The PHY I/O model csi2_tx_model takes the
+// D-PHY's PHY control: its re-init knob is reinit_o (CMD.REINIT), its BurstRxRst knob
+// burst_rst_en_o (~CTRL.DES_RST_DIS: a test case of the Versal PHY with BurstRxRst 0 writes
+// DES_RST_DIS first, the testbench checks the value at every burst); phy_status_i =
+// {4{PHY ready}} (AFE_STATUS[11:8]).
 //
 // Reads a test case written by `tools/csi2/csi2_model.py gen DIR`:
 //   DIR/cfg.txt   settings ('key value': lanes, clock mode, D-PHY timing, eye,
@@ -65,6 +71,8 @@ module tb_bow_csi2rx;
   logic                  m_tready = 1'b1;
   logic [9:0]            m_tdata;
   logic                  byte_clk, byte_ce, byte_rst, clk_hs_en, phy_rdy;
+  logic                  reinit, burst_rst_en;
+  logic [7:0]            phy_status;
   logic [1:0]            clk_lp;
   logic [Lanes-1:0][1:0] lp;
   logic [Lanes-1:0]      hs_en, dly_load, rx_valid;
@@ -101,10 +109,22 @@ module tb_bow_csi2rx;
     .rx_data_i       (rx_data),
     .rx_valid_i      (rx_valid),
     .phy_rdy_i       (phy_rdy),
+    .phy_status_i    (phy_status),
+    .reinit_o        (reinit),
+    .burst_rst_en_o  (burst_rst_en),
     .dly_tap_o       (dly_tap),
     .dly_load_o      (dly_load),
     .dly_tap_i       (dly_tap_rb)
   );
+
+  assign phy_status = {4'h0, {4{phy_rdy}}};
+
+  // the D-PHY's PHY control -> run time inputs of the Versal PHY model
+  int brst_cfg = -1;                             // cfg v_burst_rst (-1: none)
+  always @(reinit or burst_rst_en) begin
+    u_tx.phy_reinit  = reinit;
+    u_tx.v_burst_rst = burst_rst_en;
+  end
 
   // The PPI v1 outputs of the D-PHY that the controller does not use (Stopstate,
   // RxClkActiveHS, bit 1 of ErrControl, idle values): checked on every lp clock edge against
@@ -266,11 +286,12 @@ module tb_bow_csi2rx;
       "versal":        u_tx.versal = v[0];
       "t_phy_rdy":     u_tx.t_phy_rdy = v;
       "t_reinit":      u_tx.t_reinit = v;
-      "phy_reinit":    u_tx.phy_reinit = v[0];
-      "v_burst_rst":   u_tx.v_burst_rst = v[0];
+      "v_burst_rst":   brst_cfg = v;               // the D-PHY drives it: checked per burst
       "v_lat_lane":    u_tx.v_lat_lane = v[0];
       "v_glitch_pct":  u_tx.v_glitch_pct = v;
       "v_gap_pm":      u_tx.v_gap_pm = v;
+      "v_gap_byte":    u_tx.v_gap_byte = v;
+      "l0_late_ns":    u_tx.l0_late_ns = v;
       "tready":        tready_pct = v;
       "dut_lanes":     if (v != int'(Lanes)) $fatal(1, "test case for %0d lanes, testbench built with %0d", v, Lanes);
       "vid_ps":        if (v != int'(VidPs)) $fatal(1, "vid_ps %0d", v);
@@ -408,7 +429,13 @@ module tb_bow_csi2rx;
           end while ((rd & mask) != val && csi2_now() - t0 < us * 1000.0);
           $fwrite(regs_fd, "poll %03x %08x\n", a, rd);
         end
-        "pkt": push_pkt(line);
+        "pkt": begin
+          if (u_tx.versal && brst_cfg >= 0 && int'(burst_rst_en) != brst_cfg) begin
+            $fatal(1, "burst_rst_en_o %0d (CTRL.DES_RST_DIS), the test case has BurstRxRst %0d",
+                   burst_rst_en, brst_cfg);
+          end
+          push_pkt(line);
+        end
         "lp": begin
           n = $sscanf(line, "lp %d %b %d", mask, val, v);
           u_tx.push_lp(mask, 2'(val), v);

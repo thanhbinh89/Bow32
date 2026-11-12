@@ -19,16 +19,19 @@
 // the receiver of that build (CsiLanes = 4, CsiFifoDepth = 512, CsiDlyVid =
 // 1, video clock 200 MHz), csi2_tx_model runs with 4 lanes in its Versal
 // XPHY mode (byte clock 180 MHz = 1440 Mbit/s per lane, PHY_RDY, BISC
-// delays, RX FIFOs with rx_valid; BurstRxRst from PA5, which the firmware
-// sets to 1 at every receiver start; with BurstRxRst = 0 the FIFO latency
-// drifts with glitch words and wraps; one latency for all lanes) and an
-// IMX274 model (I2C 0x1A, XCLR on PA7, standby cancel
-// sequence, readout modes and crop, HMAX/VMAX line timing, REGHOLD, test
-// patterns; see "IMX274" below) replaces the TCA9546A + IMX219. PRSNT_M2C_L
-// of the camera site (PB5) reads 0; the run-time knobs of the camera top
-// drive the PHY model: PA4 its re-init (reinit_i), PA5 its BurstRxRst
-// (burst_rst_en_i), and PB6 / PB7 (PHY_RDY / DLY_RDY of every nibble) read
-// its PHY_RDY. The other tests run on the default build only.
+// delays, RX FIFOs with rx_valid; BurstRxRst from the receiver's
+// dphy_burst_rst_en_o = ~CTRL.DES_RST_DIS of its D-PHY, 1 from reset; with
+// BurstRxRst = 0 the FIFO latency drifts with glitch words and wraps; one
+// latency for all lanes) and an IMX274 model (I2C 0x1A, XCLR on PA7, standby
+// cancel sequence, readout modes and crop, HMAX/VMAX line timing, REGHOLD,
+// test patterns; see "IMX274" below) replaces the TCA9546A + IMX219.
+// PRSNT_M2C_L of the camera site (PB5) reads 0; the D-PHY's registers drive
+// the PHY model as in the camera top: CMD.REINIT (dphy_reinit_o) its re-init
+// (reinit_i), CTRL.DES_RST_DIS its BurstRxRst (burst_rst_en_i), and
+// AFE_STATUS[11:8] (dphy_phy_status_i) reads {PHY_RDY, DLY_RDY of every
+// nibble, XPLL LOCKED_FB, LOCKED} = {PHY_RDY, PHY_RDY, 1, 1} of the model
+// (GPIO PA4 / PA5 / PB6 / PB7 before step 4 of docs/ip/mipi_rx_arch.md: PB6 /
+// PB7 read 0 now). The other tests run on the default build only.
 //
 // The SoC has its DDR2 memory system (DdrEn = 1, DdrMem = 2: LiteDRAM DDR2
 // controller + Bow32 PHY) wired like the MPS4 loopback build: DDR clock model
@@ -63,12 +66,13 @@
 //                     HS-PREPARE (default in csi2_274), 2 = shortest (default
 //                     in video274); 0 = typical (camera274)
 //   +S274_BURSTRST=<0|1>  IMX274 build: BurstRxRst of the PHY model, whatever
-//                     PA5 says. Default: PA5 (0 after reset, 1 from the first
-//                     receiver start of the firmware)
-//   +S274_PA5=<0|1> +S274_SETTLE=<ns>  csi2_274: PA5 and data lane SETTLE
-//                     the firmware must have set at its receiver starts
-//                     (default 1 and 95 ns; sim/Makefile FW=brst0: 0, 115 ns,
-//                     a model-only variant: PA5 = 0 fails on silicon)
+//                     the receiver says. Default: dphy_burst_rst_en_o of the
+//                     receiver (~CTRL.DES_RST_DIS of the D-PHY, 1 from reset)
+//   +S274_DESRST=<0|1> +S274_SETTLE=<ns>  csi2_274: the receive path reset
+//                     (1: on, DES_RST_DIS = 0) and data lane SETTLE the
+//                     firmware must have set at its receiver starts (default
+//                     1 and 95 ns; sim/Makefile FW=brst0: 0, 115 ns, a
+//                     model-only variant: the reset off fails on silicon)
 //   +S274_VMAX_RST=<hex> IMX274 build: VMAX after reset (default 906, the
 //                     value of the Huins board; video274: 905, the datasheet's)
 //   +S274_GLITCH=<pct> IMX274 build: % of byte clock gate openings that add a
@@ -155,7 +159,7 @@ module tb_bow32 #(
   // output. rx_valid and phy_rdy come from the model in the IMX274 build
   // (Versal PHY), else they are tied off like on the KV260.
   logic                     dphy_byte_clk, dphy_byte_ce, dphy_byte_rst, dphy_clk_hs_en;
-  logic                     dphy_phy_rdy;
+  logic                     dphy_phy_rdy, dphy_reinit, dphy_burst_rst_en;
   logic [1:0]               dphy_clk_lp;
   logic [CsiLanes-1:0]      dphy_hs_en, dphy_dly_load, dphy_rx_valid;
   logic [CsiLanes-1:0][1:0] dphy_lp;
@@ -163,6 +167,9 @@ module tb_bow32 #(
   logic [CsiLanes-1:0][8:0] dphy_dly_tap, dphy_dly_tap_rb;
   wire  [CsiLanes-1:0]      dut_rx_valid = Imx274 ? dphy_rx_valid : '1;
   wire                      dut_phy_rdy  = Imx274 ? dphy_phy_rdy : 1'b1;
+  // AFE_STATUS[15:8] of the D-PHY: the Versal PHY's {PHY_RDY, DLY_RDY of every nibble,
+  // LOCKED_FB, LOCKED}; the model has PHY_RDY only (and no XPLL). KV260: none.
+  wire  [7:0]               dut_phy_status = Imx274 ? {4'h0, {2{dphy_phy_rdy}}, 2'b11} : 8'h00;
   logic                     isp_tvalid, isp_tuser, isp_tlast;
   logic [23:0]              isp_tdata;
 
@@ -247,6 +254,9 @@ module tb_bow32 #(
     .dphy_rx_data_i   (dphy_rx_data),
     .dphy_rx_valid_i  (dut_rx_valid),
     .dphy_phy_rdy_i   (dut_phy_rdy),
+    .dphy_phy_status_i (dut_phy_status),
+    .dphy_reinit_o    (dphy_reinit),
+    .dphy_burst_rst_en_o (dphy_burst_rst_en),
     .dphy_dly_tap_o   (dphy_dly_tap),
     .dphy_dly_load_o  (dphy_dly_load),
     .dphy_dly_tap_i   (dphy_dly_tap_rb),
@@ -1785,22 +1795,19 @@ module tb_bow32 #(
   end
 
   // Run-time knobs of the Versal PHY in the camera top
-  // (bow32_huins_vp1902_cam_top), driven into the PHY model: PA4 (OUT & DIR)
-  // = reinit_i, PA5 = burst_rst_en_i (BurstRxRst), both 0 after reset (the
-  // firmware sets PA5 = 1 at every receiver start); PB6 / PB7 read PHY_RDY /
-  // DLY_RDY of every nibble (both the PHY_RDY of the model).
-  // +S274_BURSTRST=<0|1>: BurstRxRst = 0 / 1 whatever PA5 says.
-  int          s274_brst_force = -1;      // -1: PA5
-  int unsigned s274_reinits = 0;          // PA4 pulses seen
+  // (bow32_huins_vp1902_cam_top), driven into the PHY model from the D-PHY's
+  // registers: dphy_reinit_o (CMD.REINIT, a 32 cycle pulse) = reinit_i,
+  // dphy_burst_rst_en_o (~CTRL.DES_RST_DIS, 1 from reset) = burst_rst_en_i
+  // (BurstRxRst). +S274_BURSTRST=<0|1>: BurstRxRst = 0 / 1 whatever the
+  // receiver says.
+  int          s274_brst_force = -1;      // -1: dphy_burst_rst_en_o
+  int unsigned s274_reinits = 0;          // reinit_i pulses seen
 
   always @(posedge clk) begin
     if (Imx274) begin
-      if ((gpioa_oe[4] && gpioa_o[4]) && !u_csi.phy_reinit) s274_reinits++;
-      u_csi.phy_reinit  = gpioa_oe[4] && gpioa_o[4];
-      u_csi.v_burst_rst = (s274_brst_force >= 0) ? (s274_brst_force != 0)
-                                                 : (gpioa_oe[5] && gpioa_o[5]);
-      ext_b_val[6]      = dphy_phy_rdy;
-      ext_b_val[7]      = dphy_phy_rdy;
+      if (dphy_reinit && !u_csi.phy_reinit) s274_reinits++;
+      u_csi.phy_reinit  = dphy_reinit;
+      u_csi.v_burst_rst = (s274_brst_force >= 0) ? (s274_brst_force != 0) : dphy_burst_rst_en;
     end
   end
 
@@ -2459,6 +2466,14 @@ module tb_bow32 #(
         expect_text(0, "csi2_test: PASS (12/12)\nok\n> ", mark);
         check_calibration(mark);
         check_margin(mark);
+        // the PHY timing of the firmware's receiver starts: TIM0 of the D-PHY
+        // (0x4000_8C24) in lp clock cycles of 108 MHz (INFO[17:8] of the
+        // simulation's 107.5 MHz video clock): SETTLE 9 (the SETTLE formula
+        // with the INFO2 of the UltraScale+ PHY, 107 ns + 24 UI at 912 Mbit/s,
+        // = settle_cycles() of the driver before step 4), LP_FILTER 2,
+        // CLK_SETTLE 16 (150 ns), CLK_MISS 4 (one byte clock + 3 cycles)
+        mark = send_cmd("rd 40008c24");
+        expect_text(0, "40008c24: 04100209\nok\n> ", mark);
         inject_errors();
         mark = log0.len();
         uart_send_str(0, "stat\r");
@@ -2668,7 +2683,7 @@ module tb_bow32 #(
         // D-PHY not ready (XPLL lock + BISC still running)
         video_cmd("csi", ", PHY not ready\nok\n> ");
         err_ok = 1'b1;
-        video_cmd("cam", "error: D-PHY not ready (CSI2RX STATUS.PHY_RDY = 0)\nerror\n> ");
+        video_cmd("cam", "error: D-PHY not ready (AFE_STATUS.READY = 0)\nerror\n> ");
         u_csi.t_phy_rdy = 32'(longint'(csi2_now())) + 1_000_000;
         // the first start calibrates; lane 0 without an eye: it fails, the
         // lanes keep (load) the BISC delays, the stream runs
@@ -2771,9 +2786,9 @@ module tb_bow32 #(
         check_s274_end();
       end
       // MIPI CSI-2 receiver with sw/apps/csi2_test and the IMX274 (Imx274
-      // build): the PHY knobs of the camera top through `phy` (status with
-      // PB6 / PB7, a re-init on PA4: PHY_RDY drops and comes back with the
-      // BISC delays), then 'test quick' (every check on
+      // build): the PHY knobs of the D-PHY's registers through `phy` (status
+      // with AFE_STATUS, a re-init with CMD.REINIT: one reinit_i pulse, READY
+      // drops and comes back with the BISC delays), then 'test quick' (every check on
       // 64x48 frames: phy-idle in standby LP-00, link-up, calibration with a
       // BISC delay outside the eye, integrity with solid 555h/AAAh, packets
       // FS/EMB/OB/lines/FE, timing, ISP colour bars, VC filter, 3 restarts
@@ -2783,21 +2798,22 @@ module tb_bow32 #(
       // 'start'). Clock lane in HS for every burst, D-PHY timing at the
       // limits of the specification with the longest HS-PREPARE (corner 1),
       // byte clocks without a FIFO read in the Versal PHY model. Every
-      // receiver start of the firmware sets PA5 = 1 (BurstRxRst) with SETTLE
-      // 95 ns, checked after 'test quick' (+S274_PA5, +S274_SETTLE): with
+      // receiver start of the firmware leaves the receive path reset on
+      // (BurstRxRst, the D-PHY's DES_RST_DIS = 0) with SETTLE 95 ns (TIM0 of
+      // the D-PHY), checked after 'test quick' (+S274_DESRST, +S274_SETTLE): with
       // BurstRxRst = 0 the glitch words let the FIFO latency drift up to 8
       // words, which moves the sync search back into the longest HS-PREPARE
       // at SETTLE 95 ns (false syncs, lost lines; +S274_BURSTRST=0 shows it).
       // make -C sim test-extra also runs the firmware built for the other
       // setting, BurstRxRst = 0 with SETTLE 115 ns (sim/Makefile FW=brst0):
-      // model only, on the Huins board PA5 = 0 broke at the first receiver
+      // model only, on the Huins board BurstRxRst = 0 broke at the first receiver
       // re-enable during a stream. Then 'margin' at the taps in use of every
       // lane (lane 2 moved by 'delay'), 'stat' with the receiver off after
       // 'stop' (the 4 lanes of the build), and the link check of 'start' over
       // 16 whole frames: one CRC error in the 6th frame (s274_crc_frame)
       // fails it with the hint to run cal, a clean start passes after 16.
       "csi2_274": begin
-        int unsigned us, pa5, settle, tq [4], fr0;
+        int unsigned us, desrst, settle, tq [4], fr0;
         string       dl, crc_at;
         expect_text(0, "csi2_test: Bow32 MIPI CSI-2 receiver test");
         expect_text(0, "camera: IMX274 found (id 0274)");
@@ -2806,15 +2822,15 @@ module tb_bow32 #(
         s274_tdiv = 64;
         video_cmd("simfast on", "ok\n> ");
         mark = send_cmd("phy");
-        expect_text(0, "phy: STATUS.PHY_RDY 1, every nibble PHY_RDY 1 DLY_RDY 1 (PB6 PB7), reinit 0 burstrst 0 (PA4 PA5)",
-                    mark);
+        expect_text(0, {"phy: READY 1, every nibble PHY_RDY 1 DLY_RDY 1, XPLL LOCKED 1 LOCKED_FB 1 ",
+                        "(AFE_STATUS 00000f01), DES_RST_DIS 0"}, mark);
         expect_text(0, "delays in use 97/112/88/120\nok\n> ", mark);
         mark = send_cmd("phy reinit");
         expect_text(0, "ok\n> ", mark);
-        if ($sscanf(log0_line("phy: PHY_RDY ", mark), "%d us after the reinit pulse", us) != 1 ||
+        if ($sscanf(log0_line("phy: READY ", mark), "%d us after CMD.REINIT", us) != 1 ||
             s274_reinits != 1 || us + 2 < u_csi.t_reinit / 1000 || us > u_csi.t_reinit / 1000 + 50) begin
-          $fatal(1, "PHY re-init: %0d PA4 pulses, PHY_RDY after '%s'", s274_reinits,
-                 log0_line("phy: PHY_RDY ", mark));
+          $fatal(1, "PHY re-init: %0d reinit_i pulses, READY after '%s'", s274_reinits,
+                 log0_line("phy: READY ", mark));
         end
         expect_text(0, "delays in use 97/112/88/120", mark);
         mark = send_cmd("test quick");
@@ -2827,19 +2843,21 @@ module tb_bow32 #(
         void'($sscanf(log0_line("[PASS] calibrate taps ", mark), "%d/%d/%d/%d", tq[0], tq[1], tq[2],
                       tq[3]));
         dl = $sformatf("%0d/%0d/240/%0d", tq[0], tq[1], tq[3]);   // after 'delay 2 240'
-        // the PHY setting of the firmware's receiver starts: PA5 (BurstRxRst)
-        // and SETTLE = PHY_CFG [7:0] in 5 ns cycles (0x4000_800C: CLK_MISS 5,
-        // CLK_SETTLE 30, LP_FILTER 2)
-        if (!$value$plusargs("S274_PA5=%d", pa5)) pa5 = 1;
+        // the PHY setting of the firmware's receiver starts: the receive path
+        // reset (BurstRxRst of the model: ~CTRL.DES_RST_DIS of the D-PHY) and
+        // SETTLE = TIM0 [7:0] of the D-PHY in 5 ns cycles (0x4000_8C24:
+        // CLK_MISS 5, CLK_SETTLE 30, LP_FILTER 2; 0x13 = 95 ns, the SETTLE
+        // formula with the INFO2 of the Versal PHY)
+        if (!$value$plusargs("S274_DESRST=%d", desrst)) desrst = 1;
         if (!$value$plusargs("S274_SETTLE=%d", settle)) settle = 95;
-        if ((gpioa_oe[5] && gpioa_o[5]) != (pa5 != 0)) begin
-          $fatal(1, "csi2_test: PA5 %0d after the receiver starts, expected %0d",
-                 gpioa_oe[5] && gpioa_o[5], pa5);
+        if (dphy_burst_rst_en != (desrst != 0)) begin
+          $fatal(1, "csi2_test: receive path reset %0d after the receiver starts, expected %0d",
+                 dphy_burst_rst_en, desrst);
         end
-        mark = send_cmd("rd 4000800c");
-        expect_text(0, $sformatf("4000800c: 051e02%02x\nok\n> ", (settle * 200 + 500) / 1000), mark);
-        $display("[%0t] tb   | csi2_274: receiver starts with PA5 %0d, SETTLE %0d ns, PHY model BurstRxRst %0d",
-                 $time, pa5, settle, u_csi.v_burst_rst);
+        mark = send_cmd("rd 40008c24");
+        expect_text(0, $sformatf("40008c24: 051e02%02x\nok\n> ", (settle * 200 + 500) / 1000), mark);
+        $display("[%0t] tb   | csi2_274: receiver starts with DES_RST_DIS %0d, SETTLE %0d ns, PHY model BurstRxRst %0d",
+                 $time, !dphy_burst_rst_en, settle, u_csi.v_burst_rst);
         // margin at the taps in use of every lane: lane 2 moved by hand stays
         // there (centre 240, side points 208 / 272), not back at its
         // calibrated tap
@@ -3052,12 +3070,13 @@ module tb_bow32 #(
     end
 
     // IMX274 build: Versal PHY mode of the TX model (set at time 0; its RX
-    // FIFOs as in the shipped build: BurstRxRst from PA5, one latency for all
-    // lanes, 20 % glitch words per HS entry of the clock lane), byte clock
-    // 180 MHz (1440 Mbit/s per lane), PHY_RDY 40 us after the start and 40 us
-    // after a re-init (camera274: only when the test says so), eyes of the 4
-    // lanes (see "IMX274 tests"), clock lane mode, D-PHY corner,
-    // PRSNT_M2C_L (PB5) = 0: module fitted, PB6 / PB7 = PHY_RDY
+    // FIFOs as in the shipped build: BurstRxRst from the D-PHY's
+    // DES_RST_DIS, one latency for all lanes, 20 % glitch words per HS entry
+    // of the clock lane), byte clock 180 MHz (1440 Mbit/s per lane), PHY_RDY
+    // 40 us after the start and 40 us after a re-init (camera274: only when
+    // the test says so), eyes of the 4 lanes (see "IMX274 tests"), clock
+    // lane mode, D-PHY corner, PRSNT_M2C_L (PB5) = 0: module fitted, PB6 /
+    // PB7 = 0 (no longer wired in the camera top)
     if (Imx274) begin
       u_csi.versal       = 1'b1;
       u_csi.byte_ns      = 1.0e3 / 180.0;
