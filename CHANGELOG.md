@@ -590,25 +590,26 @@
   `CNT_MISC[23:0]`, `BYTECLK`, `DLY0`…`3`, `RAW_CTRL`, `RAW` ở `0x800`, `CTRL.CLK_FORCE`, `INFO[5]`,
   `IRQ_STATUS[4]`) đọc 0; `INFO[6]` mới của controller = "D-PHY ở `0xC00`", driver từ chối bitstream
   trước bước 4 (`csi2rx: bitstream before the D-PHY split, rebuild it`): PDI / bitstream và firmware
-  phải cùng commit. Dải phụ tạm thời của bước 2–3 bỏ hẳn; D-PHY che `ErrControl[l]` theo `Enable` của
-  lane và `ErrControlClk` khi `CTRL.CLK_CONT` (`CLK_FORCE` cũ), controller chỉ còn OR của chúng.
-  Hành vi đổi: lỗi LP của lane clock khi `CLK_CONT` = 1 và lỗi của một data lane ở chu kỳ enable
-  của nó vừa xuống không còn vào `ERR_STATUS.LP` / `CNT_MISC[23:16]` của controller (`CNT_LPERR`,
+  phải cùng commit. Dải phụ tạm thời của bước 2–3 bỏ hẳn; D-PHY che `ErrControl[l]` theo `Enable`
+  của lane và `ErrControlClk` khi `CTRL.CLK_CONT` (`CLK_FORCE` cũ), controller chỉ còn OR của chúng.
+  Hành vi đổi: lỗi LP của lane clock khi `CLK_CONT` = 1 và lỗi của một data lane ở chu kỳ enable của
+  nó vừa xuống không còn vào `ERR_STATUS.LP` / `CNT_MISC[23:16]` của controller (`CNT_LPERR`,
   `ERR_STATUS.CONTROL`, `ERR_LANE` của D-PHY vẫn thấy chúng); aligner không còn bị reset khi RX tắt
-  (DV `stop` không đổi kết quả). Top camera Huins thôi nối GPIO PA4 / PA5 / PB6 / PB7: `reinit_i` từ
-  `CMD.REINIT` (xung 32 chu kỳ, thay mức phần mềm giữ trên PA4), `burst_rst_en_i` = ¬`CTRL.DES_RST_DIS`
-  (1 từ reset: `BurstRxRst` bật ngay từ reset, trước đó PA5 = 0 tới khi firmware đặt 1), trạng thái
-  thô của XPHY vào `AFE_STATUS[15:8]`, LED10 = `AFE_STATUS.READY`. `bow_csi2rx.h` / `.c` chỉ còn lớp
-  CSI-2 (delay, RAW, đồng hồ đo, bộ đếm PHY sang `bow_dphy_rx`); `cam_sensor.c` ghi `DES_RST_DIS` thay
-  cho PA5; lệnh `phy`, `phy reinit`, `phy burstrst` của `csi2_test` đọc / ghi thanh ghi D-PHY
-  (`phy: READY 1, every nibble PHY_RDY 1 DLY_RDY 1, XPLL LOCKED 1 LOCKED_FB 1 (AFE_STATUS 00000f01),
-  DES_RST_DIS 0`; `phy: READY n us after CMD.REINIT`), `phy-idle` in `LANE_LP` / `LANE_HS`. Mô
-  phỏng: `csi2_274` so `rd 40008c24` (`TIM0`) = `051e0213` thay cho `rd 4000800c`, `csi2` thêm `rd
-  40008c24` = `04100209`, `+S274_PA5` thành `+S274_DESRST`, `FW=brst0` dùng `-DDPHY_SETTLE_NS=140u`;
-  DV `csi2rx` theo bản đồ mới (dump đọc cả hai khối và địa chỉ cũ, `be` phủ cửa sổ D-PHY, PHY Versal
-  của bench nhận re-init / `BurstRxRst` từ bộ thu), bench PPI không còn dải phụ (`lpmask`: OR của
-  mọi lane), mutant PPI 19; XDC (`kv260_cam.xdc`, `huins_vp1902_cam.xdc`): selector req / ack của RAW
-  và yêu cầu / mã của `DLYn` theo cell mới trong `u_dphy_rx` (vẫn 9 / 11 ràng buộc bus skew).
+  (DV `stop` không đổi kết quả), còn controller đếm sự kiện của nó như trước (*Fixed*). Top camera
+  Huins thôi nối GPIO PA4 / PA5 / PB6 / PB7: `reinit_i` từ `CMD.REINIT` (xung 32 chu kỳ, thay mức
+  phần mềm giữ trên PA4), `burst_rst_en_i` = ¬`CTRL.DES_RST_DIS` (1 từ reset: `BurstRxRst` bật ngay
+  từ reset, trước đó PA5 = 0 tới khi firmware đặt 1), trạng thái thô của XPHY vào
+  `AFE_STATUS[15:8]`, LED10 = `AFE_STATUS.READY`. `bow_csi2rx.h` / `.c` chỉ còn lớp CSI-2 (delay,
+  RAW, đồng hồ đo, bộ đếm PHY sang `bow_dphy_rx`); `cam_sensor.c` ghi `DES_RST_DIS` thay cho PA5;
+  lệnh `phy`, `phy reinit`, `phy burstrst` của `csi2_test` đọc / ghi thanh ghi D-PHY (`phy: READY 1,
+  every nibble PHY_RDY 1 DLY_RDY 1, XPLL LOCKED 1 LOCKED_FB 1 (AFE_STATUS 00000f01), DES_RST_DIS 0`;
+  `phy: READY n us after CMD.REINIT`), `phy-idle` in `LANE_LP` / `LANE_HS`. Mô phỏng: `csi2_274` so
+  `rd 40008c24` (`TIM0`) = `051e0213` thay cho `rd 4000800c`, `csi2` thêm `rd 40008c24` =
+  `04100209`, `+S274_PA5` thành `+S274_DESRST`, `FW=brst0` dùng `-DDPHY_SETTLE_NS=140u`; DV `csi2rx`
+  theo bản đồ mới (dump đọc cả hai khối và địa chỉ cũ, `be` phủ cửa sổ D-PHY, PHY Versal của bench
+  nhận re-init / `BurstRxRst` từ bộ thu), bench PPI không còn dải phụ (`lpmask`: OR của mọi lane),
+  mutant PPI 19; XDC (`kv260_cam.xdc`, `huins_vp1902_cam.xdc`): selector req / ack của RAW và yêu
+  cầu / mã của `DLYn` theo cell mới trong `u_dphy_rx` (vẫn 9 / 11 ràng buộc bus skew).
 - Bộ thu CSI-2, bước 2 của kế hoạch chuyển MIPI RX ([docs/ip/mipi_rx_arch.md](docs/ip/mipi_rx_arch.md)
   mục 5.3, 10): `bow_mipi_rx` (`hw/ip/csi2rx/rtl/`, cổng và tham số như `bow_csi2rx` trước đây,
   instance vẫn tên `u_csi2rx` trong `bow32_top`) ghép `bow_dphy_rx` (`u_dphy_rx`) và controller
@@ -723,6 +724,22 @@
   nó (`sw/apps/camera/csi2rx.c/.h`).
 
 ### Fixed
+- Bộ thu CSI-2, bước 4 (sửa sau review, trước khi gộp): từ khi aligner dùng reset riêng của D-PHY,
+  controller vẫn biến `ErrSotSyncHS` / `RxSkewCalHS` của nó thành `CNT_SOT`, `ERR_STATUS.SOT`,
+  `CNT_EXT[31:16]`, `IRQ_STATUS.ERR` cả khi RX tắt: burst khi `RX_EN` = 0 mà `PHY_EN` = 1 được đếm,
+  và dừng bộ thu giữa lúc một burst dò sync sinh một lỗi SoT trên mọi lane đang dò, tới cùng burst
+  đầu sau khi chạy lại (byte clock đã dừng trước khi `RxActiveHS` xuống), tức sau khi `start()` đã
+  xoá bộ đếm: link check sau một lần chạy lại có thể hỏng. Controller nay bỏ các sự kiện đó khi
+  reset đường dữ liệu đang bật và ở burst mà `RxActiveHS` của lane đã cao lúc reset nhả (`stale_q`),
+  đúng cách đếm của bước 1–3; datapath pixel không đổi (271 case DV cũ cho kích thích, pixel, thanh
+  ghi và log giống từng byte). DV mới `rxoff` (1, 2, 4 lane) và `raw` (RAW của D-PHY với khe đọc của
+  PHY Versal sau sync và lane 0 vào HS muộn: hai mutant RAW của bước 3 lại bị bắt), mutant mới
+  `mutants-rx` của DV (5/5). Driver: `bow_dphy_rx_settle()` với lane rate 0 trên Versal cho
+  `0x13` như `SETTLE_VID_NS` cũ (bản đầu cho 14), test host quét cả lane rate 0 và đích `brst0`;
+  dòng `phy:` của `stat` là một ảnh chụp (`LANE_LP` / `LANE_HS` và bộ đếm của D-PHY đọc tới khi hai
+  lần giống nhau). Đặc tả mục 5.5: hồ sơ PPI theo wrapper của bước 4 (không `phy_ready_i`, không
+  `STATUS.CE` / `PHY_RDY`, không mặt nạ enable lane) và yêu cầu mới cho PHY chuẩn: chỉ báo
+  `ErrControl[l]` khi `Enable[l]` = 1.
 - DV bộ thu CSI-2 (`csi2_model.py`): test `deskew` và `loss` trên bộ thu 4 lane với PHY Versal
   (`BurstRxRst` = 0) hỏng ở khoảng 1/3 seed Verilator (trên `main` 9/30 và 10/30; directed test chỉ
   chạy seed 1 nên không thấy): trễ FIFO trôi theo word glitch đưa cửa sổ dò sync vào nhiễu

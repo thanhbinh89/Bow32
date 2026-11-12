@@ -383,7 +383,7 @@ FRAME/LINE_INFO, FRAME_SUM, `FRAME_ERR`, FRAME/LINE_TIME, LOG và các bất bi�
 
 ```bash
 make -C hw/ip/csi2rx/dv test                          # test-rx rồi test-ppi
-make -C hw/ip/csi2rx/dv test-rx                       # cả bộ thu: 105 case, 1/2/4 lane, song song
+make -C hw/ip/csi2rx/dv test-rx                       # cả bộ thu: 111 case, 1/2/4 lane, song song
 make -C hw/ip/csi2rx/dv align                         # chỉ unit test của aligner
 make -C hw/ip/csi2rx/dv test-rx SEEDS="1 2 3 4 5 6 7 8"
 make -C hw/ip/csi2rx/dv run SEED=7 LANES=1 ERRORS=1   # thêm DUT_LANES=1|2|4 RAW8=1 CONTCLK=1
@@ -392,7 +392,8 @@ make -C hw/ip/csi2rx/dv run TEST=clk                  # một test directed
 make -C hw/ip/csi2rx/dv test-ppi                      # controller ở PPI: 167 case, hai chế độ, song song
 make -C hw/ip/csi2rx/dv test-ppi SEEDS="$(seq -s ' ' 1 40)" PJOBS=8
 make -C hw/ip/csi2rx/dv run-ppi MODE=std TEST=loss LANES=4   # một case (MODE bow|std)
-make -C hw/ip/csi2rx/dv mutants-ppi                   # 20 mutant phải làm bench PPI hỏng
+make -C hw/ip/csi2rx/dv mutants-ppi                   # 19 mutant phải làm bench PPI hỏng
+make -C hw/ip/csi2rx/dv mutants-rx                    # 5 mutant phải làm bench cả bộ thu hỏng
 ```
 
 - Unit test aligner (`tb_dphy_align.sv`, chạy đầu tiên trong `test`): word
@@ -434,12 +435,20 @@ make -C hw/ip/csi2rx/dv mutants-ppi                   # 20 mutant phải làm be
   `CNT_LPERR` đếm), còn treo qua một burst deskew tới
   dòng sau; packet bị cắt không phải dòng; ECC_CORR của header FE thuộc frame nó
   kết thúc; lỗi CRC ở dòng mà word cuối có byte payload, 4 lane), `be` (ghi theo byte enable
-  trên mọi thanh ghi của controller và của D-PHY; ghi vào địa chỉ PHY cũ của controller bị bỏ).
+  trên mọi thanh ghi của controller và của D-PHY; ghi vào địa chỉ PHY cũ của controller bị bỏ),
+  `rxoff` (sự kiện của aligner khi RX tắt: `RX_EN` = 0 với `PHY_EN` = 1, một burst sync hỏng và
+  một burst deskew không vào `CNT_SOT` / `CNT_EXT` / `ERR_STATUS` / `IRQ_STATUS`; `CTRL` = 0 quét
+  từng 10 ns từ đầu một burst dòng qua cửa sổ dò sync, không lỗi SoT; `RX_EN` bật giữa một burst
+  sync hỏng, sau khi `RxActiveHS` mọi lane đã lên, không lỗi SoT; rồi RX bật thì lại đếm; trên PHY
+  Versal với `BurstRxRst` = 1).
   Từ bước 4 mỗi lần dump đọc thanh ghi của cả hai khối và các địa chỉ PHY cũ (phải đọc 0). `cmd`, `stop`, `deskew`, `extra`, `ovf`, `ovf2`, `loss`,
   `be`, `eye` chạy thêm với 1 lane; `deskew`, `extra`, `ovf`, `ovf2`, `loss`,
-  `eye` với 1 trên 2 lane; `be`, `eye`, `loss` với clock liên tục (2 và 4 lane).
-  Trên bộ thu 4 lane mọi test directed đó, thêm `dly` (tap miền video, khởi động
-  lại PHY) và `skew` (lệch lane ở biên của ghép lane: 6 byte clock nhận, 7 trở
+  `eye` với 1 trên 2 lane; `be`, `eye`, `loss`, `rxoff` với clock liên tục (2 và 4 lane).
+  `rxoff` cũng với 1 lane. Trên bộ thu 4 lane mọi test directed đó, thêm `dly` (tap miền
+  video, khởi động lại PHY), `raw` (RAW của D-PHY: PHY Versal với `BurstRxRst` = 1 đặt một khe đọc
+  mỗi burst sau 24 byte packet, data lane 0 vào HS muộn hơn các lane khác 40 ns; sáu lần bắt một
+  dòng 200 pixel, mỗi lane là sync rồi đúng byte của lane tới hết cửa sổ, word đầu của lane 0 là
+  `00` của HS-ZERO của nó) và `skew` (lệch lane ở biên của ghép lane: 6 byte clock nhận, 7 trở
   lên SKEW và không ra gì; cũng trên 2 lane); `cmd`, `stop`, `skew`, `dly`,
   `deskew`, `extra`, `ovf2`, `loss` với 2 trên 4. Số dòng của `ovf`, `ovf2`,
   `ovf8` theo `FifoDepth`; `extra` trên 4 lane đặt `CTRL.EXTRA` 196 (trail tới
@@ -457,7 +466,11 @@ make -C hw/ip/csi2rx/dv mutants-ppi                   # 20 mutant phải làm be
   5.020 đôi khi abort lúc thoát sau một bản build tốt) và `touch` binary.
 - `make test-tools` chạy 42 unit test của mô hình (`tools/tests/test_csi2_model.py`) và 3 test
   của công thức `SETTLE` (`tools/tests/test_dphy_settle.py`, biên dịch `bow_dphy_rx_settle()` bằng
-  `cc` của máy host).
+  `cc` của máy host; Versal ở mọi lane rate kể cả 0, và đích 140 ns của firmware `brst0`).
+- `make -C hw/ip/csi2rx/dv mutants-rx` (`mutants_rx.py`, không trong `test` hay CI): các mutant mà
+  chỉ bench cả bộ thu thấy, trên bản sao của `hw/ip/dphy_rx/rtl` và `hw/ip/csi2rx/rtl`: RAW nhận cả
+  word không valid, RAW bắt đầu ở cạnh lên của lane bất kỳ (test `raw`), và cổng sự kiện aligner
+  của controller bỏ hẳn, chỉ trong reset, bỏ cho deskew (test `rxoff`): 5/5 chết, ~30 s.
 - **Bench PPI** (`tb_csi2rx_ppi.sv`, `bow_ppi_bfm.sv`; `test-ppi`, bước CI riêng): controller
   `bow_csi2rx` một mình, PHY là BFM chơi phần dựng PPI của `csi2_model.py gen --ppi bow|std` (mỗi
   item TX của test case kèm byte mỗi lane mỗi burst với chu kỳ, `RxActiveHS`, `RxSyncHS`, khe,

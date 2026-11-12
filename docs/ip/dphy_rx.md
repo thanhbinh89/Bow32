@@ -87,10 +87,23 @@ Giá trị `INFO` ở bảng: KV260 (2 lane, `lp_clk` 200 MHz, `AfeKind` 1) và 
   phép OR cho luật đánh dấu burst mất và `ERR_STATUS.LP` của nó. `CNT_LPERR`, `ERR_STATUS.CONTROL`
   và `ERR_LANE` của D-PHY đếm mọi lỗi của máy LP, không che. Hệ quả (bước 4): lỗi LP của lane clock
   khi `CLK_CONT` = 1 và lỗi của một data lane ở chu kỳ enable của nó vừa xuống không còn vào
-  `ERR_STATUS.LP` của controller; `CNT_LPERR` / `ERR_STATUS.CONTROL` vẫn thấy chúng.
+  `ERR_STATUS.LP` của controller; `CNT_LPERR` / `ERR_STATUS.CONTROL` vẫn thấy chúng. Một PHY
+  khác ghép qua wrapper cổng phẳng phải che như vậy (cột Cần của mục 5.5 trong đặc tả).
 - **Reset riêng.** Aligner dùng reset byte của D-PHY: nó không còn bị reset khi RX tắt
   (`CTRL.RX_EN` / `PHY_EN` của controller); burst đang dở khi RX tắt kết thúc ở aligner như mọi
-  burst (controller vẫn xoá datapath của nó).
+  burst (controller vẫn xoá datapath của nó). Sự kiện của aligner trên PPI (`ErrSotSyncHS` mọi
+  lane, `RxSkewCalHS` lane 0) controller chỉ đếm cho burst nó thấy bắt đầu: không khi đường dữ
+  liệu của nó đang reset (`drst_n`: RX tắt, bật ngay khi `CTRL` xoá `RX_EN` hay `PHY_EN`, trước
+  khi `RxActiveHS` kịp xuống), không cho burst mà `RxActiveHS` của lane đã cao lúc `drst_n` nhả
+  (`stale_q` mỗi lane, xoá một chu kỳ sau khi thấy `RxActiveHS` thấp). Nhờ vậy `CNT_SOT`,
+  `ERR_STATUS.SOT`, `CNT_EXT[31:16]` và `IRQ_STATUS.ERR` đếm đúng như bước 1–3: burst khi `RX_EN`
+  = 0 mà `PHY_EN` = 1 không được đếm, burst đang chạy lúc RX bật không được đếm, và dừng giữa lúc
+  dò sync không sinh lỗi SoT giả. Ở trường hợp cuối, dừng bộ thu cũng kết thúc HS của lane clock
+  (cùng `Enable`), nên byte clock thường dừng trước khi `RxActiveHS` của burst bị cắt xuống ở miền
+  byte: nó xuống, và lỗi sync tới, cùng byte clock của burst đầu tiên sau khi bộ thu chạy lại, tức
+  sau khi `drst_n` đã nhả và `bow_csi2rx_start()` đã xoá bộ đếm (bản đầu của bước 4 đếm khi đó một
+  lỗi SoT trên mọi lane đang dò, có thể làm hỏng link check sau một lần chạy lại). Sửa sau review
+  của bước 4; DV `rxoff`.
 - **DLYn ở v1.** Giao thức nạp tap vẫn là của trước bước 5 (`DlyVid` 0: nạp ở byte clock khi
   mã đổi, tức ở burst sau; 1: mỗi lần ghi một lần nạp ở miền lp, không cần byte clock). Chưa có
   chủ thứ hai của mã, nên CODE đọc lại là mã đã ghi và PEND lấy từ chính delay của PHY: `wait_delay`
@@ -117,8 +130,13 @@ SETTLE = kẹp_1..255( ((SETTLE_NS · 1000 + SETTLE_UI · UI_ps) · MHz + 500000
 `SETTLE_NS`, `SETTLE_UI` từ `INFO2`, `MHz` = `INFO[17:8]`, `LP_FILTER` = 2. Phép tính nguyên giữ
 đúng từng bit phép tính của `settle_cycles()` cũ: KV260 912 Mbit/s, 200 MHz: 22 (`TIM0` =
 `0x051E0216`); Huins 1440 Mbit/s, 200 MHz: 19 = `0x13` (`TIM0` = `0x051E0213`, như `SETTLE_VID_NS`
-= 95 ns cũ). `lane_rate` = 0 (không biết): 70 ns như trước. Kiểm trên máy host:
-`tools/tests/test_dphy_settle.py` (biên dịch `bow_dphy_rx_settle()` của header bằng `cc`).
+= 95 ns cũ). `lane_rate` = 0 (không biết): đích có phần UI (UltraScale+) lấy 70 ns như
+`settle_cycles()` cũ; đích không có phần UI (Versal) không cần lane rate, vẫn ra `0x13` như
+`SETTLE_VID_NS` cũ (bản đầu của bước 4 lấy 70 ns = 14 ở đây; sửa sau review). Kiểm trên máy host:
+`tools/tests/test_dphy_settle.py` (biên dịch `bow_dphy_rx_settle()` của header bằng `cc`): hai
+điểm làm việc, lưới UltraScale+ (mọi lp clock 50–400 MHz, LP_FILTER, lane rate 0 và 80
+Mbit/s–2,5 Gbit/s), Versal ở mọi lane rate kể cả 0, và đích 140 ns của firmware mô phỏng `brst0`
+(23 = 115 ns).
 
 ## Driver (`bow_dphy_rx.h`)
 
@@ -132,11 +150,13 @@ SETTLE = kẹp_1..255( ((SETTLE_NS · 1000 + SETTLE_UI · UI_ps) · MHz + 500000
 | `bow_dphy_rx_reinit(ms, &us)` | `CMD.REINIT`, chờ READY xuống (≤ 20 µs; không xuống = PHY này không có re-init: `DPHY_ENOREINIT`) rồi lên (≤ `ms`: `DPHY_ENOTRDY`); `us` = thời gian từ lệnh tới READY |
 | `bow_dphy_rx_des_rst(on)`, `bow_dphy_rx_des_rst_on()` | `CTRL.DES_RST_DIS` = ¬on |
 | `bow_dphy_rx_set_delay(lane, code)`, `bow_dphy_rx_read_delay(lane)` (với AFE tự hiệu chỉnh: đọc tới khi hai lần giống nhau), `bow_dphy_rx_wait_delay(ms)` (PEND = 0 trên mọi lane có OWN), `bow_dphy_rx_get_delays(d)` (Q với AFE tự hiệu chỉnh, CODE nếu không), `bow_dphy_rx_print_delays(n)` | `DLYn` |
-| `bow_dphy_rx_counters(&c)`, `bow_dphy_rx_clear()` | `CNT_BURSTn`, `CNT_CLK`, `CNT_LPERR`; `CMD.CNT_CLR`, `ERR_STATUS`, `ERR_LANE` |
+| `bow_dphy_rx_counters(&c)`, `bow_dphy_rx_clear()` | `CNT_BURSTn`, `CNT_CLK`, `CNT_LPERR` (mỗi bộ đếm một lần đọc: cho vòng chờ); `CMD.CNT_CLR`, `ERR_STATUS`, `ERR_LANE` |
+| `bow_dphy_rx_snapshot(&c, &lp, &hs)` | các bộ đếm trên cùng `LANE_LP`, `LANE_HS` làm một ảnh chụp (đọc tới khi hai lần đọc tất cả giống nhau, tối đa 9 lần; trước bước 4 `STATUS` giữ cả hai trạng thái lane và `CNT_BURST` ghép lane 0 / 1): để in |
 | `bow_dphy_rx_raw(w, now, ms)`, `bow_dphy_rx_byteclk_hz(ms)` | RAW (64 word mỗi lane), tần số byte clock (max của `BYTECLK`) |
 
-`LANE_LP`, `LANE_HS`, `AFE_STATUS` được đọc thẳng qua struct `DPHY` (`DPHY->LANE_LP`, macro
-`DPHY_LANE_*`, `DPHY_AFE_*`), như `csi2_test` và `bow_csi2rx_print_status()` làm.
+`LANE_LP`, `LANE_HS`, `AFE_STATUS` cũng đọc thẳng được qua struct `DPHY` (`DPHY->LANE_LP`, macro
+`DPHY_LANE_*`, `DPHY_AFE_*`), như `csi2_test` làm khi lane đứng yên; dòng `phy:` của `stat`
+(`bow_csi2rx_print_status()`) dùng `bow_dphy_rx_snapshot()`.
 
 `bow_csi2rx_probe()` đọc `INFO[6]` của controller: 0 (hay không có `ID` của D-PHY) → in
 `csi2rx: bitstream before the D-PHY split, rebuild it` và trả false. `bow_csi2rx_start()` gọi
@@ -154,7 +174,13 @@ Kết quả đầy đủ ở [mipi_rx_arch.md](mipi_rx_arch.md) mục 10 (*Kết
   mỗi burst; mỗi lần dump đọc mọi thanh ghi của hai khối; test `be` phủ byte enable của cửa sổ
   D-PHY; `dly` dùng `CMD.REINIT`; `loss` kiểm `CLK_CONT` (lỗi lane clock chỉ ở `CNT_LPERR`).
   Checker PPI (`bow_ppi_chk`) thêm hai luật: không `ErrControl[l]` khi `Enable[l]` = 0, không
-  `ErrControlClk` khi `CLK_CONT`.
+  `ErrControlClk` khi `CLK_CONT`. Sau review: `rxoff` (1, 2, 4 lane; clock liên tục trên 2, 4
+  lane) kiểm cổng sự kiện aligner
+  của controller (RX tắt với PHY bật, dừng quét qua cửa sổ dò sync, RX bật giữa một burst sync
+  hỏng); `raw` (4 lane, PHY Versal) kiểm RAW với một khe đọc mỗi burst sau sync và data lane 0
+  vào HS muộn hơn các lane khác (word đầu của lane 0 phải là `00` của HS-ZERO của nó);
+  `make mutants-rx` (`mutants_rx.py`): 2 mutant RAW trên `bow_dphy_rx` và 3 mutant của cổng sự
+  kiện, 5/5 chết.
 - **xsim:** KV260 (`test-dphy`, seed 1–3) đọc `ID`, `INFO`, `INFO2`, `TIM0`, `LANE_LP` / `LANE_HS`,
   `CNT_BURSTn` / `CNT_CLK`, `DLYn` (PEND tới burst sau, OWN) và RAW của D-PHY; Versal
   (`test-dphy-versal`, 25 cấu hình) thêm `reinit_pulse`: xung 640 ns như `CMD.REINIT`.
