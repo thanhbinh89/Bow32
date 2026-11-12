@@ -8,17 +8,22 @@
 # PPI driven by bow_ppi_bfm.sv (step 3).
 #
 #   make test                          test-rx, then test-ppi
-#   make test-rx                       aligner unit test, then random cases (SEEDS x lanes x
-#                                      errors) and directed tests of the whole receiver, PJOBS
-#                                      of them at a time
+#   make test-rx                       aligner and AFE unit tests, then random cases (SEEDS x
+#                                      lanes x errors) and directed tests of the whole
+#                                      receiver, PJOBS of them at a time
 #   make test-ppi                      the PPI bench: random cases (SEEDS) and directed tests in
 #                                      both timings, the D-PHY of Bow32 and a standard PHY
 #   make run-ppi MODE=std TEST=loss LANES=4   one PPI case (MODE bow|std, the options of run),
 #                                      dumps in build/csi2rx_dv/ppi_<MODE>_<name>
 #   make mutants-ppi                   controller / wrapper mutants that the PPI bench must kill
-#   make mutants-rx                    mutants only the whole receiver bench sees (RAW of the
-#                                      D-PHY, the controller's gate of the aligner events)
+#   make mutants-rx                    mutants only the whole receiver bench and the AFE unit
+#                                      tests see (RAW of the D-PHY, the controller's gate of the
+#                                      aligner events, the AFE interface and the adapters' logic)
 #   make align                         aligner unit test only (tb_dphy_align.sv)
+#   make afe                           unit tests of the AFE side (step 5): the adapters' logic
+#                                      without primitives (tb_afe_dly.sv) and the D-PHY's AFE
+#                                      controls and status (tb_dphy_afe.sv, ASIC and FPGA
+#                                      configuration); AFE_SEED (default 1) seeds their random part
 #   make run SEED=7 LANES=1 ERRORS=1   one random case, dumps in build/csi2rx_dv/<name>
 #   make run TEST=clk                  one directed test (lp watchdog clk cmd ovf stop byteclk eye
 #                                      skew deskew extra loss ovf2 ovf8 be rxoff, dly and raw
@@ -121,6 +126,47 @@ align: $(ALIGN_BIN)
 	@$(ALIGN_BIN) > $(BUILD)/align.log 2>&1; grep -h 'ERROR\|tb_dphy_align:' $(BUILD)/align.log; \
 	  grep -q 'tb_dphy_align: PASS' $(BUILD)/align.log
 
+# Unit tests of the AFE side (step 5 of docs/ip/mipi_rx_arch.md, sections 3.5 - 3.7): what the
+# whole receiver bench cannot reach. tb_afe_dly: the adapters' logic without primitives
+# (bow_dphy_dly_xusp, bow_dphy_dly_xphy) against models of the primitives they drive
+# (ISERDESE3 reset, IDELAYE3 loads; the XPHY delay and its load contract), code and OWN bits
+# skewed as the board XDC allows. tb_dphy_afe: the D-PHY alone (bow_dphy_rx, bow_afe_chk
+# bound in) with an AFE model: reset values, AFE_STATUS (READY, CAL_DONE, CAL_ERR, status),
+# AFE_CTRL.PD and lane_pd (short PD pulses), DLYn OWN, CMD.REINIT, DES_RST_DIS; two builds,
+# the ASIC configuration (AfeKind 0, AfePdRst 1) and the FPGA one (AfeKind 1, AfePdRst 0).
+AFE_SEED     ?= 1
+AFE_DLY_BIN  := $(BUILD)/obj_afe_dly/Vtb_afe_dly
+DPHY_AFE_CFG := asic fpga
+DPHY_AFE_GEN_asic := -GLanes=4 -GAfeKind=0 -GAfePdRst=1 -GTrimW=32
+DPHY_AFE_GEN_fpga := -GLanes=2 -GAfeKind=1 -GAfePdRst=0 -GTrimW=64
+VUNIT = $(VERILATOR) --binary --timing -j $(JOBS) -Wno-fatal -Wno-lint -Wno-style \
+  -Wno-TIMESCALEMOD
+
+$(AFE_DLY_BIN): $(SRCS) tb_afe_dly.sv
+	@mkdir -p $(BUILD)
+	$(call vbuild,$(VUNIT) --top-module tb_afe_dly -Mdir $(BUILD)/obj_afe_dly -o Vtb_afe_dly \
+	  -F $(REPO)/hw/ip/common/common.f $(AFE_DLY) tb_afe_dly.sv)
+
+$(BUILD)/obj_dphy_afe_%/Vtb_dphy_afe: $(SRCS) tb_dphy_afe.sv
+	@mkdir -p $(BUILD)
+	$(call vbuild,$(VUNIT) --top-module tb_dphy_afe $(DPHY_AFE_GEN_$*) \
+	  -Mdir $(BUILD)/obj_dphy_afe_$* -o Vtb_dphy_afe -F $(REPO)/hw/ip/common/common.f \
+	  -F $(REPO)/hw/ip/bus/bus.f -F $(REPO)/hw/ip/dphy_rx/dphy_rx.f \
+	  $(REPO)/hw/ip/dphy_rx/dv/bow_afe_chk.sv tb_dphy_afe.sv)
+
+afe: $(AFE_DLY_BIN) $(foreach c,$(DPHY_AFE_CFG),$(BUILD)/obj_dphy_afe_$(c)/Vtb_dphy_afe)
+	@fail=0; \
+	$(AFE_DLY_BIN) +verilator+seed+$(AFE_SEED) > $(BUILD)/afe_dly.log 2>&1; \
+	grep -h 'ERROR\|tb_afe_dly:' $(BUILD)/afe_dly.log; \
+	grep -q 'tb_afe_dly: PASS' $(BUILD)/afe_dly.log || fail=1; \
+	for c in $(DPHY_AFE_CFG); do \
+	  $(BUILD)/obj_dphy_afe_$$c/Vtb_dphy_afe +verilator+seed+$(AFE_SEED) \
+	    > $(BUILD)/dphy_afe_$$c.log 2>&1; \
+	  grep -h 'ERROR\|Fatal\|tb_dphy_afe:' $(BUILD)/dphy_afe_$$c.log; \
+	  grep -q 'tb_dphy_afe: PASS' $(BUILD)/dphy_afe_$$c.log || fail=1; \
+	done; \
+	exit $$fail
+
 # One model per Lanes parameter
 VRX = $(VERILATOR) --binary --timing -j $(JOBS) -O2 -Wno-fatal -Wno-lint -Wno-style \
   -Wno-TIMESCALEMOD +define+BOW_CDC_JITTER \
@@ -168,6 +214,7 @@ rx-cases:
 
 test-rx: build $(ALIGN_BIN)
 	@fail=0; $(MAKE) --no-print-directory align || fail=1; \
+	$(MAKE) --no-print-directory afe || fail=1; \
 	$(MAKE) --no-print-directory -s rx-cases | \
 	  xargs -P $(PJOBS) -L 1 $(MAKE) --no-print-directory run || fail=1; \
 	exit $$fail
@@ -247,14 +294,14 @@ mutants-ppi:
 	$(PYTHON) mutants_ppi.py --build $(BUILD)/mutants_ppi --jobs $(MJOBS)
 
 # Mutants of the D-PHY's RAW capture, of the controller's gate of the aligner events and of
-# the AFE interface of step 5 (des_rst, OWN, lprx_en, the adapters' delay logic)
-# (mutants_rx.py): each must make a case of the whole receiver bench fail (raw, rxoff, dly,
-# be); not in test or CI
+# the AFE interface of step 5 (des_rst, OWN, lprx_en, lane_pd, the AFE status, the adapters'
+# delay and reset logic) (mutants_rx.py): each must make a case of the AFE unit tests or of
+# the whole receiver bench fail (raw, rxoff, dly, be); not in test or CI
 mutants-rx:
 	$(PYTHON) mutants_rx.py --build $(BUILD)/mutants_rx --jobs $(MJOBS)
 
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: build build-ppi align run run-ppi rx-cases ppi-cases test test-rx test-ppi mutants-ppi \
-        mutants-rx clean
+.PHONY: build build-ppi align afe run run-ppi rx-cases ppi-cases test test-rx test-ppi \
+        mutants-ppi mutants-rx clean
