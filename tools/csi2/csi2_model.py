@@ -2752,7 +2752,10 @@ def gen_dly(g):
     cleared, BISC taps again); then a write of the code in use (OWN already 1:
     no load), AFE_CTRL.PD (pd: the PHY held in its init, READY 0, OWN 0, until
     PD = 0, then the BISC taps again) and the same codes written once more (OWN
-    rises: loaded again)."""
+    rises: loaded again); last a PD pulse of two back to back writes (PD = 1,
+    then 0: the PHY restarts all the same, the D-PHY's lane_pd waits for the
+    fresh READY, which bow_afe_chk checks; OWN cleared, the same codes load
+    again)."""
     if not g.cfg.get("versal"):
         raise SystemExit("test dly needs --versal")
     dl = g.cfg["dut_lanes"]
@@ -2840,6 +2843,26 @@ def gen_dly(g):
     for n in DLY_REGS[:dl]:
         g.rd(n)
     frame(g, 0, DT_RAW10, 32, 2, fnum=5)
+    # a PD pulse of two back to back writes: the PHY restarts all the same. The D-PHY still
+    # reads READY 1 for a few bus cycles after PD rose (its synchroniser): lane_pd must not
+    # fall on that, only on the READY after the restart (section 3.6; bow_afe_chk)
+    g.mark()
+    g.wr("DPHY_AFE_CTRL", DAFE_PD)
+    g.wr("DPHY_AFE_CTRL", 0)
+    g.emit("delay 300")
+    g.rd("DPHY_AFE_CTRL")
+    g.rd("DPHY_AFE_STATUS")
+    for n in DLY_REGS[:dl]:
+        g.rd(n)                                      # OWN 0, CNTVALUEOUT 0
+    g.phy_up()
+    g.rd("DPHY_AFE_STATUS")
+    for l in range(dl):
+        g.wr(DLY_REGS[l], taps[l])                   # OWN rises: the same code loads again
+        g.rd("ID")
+    g.emit("delay 300")
+    for n in DLY_REGS[:dl]:
+        g.rd(n)
+    frame(g, 0, DT_RAW10, 32, 2, fnum=6)
     g.dump(log=False)
 
 

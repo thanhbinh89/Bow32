@@ -149,9 +149,11 @@ module tb_bow_csi2rx;
   );
 
   // The AFE v1 outputs of the D-PHY (hw/ip/dphy_rx/dv/bow_afe_chk.sv): des_rst = ~gate at the
-  // same lp clock edge, term_en = hsrx_en, lprx_en = ~pd, lane_pd, OWN only while ready,
-  // the tie-offs of v1
-  bind bow_dphy_rx bow_afe_chk #(.Lanes (Lanes), .TrimW (TrimW)) u_afe_chk (
+  // same lp clock edge, term_en = hsrx_en, lprx_en = ~pd, lane_pd (a fresh READY after PD),
+  // OWN only while ready, the tie-offs of v1, the reset values while reset is asserted
+  bind bow_dphy_rx bow_afe_chk #(
+    .Lanes (Lanes), .TrimW (TrimW), .AfePdRst (AfePdRst)
+  ) u_afe_chk (
     .clk_i          (clk_i),
     .rst_ni         (rst_ni),
     .lp_clk_i       (lp_clk_i),

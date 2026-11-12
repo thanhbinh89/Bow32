@@ -1232,8 +1232,11 @@ module tb_bow32 #(
 
   // The AFE v1 outputs of the receiver's D-PHY (hw/ip/dphy_rx/dv/bow_afe_chk.sv), the same
   // way: des_rst = ~gate at the same lp clock edge, term_en = hsrx_en, lprx_en / lane_pd,
-  // OWN only while ready, the tie-offs; +afe_chk_report prints the counts at the end
-  bind bow_dphy_rx bow_afe_chk #(.Lanes (Lanes), .TrimW (TrimW)) u_afe_chk (
+  // OWN only while ready, the tie-offs, the reset values while reset is asserted;
+  // +afe_chk_report prints the counts at the end
+  bind bow_dphy_rx bow_afe_chk #(
+    .Lanes (Lanes), .TrimW (TrimW), .AfePdRst (AfePdRst)
+  ) u_afe_chk (
     .clk_i          (clk_i),
     .rst_ni         (rst_ni),
     .lp_clk_i       (lp_clk_i),

@@ -87,7 +87,9 @@
 //      afe_mon_*           optional (monitor sampler, v3): en 0, code 0, data unused
 //   E  afe_pd_o            AFE_CTRL.PD (bus clock flop, reset AfePdRst); never from Enable
 //      afe_lane_pd_o, afe_clk_lane_pd_o  one bus clock flop: 1 from reset and while PD, 0 once
-//                          READY was seen with PD = 0 (v1: no LANE_EN, no ULPS)
+//                          a fresh READY was seen with PD = 0, i.e. READY 0 since PD last
+//                          rose, then 1 (not the stale READY of the synchroniser right after
+//                          a short PD pulse; v1: no LANE_EN, no ULPS)
 //      afe_ready_i         asynchronous: AFE_STATUS.READY; OWN of every lane falls with it
 //      afe_cal_start_o     CMD.REINIT, 32 bus clock cycles (v1; CMD.AFE_CAL from step 6)
 //      afe_cal_done_i, afe_cal_err_i  asynchronous: AFE_STATUS[1], [2]
@@ -106,8 +108,9 @@
 //                         clocks: word flops, aligners (not reset while the controller's RX
 //                         is off: a burst cut by a stop ends there as any burst), clock
 //                         toggle, meter, RAW
-// At reset (section 3.6): afe_pd_o = AfePdRst, afe_lprx_en_o = ~AfePdRst, hsrx / term 0,
-// gate 0, des_rst 1, dly_own 0, lane_pd 1.
+// At reset (section 3.6): afe_pd_o = AfePdRst, afe_lprx_en_o = ~AfePdRst, lane_pd 1, dly_own
+// 0, codes 0, cal_start 0 (rst_ni: bus clock flops); hsrx / term 0, gate 0, des_rst 1 (the lp
+// reset lrst_n, asserted with rst_ni).
 
 module bow_dphy_rx import bow_bus_pkg::*; import bow_ppi_pkg::*; #(
   parameter int unsigned Lanes       = 2,              // data lanes: 1, 2 or 4

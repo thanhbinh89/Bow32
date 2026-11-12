@@ -46,8 +46,9 @@
 // second owner, the deskew engine (step 8).
 //
 // AFE_CTRL.PD (v1: bit 0 only; TST_MODE and ATB_SEL later): pd_o = PD, lprx_en_o = ~PD (a flop
-// of its own), lane_pd_o = 1 from reset and while PD = 1, 0 once AFE_STATUS.READY was seen
-// with PD = 0 (section 3.6 of the spec; v1 has no LANE_EN and no ULPS, so every lane).
+// of its own), lane_pd_o = 1 from reset and while PD = 1, 0 once a fresh AFE_STATUS.READY was
+// seen with PD = 0: READY 0 at least once since PD last rose (or since reset), then 1
+// (section 3.6 of the spec; v1 has no LANE_EN and no ULPS, so every lane).
 //
 // CMD.REINIT (v1): cal_start_o high for ReinitCycles cycles, the AFE's re-calibration (Versal
 // adapter: XPLL, BISC and VT tracking again); its other meaning (the state machines back to
@@ -98,7 +99,7 @@ module bow_dphy_rx_regs import bow_bus_pkg::*; #(
   output logic                  cal_start_o,      // CMD.REINIT pulse
   output logic                  pd_o,             // AFE_CTRL.PD
   output logic                  lprx_en_o,        // ~AFE_CTRL.PD
-  output logic                  lane_pd_o,        // PD, or READY not yet seen since PD = 0
+  output logic                  lane_pd_o,        // PD, or no fresh READY since PD = 0
   output logic [Lanes-1:0][8:0] dly_code_o,       // DLYn CODE
   output logic [Lanes-1:0]      dly_own_o,        // DLYn OWN
   output logic [3:0]            raw_req_o,        // gray
@@ -234,9 +235,15 @@ module bow_dphy_rx_regs import bow_bus_pkg::*; #(
   assign clk_miss_o     = clk_miss_q;
 
   // ----------------------------------------------------------------- AFE_CTRL
-  // PD (pd_o), lprx_en_o = ~PD and lane_pd_o, three flops (every AFE control comes from a
-  // flop, no logic after it)
-  logic        pd_q, pd_d, lprx_en_q, lane_pd_q;
+  // PD (pd_o), lprx_en_o = ~PD and lane_pd_o, flops (every AFE control comes from a flop, no
+  // logic after it). lane_pd falls only on a fresh READY: READY seen 0 since PD last rose
+  // (rdy_low_q; 1 from reset), then READY 1 with PD = 0. ready_i comes through two flops
+  // and still reads 1 for a few cycles after PD rises: a PD pulse that short must not
+  // release lane_pd on that stale READY, the AFE restarts after any PD pulse (section 3.6
+  // of the spec). An AFE that keeps ready at 1 through pd (against section 3.2: the
+  // UltraScale+ adapter, which has neither pd nor lane_pd) leaves lane_pd at 1 after a PD
+  // pulse.
+  logic        pd_q, pd_d, lprx_en_q, lane_pd_q, rdy_low_q;
   logic [31:0] afe_ctrl_rd, afe_ctrl_w;
 
   assign afe_ctrl_rd = {31'h0, pd_q};
@@ -248,10 +255,12 @@ module bow_dphy_rx_regs import bow_bus_pkg::*; #(
       pd_q      <= AfePdRst;
       lprx_en_q <= !AfePdRst;
       lane_pd_q <= 1'b1;
+      rdy_low_q <= 1'b1;
     end else begin
       pd_q      <= pd_d;
       lprx_en_q <= !pd_d;
-      lane_pd_q <= pd_d || (lane_pd_q && !ready_i);   // 0 once READY was seen without PD
+      rdy_low_q <= (pd_d && !pd_q) ? 1'b0 : (rdy_low_q || !ready_i);   // PD rises: wait again
+      lane_pd_q <= pd_d || (lane_pd_q && !(ready_i && rdy_low_q));
     end
   end
 

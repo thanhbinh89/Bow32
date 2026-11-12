@@ -6,9 +6,9 @@
 // cannot see these (the reference of step 4 has no AFE interface), the adapters only use some
 // of them, so a testbench binds this into every bow_dphy_rx:
 //
-//   bind bow_dphy_rx bow_afe_chk #(.Lanes (Lanes), .TrimW (TrimW)) u_afe_chk (
-//     .clk_i, .rst_ni, .lp_clk_i, .lp_rst_ni (lrst_n), .gate_i (afe_clk_gate_en_o),
-//     .des_rst_i (afe_des_rst_o), .des_rst_en_i (des_rst_en), ... );
+//   bind bow_dphy_rx bow_afe_chk #(.Lanes (Lanes), .TrimW (TrimW), .AfePdRst (AfePdRst))
+//     u_afe_chk (.clk_i, .rst_ni, .lp_clk_i, .lp_rst_ni (lrst_n), .gate_i (afe_clk_gate_en_o),
+//                .des_rst_i (afe_des_rst_o), .des_rst_en_i (des_rst_en), ... );
 //
 // Properties, lp clock domain (every edge from the second one after a reset):
 //   * des_rst = ~gate & DES_RST enable of the cycle before: both are flops set at the same
@@ -16,17 +16,27 @@
 //     that sets it); held at 0 while CTRL.DES_RST_DIS = 1 (its synchronised enable);
 //   * the HS receiver and termination enables of every lane are equal (v1: one flop).
 // Bus clock domain:
-//   * lprx_en = ~pd for every lane; lane_pd = 1 while pd, and never 0 before the AFE was
-//     seen ready (the synchronised READY of the register file);
+//   * lprx_en = ~pd for every lane;
+//   * lane_pd (one value for every lane) in every cycle as section 3.6 says: 1 while pd;
+//     after PD = 1 (or a reset) it falls only on a fresh READY, i.e. READY (synchronised, as
+//     the register file sees it) 0 in a cycle since PD rose, then 1 with PD = 0; once 0 it
+//     stays 0 until PD. A reference model of those cycles: lane_pd falling on the stale
+//     READY right after a short PD pulse fails, and so does a lane_pd that never falls;
 //   * dly_own of a lane only while READY is 1 (it falls with READY, one bus clock later);
 //   * the v1 tie-offs: clock lane delay, monitor sampler, trim, test hooks at 0.
+// While reset is asserted (section 3.6, two reset domains), from its second clock edge: every
+// bus clock edge in rst_ni sees pd = AfePdRst, lprx_en = ~AfePdRst, lane_pd = 1, dly_own = 0;
+// every lp clock edge in the lp reset (lp_rst_ni, which rst_ni asserts) the gate 0, des_rst
+// 1, hsrx_en = term_en = 0. (Verilator: before the first reset the D-PHY starts with the gate
+// open on purpose.)
 // The first violation ends the simulation ($fatal). Silent otherwise; Report = 1 or the
 // plusarg +afe_chk_report prints the counts at the end.
 
 module bow_afe_chk #(
-  parameter int unsigned Lanes  = 2,
-  parameter int unsigned TrimW  = 64,
-  parameter bit          Report = 1'b0
+  parameter int unsigned Lanes    = 2,
+  parameter int unsigned TrimW    = 64,
+  parameter bit          AfePdRst = 1'b0,      // the D-PHY's AFE_CTRL.PD after reset
+  parameter bit          Report   = 1'b0
 ) (
   input logic                       clk_i,           // bus clock
   input logic                       rst_ni,
@@ -57,6 +67,7 @@ module bow_afe_chk #(
 );
 
   int unsigned n_lp = 0, n_bus = 0, n_des_rst = 0, n_gate = 0, n_ready = 0, n_own = 0;
+  int unsigned n_lp_rst = 0, n_bus_rst = 0, n_pd_rise = 0, n_lane_pd_fall = 0;
 
   function automatic void fail(string what);
     $fatal(1, "AFE v1 check failed: %s", what);
@@ -91,27 +102,63 @@ module bow_afe_chk #(
     end
   end
 
+  // the lp clock flops while the lp reset is asserted, from its second lp clock edge (a reset
+  // asserted from time 0 has no falling edge: the flops take it at the first clock edge)
+  logic lp_in_rst_q = 1'b0;
+
+  always @(posedge lp_clk_i) begin
+    if (!lp_rst_ni) begin
+      if (lp_in_rst_q) begin
+        n_lp_rst++;
+        if ((gate_i !== 1'b0) || (des_rst_i !== 1'b1) || (clk_hsrx_en_i !== 1'b0) ||
+            (hsrx_en_i !== '0) || (clk_term_en_i !== 1'b0) || (term_en_i !== '0)) begin
+          fail($sformatf("in the lp reset: gate %b des_rst %b hsrx_en %b / %b term_en %b / %b (want 0 1 0 0)",
+                         gate_i, des_rst_i, clk_hsrx_en_i, hsrx_en_i, clk_term_en_i, term_en_i));
+        end
+      end
+      lp_in_rst_q <= 1'b1;
+    end else begin
+      lp_in_rst_q <= 1'b0;
+    end
+  end
+
   // ---------------------------------------------------------------- bus domain
-  logic barmed_q = 1'b0, bvalid_q, seen_ready_q, ready_q;
+  // lane_pd reference: pd_l, rdy_l, lpd_l = pd, READY and lane_pd sampled at the edge before,
+  // low_l = READY 0 in a cycle since PD rose, as the D-PHY had it then (1 from reset)
+  logic barmed_q = 1'b0, bvalid_q, ready_q, pd_l, rdy_l, lpd_l, low_l;
+  logic exp_lane_pd, low_n;
+
+  always_comb begin
+    exp_lane_pd = pd_i || (lpd_l && !(rdy_l && low_l));
+    low_n       = (pd_i && !pd_l) ? 1'b0 : (low_l || !rdy_l);
+  end
 
   always @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      barmed_q     <= 1'b1;
-      bvalid_q     <= 1'b0;
-      seen_ready_q <= 1'b0;
-      ready_q      <= 1'b0;
+      barmed_q <= 1'b1;
+      bvalid_q <= 1'b0;
+      ready_q  <= 1'b0;
+      pd_l     <= AfePdRst;
+      rdy_l    <= 1'b0;
+      lpd_l    <= 1'b1;
+      low_l    <= 1'b1;
     end else begin
       bvalid_q <= barmed_q;
       if (bvalid_q) begin
         n_bus++;
         if (ready_i) n_ready++;
         if (dly_own_i != '0) n_own++;
+        if (pd_i && !pd_l) n_pd_rise++;
+        if (lpd_l && !clk_lane_pd_i) n_lane_pd_fall++;
         if ((clk_lprx_en_i !== !pd_i) || (lprx_en_i !== {Lanes{!pd_i}})) begin
           fail($sformatf("lprx_en %b / %b with pd %b", clk_lprx_en_i, lprx_en_i, pd_i));
         end
         if (lane_pd_i !== {Lanes{clk_lane_pd_i}}) fail("lane_pd differs between the lanes");
-        if (pd_i && !clk_lane_pd_i) fail("lane_pd 0 while pd");
-        if (!clk_lane_pd_i && !seen_ready_q && !ready_i) fail("lane_pd 0 before the AFE was ready");
+        if (clk_lane_pd_i !== exp_lane_pd) begin
+          fail($sformatf("lane_pd %b, want %b: pd %b; the cycle before lane_pd %b, READY %b, READY 0 since PD rose %b%s",
+                         clk_lane_pd_i, exp_lane_pd, pd_i, lpd_l, rdy_l, low_l,
+                         (!clk_lane_pd_i && rdy_l && !low_l) ? " (a stale READY)" : ""));
+        end
         if ((dly_own_i != '0) && !ready_i && !ready_q) begin
           fail($sformatf("dly_own %b while the AFE is not ready", dly_own_i));
         end
@@ -120,16 +167,40 @@ module bow_afe_chk #(
           fail("a v1 tie-off (clock lane delay, monitor, trim, test hooks) is not 0");
         end
       end
-      if (pd_i) seen_ready_q <= 1'b0;
-      else if (ready_i) seen_ready_q <= 1'b1;
       ready_q <= ready_i;
+      pd_l    <= pd_i;
+      rdy_l   <= ready_i;
+      lpd_l   <= clk_lane_pd_i;
+      low_l   <= low_n;
+    end
+  end
+
+  // the bus clock flops while rst_ni is asserted, from its second bus clock edge (as above)
+  logic bus_in_rst_q = 1'b0;
+
+  always @(posedge clk_i) begin
+    if (!rst_ni) begin
+      if (bus_in_rst_q) begin
+        n_bus_rst++;
+        if ((pd_i !== AfePdRst) || (clk_lprx_en_i !== !AfePdRst) ||
+            (lprx_en_i !== {Lanes{!AfePdRst}}) || (clk_lane_pd_i !== 1'b1) ||
+            (lane_pd_i !== '1) || (dly_own_i !== '0)) begin
+          fail($sformatf("in reset: pd %b lprx_en %b / %b lane_pd %b / %b dly_own %b (AfePdRst %b)",
+                         pd_i, clk_lprx_en_i, lprx_en_i, clk_lane_pd_i, lane_pd_i, dly_own_i,
+                         AfePdRst));
+        end
+      end
+      bus_in_rst_q <= 1'b1;
+    end else begin
+      bus_in_rst_q <= 1'b0;
     end
   end
 
   final begin
     if (Report || $test$plusargs("afe_chk_report")) begin
-      $display("%m: AFE v1 checks passed: %0d lp clock cycles (%0d with des_rst, %0d gate openings), %0d bus clock cycles (%0d ready, %0d with a dly_own)",
-               n_lp, n_des_rst, n_gate, n_bus, n_ready, n_own);
+      $display("%m: AFE v1 checks passed: %0d lp clock cycles (%0d with des_rst, %0d gate openings, %0d in reset), %0d bus clock cycles (%0d ready, %0d with a dly_own, %0d PD rises, %0d lane_pd falls, %0d in reset)",
+               n_lp, n_des_rst, n_gate, n_lp_rst, n_bus, n_ready, n_own, n_pd_rise,
+               n_lane_pd_fall, n_bus_rst);
     end
   end
 
