@@ -67,8 +67,10 @@ static const char help_phy[] =
     "  phy                 READY, every nibble's PHY_RDY / DLY_RDY, XPLL lock (AFE_STATUS)\n"
     "  phy reinit          XPLL lock + BISC again (CMD.AFE_CAL, REINIT), VT tracking back on\n"
     "  phy burstrst 0|1    RX FIFO reset at every HS burst (DES_RST_DIS; start sets " CAM_BURST_RST_STR ")\n"
-    "  phy tinit <us>      T_INIT: LP-11 that long before Stop after reinit / READY (0: none)\n"
-    "  phy hstmo <us>|reset  HS watchdog of the data lanes (0: none; reset: 2^20 cycles)\n"
+    "  phy tinit <us>      T_INIT: LP-11 that long before Stop after reinit / READY (0: none;\n"
+    "                      at most 2^20 - 1 lp clocks)\n"
+    "  phy hstmo <us>|reset  HS watchdog of the data lanes (0: none; reset: 2^20 cycles;\n"
+    "                      at most 2^24 - 1 lp clocks)\n"
     "  phy missoff 0|1     clock lane receiver off at the clock miss (CTRL.CLK_MISS_OFF)\n"
     "  phy v1x             ERR_STATUS, LANE_STOP, CNT_MISC / CNT_DSK, CTRL, TIM1, TIM2\n"
     "  phy check           T_INIT, HS_TMO, CLK_MISS_OFF on the running stream\n"
@@ -170,9 +172,12 @@ static int sensor_start(bool configure) {
 bool stream_start(bool configure) {
   /* before the sensor leaves LP-11 (IMX274: LP-00 in standby); Versal XPHY:
    * the D-PHY's DES_RST_DIS = !CAM_BURST_RST (cam_sensor.h) */
-  if (cam_rx_start(ct.s, ct.s->dt()) != CSI2RX_OK) {
-    bow_printf("error: D-PHY not ready (AFE_STATUS.READY = 0)\n");
-    if (ct.vid) bow_puts("  phy: nibble status; sensor on + phy reinit: BISC with a running clock\n");
+  int rs = cam_rx_start(ct.s, ct.s->dt());
+  if (rs != CSI2RX_OK) {
+    bow_printf("error: %s\n", bow_csi2rx_strerror(rs));
+    if (ct.vid && rs == CSI2RX_ENOTRDY) {
+      bow_puts("  phy: nibble status; sensor on + phy reinit: BISC with a running clock\n");
+    }
     return false;
   }
   int r = sensor_start(configure);
@@ -379,6 +384,27 @@ static void print_v1x(void) {
              DPHY_TIM2_T_INIT_OF(t2) / mhz);
 }
 
+/* ok, or "error: the D-PHY did not take CMD.APPLY" (its timers and CTRL keep their values
+ * before the write: they read the new ones, CMD[31] DIRTY) */
+static bool applied(bool ok) {
+  if (!ok) bow_puts("error: the D-PHY did not take CMD.APPLY (no lp clock?)\n");
+  return ok;
+}
+
+/* lp clock cycles of us microseconds into *n; false (with a line) when they do not fit
+ * a field of max cycles */
+static bool us_cycles(const char *what, uint32_t us, uint32_t max, uint32_t *n) {
+  uint32_t mhz = bow_dphy_rx_lp_mhz();
+  uint64_t c = (uint64_t)us * mhz;
+  if (c > max) {
+    bow_printf("error: %s %u us = %u lp clocks of %u MHz, the field holds %u (%u us)\n", what, us,
+               (uint32_t)(c > 0xFFFFFFFFu ? 0xFFFFFFFFu : c), mhz, max, mhz ? max / mhz : 0u);
+    return false;
+  }
+  *n = (uint32_t)c;
+  return true;
+}
+
 /* errors of the link over `frames` frames from cleared counters, and the D-PHY's v1.x
  * status after them */
 static uint32_t link_errors_over(uint32_t frames, bow_dphy_rx_v1x_t *v) {
@@ -406,26 +432,26 @@ static bool phy_check(void) {
     bow_puts("error: phy check needs the stream (start)\n");
     return false;
   }
-  bow_dphy_rx_set_hs_tmo(bow_dphy_rx_lp_cycles(2000u));
+  if (!applied(bow_dphy_rx_set_hs_tmo(bow_dphy_rx_lp_cycles(2000u)))) return false;
   e = link_errors_over(2, &v);
   pass = (v.err & DPHY_ERR_HS_TMO) && v.misc != 0;
   bow_printf("[%s] phy HS_TMO 2 us: %u timeouts, %u link errors, ERR_STATUS %08x\n",
              pass ? "PASS" : "FAIL", v.misc, e, v.err);
   ok &= pass;
-  bow_dphy_rx_set_hs_tmo(hs_tmo);
+  if (!applied(bow_dphy_rx_set_hs_tmo(hs_tmo))) return false;
   e = link_errors_over(4, &v);
   pass = e == 0 && !(v.err & DPHY_ERR_HS_TMO) && v.misc == 0;
   bow_printf("[%s] phy HS_TMO reset value: %u timeouts, %u link errors\n", pass ? "PASS" : "FAIL",
              v.misc, e);
   ok &= pass;
-  bow_dphy_rx_ctrl(DPHY_CTRL_CLK_MISS_OFF, 0);
+  if (!applied(bow_dphy_rx_ctrl(DPHY_CTRL_CLK_MISS_OFF, 0))) return false;
   e = link_errors_over(8, &v);
   pass = e == 0 && v.misc == 0;
   bow_printf("[%s] phy CLK_MISS_OFF 1: 8 frames, %u link errors, ERR_STATUS %08x\n",
              pass ? "PASS" : "FAIL", e, v.err);
   ok &= pass;
-  bow_dphy_rx_ctrl(0, DPHY_CTRL_CLK_MISS_OFF);
-  bow_dphy_rx_set_t_init(bow_dphy_rx_lp_cycles(100000u));
+  if (!applied(bow_dphy_rx_ctrl(0, DPHY_CTRL_CLK_MISS_OFF))) return false;
+  if (!applied(bow_dphy_rx_set_t_init(bow_dphy_rx_lp_cycles(100000u)))) return false;
   t0 = bow_cycles();
   DPHY->CMD = DPHY_CMD_REINIT;
   do {
@@ -439,7 +465,7 @@ static bool phy_check(void) {
   bow_printf("[%s] phy T_INIT 100 us: Stopstate %u us after CMD.REINIT\n", pass ? "PASS" : "FAIL",
              e);
   ok &= pass;
-  bow_dphy_rx_set_t_init(0);
+  if (!applied(bow_dphy_rx_set_t_init(0))) return false;
   e = link_errors_over(4, &v);
   pass = e == 0;
   bow_printf("[%s] phy back at the reset values: %u link errors\n", pass ? "PASS" : "FAIL", e);
@@ -461,27 +487,29 @@ static bool phy_cmd(const char *a) {
   }
   if (word_is(s, "reinit")) return phy_reinit();
   if (word_is(s, "tinit")) {
-    if (!parse_num(s + 5, &v) || v > 1000000u) return false;
-    bow_dphy_rx_set_t_init(bow_dphy_rx_lp_cycles(1000u * v));
+    uint32_t n;
+    if (!parse_num(s + 5, &v)) return false;
+    if (!us_cycles("T_INIT", v, DPHY_TIM2_T_INIT_MAX, &n)) return false;
+    bool ok = applied(bow_dphy_rx_set_t_init(n));
     print_v1x();
-    return true;
+    return ok;
   }
   if (word_is(s, "hstmo")) {
     const char *t = skip_spaces(s + 5);
-    if (word_is(t, "reset")) {
-      bow_dphy_rx_set_hs_tmo(DPHY_TIM1_HS_TMO_OF(DPHY_TIM1_RESET));
-    } else {
-      if (!parse_num(t, &v) || v > 80000u) return false;
-      bow_dphy_rx_set_hs_tmo(bow_dphy_rx_lp_cycles(1000u * v));
+    uint32_t n = DPHY_TIM1_HS_TMO_OF(DPHY_TIM1_RESET);
+    if (!word_is(t, "reset")) {
+      if (!parse_num(t, &v)) return false;
+      if (!us_cycles("HS_TMO", v, DPHY_TIM1_HS_TMO_MAX, &n)) return false;
     }
+    bool ok = applied(bow_dphy_rx_set_hs_tmo(n));
     print_v1x();
-    return true;
+    return ok;
   }
   if (word_is(s, "missoff")) {
     if (!parse_num(s + 7, &v) || v > 1u) return false;
-    bow_dphy_rx_ctrl(v ? DPHY_CTRL_CLK_MISS_OFF : 0, v ? 0 : DPHY_CTRL_CLK_MISS_OFF);
+    bool ok = applied(bow_dphy_rx_ctrl(v ? DPHY_CTRL_CLK_MISS_OFF : 0, v ? 0 : DPHY_CTRL_CLK_MISS_OFF));
     print_v1x();
-    return true;
+    return ok;
   }
   if (word_is(s, "v1x")) {
     print_v1x();
@@ -490,9 +518,9 @@ static bool phy_cmd(const char *a) {
   if (word_is(s, "check")) return phy_check();
   if (!word_is(s, "burstrst")) return false;
   if (!parse_num(s + 8, &v) || v > 1u) return false;
-  bow_dphy_rx_des_rst(v != 0);
+  bool ok = applied(bow_dphy_rx_des_rst(v != 0));
   print_phy();
-  return true;
+  return ok;
 }
 
 /* `sensor on|off` (Versal XPHY): the sensor streams with the receiver off,

@@ -274,7 +274,9 @@ int cam_rx_start(const cam_sensor_t *s, uint32_t dt) {
   /* Versal XPHY: the RX FIFO reset at every gate opening (the D-PHY's
    * CTRL.DES_RST_DIS = 0, on from reset) back on, unless the simulation
    * variant CAM_BURST_RST = 0 */
-  if (bow_dphy_rx_afe() == DPHY_AFE_VERSAL) bow_dphy_rx_des_rst(CAM_BURST_RST != 0);
+  if (bow_dphy_rx_afe() == DPHY_AFE_VERSAL && !bow_dphy_rx_des_rst(CAM_BURST_RST != 0)) {
+    return CSI2RX_EAPPLY;
+  }
   return bow_csi2rx_start(s->lanes, dt, cam_lane_rate(s));
 }
 

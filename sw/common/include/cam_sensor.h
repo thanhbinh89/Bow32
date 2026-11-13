@@ -136,8 +136,8 @@ void cam_print_prsnt(uint32_t rx_lanes);
 /* Receiver start for a stream of s with data type dt: bow_csi2rx_start() with
  * the lanes and lane rate of s. Before it, on the Huins camera build only
  * (Versal XPHY: the D-PHY's INFO says DPHY_AFE_VERSAL), DES_RST_DIS =
- * !CAM_BURST_RST; other builds are not touched. Returns what
- * bow_csi2rx_start() returns. */
+ * !CAM_BURST_RST (CSI2RX_EAPPLY when the D-PHY did not take it); other
+ * builds are not touched. Returns what bow_csi2rx_start() returns. */
 int cam_rx_start(const cam_sensor_t *s, uint32_t dt);
 
 /* Stream off and receiver stop (s NULL: receiver only). IMX219: stream off,

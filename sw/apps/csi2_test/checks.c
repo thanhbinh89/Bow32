@@ -177,9 +177,8 @@ static bool check_phy_idle(const suite_t *s) {
   uint32_t start, lpst, hs, lp = 3u, bursts, n = stream_lanes();
   bool i274 = sensor_imx274();
   if (ct.streaming) stream_stop();
-  if (cam_rx_start(ct.s, CSI2_DT_RAW10) != CSI2RX_OK) {
-    return fail("D-PHY not ready (AFE_STATUS.READY = 0)");
-  }
+  int rs = cam_rx_start(ct.s, CSI2_DT_RAW10);
+  if (rs != CSI2RX_OK) return fail("%s", bow_csi2rx_strerror(rs));
   /* the sensor may still finish a frame (probe or last stop); in standby the
    * IMX219 lanes are LP-11, the IMX274 ones LP-00 (datasheet; LP-11 of every
    * lane is accepted too) */
