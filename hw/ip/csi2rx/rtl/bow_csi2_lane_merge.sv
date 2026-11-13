@@ -45,8 +45,14 @@
 // pointer), 3 read cycles (synchroniser, the pop) and 3 write cycles (synchroniser), 7 byte
 // clocks at a ratio of 1, 9 when every synchroniser bit resolves a cycle late: CdcDepth 16
 // leaves 6 entries for a csi_clk_i a little slower than the byte clock (e.g. the ppm of two
-// oscillators: 6 entries in the longest packet, 65 541 bytes in 16 386 words of 4 lanes, is
-// 366 ppm). Should the controller still fall behind (a csi_clk_i below the byte clock), a word
+// oscillators). Over the longest packet (65 541 bytes) that margin depends on the lanes, a
+// word being one byte per lane: 16 386 words of 4 lanes, 366 ppm; 32 771 words of 2 lanes,
+// 183 ppm; 65 541 words of 1 lane, 92 ppm, less than two +-50 ppm oscillators may differ. A
+// csi_clk_i that is nominally the byte clock needs a margin above it (csi_clk_i >= byte clock
+// x (1 + the sum of both clocks' tolerances)) or one reference with the transmitter, with 1
+// lane at least (docs/ip/mipi_rx_arch.md, section 6.1; the unit test's case ppm shows 200 ppm
+// within the margin of 4 lanes and beyond that of 1 lane). Should the controller still fall
+// behind (a csi_clk_i below the byte clock), a word
 // is only written into two free slots or more, so the end of the burst always finds one;
 // a dropped word makes the burst a skew error (ERR_STATUS.SKEW, lost before the packet
 // layer), the words already written go on as a cut packet.
