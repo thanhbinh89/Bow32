@@ -229,6 +229,7 @@ module bow32_huins_vp1902_top import bow_ddr_pkg::*; #(
     .IbexRegFile   (ibex_pkg::RegFileFPGA),
     .CsiPhy        (1'b0),
     .VidClkHz      (SysClkHz),
+    .CsiByteClkHz  (SysClkHz),     // no PHY: dphy_hs_byte_clk_i tied to 0, no byte clock
     .DdrEn         (1'b1),
     .DdrMem        (DdrMem),
     .DdrClkHz      (DdrClkHz),

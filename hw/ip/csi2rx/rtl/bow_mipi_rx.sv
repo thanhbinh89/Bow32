@@ -28,10 +28,12 @@
 // continuous clock csi_clk_i (step 7 of docs/ip/mipi_rx_arch.md: csi_clk = vid_clk on the
 // FPGA): the v1 lp domain errors were pulses of that clock. This connection is the
 // guarantee; bow_csi2rx's PpiLpClkHz (= PhyClkHz here) only states it for its elaboration
-// check. ByteClkHz, the highest byte clock this receiver gets (the lane rate / 8), must not
-// exceed vid_clk_i (bow_csi2rx's PpiByteClkHz check: the lane merge hands one word per byte
-// clock to the controller's clock); its default, vid_clk_i itself, is also the limit of the
-// D-PHY's clock lane check at CLK_TOG_DIV = 0 (byte clock < lp clock, section 4.3).
+// check. ByteClkHz, the highest byte clock this receiver gets (the lane rate / 8), has no
+// default: every instantiation states it (the SoC: CsiByteClkHz of bow32_top), and
+// elaboration fails without it and above vid_clk_i (bow_csi2rx's PpiByteClkHz check: the
+// lane merge hands one word per byte clock to the controller's clock). vid_clk_i is also the
+// limit of the D-PHY's clock lane check at CLK_TOG_DIV = 0 (byte clock < lp clock, section
+// 4.3).
 //
 // AFE ports (afe_*): the signals of section 3.2 that the FPGA adapters have (bow_dphy_rx
 // describes each one). The D-PHY's other AFE signals are tied off here: no FPGA adapter has
@@ -65,8 +67,8 @@ module bow_mipi_rx import bow_bus_pkg::*; import bow_ppi_pkg::*; #(
   parameter int unsigned FifoDepth = 256,          // pixel FIFO entries (4 px each), power of 2
   parameter int unsigned AfeKind   = 1,            // the D-PHY's INFO[7:5]: 1 UltraScale+
                                                    // adapter (KV260), 2 Versal adapter (Huins)
-  parameter int unsigned ByteClkHz = PhyClkHz      // highest byte clock (lane rate / 8), at
-                                                   // most PhyClkHz (above)
+  parameter int unsigned ByteClkHz = 0             // highest byte clock (lane rate / 8), no
+                                                   // default: at most PhyClkHz (above)
 ) (
   input  logic                  clk_i,
   input  logic                  rst_ni,
@@ -102,6 +104,17 @@ module bow_mipi_rx import bow_bus_pkg::*; import bow_ppi_pkg::*; #(
   output logic                  afe_cal_start_o,    // CPU domain flop (CMD.AFE_CAL pulse)
   input  logic [7:0]            afe_status_i        // asynchronous (AFE_STATUS[15:8])
 );
+
+  // the controller checks the byte clock against its clock (PpiByteClkHz); this message names
+  // the parameter of this level (the initial copy stops simulations built with -Wno-fatal)
+  if (ByteClkHz == 0) begin : g_no_byte_clk
+    $fatal(1, "bow_mipi_rx: ByteClkHz not set (the highest byte clock on afe_hs_byte_clk_i, at most vid_clk_i %0d Hz)",
+           PhyClkHz);
+`ifndef SYNTHESIS
+    initial $fatal(1, "bow_mipi_rx: ByteClkHz not set (the highest byte clock on afe_hs_byte_clk_i, at most vid_clk_i %0d Hz)",
+                   PhyClkHz);
+`endif
+  end
 
   // ---------------------------------------------------------------- PPI
   logic                rx_byte_clk_hs;

@@ -116,7 +116,7 @@ module tb_csi2rx_ppi;
     .FifoDepth  (FifoDepth),
     .DphyWin    (1'b1),                    // as in bow_mipi_rx (INFO[6])
     .PpiLpClkHz (PhyClkHz),
-    .PpiByteClkHz (PhyClkHz)               // the BFM's byte clocks: 96 .. 180 MHz
+    .PpiByteClkHz (180_000_000)            // the BFM's byte clocks: 96 .. 180 MHz
   ) u_dut (
     .clk_i            (clk_b),
     .rst_ni           (rst_n),
@@ -165,7 +165,8 @@ module tb_csi2rx_ppi;
     .PhyClkHz  (PhyClkHz),
     .CpuClkHz  (CpuClkHz),
     .FifoDepth (FifoDepth),
-    .LpClkHz   (25_000_000)                  // the standard PHY's lp clock (lp_ns of the BFM)
+    .LpClkHz   (25_000_000),                 // the standard PHY's lp clock (lp_ns of the BFM)
+    .ByteClkHz (180_000_000)                 // the BFM's byte clocks: 96 .. 180 MHz
   ) u_flat (
     .clk_i                 (clk_s),
     .rst_ni                (rst_n),

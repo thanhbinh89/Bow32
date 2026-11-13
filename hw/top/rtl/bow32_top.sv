@@ -56,12 +56,18 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
   // pixel FIFO entries (4 pixels each, power of 2), the kind of AFE on the
   // dphy_* ports (the D-PHY's INFO[7:5]: 1 the UltraScale+ adapter
   // bow_dphy_io_xusp, 2 the Versal adapter bow_dphy_io_versal; it sets the
-  // SETTLE target and the trail bytes the D-PHY reports in INFO2)
+  // SETTLE target and the trail bytes the D-PHY reports in INFO2). CsiByteClkHz:
+  // the highest byte clock on dphy_hs_byte_clk_i (lane rate / 8), no default:
+  // every build states it, elaboration fails without it (0) and above VidClkHz
+  // (the receiver's controller runs on vid_clk_i and its lane merge FIFO needs
+  // vid_clk_i >= the byte clock: step 7 of docs/ip/mipi_rx_arch.md). A build
+  // without a PHY (CsiPhy = 0, dphy_hs_byte_clk_i tied off) states VidClkHz.
   parameter int unsigned        CsiLanes      = 2,
   parameter bit                 CsiPhy        = 1'b1,
   parameter int unsigned        VidClkHz      = ClkFreqHz,
   parameter int unsigned        CsiFifoDepth  = 256,
   parameter int unsigned        CsiAfeKind    = 1,
+  parameter int unsigned        CsiByteClkHz  = 0,
   // AXI4-Lite window: address bits passed to the AXI device
   parameter int unsigned        AxilAddrWidth = 16,
   // Video RAM (vram window of the memory map: at most 1 MiB)
@@ -475,14 +481,27 @@ module bow32_top import bow_bus_pkg::*; import bow32_memmap_pkg::*; #(
   logic [9:0] cam_tdata;
 
   // bow_mipi_rx = digital D-PHY (u_csi2rx/u_dphy_rx) + CSI-2 controller (u_csi2rx/u_csi2rx)
-  // joined by the PPI; the instance keeps the name u_csi2rx of the FPGA constraints
+  // joined by the PPI; the instance keeps the name u_csi2rx of the FPGA constraints. Its
+  // byte clock must not exceed its video clock (the controller's PpiByteClkHz check, which
+  // CsiByteClkHz reaches); CsiByteClkHz has no default, a build that does not state it
+  // fails here. As there, the initial copy stops simulations built with -Wno-fatal.
+  if (CsiByteClkHz == 0) begin : g_no_byte_clk
+    $fatal(1, "bow32_top: CsiByteClkHz not set (the highest byte clock on dphy_hs_byte_clk_i, at most VidClkHz %0d Hz)",
+           VidClkHz);
+`ifndef SYNTHESIS
+    initial $fatal(1, "bow32_top: CsiByteClkHz not set (the highest byte clock on dphy_hs_byte_clk_i, at most VidClkHz %0d Hz)",
+                   VidClkHz);
+`endif
+  end
+
   bow_mipi_rx #(
     .Lanes     (CsiLanes),
     .PhyClkHz  (VidClkHz),
     .CpuClkHz  (ClkFreqHz),
     .HasPhy    (CsiPhy),
     .FifoDepth (CsiFifoDepth),
-    .AfeKind   (CsiAfeKind)
+    .AfeKind   (CsiAfeKind),
+    .ByteClkHz (CsiByteClkHz)
   ) u_csi2rx (
     .clk_i,
     .rst_ni          (sys_rst_n),

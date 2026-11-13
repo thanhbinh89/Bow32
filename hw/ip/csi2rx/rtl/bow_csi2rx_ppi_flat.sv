@@ -47,7 +47,8 @@
 // delays, RAW) are the PHY's own; INFO[6] reads 0 (no D-PHY of Bow32 at 0xC00). Resets: the
 // byte and lp clock domains of this wrapper synchronise rst_ni & csi_rst_ni on their own.
 // Clocks: csi_clk_i is the controller's continuous clock (step 7 of the spec), at least the
-// PHY's highest byte clock ByteClkHz (checked at elaboration).
+// PHY's highest byte clock ByteClkHz (no default: every build states it; checked at
+// elaboration).
 
 module bow_csi2rx_ppi_flat import bow_bus_pkg::*; import bow_ppi_pkg::*; #(
   parameter int unsigned Lanes     = 2,            // data lanes: 1, 2 or 4
@@ -55,8 +56,8 @@ module bow_csi2rx_ppi_flat import bow_bus_pkg::*; import bow_ppi_pkg::*; #(
   parameter int unsigned CpuClkHz  = 0,            // clk_i frequency (0: not checked)
   parameter int unsigned FifoDepth = 256,          // pixel FIFO entries (4 px each), power of 2
   parameter int unsigned LpClkHz   = PhyClkHz,     // lp_clk_i frequency (<= 32 x PhyClkHz)
-  parameter int unsigned ByteClkHz = PhyClkHz      // the PHY's highest rx_byte_clk_hs_i
-                                                   // (<= PhyClkHz)
+  parameter int unsigned ByteClkHz = 0             // the PHY's highest rx_byte_clk_hs_i, no
+                                                   // default (<= PhyClkHz)
 ) (
   input  logic                  clk_i,
   input  logic                  rst_ni,
@@ -95,6 +96,17 @@ module bow_csi2rx_ppi_flat import bow_bus_pkg::*; import bow_ppi_pkg::*; #(
   output logic [Lanes-1:0]      enable_o,           // Enable (CPU domain flops)
   output logic                  enable_clk_o        // EnableClk (CPU domain flop)
 );
+
+  // the controller checks the byte clock against csi_clk_i (PpiByteClkHz); this message names
+  // the parameter of the wrapper (the initial copy stops simulations built with -Wno-fatal)
+  if (ByteClkHz == 0) begin : g_no_byte_clk
+    $fatal(1, "bow_csi2rx_ppi_flat: ByteClkHz not set (the PHY's highest byte clock, at most csi_clk_i %0d Hz)",
+           PhyClkHz);
+`ifndef SYNTHESIS
+    initial $fatal(1, "bow_csi2rx_ppi_flat: ByteClkHz not set (the PHY's highest byte clock, at most csi_clk_i %0d Hz)",
+                   PhyClkHz);
+`endif
+  end
 
   // ---------------------------------------------------------------- resets
   logic brst_n;

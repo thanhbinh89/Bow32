@@ -112,13 +112,22 @@ module tb_bow32 #(
   // Video clock of the ISP and of the CSI-2 receiver PHY logic, unrelated to
   // the CPU clock (200 MHz on the KV260 and the Huins board; slower in the
   // KV260 simulation, 200 MHz in the IMX274 build, whose 180 MHz byte clock
-  // the clock lane miss detector of the receiver samples in this domain)
-  localparam real         VidPeriodNs = Imx274 ? 5.0 : 9.3;
-  localparam int unsigned VidClkHz    = Imx274 ? 200_000_000 : 107_526_882;  // 1 / 9.3 ns
+  // the clock lane miss detector of the receiver samples in this domain). It is
+  // also the clock of the receiver's controller (csi_clk, step 7 of
+  // docs/ip/mipi_rx_arch.md), which must be at least the byte clock CsiByteClkHz
+  // (bow32_top refuses a build that breaks this): the KV260 build's 8.3 ns (120.5
+  // MHz, no multiple of the CPU or byte clock) is above its 114 MHz byte clock
+  // (8.772 ns, csi2_tx_model's default: 912 Mbit/s per lane). Up to the review of
+  // step 7 it was 9.3 ns (107.5 MHz), below the byte clock: refused since then.
+  localparam real         VidPeriodNs = Imx274 ? 5.0 : 8.3;
+  localparam int unsigned VidClkHz    = Imx274 ? 200_000_000 : 120_481_928;  // 1 / 8.3 ns
   logic vclk = 1'b0;
   always #(VidPeriodNs / 2) vclk = ~vclk;
 
-  // CSI-2 receiver of the camera build
+  // CSI-2 receiver of the camera build: the highest byte clock of the D-PHY model
+  // (csi2_tx_model byte_ns: 8.772 ns, IMX219 at 912 Mbit/s; IMX274 build 1e3 / 180 ns at
+  // 1440 Mbit/s, set below)
+  localparam int unsigned CsiByteClkHz = Imx274 ? 180_000_000 : 114_000_000;
   localparam int unsigned CsiLanes     = Imx274 ? 4 : 2;
   localparam int unsigned CsiFifoDepth = Imx274 ? 512 : 256;
 
@@ -211,6 +220,7 @@ module tb_bow32 #(
     .VidClkHz    (VidClkHz),
     .CsiFifoDepth (CsiFifoDepth),
     .CsiAfeKind  (Imx274 ? 2 : 1),
+    .CsiByteClkHz (CsiByteClkHz),
     .DdrEn       (1'b1),
     .DdrMem      (DdrMem),
     .DdrClkHz    (DdrClkHz),
@@ -2482,7 +2492,7 @@ module tb_bow32 #(
       "camera": begin
         cam_setup();
         expect_text(0, "camera: IMX219 found (id 0219)");
-        expect_text(0, "csi2rx: Bow32 receiver, 2 lanes, PHY clock 108 MHz");
+        expect_text(0, "csi2rx: Bow32 receiver, 2 lanes, PHY clock 120 MHz");
         expect_text(0, "> ");
         step = 0;
         mark = log0.len();
@@ -2527,7 +2537,7 @@ module tb_bow32 #(
       "csi2": begin
         expect_text(0, "csi2_test: Bow32 MIPI CSI-2 receiver test");
         expect_text(0, "camera: IMX219 found (id 0219)");
-        expect_text(0, "csi2rx: Bow32 receiver, 2 lanes, PHY clock 108 MHz");
+        expect_text(0, "csi2rx: Bow32 receiver, 2 lanes, PHY clock 120 MHz");
         expect_text(0, "type h for help\n> ");
         mark = log0.len();
         uart_send_str(0, "test quick\r");
@@ -2535,16 +2545,17 @@ module tb_bow32 #(
         check_calibration(mark);
         check_margin(mark);
         // the PHY timing of the firmware's receiver starts: TIM0 of the D-PHY
-        // (0x4000_8C24) in lp clock cycles of 108 MHz (INFO[17:8] of the
-        // simulation's 107.5 MHz video clock): SETTLE 9 (the SETTLE formula
+        // (0x4000_8C24) in lp clock cycles of 120 MHz (INFO[17:8] of the
+        // simulation's 120.5 MHz video clock; 108 MHz and 04100209 with the 9.3 ns
+        // up to the review of step 7): SETTLE 11 (the SETTLE formula
         // with the INFO2 of the UltraScale+ PHY, 107 ns + 24 UI at 912 Mbit/s,
         // = settle_cycles() of the driver before step 4), LP_FILTER 2,
-        // CLK_SETTLE 16 (150 ns), CLK_MISS 4 (one byte clock + 3 cycles); TIM0 reads back
+        // CLK_SETTLE 18 (150 ns), CLK_MISS 5 (one byte clock, 2 cycles, + 3); TIM0 reads back
         // the shadow, so also CMD (0x4000_8C10) = 0: no APPLY pending, not DIRTY (the D-PHY
         // uses what TIM0 reads), and the D-PHY's applied copy itself
         mark = send_cmd("rd 40008c24");
-        expect_text(0, "40008c24: 04100209\nok\n> ", mark);
-        check_tim0_applied(32'h0410_0209);
+        expect_text(0, "40008c24: 0512020b\nok\n> ", mark);
+        check_tim0_applied(32'h0512_020b);
         inject_errors();
         mark = log0.len();
         uart_send_str(0, "stat\r");

@@ -128,13 +128,14 @@
 #     simulation builds (BOW_SYNC_JITTER, not defined here): the same flops, names and logic.
 
 # Configurations: the parameter sets of the builds that instantiate the receiver
-# (hw/top/rtl/bow32_top.sv, the board tops, sim/tb/tb_bow32.sv)
+# (hw/top/rtl/bow32_top.sv, the board tops, sim/tb/tb_bow32.sv; sim: the KV260 system
+# simulation's video clock, 8.3 ns since the review of step 7, 9.3 ns = 107 526 882 Hz before)
 array set cfg_params {
   kv260   {Lanes = 2, PhyClkHz = 200000000, CpuClkHz = 50000000, HasPhy = 1, FifoDepth = 256, DlyVid = 0}
   huins   {Lanes = 4, PhyClkHz = 200000000, CpuClkHz = 50000000, HasPhy = 1, FifoDepth = 512, DlyVid = 1}
   lanes1  {Lanes = 1, PhyClkHz = 200000000, CpuClkHz = 50000000, HasPhy = 1, FifoDepth = 256, DlyVid = 0}
   nophy   {Lanes = 2, PhyClkHz = 50000000, CpuClkHz = 50000000, HasPhy = 0, FifoDepth = 256, DlyVid = 0}
-  sim     {Lanes = 2, PhyClkHz = 107526882, CpuClkHz = 50000000, HasPhy = 1, FifoDepth = 256, DlyVid = 0}
+  sim     {Lanes = 2, PhyClkHz = 120481928, CpuClkHz = 50000000, HasPhy = 1, FifoDepth = 256, DlyVid = 0}
   lp_data {ClockLane = 0}
   lp_clk  {ClockLane = 1}
   blk_packet2 {Bytes = 2}

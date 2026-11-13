@@ -132,6 +132,9 @@ module bow32_huins_vp1902_cam_top #(
   localparam int unsigned SysDivide = 64;                       // VCO 3200 MHz / 64
   localparam int unsigned VidDivide = 16;                       // VCO 3200 MHz / 16
   localparam int unsigned CsiLanes  = 4;
+  // the highest byte clock of the D-PHY: the IMX274 at 1440 Mbit/s per lane (constr/
+  // huins_vp1902_cam.xdc, dphy_hs_period), at most VidClkHz (the receiver's elaboration check)
+  localparam int unsigned CsiByteClkHz = 180_000_000;
   localparam              SimDevice = "VERSAL_PREMIUM";
 
   // ---------------------------------------------------------------------------
@@ -248,7 +251,8 @@ module bow32_huins_vp1902_cam_top #(
     .CsiPhy        (1'b1),
     .CsiFifoDepth  (512),                 // 2048 px: a 1080p line burst (receiver FIFO)
     .CsiAfeKind    (2),                   // the Versal adapter (INFO2: SETTLE target, trail)
-    .VidClkHz      (VidClkHz)
+    .VidClkHz      (VidClkHz),
+    .CsiByteClkHz  (CsiByteClkHz)
   ) u_soc (
     .clk_i        (clk_sys),
     .rst_ni       (rst_n),

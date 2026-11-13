@@ -91,7 +91,8 @@ module tb_bow_csi2rx;
     .CpuClkHz  (1_000_000_000 / (CpuPs / 1000)),
     .HasPhy    (1'b1),
     .FifoDepth (FifoDepth),
-    .AfeKind   (AfeKind)
+    .AfeKind   (AfeKind),
+    .ByteClkHz (180_000_000)                   // the TX model's byte clocks: 96 .. 180 MHz
   ) dut (
     .clk_i           (clk),
     .rst_ni          (rst_n),

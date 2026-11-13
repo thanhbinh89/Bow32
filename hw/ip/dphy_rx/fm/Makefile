@@ -35,8 +35,9 @@
 # Configurations (equiv.tcl): kv260 (2 lanes, FIFO 256, taps in the byte clock domain:
 # the KV260 camera build), huins (4 lanes, FIFO 512, taps in the video clock domain:
 # the Huins camera build), lanes1 (1 lane), nophy (HasPhy 0 with a 50 MHz video clock:
-# the KV260, MPS4 and Huins RAM card builds), sim (the system simulation's 107.5 MHz
-# video clock); at step 6 these are the controller's parameters, and lp_data / lp_clk the
+# the KV260, MPS4 and Huins RAM card builds), sim (the system simulation's 120.5 MHz
+# video clock, 107.5 MHz up to the review of step 7); at step 6 these are the controller's
+# parameters, and lp_data / lp_clk the
 # lane state machine (data lane, clock lane), added to CFGS by default; at step 7 the
 # D-PHY's (bow_mipi_rx's for it), with lp_data / lp_clk and the controller's blocks
 # blk_packet2 / 4, blk_unpack1 / 4, blk_out, blk_capture, blk_regs, and the two clock FIFO

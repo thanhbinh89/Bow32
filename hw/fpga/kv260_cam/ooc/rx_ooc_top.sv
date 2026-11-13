@@ -56,7 +56,8 @@ module bow32_kv260_rx_ooc_soc import bow_bus_pkg::*; #(
     .CpuClkHz  (50_000_000),
     .HasPhy    (1'b1),
     .FifoDepth (FifoDepth),
-    .AfeKind   (1)
+    .AfeKind   (1),
+    .ByteClkHz (114_000_000)                   // as bow32_kv260_cam_top: 912 Mbit/s
   ) u_csi2rx (
     .clk_i,
     .rst_ni,

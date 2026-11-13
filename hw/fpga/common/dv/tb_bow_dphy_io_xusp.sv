@@ -408,10 +408,11 @@ module tb_bow_dphy_io_xusp;
   logic [9:0] m_tdata;
 
   bow_mipi_rx #(
-    .Lanes    (Lanes),
-    .PhyClkHz (200_000_000),
-    .CpuClkHz (50_000_000),
-    .HasPhy   (1'b1)
+    .Lanes     (Lanes),
+    .PhyClkHz  (200_000_000),
+    .CpuClkHz  (50_000_000),
+    .HasPhy    (1'b1),
+    .ByteClkHz (114_000_000)                   // 912 Mbit/s
   ) u_rx (
     .clk_i           (clk),
     .rst_ni          (rst_n),
