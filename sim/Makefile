@@ -131,9 +131,13 @@ sw:
 # -Wno-style here: Verilator 5.020 then drops PINMISSING whatever comes after). An empty
 # connection, .pin (), is only a waived PINCONNECTEMPTY in Verilator (an empty output is the
 # normal no-connect), so hw/lint/empty_inputs.py lists the inputs connected to nothing of
-# every instance in the same elaboration (Verilator's netlist): one is an error.
+# every instance in the same elaboration (Verilator's netlist): one is an error. So is an
+# elaboration check of the RTL that fails with the testbench's parameters (USERFATAL, e.g. a
+# byte clock above the video clock, review of step 7 of docs/ip/mipi_rx_arch.md: the
+# simulation builds turn it into a warning and stop only at time 0, in every test).
 TB_LINT := $(VERILATOR) --lint-only --timing -Wno-fatal -Wno-TIMESCALEMOD -Wno-WIDTH \
-           -Wno-CASEINCOMPLETE -Werror-PINMISSING -Werror-PINNOCONNECT --top-module tb_bow32
+           -Wno-CASEINCOMPLETE -Werror-PINMISSING -Werror-PINNOCONNECT -Werror-USERFATAL \
+           --top-module tb_bow32
 TB_PINS := $(PYTHON) $(REPO)/hw/lint/empty_inputs.py --verilator $(VERILATOR) -- --timing \
            -Wno-fatal -Wno-TIMESCALEMOD --top-module tb_bow32
 lint:

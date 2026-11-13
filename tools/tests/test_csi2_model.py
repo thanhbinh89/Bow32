@@ -718,6 +718,25 @@ class PpiTest(unittest.TestCase):
             self.assertGreaterEqual(len([v for v in sk[0]["b"] if v >= 0]), 9)
             self.assertGreaterEqual(sk[1]["s"] - sk[0]["s"], 7)
 
+    def test_clock_stop_rendering(self):
+        # step 7: the byte clock runs exactly POST edges after the one at which the last
+        # RxActiveHS falls (std: 2 more, the flat wrapper's hold); early: it stops at the edge
+        # that writes the packet's last word into the lane merge's FIFO (EXACT edges after the
+        # one of its last byte, std one more), before the fall (the end of the burst waits)
+        for mode in m.PPI_MODES:
+            std = int(mode == "std")
+            g = self.gen(mode)
+            g.ppi.post = m.Ppi.POST + 2 * std
+            g.send(g.line(0, m.DT_RAW10, 32))
+            g.ppi.post = None
+            g.ppi.early = g.rx.exact_early = True
+            g.send(g.line(0, m.DT_RAW10, 32))
+            (_, ln0, stop0, _), (_, ln1, stop1, tend1) = self.bursts(g.lines)
+            self.assertEqual(stop0 - 1 - max(x["f"] for x in ln0.values()), m.Ppi.POST + 2 * std)
+            self.assertEqual(stop1, tend1 + 1 + m.Ppi.EXACT + std)
+            self.assertGreater(max(x["f"] for x in ln1.values()) + 2 * std, stop1 - 1, mode)
+            self.assertTrue(g.rx.timing_exact())
+
     def test_receiver(self):
         # the controller alone (both timings): the D-PHY's window reads 0, the old PHY
         # registers of the controller too; INFO[6] (DphyWin) only in the timing of Bow32's
@@ -935,6 +954,21 @@ class GenCheckTest(unittest.TestCase):
             bad[k] = "rd 02c 00000063"
             (d / "regs.txt").write_text("\n".join(bad) + "\n")
             self.assertTrue(any("CNT_LINE" in e for e in m.check(d)[0]))
+
+    def test_frame_end_segment(self):
+        # a frame end record (IRQ_STATUS.FE) after the end of its FE's segment: late (test
+        # tclkpost reads and ends segments without a clock-only burst since step 7)
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            self.gen(d, "--test", "tclkpost")
+            perfect_dut(d)
+            self.assertEqual(m.check(d)[0], [])
+            regs = (d / "regs.txt").read_text().splitlines()
+            k = next(i for i, ln in enumerate(regs) if ln.startswith("fe "))
+            j = next(i for i in range(k, len(regs)) if regs[i].startswith("mark "))
+            bad = regs[:k] + regs[k + 1:j + 1] + [regs[k]] + regs[j + 1:]
+            (d / "regs.txt").write_text("\n".join(bad) + "\n")
+            self.assertTrue(any("IRQ_STATUS.FE late" in e for e in m.check(d)[0]))
 
 
 if __name__ == "__main__":

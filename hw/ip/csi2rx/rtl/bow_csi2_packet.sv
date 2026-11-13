@@ -1,7 +1,9 @@
 // Copyright Bow32 contributors.
 // SPDX-License-Identifier: Apache-2.0
 //
-// CSI-2 packet layer (byte clock domain): one packet per HS burst.
+// CSI-2 packet layer (the controller's clock csi_clk; the byte clock domain up to step 6 of
+// docs/ip/mipi_rx_arch.md): one packet per HS burst. The words come from the lane merge's
+// two clock FIFO, with gaps between them (gaps change nothing here).
 //
 // The words of the lane merge carry 1, 2 or 4 bytes (active lanes, constant
 // within a burst), so the 4 byte header always fills whole words and the
@@ -57,7 +59,7 @@ module bow_csi2_packet import bow_csi2rx_pkg::*; #(
   parameter int unsigned Bytes = 2      // bytes per word: Lanes of the receiver (1, 2 or 4)
 ) (
   input  logic                  clk_i,
-  input  logic                  rst_ni,          // byte clock, datapath reset
+  input  logic                  rst_ni,          // csi clock, datapath reset
 
   input  logic [1:0]            vc_i,            // configuration (static while RX is on)
   input  logic                  vc_any_i,

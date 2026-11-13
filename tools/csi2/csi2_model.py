@@ -20,8 +20,8 @@ Command line (used by hw/ip/csi2rx/dv):
         -> DIR/cfg.txt (testbench and TX model settings), DIR/stim.txt (commands,
            see tb_bow_csi2rx.sv). NAME: random (default), lp, watchdog, clk, cmd,
            ovf, stop, byteclk, eye, skew, deskew, extra, loss, ovf2, ovf8, be, rxoff,
-           dly, raw (directed tests, see gen_<name>; dly needs --versal, raw --versal
-           with 4 lanes). --versal:
+           tclkpost, dly, raw (directed tests, see gen_<name>; dly needs --versal, raw
+           --versal with 4 lanes). --versal:
            receiver built with AfeKind = 2 and the Versal XPHY model of
            csi2_tx_model (RX FIFOs with a latency that the stale words of the
            previous burst, hs_valid gaps and glitch words change, PHY ready
@@ -43,7 +43,7 @@ Command line (used by hw/ip/csi2rx/dv):
         ErrSotSyncHS early, pulses on the PHY's own lp clock, no ErrControlClk). Since
         step 4 the PHY's registers, HS entry counters and RAW are the D-PHY's: not in
         this bench. NAME: random, cmd, ovf, stop, skew, deskew, extra, loss, ovf2,
-        ovf8, be, clkstop, lpmask, and with bow gaps.
+        ovf8, be, clkstop, tclkpost, lpmask, and with bow gaps.
     csi2_model.py check DIR
         compares DIR/out.txt (m_axis transfers) and DIR/regs.txt (register reads,
         frame end records, invariants, burst end times) with the prediction.
@@ -65,8 +65,12 @@ Determinism (the generator only creates what the checker can predict):
     from bytes actually sent are compared (then any number of extra pixels,
     then eol); truncated packets are accepted lines without format error;
   * register accesses follow a clock-only burst + wait, so that work the
-    stopped byte clock deferred is done; FRAME_TIME/LINE_TIME are only exact
-    when CLK-POST meets the D-PHY minimum (60 ns + 52 UI);
+    stopped byte clock deferred is done (since step 7 of docs/ip/mipi_rx_arch.md,
+    the controller on its own clock csi_clk, only the end of a burst whose byte
+    clock stopped before RxActiveHS fell: test tclkpost reads without one);
+    FRAME_TIME/LINE_TIME are only exact when CLK-POST meets the D-PHY minimum
+    (60 ns + 52 UI), or the byte clock runs until the last word of the packet is
+    in the lane merge's FIFO (the PPI rendering's early mode, Ppi.early);
   * no FIFO overflow except in 'nocheck ovf' segments, where tready is held
     low from before the first burst: the FIFO only fills then, and which
     groups are written is exact (tready duty >= 1.2 x the input pixel rate
@@ -83,9 +87,10 @@ Determinism (the generator only creates what the checker can predict):
     word, the lane merge decides like the model (the exact rule: a lane FIFO
     takes the 9th byte before the first word is out, checked on the rendered
     cycles with their gaps, the rendering drawn again otherwise), and the byte
-    clock runs >= Ppi.EXACT (10) edges after the one of the last packet byte,
-    as the controller sees it (it needs 8 for exact FRAME_TIME / LINE_TIME),
-    whenever the model says the event times are exact.
+    clock runs >= Ppi.EXACT (3) edges after the one of the last packet byte,
+    as the controller sees it (since step 7 its last word must be in the lane
+    merge's FIFO: 3 edges; the packet layer on the byte clock needed 8 up to
+    step 6), whenever the model says the event times are exact.
 """
 
 import argparse
@@ -601,7 +606,8 @@ class Capture:
     count: int = 0
     wptr: int = 0
     burst: object = None   # RAW: burst captured
-    pending: bool = False  # ARM written, byte clock not yet seen
+    pending: bool = False  # RAW: ARM written, byte clock not yet seen (LOG: never since
+                           # step 7, its capture runs on the controller's clock)
 
 
 ST = {"11": 3, "10": 2, "01": 1, "00": 0}
@@ -685,6 +691,8 @@ class Receiver:
         self.clk_running = False
         self.lp00_hold = bool(cfg["lp00"])     # lanes at LP-00 until the first TX item
         self.t_clk_post = cfg["t_clk_post"]
+        self.exact_early = False       # the byte clock runs until a packet's last word is in
+                                       # the lane merge's FIFO (Ppi.early, test tclkpost)
         self.fs_prev_exact = self.lt_ref_exact = True
         self.burst_idx = 0
         self.seg = 0
@@ -912,16 +920,15 @@ class Receiver:
             self.see(CLK, "11")
 
     def byte_clock(self):
-        """The byte clock runs: IDELAY loads (UltraScale+ AFE), pending capture
-        requests. (PPI bench: no input delays.)"""
+        """The byte clock runs: IDELAY loads (UltraScale+ AFE), a pending RAW capture
+        request. (PPI bench: no input delays.)"""
         if self.phy_en:
             if not self.dly_vid and not self.ppi:
                 for l in range(self.dut_lanes):
                     self.dly_out[l] = self.dly[l]
-            for cap in (self.log, self.raw):
-                if cap.pending:
-                    cap.pending = False
-                    cap.started = not (cap is self.log and cap.mode & 2)
+            if self.raw.pending:
+                self.raw.pending = False
+                self.raw.started = True
 
     def time_step(self, sure=True):
         """Time may pass (wait, delay, poll, waitbyte, waitphy, knob): Versal AFE
@@ -956,8 +963,12 @@ class Receiver:
     def timing_exact(self):
         """Event times are known (end of the packet) unless CLK-POST is below
         the D-PHY minimum (60 ns + 52 UI): the byte clock may then stop before
-        the receiver has finished a packet, which completes at the next burst."""
-        return bool(self.contclk) or self.t_clk_post * 8000 >= 480_000 + 52 * self.cfg["byte_ps"]
+        the last word of a packet is in the lane merge's FIFO, and the packet
+        completes at the next burst. Since step 7 that word is all the packet
+        needs of the byte clock (up to step 6 the packet layer ran on it: 8
+        edges after the last byte); exact_early: the PPI rendering guarantees it."""
+        return bool(self.contclk) or self.exact_early or \
+            self.t_clk_post * 8000 >= 480_000 + 52 * self.cfg["byte_ps"]
 
     def clk_burst(self):
         """'clkburst': the clock lane alone runs for a while (no data lane)."""
@@ -1319,9 +1330,16 @@ class Receiver:
             self.dirq |= DIRQ_RAW
 
     def arm(self, cap, mode):
+        """LOG_CTRL / RAW_CTRL ARM. The RAW capture of the D-PHY starts at the next byte
+        clock; the LOG (the controller's) at once since step 7 (its capture runs on csi_clk;
+        up to step 6 on the byte clock, which made no difference to what it logs: packets
+        only come with a byte clock)."""
         cap.armed, cap.done, cap.pending = True, False, True
         cap.mode, cap.started, cap.count, cap.wptr, cap.burst = mode, False, 0, 0, None
-        if self.clk_running and self.byte_clock_ok():
+        if cap is self.log:
+            cap.pending = False
+            cap.started = not (mode & 2)
+        elif self.clk_running and self.byte_clock_ok():
             self.byte_clock()
 
     def stop_line(self, b):
@@ -1820,13 +1838,17 @@ class Ppi:
             (lane skew) plus, where the model does not use the exact skew rule, 0..2
             (bow; std 0..1) cycles of PHY offset; every lane delivers the bytes of the
             last merged word, then a trail (bow 8 .. trail bound - 2 bytes, std 0..3);
-            the byte clock runs >= 4 edges (post) after the one at which the last
-            RxActiveHS falls and >= EXACT edges (std: EXACT + 1, the wrapper's delay)
-            after the one of the last packet byte when the model says the
-            event times are exact (contclk, or CLK-POST >= the D-PHY minimum), else it
-            stops between the last needed byte and 3 cycles after the fall, the rest
-            (RxActiveHS falls 1..2 cycles into the next run, bow: ErrSotSyncHS one
-            later) happening when it runs again
+            the byte clock runs >= POST edges (post; std: POST + 2, the wrapper holds
+            RxActiveHS 2 cycles) after the one at which the last RxActiveHS falls and
+            >= EXACT edges (std: EXACT + 1, the wrapper's delay) after the one of the
+            last packet byte when the model says the event times are exact (contclk, or
+            CLK-POST >= the D-PHY minimum), else it stops between the last needed byte
+            and 3 cycles after the fall, or (early) exactly EXACT (+ 1) edges after the
+            last packet byte, the rest (RxActiveHS falls 1..2 cycles into the next run,
+            bow: ErrSotSyncHS one later) happening when it runs again. Step 7: POST =
+            2 (the edge that registers the end of the burst, the one that writes it into
+            the lane merge's FIFO), EXACT = 3 (its last word in the FIFO); up to step 6
+            the controller needed 4 and 8
       bow   RxActiveHS from the end of SETTLE (1 cycle of jitter), RxValidHS gaps
             (common to all lanes, or on a lane ahead of the others), RxActiveHS falls
             0..2 cycles before the last trail byte (the aligner's last bytes come
@@ -1837,13 +1859,15 @@ class Ppi:
 
     PRE = (12, 24)
     ZERO = (4, 9)
-    EXACT = 10
+    EXACT = 3
+    POST = 2
 
     def __init__(self, cfg, rx, rnd):
         self.cfg, self.rx, self.r = cfg, rx, rnd
         self.std = cfg["ppi"] == PPI_STD
         self.gap = None          # RxValidHS gap probability per cycle (bow), None: per burst
         self.post = None         # byte clocks after the last fall (exact bursts), None: random
+        self.early = False       # stop right after the packet's last word is in the FIFO
         self.std_trail = (0, 3)  # std: trail bytes per lane
         self.tr_max = rx.garbage_max // cfg["lanes"]
         self.was_running = False
@@ -2010,11 +2034,16 @@ class Ppi:
         tneed = max((cyc[l][need[l] - 1] for l in locked if need[l]), default=max(s0.values()))
         if rx.contclk and rx.clk_running:
             stop = None
-        elif rx.timing_exact():
-            post = self.post if self.post is not None else r.choice([4, 4, 4, 5, 6, 8, 12])
+        elif rx.timing_exact() and not self.early:
+            post = self.post if self.post is not None else \
+                r.choice([0, 0, 0, 1, 2, 6, 10]) + self.POST + 2 * int(std)
             stop = max(maxf + 1 + post, tlast + 1 + self.EXACT + int(std))
         else:
-            stop = r.randint(tneed + 1, maxf + 4)
+            # early: the clock stops at the edge that writes the packet's last word into the
+            # lane merge's FIFO (before the last RxActiveHS falls: the end of the burst comes
+            # with the next run)
+            stop = tlast + 1 + self.EXACT + int(std) if self.early else \
+                r.randint(tneed + 1, maxf + 4)
             for ln in lanes.values():          # the rest when the clock runs again
                 if ln["a"] >= 0 and ln["f"] > stop:
                     ln["f"] = stop + r.randint(1, 2)
@@ -2104,6 +2133,7 @@ class Gen:
         self.marks = 0
         self.queued = False            # TX items queued since the last wait
         self.dirty = False             # bursts since the last clock-only burst
+        self.clk_sync = True           # sync() runs a clock-only burst after bursts
         # PPI bench: the PPI rendering of every TX item follows it (own random stream,
         # so that the TX items of a seed do not depend on the rendering)
         self.ppi = Ppi(cfg, self.rx, random.Random(f"ppi/{cfg['ppi']}/{cfg['test']}/{cfg['seed']}/"
@@ -2134,12 +2164,16 @@ class Gen:
     def sync(self, now=False):
         """Register accesses act on the state after the queued TX items,
         unless `now` (deliberately during an item). After bursts, a clock-only
-        burst lets the receiver finish work the stopped byte clock deferred."""
+        burst lets the receiver finish work the stopped byte clock deferred
+        (since step 7 only the end of a burst whose clock stopped before its
+        RxActiveHS fell); not while clk_sync is off (test tclkpost: what a burst
+        does must be done when its byte clock stops)."""
         if now:
             return
-        if self.dirty and not self.rx.contclk:
+        if self.dirty and not self.rx.contclk and self.clk_sync:
             self.emit("clkburst 800")
-        self.dirty = False
+        if self.clk_sync or self.rx.contclk:
+            self.dirty = False
         if self.queued:
             self.emit("wait")
 
@@ -2693,8 +2727,11 @@ def gen_rxoff(g):
     ERR_STATUS or IRQ_STATUS bit; (2) CTRL cleared (rx_off() of the driver) at a sweep of
     times from the start of a line burst, through its sync search: no SoT error; (3) RX_EN
     set at a sweep of times inside a burst with a bad sync, after RxActiveHS rose on every
-    lane: the burst is not the controller's, no SoT error; (4) RX on: a bad sync and a
-    deskew burst count again. Whole receiver only (the D-PHY's aligners)."""
+    lane, and inside a deskew burst after its RxSkewCalHS rose (a level until the burst ends):
+    the burst is not the controller's, no SoT error, no deskew count; (4) RX on: a bad sync
+    and a deskew burst count again. (Since step 7 the gated events go through the lane
+    merge's FIFO, whose write side is in reset while RX is off: (1) holds without the gate
+    too, (3) needs it.) Whole receiver only (the D-PHY's aligners)."""
     if g.ppi:
         raise SystemExit("test rxoff needs the D-PHY (no --ppi)")
     g.phy_up()
@@ -2758,6 +2795,17 @@ def gen_rxoff(g):
         g.wr("CTRL", ctrl, now=True)
         g.emit("wait")
         g.rd("CNT_SOT")
+        g.rd("ERR_STATUS")
+        g.wr("CTRL", off)
+    lanes = g.cfg["lanes"]
+    for d in range(0, 200, 20):                      # (3) RX on in a deskew burst
+        clear()
+        n = burst(g.deskew_burst, stop=True)
+        g.emit(f"waitbyte {n} {4 * lanes}")          # past the FFFFh: RxSkewCalHS high
+        g.emit(f"delay {d}")
+        g.wr("CTRL", ctrl, now=True)
+        g.emit("wait")
+        g.rd("CNT_EXT")
         g.rd("ERR_STATUS")
         g.wr("CTRL", off)
     g.wr("DPHY_CMD", DCMD_CNT_CLR)                   # HS entries of (2): stop dependent
@@ -3671,6 +3719,121 @@ def gen_clkstop(g):
     g.dump(log=True)
 
 
+def gen_tclkpost(g):
+    """T_CLK-POST short: the byte clock stops almost right after a burst ends (step 7 of
+    docs/ip/mipi_rx_arch.md, section 10: the controller works on its own clock csi_clk, the
+    byte clock only carries a burst into the lane merge's FIFO). The register reads and the
+    segment ends after each frame come without a clock-only burst (Gen.clk_sync off): what a
+    burst does must be done once its byte clock has stopped, and the frame end record
+    (IRQ_STATUS.FE, with irq_o: invariant irq_fe of the testbenches) must fall in its own
+    segment. Up to step 6 the packet layer ran on the byte clock and needed 8 edges after a
+    packet's last byte: there this test fails.
+    PPI bench (--ppi): segment 1, the byte clock stops at the least the controller needs after
+    the last RxActiveHS falls (Ppi.POST: bow 2 edges, std 4 as the flat wrapper holds
+    RxActiveHS 2 cycles more), std with the packet's last byte right before the fall (trail
+    0..3 bytes): a frame, then one with a sync error, a skew error (2 or 4 lanes), bytes after
+    a packet (EXTRA) and a line cut short (TRUNC at the end of its burst); after each FE:
+    FRAME_INFO, FRAME_SUM, FRAME_ERR, FRAME_TIME, LINE_TIME, LOG_CTRL (a STOP_FE capture,
+    DONE), the counters, ERR_STATUS; then between frames a line cut short, a skew error and a
+    sync error, each the last burst before the counters and ERR_STATUS are read (only the end
+    of a burst reports the first two: its marker must be in the FIFO two edges after the
+    fall; bow: the D-PHY of Bow32 gives ErrSotSyncHS in the cycle after the fall, which must
+    reach the FIFO with that marker, review of step 7). Segment 2, the
+    byte clock stops at the edge that writes
+    a packet's last word into the lane merge's FIFO, before RxActiveHS falls (Ppi.early: the
+    end of every burst comes with the next run): frames of good lines (an error waits for
+    the end of its burst), read the same way.
+    Whole receiver: the transmitter's clock lane stops T_CLK-POST after its data lanes went
+    LP-11, 10 ns (UltraScale+ PHY; 30 ns with the Versal PHY, whose RX FIFOs hold up to 8
+    words more), below what the D-PHY needs to drop RxActiveHS (LATE_EOT: the end of every
+    burst comes with the next one), while the HS-TRAIL still carries a packet's last word
+    into the FIFO: frames of good lines, read as above (FRAME_TIME, LINE_TIME not predicted:
+    CLK-POST below the D-PHY minimum).
+    Interrupt (review of step 7): IRQ_EN has FE only, and after each frame's FE burst
+    (irqfe) the bench waits until the PHY is idle (the byte clock stopped): irq_o must be high
+    within 2 us (invariant irq_stop), and a rise after the last byte clock edge is a
+    measurement of the interrupt with the byte clock stopped (irq_stop_n). The PPI's segment
+    2 stops the clock before the FE is through, so each of its frames is one (irq_stop_n =
+    1); elsewhere the clock may run on until the FE is through (irq_o rose before its last
+    edge, nothing to measure)."""
+    lanes, ppi = g.cfg["lanes"], g.ppi
+    g.phy_up()
+    on(g)
+    g.wr("IRQ_EN", IRQ_FE)                           # irq_o = IRQ_STATUS.FE (irqfe below)
+    g.emit("tready 100")
+    wide = extra_px(extra_thr(g.rx))
+    # a line cut short needs more bytes than any trail gives
+    n = 120 + (0 if g.rx.garbage_max <= EXTRA_RESET - 10 else 4 * ((g.rx.garbage_max + 3) // 4))
+    fnum = 0
+
+    def frame_read(h, errors=False):
+        """A frame of h 32 px lines (with the errors of segment 1), then the reads."""
+        nonlocal fnum
+        fnum += 1
+        g.wr("LOG_CTRL", 1 | 4)                      # STOP_FE: DONE with this FE
+        g.send(g.short(0, DT_FS, fnum))
+        for y in range(h):
+            g.send(g.line(0, DT_RAW10, 32))
+            if errors and y == 0:
+                send_lost(g, lambda: g.line(0, DT_RAW10, 32), "sync")
+                if lanes >= 2:
+                    send_lost(g, lambda: g.line(0, DT_RAW10, 32), "skew")
+                b = g.line(0, DT_RAW10, 32)
+                b.extra = g.line(0, DT_RAW10, wide).packet()  # EXTRA, the next line tuser[1]
+                g.send(b)
+                send_lost(g, lambda: g.line(0, DT_RAW10, 4 * (n // 5)), "trunc")
+        g.send(g.short(0, DT_FE, fnum))
+        # irq_o after the FE with the byte clock stopped (review of step 7): measured when the
+        # clock stops before the FE is through (PPI segment 2: right after its last word is
+        # in the FIFO), else (the clock ran on until the FE was through) nothing to measure
+        g.emit("irqfe")
+        g.emit(f"expect irq_stop_n {'=1' if ppi and ppi.early else 'any'}")
+        for name in ("FRAME_INFO", "FRAME_SUM", "FRAME_ERR", "LOG_CTRL", "CNT_FRAME", "CNT_LINE",
+                     "LINE_INFO", "FRAME_TIME", "LINE_TIME", "CNT_SOT", "CNT_CRC", "CNT_EXT",
+                     "CNT_MISC", "ERR_STATUS", "CNT_PKT"):
+            g.rd(name)
+        g.mark()
+        g.wr("ERR_STATUS", ERR_ALL)
+
+    g.clk_sync = False
+    if ppi:
+        ppi.post = Ppi.POST + 2 * int(ppi.std)       # segment 1: the least after the fall
+        frame_read(3)
+        frame_read(3, errors=True)
+        # what only the end of a burst reports, as the last burst before the reads: a line cut
+        # short (TRUNC), a skew error (2 or 4 lanes); between frames
+        send_lost(g, lambda: g.line(0, DT_RAW10, 4 * (n // 5)), "trunc")
+        for name in ("CNT_CRC", "ERR_STATUS", "CNT_LINE"):
+            g.rd(name)
+        if lanes >= 2:
+            send_lost(g, lambda: g.line(0, DT_RAW10, 32), "skew")
+            for name in ("CNT_MISC", "ERR_STATUS", "CNT_CRC"):
+                g.rd(name)
+        # a sync error as the last burst before CNT_SOT and ERR_STATUS are read (bow: its
+        # ErrSotSyncHS comes in the cycle after the fall and must be in the FIFO two edges
+        # after it, with the end of the burst; std: where the sync would be)
+        send_lost(g, lambda: g.line(0, DT_RAW10, 32), "sync")
+        for name in ("CNT_SOT",) + (("CNT_SOT23",) if g.cfg["dut_lanes"] == 4 else ()) + \
+                    ("ERR_STATUS", "CNT_LINE"):
+            g.rd(name)
+        g.mark()
+        g.wr("ERR_STATUS", ERR_ALL)
+        ppi.post = None
+        ppi.early = g.rx.exact_early = True          # segment 2: stop after the last word
+        frame_read(4)
+        frame_read(2)
+        ppi.early = g.rx.exact_early = False
+    else:
+        g.emit(f"knob t_clk_post {30 if g.cfg.get('versal') else 10}")
+        frame_read(3)
+        frame_read(4)
+        g.sync()
+        g.emit("knob t_clk_post 120")
+    g.clk_sync = True
+    frame(g, 0, DT_RAW10, 32, 2, fnum=fnum + 1)
+    g.dump(log=True)
+
+
 def gen_gaps(g):
     """PPI, D-PHY of Bow32: RxValidHS gaps anywhere in the bursts, as from the FIFOs of
     the Versal XPHY (in a cycle on every lane, or on a lane ahead of the others), gap
@@ -3757,12 +3920,12 @@ TESTS = {"random": gen_random, "lp": gen_lp, "watchdog": gen_watchdog, "clk": ge
          "skew": gen_skew, "dly": gen_dly, "deskew": gen_deskew, "extra": gen_extra,
          "loss": gen_loss, "ovf2": gen_ovf2, "ovf8": gen_ovf8, "be": gen_be,
          "clkstop": gen_clkstop, "gaps": gen_gaps, "lpmask": gen_lpmask, "rxoff": gen_rxoff,
-         "raw": gen_raw}
+         "raw": gen_raw, "tclkpost": gen_tclkpost}
 # The tests of the controller alone (--ppi): not those of the D-PHY (LP state machines,
 # watchdog, clock lane gate, byte clock meter, input delays); gaps only in the timing of the
 # D-PHY of Bow32 (a standard PHY has no gaps; lpmask has its mask edge cases there only)
 PPI_TESTS = ("random", "cmd", "ovf", "stop", "skew", "deskew", "extra", "loss", "ovf2", "ovf8",
-             "be", "clkstop", "gaps", "lpmask")
+             "be", "clkstop", "tclkpost", "gaps", "lpmask")
 PPI_BOW_ONLY = ("gaps",)
 
 
@@ -3966,12 +4129,17 @@ def check(d):
     got_fe = [f for f in fes if f[0] not in rx.blind_segs]
     if len(exp_fe) != len(got_fe):
         errs.append(f"frame ends: {len(got_fe)} recorded, expected {len(exp_fe)}")
-    for n, (e, (_, info, fsum, ferr)) in enumerate(zip(exp_fe, got_fe)):
+    for n, (e, (seg, info, fsum, ferr)) in enumerate(zip(exp_fe, got_fe)):
         esum = sums.get(e["id"], 0) if e["id"] in rx.fuzzy_frames else e["sum"]
         if info != e["info"] or (esum is not None and fsum != esum) or ferr != e["err"]:
             errs.append(f"frame end {n}: FRAME_INFO {info:08x} FRAME_SUM {fsum:08x} FRAME_ERR "
                         f"{ferr:03x}, expected {e['info']:08x} "
                         f"{'-' if esum is None else f'{esum:08x}'} {e['err']:03x}")
+        # the record (IRQ_STATUS.FE) within the segment of its FE: a segment ends after a wait
+        # (since step 7 also without a clock-only burst before it, test tclkpost)
+        if seg != e["seg"]:
+            errs.append(f"frame end {n}: recorded in segment {seg}, its FE is in segment "
+                        f"{e['seg']} (IRQ_STATUS.FE late)")
 
     for seg, vals in sorted(inv.items()):
         exp = rx.seg_expect.get(seg, {})
@@ -3986,6 +4154,8 @@ def check(d):
                 errs.append(f"segment {seg}: {name} = 0, expected > 0")
             elif cond.startswith("=") and v != int(cond[1:]):
                 errs.append(f"segment {seg}: {name} = {v}, expected {cond[1:]}")
+            # (cond "any": a count that is not checked, e.g. irq_stop_n where the byte clock
+            # may run until the FE is through)
     npx = sum(1 for e in out if e[0] == "px")
     return errs, f"{npx} pixels, {len(rds)} reads, {len(got_fe)} frames"
 

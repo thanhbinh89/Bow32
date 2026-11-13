@@ -258,6 +258,17 @@ int bow_csi2rx_start(uint32_t lanes, uint32_t dt, uint32_t lane_rate);
 /* What a return code of bow_csi2rx_start() means, for an error line. */
 const char *bow_csi2rx_strerror(int r);
 
+/* The clock rule of the controller (step 7 of docs/ip/mipi_rx_arch.md): its lane merge FIFO is
+ * read once per cycle of the controller's clock (csi_clk, INFO[15:8] MHz: vid_clk on the
+ * FPGAs) and written up to once per byte clock, so the byte clock must not be above it; else
+ * words are dropped and their bursts end with ERR_STATUS.SKEW (CNT_MISC), which looks like
+ * lane skew. byte_hz: a byte clock in Hz (lane rate / 8, or the D-PHY's meter,
+ * bow_dphy_rx_byteclk_hz(): a lower bound when the clock lane is gated per packet). False
+ * when it is above the controller's clock; true for 0 (nothing measured) and when INFO
+ * saturates (255 MHz or more). bow_csi2rx_start() prints a warning for its lane rate,
+ * bow_csi2rx_print_status() for the measured byte clock; csi2_test's timing check fails. */
+bool bow_csi2rx_byte_clock_ok(uint32_t byte_hz);
+
 /* Call AFTER the sensor stream-off: waits until the current frame has ended
  * (FE, or IN_FRAME = 0 and no new burst for 2 line times; at most timeout_ms)
  * and the clock lane state machine has closed the byte clock gate (the
@@ -351,7 +362,8 @@ void bow_csi2rx_print_log(const uint32_t *e, uint32_t n);
  * frames without an accepted line), counters, frame/line info (FRAME_ERR
  * of the last frame), timing and PHY state (the D-PHY's registers). The byte
  * clock is measured over one frame period + 2 ms (a non-continuous clock may
- * stop for the whole vertical blanking). The per lane lists (sot, LP state,
+ * stop for the whole vertical blanking); a warning line when it is above the
+ * controller's clock (bow_csi2rx_byte_clock_ok()). The per lane lists (sot, LP state,
  * bursts, delay) have 4 values while 4 lanes are in use (CTRL.LANES4), else
  * 2 as before; while the receiver is off (CTRL.PHY_EN = 0) as many as the
  * build has (INFO: 4 on the Huins camera build). delay: as

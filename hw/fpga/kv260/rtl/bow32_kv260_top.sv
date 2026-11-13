@@ -75,7 +75,8 @@ module bow32_kv260_top #(
     .FlashInitFile (FlashInitFile),
     .IbexRegFile   (ibex_pkg::RegFileFPGA),
     .CsiPhy        (1'b0),
-    .VidClkHz      (SysClkHz)
+    .VidClkHz      (SysClkHz),
+    .CsiByteClkHz  (SysClkHz)      // no PHY: dphy_hs_byte_clk_i tied to 0, no byte clock
   ) u_soc (
     .clk_i        (clk_sys),
     .rst_ni       (pl_resetn0),

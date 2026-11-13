@@ -44,6 +44,9 @@ module bow32_kv260_cam_top #(
   localparam int unsigned SysClkHz = 50_000_000;
   localparam int unsigned VidClkHz = 200_000_000;   // clk_out1 of tcl/cam_bd.tcl
   localparam int unsigned CsiLanes = 2;
+  // the highest byte clock of the D-PHY: the IMX219 at 912 Mbit/s per lane (constr/kv260_cam.xdc,
+  // dphy_hs_period), at most VidClkHz (the receiver's elaboration check)
+  localparam int unsigned CsiByteClkHz = 114_000_000;
 
   // ---------------------------------------------------------------------------
   // Block design: PS, clocks, resets
@@ -116,7 +119,8 @@ module bow32_kv260_cam_top #(
     .IbexRegFile   (ibex_pkg::RegFileFPGA),
     .CsiLanes      (CsiLanes),
     .CsiPhy        (1'b1),
-    .VidClkHz      (VidClkHz)
+    .VidClkHz      (VidClkHz),
+    .CsiByteClkHz  (CsiByteClkHz)
   ) u_soc (
     .clk_i        (clk_sys),
     .rst_ni       (rst_sys_n),

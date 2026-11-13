@@ -8,10 +8,12 @@
 // docs/ip/mipi_rx_arch.md, section 10); the PHY I/O contract is described there.
 //
 //   PPI ppi_hs_i (RxActiveHS, RxValidHS, RxDataHS, RxSyncHS of each lane, byte domain)
-//     -> bow_csi2_lane_merge -> bow_csi2_packet -> bow_csi2_unpack
-//     -> bow_fifo_async (byte -> video clock) -> bow_csi2rx_out -> m_axis
+//     -> bow_csi2_lane_merge (two clock FIFO: byte clock -> csi_clk_i, with the end of burst
+//        marker and the aligner events in order with the words)
+//     -> bow_csi2_packet -> bow_csi2_unpack -> bow_fifo_ram (pixel FIFO) -> bow_csi2rx_out
+//     -> m_axis, all on csi_clk_i
 //   PPI ppi_lp_i, ppi_lp_clk_i (ErrControl, ErrControlClk) -> ERR_STATUS.LP and the lost
-//     burst marking (lpl_*)
+//     burst marking (lpl_*), on csi_clk_i
 //   bow_csi2rx_regs (u_regs) -> enable_o, enable_clk_o (PPI Enable, EnableClk)
 //
 // Lanes = 1, 2 or 4 data lanes (CTRL.LANES / LANES4 select 1, 2 or 4 of
@@ -30,11 +32,21 @@
 // PPI (v1.x, bow_ppi_pkg; step 6 of docs/ip/mipi_rx_arch.md, section 10): the byte domain
 // runs on rx_byte_clk_hs_i (RxByteClkHS). The lp domain signals belong to the PHY's lp clock;
 // ErrControl / ErrControlClk are 2 bit gray counters there (section 4.11 of the spec; v1: one
-// cycle pulses of vid_clk_i), sampled here on vid_clk_i (bow_ppi_err_rx, u_lperr): every
-// change is at least one LP error. The PHY steps a counter at most once every 16 of its lp
-// cycles, so nothing is lost while vid_clk_i >= lp_clk / 32: PpiLpClkHz (the PHY's lp clock
+// cycle pulses of the controller's clock), sampled here on csi_clk_i (bow_ppi_err_rx, u_lperr):
+// every change is at least one LP error. The PHY steps a counter at most once every 16 of its
+// lp cycles, so nothing is lost while csi_clk_i >= lp_clk / 32: PpiLpClkHz (the PHY's lp clock
 // frequency) has no default, every instantiation states it, and elaboration fails above 32 x
-// PhyClkHz (bow_mipi_rx runs the D-PHY's lp_clk_i on vid_clk_i itself).
+// PhyClkHz (bow_mipi_rx runs the D-PHY's lp_clk_i on the controller's clock itself).
+// Since step 7 the controller works on its own continuous clock csi_clk_i (csi_clk of the
+// spec, section 6.5; vid_clk on the FPGAs): only the lane merge runs on the byte clock, and a
+// two clock FIFO right after it carries the words, the end of every burst and the aligner
+// events in order to csi_clk_i. The FIFO is read one entry per csi_clk_i cycle and written at
+// most one per byte clock: csi_clk_i must be at least the PHY's highest RxByteClkHS.
+// PpiByteClkHz (that byte clock) has no default either, and elaboration fails above PhyClkHz
+// (bow_csi2_lane_merge: the FIFO depth and this rule). The byte clock is needed during a
+// burst and for two edges after the edge at which the last RxActiveHS falls (the end of the
+// burst then is in the FIFO); everything else (packets, FS / FE, lines, pixels, interrupts,
+// counters, FRAME_TIME / LINE_TIME, LOG) happens on csi_clk_i without it.
 // Used here: RxActiveHS, RxValidHS, RxDataHS, RxSyncHS, ErrSotSyncHS of every lane,
 // RxSkewCalHS of lane 0 (its rising edge: a level from the deskew recognition to the end of
 // the burst in v1.x, a pulse in v1, both count once), ErrControl of every lane and
@@ -45,25 +57,29 @@
 //
 // Clock domains:
 //   clk_i            CPU: registers, counters, LOG read (bow_csi2rx_regs)
-//   vid_clk_i        video: the PPI lp error counters' samples, the LP error release, the
-//                    lost burst request (lpl_*) and the pixel output (in bow_mipi_rx also the
-//                    D-PHY's lp clock)
+//   csi_clk_i        the controller's continuous clock (step 7; vid_clk_i up to step 6, which
+//                    in bow_mipi_rx it still is, also the D-PHY's lp clock): the read side of
+//                    the lane merge's FIFO, packet layer, unpack, pixel FIFO, output, LOG
+//                    capture, the PPI lp error counters' samples, the LP error release and
+//                    the lost burst marking (lpl_*)
 //   rx_byte_clk_hs_i byte clock = HS clock / 4, runs only while the clock lane is in HS
-//                    (non-continuous clock: HS bursts only)
+//                    (non-continuous clock: HS bursts only): the lane merge and the write side
+//                    of its FIFO, the gate of the aligner events (stale_q); tied off without
+//                    a PHY (HasPhy = 0), the lane merge then runs on csi_clk_i, without input
 // Resets (asynchronous assertion, synchronous release):
-//   vrst_n      video hard reset (vid_rst_ni & rst_ni)
-//   brst_n      byte hard reset: event toggles, command handshakes, LOG capture
-//   drst_n      byte datapath (lane merge .. FIFO write side) and
-//   vdrst_n     video datapath (FIFO read side, output): asserted while RX
-//               is off (rx_on = CTRL.PHY_EN & RX_EN, a CPU flop), so a stop
-//               drops partial packets, lines, the frame state and the FIFO.
-//               drst_n is released by the first byte clocks of a burst. It also
-//               gates the aligner events of the PPI (ErrSotSyncHS, RxSkewCalHS:
-//               stale_q, below), since step 4 the aligners are not reset with it.
-// Clock domain crossings: configuration through one bow_sync per bit
-// (quasi-static), events through one bow_cdc_pulse per kind, commands to
-// the byte domain as gray request / ack counters, pixels through
-// bow_fifo_async. See bow_csi2rx_regs for the register map.
+//   crst_n      csi hard reset (csi_rst_ni & rst_ni): event toggles, LOG capture
+//   brst_n      byte hard reset: the configuration of the lane merge
+//   drst_n      byte datapath (lane merge, FIFO write side) and
+//   cdrst_n     csi datapath (FIFO read side .. output): asserted while RX is off
+//               (rx_on = CTRL.PHY_EN & RX_EN, a CPU flop), so a stop drops partial
+//               packets, lines, the frame state and the FIFOs. drst_n is released by
+//               the first byte clocks of a burst. It also gates the aligner events of
+//               the PPI (ErrSotSyncHS, RxSkewCalHS: stale_q, below), since step 4 the
+//               aligners are not reset with it.
+// Clock domain crossings: configuration through one bow_sync per bit (quasi-static), the
+// lane merge's words, ends of burst and aligner events through its two clock FIFO (gray
+// pointers), events to the CPU through one bow_cdc_pulse per kind, the LOG commands as gray
+// request / ack counters. See bow_csi2rx_regs for the register map.
 //
 // xsim 2025.2 (hw/fpga/common/dv) mis-simulates "q[l] <= 0; if (c) q[l] <= 1;"
 // in a loop of an always_ff and indices from constant functions: new
@@ -73,23 +89,26 @@ module bow_csi2rx
   import bow_bus_pkg::*; import bow_csi2rx_pkg::*; import bow_ppi_pkg::*;
 #(
   parameter int unsigned Lanes      = 2,            // physical data lanes: 1, 2 or 4
-  parameter int unsigned PhyClkHz   = 200_000_000,  // vid_clk_i frequency (INFO)
+  parameter int unsigned PhyClkHz   = 200_000_000,  // csi_clk_i frequency (INFO[15:8])
   parameter int unsigned CpuClkHz   = 0,            // clk_i frequency (0: not checked)
-  parameter bit          HasPhy     = 1'b1,         // INFO.PHY: a D-PHY is connected
+  parameter bit          HasPhy     = 1'b1,         // INFO.PHY: a D-PHY is connected (0: no
+                                                    // byte clock, the lane merge on csi_clk_i)
   parameter int unsigned FifoDepth  = 256,          // pixel FIFO entries (4 px each), power of 2
   parameter bit          DphyWin    = 1'b1,         // INFO[6]: the D-PHY's registers are at 0xC00
                                                     // (bow_mipi_rx; 0: a PHY of its own)
-  parameter int unsigned PpiLpClkHz = 0             // the PHY's lp clock (PPI lp domain), no
+  parameter int unsigned PpiLpClkHz = 0,            // the PHY's lp clock (PPI lp domain), no
                                                     // default: at most 32 x PhyClkHz (above)
+  parameter int unsigned PpiByteClkHz = 0           // the PHY's highest RxByteClkHS, no
+                                                    // default: at most PhyClkHz (above)
 ) (
   input  logic                  clk_i,
   input  logic                  rst_ni,
   input  bus_req_t              bus_req_i,
   output bus_rsp_t              bus_rsp_o,
   output logic                  irq_o,
-  input  logic                  vid_clk_i,
-  input  logic                  vid_rst_ni,
-  output logic                  m_axis_tvalid_o,
+  input  logic                  csi_clk_i,        // the controller's clock (vid_clk on the FPGAs)
+  input  logic                  csi_rst_ni,
+  output logic                  m_axis_tvalid_o,  // m_axis: csi_clk_i
   input  logic                  m_axis_tready_i,
   output logic [9:0]            m_axis_tdata_o,
   output logic [1:0]            m_axis_tuser_o,   // [0] start of frame, [1] line error (tlast)
@@ -98,8 +117,8 @@ module bow_csi2rx
   // PPI (bow_ppi_pkg)
   input  logic                  rx_byte_clk_hs_i,     // RxByteClkHS
   input  ppi_hs_t [Lanes-1:0]   ppi_hs_i,             // byte domain
-  input  ppi_lp_t [Lanes-1:0]   ppi_lp_i,             // lp domain (sampled on vid_clk_i)
-  input  ppi_lp_clk_t           ppi_lp_clk_i,         // lp domain (sampled on vid_clk_i)
+  input  ppi_lp_t [Lanes-1:0]   ppi_lp_i,             // lp domain (sampled on csi_clk_i)
+  input  ppi_lp_clk_t           ppi_lp_clk_i,         // lp domain (sampled on csi_clk_i)
   output logic [Lanes-1:0]      enable_o,             // Enable[l] (CPU domain flops)
   output logic                  enable_clk_o,         // EnableClk (CPU domain flop)
   // D-PHY interrupt (bus clock domain level, |(IRQ_STATUS & IRQ_EN) of bow_dphy_rx_regs)
@@ -111,36 +130,55 @@ module bow_csi2rx
   end
 
   // PPI v1.x: the lp domain errors are gray counters of the PHY's lp clock, sampled on
-  // vid_clk_i (see above), which must be at least lp_clk / 32. As below, the initial copy
+  // csi_clk_i (see above), which must be at least lp_clk / 32. As below, the initial copy
   // stops simulations that build with -Wno-fatal.
   if (PpiLpClkHz == 0) begin : g_no_lp_clk
-    $fatal(1, "bow_csi2rx: PpiLpClkHz not set (the PHY's lp clock, at most 32 x vid_clk_i %0d Hz)",
+    $fatal(1, "bow_csi2rx: PpiLpClkHz not set (the PHY's lp clock, at most 32 x csi_clk_i %0d Hz)",
            PhyClkHz);
 `ifndef SYNTHESIS
-    initial $fatal(1, "bow_csi2rx: PpiLpClkHz not set (the PHY's lp clock, at most 32 x vid_clk_i %0d Hz)",
+    initial $fatal(1, "bow_csi2rx: PpiLpClkHz not set (the PHY's lp clock, at most 32 x csi_clk_i %0d Hz)",
                    PhyClkHz);
 `endif
   end else if (64'(PpiLpClkHz) > 64'(PhyClkHz) * 64'd32) begin : g_bad_lp_clk
-    $fatal(1, "bow_csi2rx: PPI lp clock %0d Hz > 32 x vid_clk_i %0d Hz (PPI error counters lap)",
+    $fatal(1, "bow_csi2rx: PPI lp clock %0d Hz > 32 x csi_clk_i %0d Hz (PPI error counters lap)",
            PpiLpClkHz, PhyClkHz);
 `ifndef SYNTHESIS
-    initial $fatal(1, "bow_csi2rx: PPI lp clock %0d Hz > 32 x vid_clk_i %0d Hz (PPI error counters lap)",
+    initial $fatal(1, "bow_csi2rx: PPI lp clock %0d Hz > 32 x csi_clk_i %0d Hz (PPI error counters lap)",
                    PpiLpClkHz, PhyClkHz);
+`endif
+  end
+
+  // Step 7: the two clock FIFO of the lane merge is read one entry per csi_clk_i cycle and
+  // written at most one per byte clock, so csi_clk_i must be at least the PHY's highest
+  // RxByteClkHS (bow_csi2_lane_merge sizes the FIFO for that ratio)
+  if (PpiByteClkHz == 0) begin : g_no_byte_clk
+    $fatal(1, "bow_csi2rx: PpiByteClkHz not set (the PHY's highest byte clock, at most csi_clk_i %0d Hz)",
+           PhyClkHz);
+`ifndef SYNTHESIS
+    initial $fatal(1, "bow_csi2rx: PpiByteClkHz not set (the PHY's highest byte clock, at most csi_clk_i %0d Hz)",
+                   PhyClkHz);
+`endif
+  end else if (PpiByteClkHz > PhyClkHz) begin : g_bad_byte_clk
+    $fatal(1, "bow_csi2rx: PPI byte clock %0d Hz > csi_clk_i %0d Hz (the lane merge FIFO overflows)",
+           PpiByteClkHz, PhyClkHz);
+`ifndef SYNTHESIS
+    initial $fatal(1, "bow_csi2rx: PPI byte clock %0d Hz > csi_clk_i %0d Hz (the lane merge FIFO overflows)",
+                   PpiByteClkHz, PhyClkHz);
 `endif
   end
 
   localparam int unsigned NumPktEv = $bits(csi2_pkt_ev_t);
   localparam int unsigned NumBEv   = NumPktEv + 3 + Lanes;   // packet, skew, deskew, skip, sot per lane
 
-  // The LP error release below (one pulse every 16 video cycles) needs 3 CPU
-  // cycles per pulse: vid_clk_i <= 16/3 x clk_i. The elaboration
+  // The LP error release below (one pulse every 16 csi_clk_i cycles) needs 3 CPU
+  // cycles per pulse: csi_clk_i <= 16/3 x clk_i. The elaboration
   // $fatal stops lint and synthesis, the initial copy stops simulations whose
   // build turns USERFATAL into a warning (-Wno-fatal).
   if ((CpuClkHz != 0) && (64'(PhyClkHz) * 64'd3 > 64'(CpuClkHz) * 64'd16)) begin : g_bad_clk
-    $fatal(1, "bow_csi2rx: vid_clk_i %0d Hz > 16/3 x clk_i %0d Hz (LP event pulses merge)",
+    $fatal(1, "bow_csi2rx: csi_clk_i %0d Hz > 16/3 x clk_i %0d Hz (LP event pulses merge)",
            PhyClkHz, CpuClkHz);
 `ifndef SYNTHESIS
-    initial $fatal(1, "bow_csi2rx: vid_clk_i %0d Hz > 16/3 x clk_i %0d Hz (LP event pulses merge)",
+    initial $fatal(1, "bow_csi2rx: csi_clk_i %0d Hz > 16/3 x clk_i %0d Hz (LP event pulses merge)",
                    PhyClkHz, CpuClkHz);
 `endif
   end
@@ -149,14 +187,14 @@ module bow_csi2rx
   // Resets
   // =========================================================================
   logic rst_src_n, rx_on;
-  logic vrst_n, brst_n, drst_n, vdrst_n;
+  logic crst_n, brst_n, drst_n, cdrst_n;
 
-  assign rst_src_n = vid_rst_ni & rst_ni;
+  assign rst_src_n = csi_rst_ni & rst_ni;
 
-  bow_rst_sync u_vrst (
-    .clk_i  (vid_clk_i),
+  bow_rst_sync u_crst (
+    .clk_i  (csi_clk_i),
     .rst_ni (rst_src_n),
-    .rst_no (vrst_n)
+    .rst_no (crst_n)
   );
 
   bow_rst_sync u_brst (
@@ -171,10 +209,10 @@ module bow_csi2rx
     .rst_no (drst_n)
   );
 
-  bow_rst_sync u_vdrst (
-    .clk_i  (vid_clk_i),
+  bow_rst_sync u_cdrst (
+    .clk_i  (csi_clk_i),
     .rst_ni (rst_src_n & rx_on),
-    .rst_no (vdrst_n)
+    .rst_no (cdrst_n)
   );
 
   // =========================================================================
@@ -251,7 +289,7 @@ module bow_csi2rx
 
   // lp domain: ErrControl of every data lane and ErrControlClk, gray counters as the D-PHY
   // sends them (masked there by the lane's synchronised Enable and, for the clock lane, by
-  // CTRL.CLK_CONT), sampled on vid_clk_i (u_lperr: a change is at least one error). Their
+  // CTRL.CLK_CONT), sampled on csi_clk_i (u_lperr: a change is at least one error). Their
   // OR sets ERR_STATUS.LP and marks a lost burst.
   logic [Lanes:0][1:0] lperr_gray;
   logic [Lanes:0]      lperr_ev;
@@ -265,8 +303,8 @@ module bow_csi2rx
   bow_ppi_err_rx #(
     .N (Lanes + 1)
   ) u_lperr (
-    .clk_i   (vid_clk_i),
-    .rst_ni  (vrst_n),
+    .clk_i   (csi_clk_i),
+    .rst_ni  (crst_n),
     .gray_i  (lperr_gray),
     .ev_o    (lperr_ev),
     .steps_o ()
@@ -274,16 +312,16 @@ module bow_csi2rx
 
   assign lp_err = |lperr_ev;
 
-  // LP errors -> CPU (ERR_STATUS.LP). Released at most every 16 video cycles, so the pulse
-  // synchroniser never merges two pulses (needs vid_clk_i <= 16/3 x clk_i, checked with
+  // LP errors -> CPU (ERR_STATUS.LP). Released at most every 16 csi_clk_i cycles, so the
+  // pulse synchroniser never merges two pulses (needs csi_clk_i <= 16/3 x clk_i, checked with
   // CpuClkHz); real D-PHY sequences are much slower (T_LPX >= 50 ns per LP state).
   logic lp_pend_q, lp_fire, lp_sys;
   logic [3:0] vdiv_q;
 
   assign lp_fire = (vdiv_q == 4'd0) && lp_pend_q;
 
-  always_ff @(posedge vid_clk_i or negedge vrst_n) begin
-    if (!vrst_n) begin
+  always_ff @(posedge csi_clk_i or negedge crst_n) begin
+    if (!crst_n) begin
       vdiv_q    <= '0;
       lp_pend_q <= 1'b0;
     end else begin
@@ -292,29 +330,9 @@ module bow_csi2rx
     end
   end
 
-  // HS entries refused at the LP level (lpl_ev: an LP error that reached the controller)
-  // lose a burst that the packet layer never sees. A request toggle tells the byte domain,
-  // which counts it as a lost burst at the next packet start (drop of the unpacker, only
-  // inside a frame). Requests while one is pending merge into it.
-  logic lpl_ev, lpl_req_q, lpl_ack_s, lpl_ack_q, lpl_req_s, lpl_pend_q;
-
-  assign lpl_ev = lp_err;
-
-  always_ff @(posedge vid_clk_i or negedge vrst_n) begin
-    if (!vrst_n)                                   lpl_req_q <= 1'b0;
-    else if (lpl_ev && (lpl_req_q == lpl_ack_s))   lpl_req_q <= ~lpl_req_q;
-  end
-
-  bow_sync u_sync_lpl_ack (
-    .clk_i  (vid_clk_i),
-    .rst_ni (vrst_n),
-    .d_i    (lpl_ack_q),
-    .q_o    (lpl_ack_s)
-  );
-
   bow_cdc_pulse u_cdc_lp (
-    .src_clk_i   (vid_clk_i),
-    .src_rst_ni  (vrst_n),
+    .src_clk_i   (csi_clk_i),
+    .src_rst_ni  (crst_n),
     .src_pulse_i (lp_fire),
     .dst_clk_i   (clk_i),
     .dst_rst_ni  (rst_ni),
@@ -322,58 +340,127 @@ module bow_csi2rx
   );
 
   // =========================================================================
-  // Byte domain: aligned bytes -> packets -> pixel groups
+  // Byte domain: aligned bytes -> lane merge -> two clock FIFO
   // =========================================================================
-  logic                  lanes2, lanes4, vc_any;
-  logic [1:0]            vc;
-  logic [5:0]            dt;
-  logic [7:0]            extra;
+  // The lane merge's configuration (CTRL.LANES, LANES4; quasi-static: changed only while
+  // RX_EN = 0, when the datapath is in reset)
+  logic mlanes2, mlanes4;
 
   bow_sync_bus #(
-    .Width (19)
-  ) u_sync_bcfg (
+    .Width (2)
+  ) u_sync_mcfg (
     .clk_i  (rx_byte_clk_hs_i),
     .rst_ni (brst_n),
-    .d_i    ({cfg.lanes2, cfg.lanes4, cfg.vc_any, cfg.vc, cfg.dt, cfg.extra}),
-    .q_o    ({lanes2, lanes4, vc_any, vc, dt, extra})
+    .d_i    ({cfg.lanes2, cfg.lanes4}),
+    .q_o    ({mlanes2, mlanes4})
   );
 
-  // LP level loss request (see above): acknowledged as soon as it is seen,
-  // pending until the next packet start
-  bow_sync u_sync_lpl_req (
-    .clk_i  (rx_byte_clk_hs_i),
-    .rst_ni (brst_n),
-    .d_i    (lpl_req_q),
-    .q_o    (lpl_req_s)
-  );
+  // The aligner events of the PPI (ErrSotSyncHS of every lane, RxSkewCalHS of lane 0) count
+  // only for a burst the controller saw start: not while the datapath is in reset (drst_n:
+  // RX off, asserted at once when CTRL clears RX_EN or PHY_EN, before RxActiveHS can fall),
+  // and not for the burst a lane was already in (RxActiveHS high) when drst_n was released,
+  // which the lane merge does not take either. Up to step 3 drst_n reset the aligners; since
+  // step 4 they have the D-PHY's own reset and keep running while RX is off, and this gate
+  // keeps CNT_SOT, ERR_STATUS.SOT, CNT_EXT[31:16] and IRQ_STATUS.ERR as they were: none for
+  // bursts while RX_EN = 0 and PHY_EN = 1, none for the burst in progress when RX comes on,
+  // no SoT error for a burst cut by a stop in its sync search. A stop ends the clock lane's
+  // HS state too (the same Enable), so the byte clock usually stops before RxActiveHS of the
+  // cut burst falls in this domain: it falls, and the sync error comes, with the first byte
+  // clocks of the next burst, after a restart released drst_n (and cleared the counters),
+  // on a lane that was still high at the release. stale_q[l]: set by drst_n, cleared one
+  // cycle after RxActiveHS of lane l was seen low (ErrSotSyncHS of a burst comes in the
+  // cycle after its RxActiveHS fell). A PHY event without RxActiveHS (a standard PHY,
+  // section 5.5 of the spec) counts from the second cycle after the release.
+  // RxSkewCalHS counts at its rising edge (dsk_last_q): one per deskew burst, a pulse (v1,
+  // a standard PHY) or a level until the burst ends (the D-PHY of Bow32 since step 6).
+  // Since step 7 the gated events go through the lane merge's FIFO in order with the words
+  // and ends of burst (the lost burst marking of the packet layer needs that order), to the
+  // counters and to the drop of the unpacker on csi_clk_i. The FIFO's write side is reset with
+  // drst_n as well, so the events while RX is off stop there too; the gate is still what keeps
+  // out the burst in progress when RX comes on (DV rxoff).
+  logic [Lanes-1:0] arm_lo_q, stale_q, sot_ev;
+  logic             dsk_ev, dsk_last_q;
 
-  always_ff @(posedge rx_byte_clk_hs_i or negedge brst_n) begin
-    if (!brst_n) lpl_ack_q <= 1'b0;
-    else         lpl_ack_q <= lpl_req_s;
+  always_ff @(posedge rx_byte_clk_hs_i or negedge drst_n) begin
+    if (!drst_n) begin
+      arm_lo_q   <= '0;
+      stale_q    <= '1;
+      dsk_last_q <= 1'b0;
+    end else begin
+      arm_lo_q   <= ~arm;
+      stale_q    <= stale_q & ~arm_lo_q;
+      dsk_last_q <= al_deskew[0];
+    end
   end
 
-  logic                  lm_valid, lm_sop, lm_eob, lm_skew;
+  assign sot_ev = al_sync_err & ~stale_q;
+  assign dsk_ev = al_deskew[0] & ~dsk_last_q & ~stale_q[0];
+
+  // The lane merge (byte domain) and its two clock FIFO: from here on csi_clk_i. Without a
+  // PHY (HasPhy = 0: bow32_top's CsiPhy, the builds without a camera) the byte clock is tied
+  // off, and the lane merge runs on csi_clk_i, reset with the csi datapath and without
+  // input, so that no flop is left on a constant clock: on the byte clock, the DONT_TOUCH
+  // gray write pointer of its FIFO (bow_fifo_async) kept the write side's pointer flops and
+  // drst_n there, and check_timing found a constant clock at their pins (the Huins RAM card
+  // build; review of step 7 of docs/ip/mipi_rx_arch.md).
+  logic                  lm_valid, lm_sop, lm_eob, lm_skew, lm_dsk;
   logic [Lanes-1:0][7:0] lm_data;
-  logic [2:0]            lm_nbytes;
+  logic [Lanes-1:0]      lm_sot;
+  logic                  lm_clk, lm_rst_n;
+
+  if (HasPhy) begin : g_merge_byte_clk
+    assign lm_clk   = rx_byte_clk_hs_i;
+    assign lm_rst_n = drst_n;
+  end else begin : g_merge_csi_clk
+    assign lm_clk   = csi_clk_i;
+    assign lm_rst_n = cdrst_n;
+  end
 
   bow_csi2_lane_merge #(
     .Lanes (Lanes)
   ) u_lane_merge (
-    .clk_i     (rx_byte_clk_hs_i),
-    .rst_ni    (drst_n),
-    .lanes2_i  (lanes2),
-    .lanes4_i  (lanes4),
-    .arm_i     (arm),
-    .valid_i   (al_valid),
-    .data_i    (al_data),
-    .sot_i     (al_sot),
-    .valid_o   (lm_valid),
-    .data_o    (lm_data),
-    .nbytes_o  (lm_nbytes),
-    .sop_o     (lm_sop),
-    .eob_o     (lm_eob),
-    .ev_skew_o (lm_skew)
+    .clk_i      (lm_clk),
+    .rst_ni     (lm_rst_n),
+    .lanes2_i   (HasPhy && mlanes2),
+    .lanes4_i   (HasPhy && mlanes4),
+    .arm_i      (HasPhy ? arm : '0),
+    .valid_i    (HasPhy ? al_valid : '0),
+    .data_i     (HasPhy ? al_data : '0),
+    .sot_i      (HasPhy ? al_sot : '0),
+    .ev_sot_i   (HasPhy ? sot_ev : '0),
+    .ev_dsk_i   (HasPhy && dsk_ev),
+    .csi_clk_i,
+    .csi_rst_ni (cdrst_n),
+    .valid_o    (lm_valid),
+    .data_o     (lm_data),
+    .sop_o      (lm_sop),
+    .eob_o      (lm_eob),
+    .ev_skew_o  (lm_skew),
+    .ev_sot_o   (lm_sot),
+    .ev_dsk_o   (lm_dsk)
   );
+
+  // =========================================================================
+  // csi_clk_i: packets -> pixel groups -> pixel FIFO -> m_axis
+  // =========================================================================
+  // The packet layer's configuration (quasi-static, as above)
+  logic       lanes2, lanes4, vc_any;
+  logic [1:0] vc;
+  logic [5:0] dt;
+  logic [7:0] extra;
+  logic [2:0] lm_nbytes;
+
+  bow_sync_bus #(
+    .Width (19)
+  ) u_sync_ccfg (
+    .clk_i  (csi_clk_i),
+    .rst_ni (crst_n),
+    .d_i    ({cfg.lanes2, cfg.lanes4, cfg.vc_any, cfg.vc, cfg.dt, cfg.extra}),
+    .q_o    ({lanes2, lanes4, vc_any, vc, dt, extra})
+  );
+
+  // bytes per word of the lane merge: the active lanes (constant while RX is on)
+  assign lm_nbytes = active_lanes(Lanes, lanes2, lanes4);
 
   csi2_pkt_ev_t          pkt_ev;
   logic                  px_sol, px_raw10, px_eol, px_err, px_ovf, fs, fe;
@@ -385,8 +472,8 @@ module bow_csi2rx
   bow_csi2_packet #(
     .Bytes (Lanes)
   ) u_packet (
-    .clk_i         (rx_byte_clk_hs_i),
-    .rst_ni        (drst_n),
+    .clk_i         (csi_clk_i),
+    .rst_ni        (cdrst_n),
     .vc_i          (vc),
     .vc_any_i      (vc_any),
     .dt_i          (dt),
@@ -420,26 +507,34 @@ module bow_csi2rx
 
   logic              grp_push, fifo_full, fifo_afull, fifo_empty, fifo_pop, px_drop, px_skip;
   logic [GroupW-1:0] grp_wdata, grp_rdata;
+  logic              lpl_ev, lpl_pend_q;
 
-  // HS entry refused at the LP level: pending until the next packet start
-  always_ff @(posedge rx_byte_clk_hs_i or negedge drst_n) begin
-    if (!drst_n)                      lpl_pend_q <= 1'b0;
-    else if (lpl_req_s != lpl_ack_q)  lpl_pend_q <= 1'b1;
-    else if (lm_sop)                  lpl_pend_q <= 1'b0;
+  // HS entries refused at the LP level (lpl_ev: an LP error that reached the controller)
+  // lose a burst that the packet layer never sees: counted as a lost burst at the next
+  // packet start (drop of the unpacker, only inside a frame). Since step 7 the packet layer
+  // runs on the clock that samples the LP errors: no request / acknowledge into the byte
+  // domain any more; the flag waits here for the next sop out of the lane merge's FIFO
+  // (errors while one is pending merge into it, none while RX is off).
+  assign lpl_ev = lp_err;
+
+  always_ff @(posedge csi_clk_i or negedge cdrst_n) begin
+    if (!cdrst_n)    lpl_pend_q <= 1'b0;
+    else if (lpl_ev) lpl_pend_q <= 1'b1;
+    else if (lm_sop) lpl_pend_q <= 1'b0;
   end
 
   // a burst of the frame was lost before the unpacker: the next line gets
   // tuser[1], or the frame is skipped if its first line has not started.
   // A truncation that did not end an accepted line (cut in the header, or a
   // dropped packet cut short) may have been a line with a corrupted header.
-  assign px_drop = in_frame && (pkt_ev.ecc_err || pkt_ev.extra || lm_skew || (|al_sync_err) ||
+  assign px_drop = in_frame && (pkt_ev.ecc_err || pkt_ev.extra || lm_skew || (|lm_sot) ||
                                 (pkt_ev.trunc && !px_eol) || (lpl_pend_q && lm_sop));
 
   bow_csi2_unpack #(
     .Bytes (Lanes)
   ) u_unpack (
-    .clk_i       (rx_byte_clk_hs_i),
-    .rst_ni      (drst_n),
+    .clk_i       (csi_clk_i),
+    .rst_ni      (cdrst_n),
     .sol_i       (px_sol),
     .raw10_i     (px_raw10),
     .valid_i     (px_valid),
@@ -458,26 +553,27 @@ module bow_csi2rx
     .frame_sum_o (frame_sum)
   );
 
-  bow_fifo_async #(
+  // pixel FIFO: the bursts' rate against the output's 1 pixel per clock (step 7: one clock,
+  // the byte -> video crossing of steps 1-6 is the lane merge's FIFO now)
+  bow_fifo_ram #(
     .Width (GroupW),
     .Depth (FifoDepth)
   ) u_fifo (
-    .wclk_i  (rx_byte_clk_hs_i),
-    .wrst_ni (drst_n),
+    .clk_i   (csi_clk_i),
+    .rst_ni  (cdrst_n),
     .push_i  (grp_push),
     .wdata_i (grp_wdata),
     .full_o  (fifo_full),
     .afull_o (fifo_afull),
-    .rclk_i  (vid_clk_i),
-    .rrst_ni (vdrst_n),
     .pop_i   (fifo_pop),
     .rdata_o (grp_rdata),
-    .empty_o (fifo_empty)
+    .empty_o (fifo_empty),
+    .level_o ()
   );
 
   bow_csi2rx_out u_out (
-    .clk_i    (vid_clk_i),
-    .rst_ni   (vdrst_n),
+    .clk_i    (csi_clk_i),
+    .rst_ni   (cdrst_n),
     .empty_i  (fifo_empty),
     .group_i  (grp_rdata),
     .pop_o    (fifo_pop),
@@ -495,58 +591,21 @@ module bow_csi2rx
     .q_o (in_frame_sys)
   );
 
-  // Byte domain events -> CPU. Each kind comes at most once per packet or
-  // burst; a new burst needs the LP-11 -> LP-01 -> LP-00 -> SETTLE sequence
-  // of the lane FSMs (>= 370 ns with D-PHY timing), far more than the 3 CPU
-  // cycles a pulse synchroniser needs. The data that goes with ev fe / line
-  // is held in the packet layer and unpacker until the next event of the kind.
+  // Events -> CPU. Each kind comes at most once per packet or burst; a new burst needs the
+  // LP-11 -> LP-01 -> LP-00 -> SETTLE sequence of the lane FSMs (>= 370 ns with D-PHY
+  // timing), and the lane merge's FIFO keeps that distance (it is read as fast as it is
+  // written), far more than the 3 CPU cycles a pulse synchroniser needs. The data that goes
+  // with ev fe / line is held in the packet layer and unpacker until the next event of the
+  // kind. Deskew bursts are counted on lane 0 (the other lanes then deskew too, or the burst
+  // is a skew or sync error).
   logic [NumBEv-1:0] bev, bev_sys;
 
-  // The aligner events of the PPI (ErrSotSyncHS of every lane, RxSkewCalHS of lane 0) count
-  // only for a burst the controller saw start: not while the datapath is in reset (drst_n:
-  // RX off, asserted at once when CTRL clears RX_EN or PHY_EN, before RxActiveHS can fall),
-  // and not for the burst a lane was already in (RxActiveHS high) when drst_n was released,
-  // which the lane merge does not take either. Up to step 3 drst_n reset the aligners; since
-  // step 4 they have the D-PHY's own reset and keep running while RX is off, and this gate
-  // keeps CNT_SOT, ERR_STATUS.SOT, CNT_EXT[31:16] and IRQ_STATUS.ERR as they were: none for
-  // bursts while RX_EN = 0 and PHY_EN = 1, none for the burst in progress when RX comes on,
-  // no SoT error for a burst cut by a stop in its sync search. A stop ends the clock lane's
-  // HS state too (the same Enable), so the byte clock usually stops before RxActiveHS of the
-  // cut burst falls in this domain: it falls, and the sync error comes, with the first byte
-  // clocks of the next burst, after a restart released drst_n (and cleared the counters),
-  // on a lane that was still high at the release. stale_q[l]: set by drst_n, cleared one
-  // cycle after RxActiveHS of lane l was seen low (ErrSotSyncHS of a burst comes in the
-  // cycle after its RxActiveHS fell). A PHY event without RxActiveHS (a standard PHY,
-  // section 5.5 of the spec) counts from the second cycle after the release. The pixel
-  // datapath is not gated (px_drop): it is in reset or outside a frame then.
-  // RxSkewCalHS counts at its rising edge (dsk_last_q): one per deskew burst, a pulse (v1,
-  // a standard PHY) or a level until the burst ends (the D-PHY of Bow32 since step 6).
-  logic [Lanes-1:0] arm_lo_q, stale_q, sot_ev;
-  logic             dsk_ev, dsk_last_q;
-
-  always_ff @(posedge rx_byte_clk_hs_i or negedge drst_n) begin
-    if (!drst_n) begin
-      arm_lo_q   <= '0;
-      stale_q    <= '1;
-      dsk_last_q <= 1'b0;
-    end else begin
-      arm_lo_q   <= ~arm;
-      stale_q    <= stale_q & ~arm_lo_q;
-      dsk_last_q <= al_deskew[0];
-    end
-  end
-
-  assign sot_ev = al_sync_err & ~stale_q;
-  assign dsk_ev = al_deskew[0] & ~dsk_last_q & ~stale_q[0];
-
-  // deskew bursts are counted on lane 0 (the other lanes then deskew too,
-  // or the burst is a skew or sync error)
-  assign bev = {sot_ev, px_skip, dsk_ev, lm_skew, pkt_ev};
+  assign bev = {lm_sot, px_skip, lm_dsk, lm_skew, pkt_ev};
 
   for (genvar i = 0; i < NumBEv; i++) begin : g_cdc_bev
     bow_cdc_pulse u_cdc (
-      .src_clk_i   (rx_byte_clk_hs_i),
-      .src_rst_ni  (brst_n),
+      .src_clk_i   (csi_clk_i),
+      .src_rst_ni  (crst_n),
       .src_pulse_i (bev[i]),
       .dst_clk_i   (clk_i),
       .dst_rst_ni  (rst_ni),
@@ -565,18 +624,20 @@ module bow_csi2rx
   end
 
   // =========================================================================
-  // Byte domain: LOG capture
+  // csi_clk_i: LOG capture
   // =========================================================================
   // Commands in (gray request counter + mode bits), acknowledges (gray) and the LOG write
-  // pointer (quasi-static) out. (RAW: in the D-PHY since step 4, bow_dphy_raw.)
+  // pointer (quasi-static) out. (RAW: in the D-PHY since step 4, bow_dphy_raw.) Since step 7
+  // the capture runs on csi_clk_i: an ARM is taken at once and DONE comes without a byte
+  // clock.
   logic [3:0] log_req;
   logic       log_trig, log_stop;
 
   bow_sync_bus #(
     .Width (4)
   ) u_sync_log_req (
-    .clk_i  (rx_byte_clk_hs_i),
-    .rst_ni (brst_n),
+    .clk_i  (csi_clk_i),
+    .rst_ni (crst_n),
     .d_i    (log_req_sys),
     .q_o    (log_req)
   );
@@ -584,15 +645,15 @@ module bow_csi2rx
   bow_sync_bus #(
     .Width (2)
   ) u_sync_mode (
-    .clk_i  (rx_byte_clk_hs_i),
-    .rst_ni (brst_n),
+    .clk_i  (csi_clk_i),
+    .rst_ni (crst_n),
     .d_i    ({log_trig_sys, log_stop_sys}),
     .q_o    ({log_trig, log_stop})
   );
 
   bow_csi2_capture u_capture (
-    .clk_i         (rx_byte_clk_hs_i),
-    .rst_ni        (brst_n),
+    .clk_i         (csi_clk_i),
+    .rst_ni        (crst_n),
     .log_req_i     (log_req),
     .log_trig_fs_i (log_trig),
     .log_stop_fe_i (log_stop),

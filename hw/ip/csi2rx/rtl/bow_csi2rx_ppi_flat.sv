@@ -26,15 +26,16 @@
 //     raises RxActiveHS together with RxSyncHS (PG202, PG435) would lose the sync and so the
 //     burst, one that drops RxActiveHS right after its last byte the last word. Costs: the
 //     PHY must keep RxActiveHS low >= 3 byte clocks between bursts, and its byte clock must
-//     run 2 cycles longer after the fall than the controller needs.
+//     run 2 cycles longer after the fall than the controller needs (step 7: 4 edges after
+//     the edge at which the PHY drops its last RxActiveHS, 2 of them for the controller).
 //   * RxSkewCalHS: one byte clock later like the rest (since step 6 the controller counts
 //     its rising edge, so a level as in PG202 counts once; up to step 5 the wrapper made a
 //     one cycle pulse of the edge).
 //   * ErrControl: the one cycle pulses of lp_clk_i step a 2 bit gray counter per lane in
 //     lp_clk_i (bow_ppi_err_tx, at most one step every 16 lp cycles: pulses closer together
 //     are merged), the form of the Bow32 PPI since step 6 (section 4.11 of the spec), which
-//     the controller samples on vid_clk_i: LpClkHz is at most 32 x PhyClkHz (up to step 5 a
-//     pulse synchroniser per lane made vid_clk_i pulses of them). The controller takes their
+//     the controller samples on csi_clk_i: LpClkHz is at most 32 x PhyClkHz (up to step 5 a
+//     pulse synchroniser per lane made pulses of its clock of them). The controller takes their
 //     OR for the lost burst marking: like the D-PHY of Bow32 since step 4, the PHY reports
 //     errors of the lanes it has enabled only.
 // Tied off (no counterpart on the PPI of a standard PHY) and what that means:
@@ -44,22 +45,27 @@
 //   ErrEsc, ErrSyncEsc   not used by the v1 controller (escape mode), the ports only
 // The PHY registers (LP / HS state, counters of HS entries and LP errors, byte clock meter,
 // delays, RAW) are the PHY's own; INFO[6] reads 0 (no D-PHY of Bow32 at 0xC00). Resets: the
-// byte and lp clock domains of this wrapper synchronise rst_ni & vid_rst_ni on their own.
+// byte and lp clock domains of this wrapper synchronise rst_ni & csi_rst_ni on their own.
+// Clocks: csi_clk_i is the controller's continuous clock (step 7 of the spec), at least the
+// PHY's highest byte clock ByteClkHz (no default: every build states it; checked at
+// elaboration).
 
 module bow_csi2rx_ppi_flat import bow_bus_pkg::*; import bow_ppi_pkg::*; #(
   parameter int unsigned Lanes     = 2,            // data lanes: 1, 2 or 4
-  parameter int unsigned PhyClkHz  = 200_000_000,  // vid_clk_i frequency (INFO)
+  parameter int unsigned PhyClkHz  = 200_000_000,  // csi_clk_i frequency (INFO)
   parameter int unsigned CpuClkHz  = 0,            // clk_i frequency (0: not checked)
   parameter int unsigned FifoDepth = 256,          // pixel FIFO entries (4 px each), power of 2
-  parameter int unsigned LpClkHz   = PhyClkHz      // lp_clk_i frequency (<= 32 x PhyClkHz)
+  parameter int unsigned LpClkHz   = PhyClkHz,     // lp_clk_i frequency (<= 32 x PhyClkHz)
+  parameter int unsigned ByteClkHz = 0             // the PHY's highest rx_byte_clk_hs_i, no
+                                                   // default (<= PhyClkHz)
 ) (
   input  logic                  clk_i,
   input  logic                  rst_ni,
   input  bus_req_t              bus_req_i,
   output bus_rsp_t              bus_rsp_o,
   output logic                  irq_o,
-  input  logic                  vid_clk_i,
-  input  logic                  vid_rst_ni,
+  input  logic                  csi_clk_i,          // the controller's clock
+  input  logic                  csi_rst_ni,
   output logic                  m_axis_tvalid_o,
   input  logic                  m_axis_tready_i,
   output logic [9:0]            m_axis_tdata_o,
@@ -91,12 +97,23 @@ module bow_csi2rx_ppi_flat import bow_bus_pkg::*; import bow_ppi_pkg::*; #(
   output logic                  enable_clk_o        // EnableClk (CPU domain flop)
 );
 
+  // the controller checks the byte clock against csi_clk_i (PpiByteClkHz); this message names
+  // the parameter of the wrapper (the initial copy stops simulations built with -Wno-fatal)
+  if (ByteClkHz == 0) begin : g_no_byte_clk
+    $fatal(1, "bow_csi2rx_ppi_flat: ByteClkHz not set (the PHY's highest byte clock, at most csi_clk_i %0d Hz)",
+           PhyClkHz);
+`ifndef SYNTHESIS
+    initial $fatal(1, "bow_csi2rx_ppi_flat: ByteClkHz not set (the PHY's highest byte clock, at most csi_clk_i %0d Hz)",
+                   PhyClkHz);
+`endif
+  end
+
   // ---------------------------------------------------------------- resets
   logic brst_n;
 
   bow_rst_sync u_brst (
     .clk_i  (rx_byte_clk_hs_i),
-    .rst_ni (rst_ni & vid_rst_ni),
+    .rst_ni (rst_ni & csi_rst_ni),
     .rst_no (brst_n)
   );
 
@@ -146,7 +163,7 @@ module bow_csi2rx_ppi_flat import bow_bus_pkg::*; import bow_ppi_pkg::*; #(
 
   bow_rst_sync u_lp_rst (
     .clk_i  (lp_clk_i),
-    .rst_ni (rst_ni & vid_rst_ni),
+    .rst_ni (rst_ni & csi_rst_ni),
     .rst_no (lprst_n)
   );
 
@@ -180,21 +197,22 @@ module bow_csi2rx_ppi_flat import bow_bus_pkg::*; import bow_ppi_pkg::*; #(
 
   // ---------------------------------------------------------------- controller
   bow_csi2rx #(
-    .Lanes      (Lanes),
-    .PhyClkHz   (PhyClkHz),
-    .CpuClkHz   (CpuClkHz),
-    .HasPhy     (1'b1),
-    .FifoDepth  (FifoDepth),
-    .DphyWin    (1'b0),                        // the PHY's registers are its own
-    .PpiLpClkHz (LpClkHz)                      // the gray counters' clock (above)
+    .Lanes        (Lanes),
+    .PhyClkHz     (PhyClkHz),
+    .CpuClkHz     (CpuClkHz),
+    .HasPhy       (1'b1),
+    .FifoDepth    (FifoDepth),
+    .DphyWin      (1'b0),                      // the PHY's registers are its own
+    .PpiLpClkHz   (LpClkHz),                   // the gray counters' clock (above)
+    .PpiByteClkHz (ByteClkHz)
   ) u_csi2rx (
     .clk_i,
     .rst_ni,
     .bus_req_i,
     .bus_rsp_o,
     .irq_o,
-    .vid_clk_i,
-    .vid_rst_ni,
+    .csi_clk_i,
+    .csi_rst_ni,
     .m_axis_tvalid_o,
     .m_axis_tready_i,
     .m_axis_tdata_o,

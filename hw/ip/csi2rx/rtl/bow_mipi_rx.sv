@@ -11,9 +11,9 @@
 // hw/fpga/common/rtl/bow_dphy_io_xusp.sv (KV260) or bow_dphy_io_versal.sv (Versal XPHY).
 //
 //   AFE (afe_*)  --> bow_dphy_rx --PPI--> bow_csi2rx --> m_axis RAW10 (ISP)
-//   (hs_data, lp,    LP state machines,   lane merge, packet, unpack, FIFO,
-//    hs_byte_clk ..) aligners, meter,     LOG, registers 0x000..
-//                    RAW, registers 0xC00..
+//   (hs_data, lp,    LP state machines,   lane merge (byte clock) + its two clock FIFO,
+//    hs_byte_clk ..) aligners, meter,     packet, unpack, FIFO, LOG (vid_clk_i: the
+//                    RAW, registers 0xC00 controller's csi_clk, step 7), registers 0x000..
 //
 // PPI (bow_ppi_pkg, v1):
 //   rx_byte_clk_hs  RxByteClkHS: afe_hs_byte_clk_i
@@ -24,9 +24,16 @@
 //   ppi_lp_clk      lp domain: StopstateClk, RxClkActiveHS, ErrControlClk (masked while
 //                   CTRL.CLK_CONT of the D-PHY), ULPS idle
 //   enable[l], enable_clk  Enable, EnableClk (controller -> D-PHY)
-// The D-PHY's lp clock is vid_clk_i (FPGA: lp_clk = vid_clk): the v1 lp domain errors are
-// pulses of the controller's own video clock. This connection is the guarantee;
-// bow_csi2rx's PpiLpClkHz (= PhyClkHz here) only states it for its elaboration check.
+// The D-PHY's lp clock is vid_clk_i (FPGA: lp_clk = vid_clk), and so is the controller's own
+// continuous clock csi_clk_i (step 7 of docs/ip/mipi_rx_arch.md: csi_clk = vid_clk on the
+// FPGA): the v1 lp domain errors were pulses of that clock. This connection is the
+// guarantee; bow_csi2rx's PpiLpClkHz (= PhyClkHz here) only states it for its elaboration
+// check. ByteClkHz, the highest byte clock this receiver gets (the lane rate / 8), has no
+// default: every instantiation states it (the SoC: CsiByteClkHz of bow32_top), and
+// elaboration fails without it and above vid_clk_i (bow_csi2rx's PpiByteClkHz check: the
+// lane merge hands one word per byte clock to the controller's clock). vid_clk_i is also the
+// limit of the D-PHY's clock lane check at CLK_TOG_DIV = 0 (byte clock < lp clock, section
+// 4.3).
 //
 // AFE ports (afe_*): the signals of section 3.2 that the FPGA adapters have (bow_dphy_rx
 // describes each one). The D-PHY's other AFE signals are tied off here: no FPGA adapter has
@@ -37,10 +44,12 @@
 //   clk_i              CPU: registers, counters, LOG/RAW read, status synchronisers, the AFE
 //                      controls of the D-PHY's register file (delay codes, PD, cal_start)
 //   vid_clk_i          video: the D-PHY's lp clock (LP state machines, gate, des_rst, HS
-//                      receivers); the controller's LP error release, lost burst request and
-//                      pixel output
+//                      receivers); the controller's clock csi_clk_i (step 7: everything after
+//                      the lane merge's two clock FIFO, the PPI lp error samples, the pixel
+//                      output)
 //   afe_hs_byte_clk_i  byte clock = HS clock / 4, runs only while afe_clk_gate_en_o = 1 and
-//                      the clock lane toggles (non-continuous clock: HS bursts only)
+//                      the clock lane toggles (non-continuous clock: HS bursts only): the
+//                      D-PHY's byte side and the controller's lane merge
 // Resets: each block synchronises vid_rst_ni & rst_ni per domain on its own (the D-PHY:
 // docs/ip/mipi_rx_arch.md section 4.11); the controller's datapath resets are also asserted
 // while RX is off (CTRL.PHY_EN & RX_EN), the D-PHY's aligners are not. The AFE's receive path
@@ -56,8 +65,10 @@ module bow_mipi_rx import bow_bus_pkg::*; import bow_ppi_pkg::*; #(
   parameter int unsigned CpuClkHz  = 0,            // clk_i frequency (0: not checked)
   parameter bit          HasPhy    = 1'b1,         // INFO.PHY: a D-PHY is connected
   parameter int unsigned FifoDepth = 256,          // pixel FIFO entries (4 px each), power of 2
-  parameter int unsigned AfeKind   = 1             // the D-PHY's INFO[7:5]: 1 UltraScale+
+  parameter int unsigned AfeKind   = 1,            // the D-PHY's INFO[7:5]: 1 UltraScale+
                                                    // adapter (KV260), 2 Versal adapter (Huins)
+  parameter int unsigned ByteClkHz = 0             // highest byte clock (lane rate / 8), no
+                                                   // default: at most PhyClkHz (above)
 ) (
   input  logic                  clk_i,
   input  logic                  rst_ni,
@@ -93,6 +104,17 @@ module bow_mipi_rx import bow_bus_pkg::*; import bow_ppi_pkg::*; #(
   output logic                  afe_cal_start_o,    // CPU domain flop (CMD.AFE_CAL pulse)
   input  logic [7:0]            afe_status_i        // asynchronous (AFE_STATUS[15:8])
 );
+
+  // the controller checks the byte clock against its clock (PpiByteClkHz); this message names
+  // the parameter of this level (the initial copy stops simulations built with -Wno-fatal)
+  if (ByteClkHz == 0) begin : g_no_byte_clk
+    $fatal(1, "bow_mipi_rx: ByteClkHz not set (the highest byte clock on afe_hs_byte_clk_i, at most vid_clk_i %0d Hz)",
+           PhyClkHz);
+`ifndef SYNTHESIS
+    initial $fatal(1, "bow_mipi_rx: ByteClkHz not set (the highest byte clock on afe_hs_byte_clk_i, at most vid_clk_i %0d Hz)",
+                   PhyClkHz);
+`endif
+  end
 
   // ---------------------------------------------------------------- PPI
   logic                rx_byte_clk_hs;
@@ -182,21 +204,22 @@ module bow_mipi_rx import bow_bus_pkg::*; import bow_ppi_pkg::*; #(
   );
 
   bow_csi2rx #(
-    .Lanes      (Lanes),
-    .PhyClkHz   (PhyClkHz),
-    .CpuClkHz   (CpuClkHz),
-    .HasPhy     (HasPhy),
-    .FifoDepth  (FifoDepth),
-    .DphyWin    (1'b1),                        // the D-PHY's registers at 0xC00
-    .PpiLpClkHz (PhyClkHz)                     // the D-PHY runs on vid_clk_i
+    .Lanes        (Lanes),
+    .PhyClkHz     (PhyClkHz),
+    .CpuClkHz     (CpuClkHz),
+    .HasPhy       (HasPhy),
+    .FifoDepth    (FifoDepth),
+    .DphyWin      (1'b1),                      // the D-PHY's registers at 0xC00
+    .PpiLpClkHz   (PhyClkHz),                  // the D-PHY runs on vid_clk_i
+    .PpiByteClkHz (ByteClkHz)
   ) u_csi2rx (
     .clk_i,
     .rst_ni,
     .bus_req_i        (bus_req_c),
     .bus_rsp_o        (bus_rsp_c),
     .irq_o,
-    .vid_clk_i,
-    .vid_rst_ni,
+    .csi_clk_i        (vid_clk_i),             // the controller's clock (step 7)
+    .csi_rst_ni       (vid_rst_ni),
     .m_axis_tvalid_o,
     .m_axis_tready_i,
     .m_axis_tdata_o,

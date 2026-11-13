@@ -45,8 +45,10 @@
 // without TEND), rx_clk_active (RxClkActiveHS), overlaps (a lane's burst starts before the
 // events of its previous burst are over: a rendering error); report() prints what the run
 // covered (cov_*: bursts by the byte clock edges after the one at which the last RxActiveHS
-// falls, RxActiveHS before / with RxSyncHS, gap cycles, ErrSotSyncHS after the fall / early,
-// RxSkewCalHS pulse / level, ErrSotHS, bytes with RxActiveHS low, lp pulses).
+// falls: exactly the least the controller needs since step 7 of docs/ip/mipi_rx_arch.md, 2
+// (std 4: the flat wrapper holds RxActiveHS 2 cycles), more, fewer, the clock stopped before
+// the fall; RxActiveHS before / with RxSyncHS, gap cycles, ErrSotSyncHS after the fall /
+// early, RxSkewCalHS pulse / level, ErrSotHS, bytes with RxActiveHS low, lp pulses).
 
 `timescale 1ns / 1ps
 
@@ -70,7 +72,7 @@ module bow_ppi_bfm import bow_ppi_pkg::*; import csi2_tx_pkg::csi2_now; #(
   localparam int unsigned PF = 12;                    // ints per lane program in pstore
 
   // -------------------------------------------------------------- coverage
-  int unsigned cov_runs = 0, cov_post4 = 0, cov_post_more = 0, cov_post_short = 0, cov_post_before = 0;
+  int unsigned cov_runs = 0, cov_post_min = 0, cov_post_more = 0, cov_post_short = 0, cov_post_before = 0;
   int unsigned cov_act_early = 0, cov_act_sync = 0, cov_no_act = 0, cov_bytes = 0, cov_gaps = 0;
   int unsigned cov_err_late = 0, cov_err_early = 0, cov_skew_pulse = 0, cov_skew_level = 0;
   int unsigned cov_err_sot = 0, cov_low_bytes = 0, cov_lp = 0;
@@ -378,8 +380,8 @@ module bow_ppi_bfm import bow_ppi_pkg::*; import csi2_tx_pkg::csi2_now; #(
   end
 
   function automatic void report();
-    $display("bow_ppi_bfm: %s timing, %0d bursts (byte clock edges after the last fall of RxActiveHS: %0d stop 4 byte clocks after it, %0d more, %0d 0..3, %0d before it), lanes: %0d RxActiveHS before RxSyncHS, %0d with it, %0d without RxActiveHS; %0d bytes, %0d gap cycles, %0d bytes with RxActiveHS low; ErrSotSyncHS %0d after the fall, %0d early; RxSkewCalHS %0d pulses, %0d levels; ErrSotHS %0d; lp domain pulses: %0d ErrControl / ErrControlClk",
-             std ? "standard PHY" : "D-PHY of Bow32", bursts_done, cov_post4, cov_post_more,
+    $display("bow_ppi_bfm: %s timing, %0d bursts (byte clock edges after the last fall of RxActiveHS: %0d stop %0d byte clocks after it, the least, %0d more, %0d fewer, %0d before it), lanes: %0d RxActiveHS before RxSyncHS, %0d with it, %0d without RxActiveHS; %0d bytes, %0d gap cycles, %0d bytes with RxActiveHS low; ErrSotSyncHS %0d after the fall, %0d early; RxSkewCalHS %0d pulses, %0d levels; ErrSotHS %0d; lp domain pulses: %0d ErrControl / ErrControlClk",
+             std ? "standard PHY" : "D-PHY of Bow32", bursts_done, cov_post_min, 2 + 2 * int'(std), cov_post_more,
              cov_post_short, cov_post_before, cov_act_early, cov_act_sync, cov_no_act, cov_bytes,
              cov_gaps, cov_low_bytes, cov_err_late, cov_err_early, cov_skew_pulse, cov_skew_level,
              cov_err_sot, cov_lp);
@@ -441,13 +443,14 @@ module bow_ppi_bfm import bow_ppi_pkg::*; import csi2_tx_pkg::csi2_now; #(
           end
           cur_burst = int'(it.a);
           cur_byte  = 0;
-          // edges of the run after the one at which the last RxActiveHS falls (maxf)
+          // edges of the run after the one at which the last RxActiveHS falls (maxf), against
+          // the least the controller needs (step 7: 2, std 4)
           if (it.c != 0 && !cont && maxf >= 0) begin
             cov_runs++;
-            if (int'(it.c) - 1 - maxf == 4)     cov_post4++;
-            else if (int'(it.c) - 1 - maxf > 4) cov_post_more++;
-            else if (int'(it.c) - 1 >= maxf)    cov_post_short++;
-            else                                cov_post_before++;
+            if (int'(it.c) - 1 - maxf == 2 + 2 * int'(std))     cov_post_min++;
+            else if (int'(it.c) - 1 - maxf > 2 + 2 * int'(std)) cov_post_more++;
+            else if (int'(it.c) - 1 >= maxf)                    cov_post_short++;
+            else                                                cov_post_before++;
           end
           if (it.c != 0) begin
             rx_clk_active = 1'b1;

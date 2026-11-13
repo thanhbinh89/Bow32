@@ -46,9 +46,10 @@ int main(void) {
   printf("kv260 %u %u\n", bow_dphy_rx_settle(107, 24, 912000000u, 200, 2),
          settle_cycles(912000000u, 200, 2));
   printf("huins %u %u\n", bow_dphy_rx_settle(120, 0, 1440000000u, 200, 2), phy_cycles(95, 200));
-  /* the KV260 simulation: video clock 107.5 MHz, INFO says 108 */
-  printf("kv260sim %u %u\n", bow_dphy_rx_settle(107, 24, 912000000u, 108, 2),
-         settle_cycles(912000000u, 108, 2));
+  /* the KV260 simulation: video clock 120.5 MHz, INFO says 120 (107.5 / 108 MHz up to the
+   * review of step 7 of docs/ip/mipi_rx_arch.md: 9) */
+  printf("kv260sim %u %u\n", bow_dphy_rx_settle(107, 24, 912000000u, 120, 2),
+         settle_cycles(912000000u, 120, 2));
   /* sweeps: lane rate 0 (unknown) and 80 Mbit/s .. 2.5 Gbit/s, lp clock 50 .. 400 MHz,
    * LP_FILTER 0 .. 15 */
   unsigned bad_xusp = 0, bad_versal = 0, n = 0;
@@ -93,9 +94,10 @@ class DphySettleTest(unittest.TestCase):
         cls.res = {f[0]: [int(x) for x in f[1:]] for f in (ln.split() for ln in out.splitlines())}
 
     def test_kv260(self):
-        """UltraScale+ (KV260): 107 ns + 24 UI gives settle_cycles() = 22 at 912 Mbit/s, 200 MHz."""
+        """UltraScale+ (KV260): 107 ns + 24 UI gives settle_cycles() = 22 at 912 Mbit/s, 200 MHz;
+        11 at the 120 MHz of the system simulation (TIM0 0512020b in sim/tb/tb_bow32.sv)."""
         self.assertEqual(self.res["kv260"], [22, 22])
-        self.assertEqual(self.res["kv260sim"][0], self.res["kv260sim"][1])
+        self.assertEqual(self.res["kv260sim"], [11, 11])
 
     def test_huins(self):
         """Versal (Huins): 120 ns + 0 UI gives 0x13 = 95 ns at 200 MHz, as SETTLE_VID_NS did,

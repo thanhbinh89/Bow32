@@ -67,7 +67,8 @@ module bow_mipi_rx_s4 import bow_bus_pkg::*; #(
     .CpuClkHz  (CpuClkHz),
     .HasPhy    (HasPhy),
     .FifoDepth (FifoDepth),
-    .AfeKind   (DlyVid ? 2 : 1)
+    .AfeKind   (DlyVid ? 2 : 1),
+    .ByteClkHz (PhyClkHz)                      // (step 7 of this tree: no default)
   ) u_mipi (
     .clk_i,
     .rst_ni,

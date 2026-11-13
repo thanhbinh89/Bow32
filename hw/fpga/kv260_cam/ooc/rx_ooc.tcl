@@ -21,6 +21,10 @@
 #     or u_dphy/u_dly); the delay code constraint with 10 endpoints per lane;
 #   * the CE false path finds both BUFGCE_DIV CE pins, the CLOCK_DELAY_GROUP has the two
 #     D-PHY clock nets (also in the placer's clockInfo.txt);
+#   * the byte clock <-> clk_vid pairs have the data path limits of the XDC ("Max Delay
+#     Datapath Only" in report_clock_interaction, no clock group: review of step 7), and the
+#     lane merge FIFO's RAM -> read register paths are timed with them and met
+#     (hw/fpga/common/tcl/fifo_ram_checks.tcl);
 #   * the ISERDESE3 RST, IDELAYE3 LOAD and CNTVALUEIN of every lane are driven by the
 #     adapter's logic (u_dphy/u_dly);
 #   * report_cdc: every critical row is one of the reviewed kinds (reset synchroniser CLR
@@ -37,6 +41,7 @@ file mkdir $out
 cd $out
 source [file join $repo hw fpga common tcl filelist.tcl]
 source [file join $repo hw fpga common tcl bus_skew_checks.tcl]
+source [file join $repo hw fpga common tcl fifo_ram_checks.tcl]
 
 set lanes 2
 set files {}
@@ -164,6 +169,37 @@ result [expr {[llength $cdg] == 2 &&
               [regexp {The following 2 clock nets belong to CLOCK_DELAY_GROUP bow_dphy_rx_clk} $ci]}] \
   "CLOCK_DELAY_GROUP bow_dphy_rx_clk: [llength $cdg] nets ([lsort [get_property NAME $cdg]]),\
    clockInfo.txt: [expr {[regexp {2 clock nets belong to CLOCK_DELAY_GROUP bow_dphy_rx_clk} $ci] ? {both} : {not found}}]"
+
+# ---- byte clock <-> clk_vid: data path limits, not a clock group (review of step 7); the lane
+# merge FIFO's RAM -> read register paths timed with them
+set bclk [get_property NAME [get_clocks -of_objects [get_pins u_dphy/u_byte_bufg/O]]]
+set got [dict create]
+foreach line [split [report_clock_interaction -return_string] "\n"] {
+  set cols [regexp -all -inline {\S+(?: \S+)*} $line]
+  if {[llength $cols] >= 3} {
+    dict set got [list [lindex $cols 0] [lindex $cols 1]] [lindex $cols end]
+  }
+}
+foreach pair [list [list $bclk clk_vid] [list clk_vid $bclk]] {
+  set c [expr {[dict exists $got $pair] ? [dict get $got $pair] : "no paths"}]
+  set q [get_timing_paths -quiet -max_paths 1 -nworst 1 -from [get_clocks [lindex $pair 0]] \
+           -to [get_clocks [lindex $pair 1]]]
+  set w [expr {$q eq "" ? "" : ", worst slack [get_property SLACK $q] ns (data path\
+    [get_property DATAPATH_DELAY $q] ns to [get_property ENDPOINT_PIN $q])"}]
+  result [expr {$c eq "Max Delay Datapath Only"}] "[join $pair { -> }]: $c$w"
+}
+set problems [bow32_fifo_ram_paths */u_csi2rx/u_lane_merge/u_cdc_fifo "lane merge FIFO"]
+result [expr {[llength $problems] == 0}] "lane merge FIFO RAM -> read register: [llength $problems] problems"
+foreach p $problems {
+  lappend res "RX_OOC   $p"
+}
+set q [get_timing_paths -quiet -max_paths 1 -nworst 1 \
+  -from [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_lane_merge/u_cdc_fifo/u_ram/* && IS_PRIMITIVE && REF_NAME =~ RAM*}] \
+  -to [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_lane_merge/u_cdc_fifo/u_ram/rdata_o_reg*}]]
+if {$q ne ""} {
+  lappend res "RX_OOC   lane merge FIFO RAM -> read register worst: slack [get_property SLACK $q] ns,\
+    data path [get_property DATAPATH_DELAY $q] ns ([get_property EXCEPTION $q])"
+}
 
 # ---- the adapter's logic drives the primitives
 proc driver {pin} {

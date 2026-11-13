@@ -47,8 +47,9 @@ jobs:
       - name: ISP unit test (bit-exact vs. Python model)
         run: make -C hw/ip/isp/dv test
 
-      # The aligner and the AFE side (the adapters' logic against models of the primitives,
-      # the D-PHY's AFE controls and status) on their own, then the whole receiver
+      # The aligner, the AFE side (the adapters' logic against models of the primitives, the
+      # D-PHY's AFE controls and status) and the lane merge's two clock FIFO (step 7, with the
+      # synchronisers' jitter model) on their own, then the whole receiver
       - name: CSI-2 receiver unit test (AFE unit tests, D-PHY TX model, RTL vs. Python model)
         run: make -C hw/ip/csi2rx/dv test-rx
 
@@ -83,6 +84,7 @@ jobs:
             build/sim/*.log
             build/isp_dv/*/sim.log
             build/csi2rx_dv/*/sim.log
+            build/csi2rx_dv/cdc_s*.log
             build/h264_dv/*/sim.log
             build/mkv_dv/*/sim.log
             build/ddr_dv/*/sim.log

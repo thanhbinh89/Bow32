@@ -235,7 +235,10 @@ báo cáo, LATE_EOT và các bit HS_TMO của watchdog, mà không firmware nào
 - **LATE_EOT** (luôn bật, chỉ báo cáo): cổng byte clock đóng (không phải vì `Enable` của lane clock
   hay `CMD.REINIT`, tức clock của máy phát đã dừng) khi `RxActiveHS` của một data lane đang bật vẫn
   1 ở miền byte (`arm_q`, giá trị controller lấy ở cạnh byte clock cuối, đọc ở miền lp 3 chu kỳ sau
-  khi cổng đóng): byte cuối của burst có thể chưa ra PPI (máy phát giữ T_CLK-POST quá ngắn). Một lần
+  khi cổng đóng): byte cuối của burst có thể chưa ra PPI (máy phát giữ T_CLK-POST quá ngắn; từ
+  bước 7 của [mipi_rx_arch.md](mipi_rx_arch.md), controller ở clock của nó, chỉ phần cuối burst của
+  controller (SKEW, TRUNC, `ErrSotSyncHS` cuối burst) chờ burst sau, packet đã vào FIFO 2 clock của
+  ghép lane thì xong, FE và ngắt không trễ). Một lần
   mỗi lane mỗi lần kết thúc burst; `ERR_STATUS[7]`, `CNT_MISC`, `IRQ_STATUS.ERR`; không lên PPI.
   Không sau một bit có giá trị reset (ngoại lệ chỉ báo cáo của mục 4.12 của đặc tả): không firmware
   nào đọc `ERR_STATUS` / `CNT_MISC` của D-PHY để quyết định (chỉ `phy v1x` / `phy check` của

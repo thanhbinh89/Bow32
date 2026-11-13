@@ -1,7 +1,8 @@
 // Copyright Bow32 contributors.
 // SPDX-License-Identifier: Apache-2.0
 //
-// CSI-2 receiver output (video clock domain): pixel groups from the FIFO ->
+// CSI-2 receiver output (the controller's clock csi_clk, vid_clk on the FPGAs): pixel
+// groups from the FIFO ->
 // AXI4-Stream, one RAW10 pixel per clock.
 //
 // Two group registers: `cur` (being sent, pixel index idx) and `next`. The
@@ -14,7 +15,7 @@
 
 module bow_csi2rx_out import bow_csi2rx_pkg::*; (
   input  logic              clk_i,
-  input  logic              rst_ni,       // video clock, datapath reset
+  input  logic              rst_ni,       // csi clock, datapath reset
   input  logic              empty_i,      // pixel FIFO, first word fall through
   input  logic [GroupW-1:0] group_i,
   output logic              pop_o,
