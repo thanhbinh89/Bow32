@@ -94,7 +94,7 @@ là 99,999 MHz nên ra 199,998 / 49,9995 MHz) và 2 `proc_sys_reset`. Ràng bu�
 | File | Phải thấy |
 |------|-----------|
 | `timing_summary.rpt` | WNS ≥ 0 và WHS ≥ 0 (PR #17: +0,005 ns / +0,010 ns; bộ thu 4 lane: +0,025 ns; bản gộp hai thay đổi, 2026-11-10: +0,074 ns / +0,010 ns; đường găng ở bộ macroblock H.264, `tcl/build.tcl` dùng directive Explore và bật `phys_opt_design` sau route cho nó) |
-| `bus_skew.rpt` | 10 ràng buộc `set_bus_skew` (7 bus gray của bộ thu, 1 của mã delay + OWN vào logic adapter `u_dphy/u_dly` từ review bước 5 của [ip/mipi_rx_arch.md](ip/mipi_rx_arch.md) mục 10, 2 của FIFO ra H.264; trước đó 9), cả 10 `Slack (MET)`; log: `INFO: bus skew cells: 0 problems in 10 constraints` (cell của từng ràng buộc, `hw/fpga/common/tcl/bus_skew_checks.tcl`) |
+| `bus_skew.rpt` | 11 ràng buộc `set_bus_skew` (8 bus gray của bộ thu: từ bước 6 thêm bộ đếm sự kiện của D-PHY `u_dphy_rx/evc_gray_q` → `u_sync_evc`, một chu kỳ lp; 1 của mã delay + OWN vào logic adapter `u_dphy/u_dly` từ review bước 5 của [ip/mipi_rx_arch.md](ip/mipi_rx_arch.md) mục 10, 2 của FIFO ra H.264; trước đó 10, rồi 9), cả 11 `Slack (MET)`; log: `INFO: bus skew cells: 0 problems in 11 constraints` (cell của từng ràng buộc, `hw/fpga/common/tcl/bus_skew_checks.tcl`) |
 | `clockInfo.txt` | `The following 2 clock nets belong to CLOCK_DELAY_GROUP bow_dphy_rx_clk`: `u_dphy/dphy_byte_clk`, `u_dphy/hs_clk` |
 | `drc.rpt` | không có lỗi (nhất là REQP-1742: `CLK` của IDELAYE3 phải là `CLKDIV` của ISERDESE3) |
 | `clocks.rpt`, `clock_interaction.rpt` | `dphy_hs_clk` 2,193 ns; `dphy_byte_clk` và `dphy_hs_clk_DIV4_INV` 8,772 ns; các cặp clock khác miền là *Asynchronous Groups* |
@@ -109,7 +109,7 @@ chúng, chân CE của false path, `CLOCK_DELAY_GROUP`, ai lái `RST` / `LOAD` /
 (dòng cuối `RX_OOC: PASS`).
 
 `tcl/build.tcl` in `CRITICAL WARNING` khi WNS < 0, khi bus skew vi phạm hay
-không đủ 10 ràng buộc, khi cell của một ràng buộc không đúng (cell ngoài
+không đủ 11 ràng buộc, khi cell của một ràng buộc không đúng (cell ngoài
 `u_soc/u_csi2rx`, `u_dphy/u_dly` và FIFO ra của H.264, flop đích không có đường từ nguồn, số flop
 nguồn khác số flop đích: selector của bộ thu chọn theo đuôi tên), hoặc khi
 `CLOCK_DELAY_GROUP` không đủ 2 net (thường do đổi tên instance trong RTL mà XDC

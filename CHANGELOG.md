@@ -6,6 +6,24 @@
 ## [Unreleased]
 
 ### Added
+- Bộ thu CSI-2, bước 6 của kế hoạch chuyển MIPI RX ([docs/ip/mipi_rx_arch.md](docs/ip/mipi_rx_arch.md)
+  mục 4, 10; [docs/ip/dphy_rx.md](docs/ip/dphy_rx.md) mục *Chức năng v1.x*): **D-PHY v1.x**, mỗi
+  chức năng sau một bit có giá trị reset = hành vi của bước 5. `T_INIT` (`TIM2[19:0]`: LP-11 liên
+  tiếp trước `Stop`, chỉ sau READY lên hay `CMD.REINIT`), `HS_TMO` (`TIM1[23:0]`, reset 2^20 =
+  watchdog cũ), `ESC_TMO` (`TIM2[31:20]`), `CTRL.HSRX_EARLY`, `CTRL.CLK_MISS_OFF`, escape và lệnh
+  ULPS trên data lane, ULPS lane clock (`CTRL.ULPS_EN`; `lane_pd` mỗi lane, `UlpsActiveNot*`,
+  `RxUlpsEsc`, `RxUlpsClkNot`), `CLK_TOG_DIV` (`TIM1[27:24]`), `CTRL.CLK_LOST_EN`, LATE_EOT;
+  thanh ghi shadow (`CTRL`, `TIM0`–`TIM2`) + `CMD.APPLY`; `CMD.REINIT` (máy LP về `WaitStop`) và
+  `CMD.AFE_CAL` (xung `cal_start`); `LANE_STOP`, `CNT_MISC[31:16]`, `CNT_DSK[31:16]`, `INFO[27]`,
+  `ERR_STATUS` [3] [4] [6] [7] [10], `IRQ_STATUS.ULPS`; sự kiện miền lp tới thanh ghi qua bộ đếm
+  gray 4 bit (`lp_clk` ≤ 12 × `clk_i`, `set_bus_skew` mới trên hai bo); `RxSkewCalHS` là mức trên
+  mọi lane; lỗi lp trên PPI (`ErrControl*`, `ErrEsc`) là bộ đếm gray 2 bit (`bow_ppi_err_tx`, lấy
+  mẫu ở controller bằng `bow_ppi_err_rx`). Driver: `bow_dphy_rx_apply()`, `bow_dphy_rx_ctrl()`,
+  setter của `TIM1` / `TIM2`, `bow_dphy_rx_v1x()`, `bow_dphy_rx_power()`; `csi2_test`: `phy tinit`,
+  `phy hstmo`, `phy missoff`, `phy v1x`, `phy check`. Bench mới của D-PHY một mình
+  (`hw/ip/dphy_rx/dv`: `tb_bow_dphy_rx.sv` với máy phát mức bit, 12 test, 2 và 4 lane, bước CI và
+  `make test-ip`; `make mutants` 35 mutant), `BOW_SYNC_JITTER` của `bow_sync` (chỉ bench đó).
+  Formality `STEP=6` (mặc định, `REF=1c76364`): controller và máy LP so với bước 5.
 - Bộ thu CSI-2, bước 5 của kế hoạch chuyển MIPI RX ([docs/ip/mipi_rx_arch.md](docs/ip/mipi_rx_arch.md)
   mục 3.2, 3.7, 10; [docs/ip/dphy_rx.md](docs/ip/dphy_rx.md)): **giao diện AFE**. `bow_dphy_rx` có
   mọi cổng của mục 3.2 (`afe_*`: byte clock, word, valid; cổng byte clock và `des_rst` = ¬cổng, cùng
@@ -613,6 +631,17 @@
   144 chu kỳ, không giới hạn số lần thử.
 
 ### Changed
+- Bộ thu CSI-2, bước 6 (xem *Added*): PPI v1.x giữa D-PHY và controller: `ErrControl` /
+  `ErrControlClk` là bộ đếm gray 2 bit (bước 2–5: xung một chu kỳ ở bit 0), `RxSkewCalHS` mức (bước
+  2–5: xung; controller đếm cạnh lên, nên `CNT_EXT[31:16]` không đổi), `PpiLpClkHz` của controller
+  được tới 32 × `PhyClkHz` (trước: phải bằng); wrapper cổng phẳng đổi xung lỗi của PHY chuẩn thành bộ
+  đếm gray ở clock lp của PHY (tham số mới `LpClkHz`). Bản đồ thanh ghi D-PHY: `CMD[1]` là REINIT của
+  máy LP, hiệu chỉnh AFE chuyển sang `CMD[2]` AFE_CAL (driver `bow_dphy_rx_reinit()` ghi cả hai);
+  `CTRL` / `TIM0` có hiệu lực sau `CMD.APPLY` (driver ghi APPLY; phần mềm khác phải ghi `CMD` = 1
+  sau khi đổi chúng); `INFO` có bit 27 (KV260 `0x0824C822`, Huins `0x08A4C844`); HS_TMO cũng vào
+  `ERR_STATUS[3]`. Ràng buộc `set_bus_skew`: 11 trên KV260, 12 trên Huins (bộ đếm sự kiện của
+  D-PHY). Kiểm tra CDC ngoài ngữ cảnh của KV260 nhận thêm flop termination (`term_q`) trước
+  `ISERDESE3`, cùng loại với `hs_en_q`. Bench xsim KV260 ghi `CMD.APPLY` sau `TIM0`.
 - Bộ thu CSI-2, bước 5 (xem *Added*): cổng PHY `dphy_*` của `bow32_top` (và cổng của `bow_mipi_rx`)
   thành giao diện AFE ở cả sáu nơi dùng, cổng cũ không giữ: `byte_clk_i` / `rx_data_i` /
   `rx_valid_i` → `hs_byte_clk_i` / `hs_data_i` / `hs_valid_i`, `byte_ce_o` → `clk_gate_en_o`,

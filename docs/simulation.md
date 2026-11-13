@@ -403,8 +403,8 @@ make -C hw/ip/csi2rx/dv run TEST=clk                  # một test directed
 make -C hw/ip/csi2rx/dv test-ppi                      # controller ở PPI: 167 case, hai chế độ, song song
 make -C hw/ip/csi2rx/dv test-ppi SEEDS="$(seq -s ' ' 1 40)" PJOBS=8
 make -C hw/ip/csi2rx/dv run-ppi MODE=std TEST=loss LANES=4   # một case (MODE bow|std)
-make -C hw/ip/csi2rx/dv mutants-ppi                   # 19 mutant phải làm bench PPI hỏng
-make -C hw/ip/csi2rx/dv mutants-rx                    # 28 mutant: unit test AFE hay bench cả bộ thu hỏng
+make -C hw/ip/csi2rx/dv mutants-ppi                   # 20 mutant phải làm bench PPI hỏng
+make -C hw/ip/csi2rx/dv mutants-rx                    # 29 mutant: unit test AFE hay bench cả bộ thu hỏng
 ```
 
 - Unit test aligner (`tb_dphy_align.sv`, chạy đầu tiên trong `test`): word
@@ -481,7 +481,8 @@ make -C hw/ip/csi2rx/dv mutants-rx                    # 28 mutant: unit test AFE
   ∧ `des_rst`, `RX_EN_VTC` = 1 và không `LD` khi không `ready`, hợp đồng `LD` của XPHY, OWN xuống /
   lên, nạp lại lane OWN khi `ready` lên), và `tb_dphy_afe.sv`, `bow_dphy_rx` một mình với mô hình
   AFE, hai bản dựng (ASIC: `AfeKind` 0, `AfePdRst` 1; FPGA): giá trị reset, `AFE_STATUS` từng bit,
-  `pd` / `lprx_en` / `lane_pd` với xung PD ngắn, OWN, `CMD.REINIT`, `DES_RST_DIS`. `AFE_SEED` (mặc
+  `pd` / `lprx_en` / `lane_pd` với xung PD ngắn, OWN, `CMD.AFE_CAL` (bước 6: `CMD.REINIT` không
+  chạy lại AFE), `DES_RST_DIS` (sau `CMD.APPLY`). `AFE_SEED` (mặc
   định 1) cho phần ngẫu nhiên; log ở `build/csi2rx_dv/afe_dly.log`, `dphy_afe_asic.log`,
   `dphy_afe_fpga.log`.
 - Mỗi case giữ file trong `build/csi2rx_dv/<case>/` (`sim.log` cho CI, có dòng thống kê FIFO
@@ -491,7 +492,17 @@ make -C hw/ip/csi2rx/dv mutants-rx                    # 28 mutant: unit test AFE
   song `PJOBS` case (mặc định số CPU; `PJOBS=1`: lần lượt), mỗi case in dòng kết quả của nó: ~3 s
   với 24 job, ~26 s tuần tự. Mỗi bản build model chạy lại Verilator một lần nếu nó hỏng (Verilator
   5.020 đôi khi abort lúc thoát sau một bản build tốt) và `touch` binary.
-- `make test-tools` chạy 42 unit test của mô hình (`tools/tests/test_csi2_model.py`) và 3 test
+- Từ bước 6 mô hình biết shadow + `CMD.APPLY` của D-PHY (ghi `CTRL` / `TIM*` chỉ có hiệu lực sau
+  APPLY; stimulus do mô hình sinh ghi APPLY sau mỗi lần ghi shadow, như driver), các thanh ghi mới
+  (`TIM1`, `TIM2`, `LANE_STOP`, `CNT_DSK`, `CNT_MISC`, `INFO[27]`), `CMD.REINIT` / `CMD.AFE_CAL` và
+  LATE_EOT: số lane kết thúc burst muộn tính từ số bước của lane và thời gian lọc LP-11 của bộ thu
+  (chính xác ở hai lane UltraScale+; một khoảng ở bốn lane Versal, khi đó `ERR_STATUS[7]`,
+  `CNT_MISC` và bit ERR của ngắt được so theo khoảng). Hai khác biệt có chủ ý của mục 4.12 của đặc
+  tả không đổi gì ở đây (controller đếm `RxSkewCalHS` ở cạnh lên; `des_rst` như bước 5). `ovf2`
+  chạy không có word glitch như `deskew` và `loss` (với `BurstRxRst` = 0 trễ trôi đưa cửa sổ dò
+  vào nhiễu HS-PREPARE: một sync giả ở seed 1, 4 lane, sau khi luồng `$urandom` của bench dịch đi
+  vì các bộ đồng bộ xung của bước 5 đã thành bộ đếm gray).
+- `make test-tools` chạy 43 unit test của mô hình (`tools/tests/test_csi2_model.py`) và 3 test
   của công thức `SETTLE` (`tools/tests/test_dphy_settle.py`, biên dịch `bow_dphy_rx_settle()` bằng
   `cc` của máy host; Versal ở mọi lane rate kể cả 0, và đích 140 ns của firmware `brst0`), và 3
   test của kiểm tra đầu vào nối rỗng (`tools/tests/test_empty_inputs.py`, cần Verilator).
@@ -506,7 +517,8 @@ make -C hw/ip/csi2rx/dv mutants-rx                    # 28 mutant: unit test AFE
   chúng thấy (`lane_pd` theo READY cũ, OWN đặt khi READY = 0, `des_rst` = 0 lúc reset, CAL_DONE /
   CAL_ERR đổi chỗ, XPHY giữ user mode / `RX_RST` / không xoá khi chưa ready, OWN xuống không nhả,
   không cần ổn định 2 chu kỳ, `ISERDESE3` không reset, tap bỏ qua OWN, `LOAD` mỗi chu kỳ…):
-  28/28 chết, ~3 phút (`MJOBS`=2).
+  28/28 chết, ~3 phút (`MJOBS`=2). Bước 6 thêm `reinit_starts_cal` (`CMD.REINIT` lại chạy hiệu
+  chỉnh AFE: `tb_dphy_afe`): 29/29.
 - **Bench PPI** (`tb_csi2rx_ppi.sv`, `bow_ppi_bfm.sv`; `test-ppi`, bước CI riêng): controller
   `bow_csi2rx` một mình, PHY là BFM chơi phần dựng PPI của `csi2_model.py gen --ppi bow|std` (mỗi
   item TX của test case kèm byte mỗi lane mỗi burst với chu kỳ, `RxActiveHS`, `RxSyncHS`, khe,
@@ -525,7 +537,57 @@ make -C hw/ip/csi2rx/dv mutants-rx                    # 28 mutant: unit test AFE
   `build/csi2rx_dv/ppi_<MODE>_<case>/`, `sim.log` có dòng phủ của BFM (số burst theo số cạnh byte
   clock sau khi `RxActiveHS` xuống, khe, `ErrSotSyncHS` cuối / sớm, xung lp...). Bench PPI không nhanh hơn bench cả bộ thu trên cùng case (thời gian nằm
   ở mô hình Python). Chi tiết: [ip/csi2rx.md](ip/csi2rx.md) mục *Kiểm chứng*,
-  [ip/mipi_rx_arch.md](ip/mipi_rx_arch.md) mục 5.5.
+  [ip/mipi_rx_arch.md](ip/mipi_rx_arch.md) mục 5.5. Từ bước 6 lỗi lp trên PPI là bộ đếm gray 2 bit:
+  ở `bow` BFM bước bộ đếm mỗi lỗi, ở `std` PHY vẫn phát xung và wrapper đổi thành bộ đếm
+  (`bow_ppi_err_tx` ở clock 25 MHz của PHY); mutant mới: đếm `RxSkewCalHS` ở mọi chu kỳ nó cao,
+  bộ lấy mẫu chỉ thấy bit 0 (20/20).
+
+### D-PHY số (`bow_dphy_rx` một mình)
+
+`hw/ip/dphy_rx/dv/` (bước 6 của [ip/mipi_rx_arch.md](ip/mipi_rx_arch.md) mục 10, mục 8.3):
+`tb_bow_dphy_rx.sv` lái `bow_dphy_rx` một mình bằng máy phát D-PHY mức bit của bench bộ thu
+(`hw/ip/csi2rx/dv/csi2_tx_model.sv`) trên giao diện AFE, với `bow_ppi_chk` và `bow_afe_chk` gắn
+vào, và kiểm các chức năng D-PHY v1.x bằng chính bench (thanh ghi qua bus, byte và lỗi trên PPI,
+bộ đếm gray của PPI lấy mẫu ở `lp_clk` / 32 như controller chậm nhất được phép). Không có mô hình
+Python: mỗi test tự kiểm và in `tb_bow_dphy_rx: PASS (<n> checks; test <t>, <l> lanes)`.
+
+```bash
+make -C hw/ip/dphy_rx/dv test                    # 26 case (12 test, 2 và 4 lane, 2 cấu hình clock), song song
+make -C hw/ip/dphy_rx/dv test SEEDS="1 2 3"      # seed Verilator của jitter bộ đồng bộ
+make -C hw/ip/dphy_rx/dv run TEST=ulps LANES=4   # một test; log build/dphy_rx_dv/<test>_l<lanes>_s<seed>.log
+make -C hw/ip/dphy_rx/dv run TEST=gray PLUS=+BUS_PS=50000
+make -C hw/ip/dphy_rx/dv mutants                 # 35 mutant (mutants_dphy.py), không trong CI
+```
+
+- Test: `basic` (giá trị reset, byte của burst trên PPI, `RxSkewCalHS` là mức từ burst deskew tới
+  cuối burst, bộ đếm sự kiện), `apply` (shadow không có hiệu lực trước `CMD.APPLY`, mọi trường đổi
+  trong một chu kỳ lp, `CMD[0]`, APPLY khi một APPLY đang chờ ở 6 khoảng cách), `tinit` (`T_INIT`
+  sau READY lên và sau `CMD.REINIT`, không ở `Enable`; burst tới trước khi đủ `T_INIT` LP-11 không
+  được nhận; REINIT giữa burst: lane rời HS ngay, không phải LATE_EOT; `T_INIT` 0 như bước 5), `hstmo` (cắt burst, lỗi CONTROL + HS_TMO, 0 = tắt), `esctmo`, `ulps`
+  (`ULPS_EN` = 0: LP-10 là lỗi CONTROL; lệnh ULPS trên mọi data lane: `LANE_STOP`, `UlpsActiveNot` /
+  `RxUlpsEsc`, `lane_pd`, bộ thu HS tắt, `IRQ_STATUS.ULPS` và `irq_o`; mark thức dậy: `lane_pd` 0;
+  về `Stop`; `CNT_DSK`; không lỗi; ULPS lane clock; lệnh khác ULPS: chỉ ESC, `ErrEsc` một bước; LP-11
+  trong lần vào: không lỗi; mark không có space: CONTROL), `hsrx` (`HSRX_EARLY`: `hsrx_en` từ LP-01, termination từ
+  LP-00), `missoff` (`CLK_MISS_OFF`), `clklost` (`CLK_LOST_EN`), `lateeot` (T_CLK-POST 10 ns: mọi
+  lane mọi burst; 120 ns: không; burst bị cắt bởi `Enable` của mọi lane hay chỉ lane clock: không),
+  `gray` (lỗi dồn dập: `ErrControl` gộp bước, bộ lấy mẫu ở `lp_clk` / 32 thấy mọi bước, `CNT_LPERR`
+  đếm đủ; với `CLK_CONT` lỗi lane clock được đếm mà `ErrControlClk` không bước; thêm với
+  `+BUS_PS=50000`, `lp_clk` = 10 × `clk_i`), `togdiv` (`+LP_PS=20000 +BYTE_PS=10000`: byte
+  clock = 2 × `lp_clk`; `CLK_TOG_DIV` 0 không thấy cạnh và đóng cổng giữa burst, 1 và 2 thì không).
+- Bản dựng định nghĩa `BOW_CDC_JITTER` và `BOW_SYNC_JITTER` (`hw/ip/common/rtl/bow_sync.sv`): một
+  bit đổi trong 0,5 ns trước cạnh clock (cửa sổ setup / hold, và lệch mà ràng buộc bus skew cho
+  phép) được nhận muộn một chu kỳ một cách ngẫu nhiên, như flop metastable; bus không mã gray qua
+  các bộ đồng bộ đó sẽ cho giá trị nó chưa từng có. Các bench khác không định nghĩa nó.
+- `mutants_dphy.py`: mỗi mutant là bản sao của `hw/ip/dphy_rx/rtl` và `bow_ppi_err_rx.sv` với một
+  thay thế văn bản, phải làm một trong 13 lần chạy (12 test, `gray` thêm `+BUS_PS`) hỏng: `T_INIT`
+  bỏ qua / đếm nửa / đếm ở `Enable` / không đếm sau READY lên, REINIT không đưa về `WaitStop`,
+  `HS_TMO` trễ một chu kỳ / không là lỗi LP / reset 0, `ESC_TMO` đơn vị 32 / bỏ qua, mã ULPS đảo
+  thứ tự bit, `lane_pd` không theo ULPS / giữ qua mark thức dậy, `ULPS_EN` bỏ qua, lệnh lạ không
+  lỗi, `HSRX_EARLY` bỏ qua / bật cả termination, `CLK_MISS_OFF` bỏ qua, `RxSkewCalHS` xung,
+  `CLK_TOG_DIV` bỏ qua, bộ đếm PPI nhị phân / cách 8 chu kỳ / không che khi `CLK_CONT`, bộ lấy mẫu
+  đếm thay đổi thay vì bước, bộ đếm phía bus đếm thay đổi / nhị phân / không dồn sự kiện cùng chu
+  kỳ, APPLY mọi chu kỳ / `CMD[0]` đọc 0 / APPLY khi đang chờ bị mất, `CLK_LOST` bỏ qua bit bật /
+  không lên PPI, LATE_EOT một lần / cả khi `Enable` / cả khi REINIT: 35/35 chết.
 
 ### D-PHY I/O trên FPGA (xsim)
 
