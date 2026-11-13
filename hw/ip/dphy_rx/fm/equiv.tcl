@@ -77,11 +77,16 @@
 # against the same module of a tree of step 5 (e.g. 1c76364), with the new inputs held at
 # the values the D-PHY gives them after reset:
 #   * the controller bow_csi2rx (configurations kv260 .. sim, the parameters bow_mipi_rx
-#     gives it): ErrControl / ErrControlClk held at 0 on both sides (v1 pulses and v1.x
-#     gray counters cannot be compared cycle by cycle: the new sampler u_lperr, constant
-#     then, has no counterpart) and the new flop of the deskew count (dsk_last_q, the
-#     previous RxSkewCalHS) held at 0: the proof of the rising edge count for a pulse of
-#     one byte clock, the RxSkewCalHS of v1 (dsk_last_q is 0 whenever such a pulse is 1);
+#     gives it), cut at lp_err on both sides: the net "an LP error reached the controller"
+#     (v1: the OR of the ErrControl* pulses; v1.x: the OR of the changes the new sampler
+#     u_lperr sees in the gray counters) is a cut point, a free input of everything it
+#     drives (lp_pend_q, ERR_STATUS.LP, the lost burst request lpl_* and its marking), which
+#     is so proven for any LP error; the cut point itself is a don't-verify point (v1
+#     pulses and v1.x gray counters cannot be compared cycle by cycle, and u_lperr has no
+#     counterpart): the sampler is not proven here (gap: DV and mutants_ppi / mutants_rx /
+#     mutants_dphy cover it). The new flop of the deskew count (dsk_last_q, the previous
+#     RxSkewCalHS) is held at 0: the proof of the rising edge count for a pulse of one byte
+#     clock, the RxSkewCalHS of v1 (dsk_last_q is 0 whenever such a pulse is 1);
 #   * the lane state machine bow_dphy_lp, data lane (lp_data) and clock lane (lp_clk), with
 #     the new inputs at the values of the reset configuration: HSRX_EARLY, CLK_MISS_OFF,
 #     ULPS_EN, ESC_TMO, T_INIT 0, HS_TMO 2^20 (the watchdog of v1), no T_INIT or REINIT
@@ -176,6 +181,11 @@ array set step6_new {
         esc_mark_q_reg ev_tmo_o ev_esc_o ev_esc_tmo_o ev_ulps_o ev_wake_o hsrx_early_i miss_off_i
         ulps_en_i hs_tmo_i esc_tmo_i tinit_i tinit_set_i force_wait_i term_en_o ulps_o
         ulps_act_o}
+}
+# step 6, part ctrl: the nets cut on both sides (cut points, not verified; see the header)
+array set step6_cut {
+  ctrl {lp_err}
+  lp   {}
 }
 if {![info exists step]} {
   set step 2
@@ -334,13 +344,6 @@ if {[info exists step_constants($step)]} {
 # step 6: {side point value}, see the header
 set step6_constants {}
 if {$part eq "ctrl"} {
-  regexp {Lanes = (\d+)} $params -> lanes
-  foreach b {0 1} {
-    lappend step6_constants both "ppi_lp_clk_i\[err_control\]\[$b\]" 0
-    for {set l 0} {$l < $lanes} {incr l} {
-      lappend step6_constants both "ppi_lp_i\[$l\]\[err_control\]\[$b\]" 0
-    }
-  }
   lappend step6_constants impl dsk_last_q_reg 0
 } elseif {$part eq "lp"} {
   foreach p {hsrx_early_i miss_off_i ulps_en_i tinit_set_i force_wait_i} {
@@ -363,6 +366,21 @@ if {$part eq "ctrl"} {
   # the clock lane's REINIT exit flag: set only with force_wait_i, held 0 here
   if {[regexp {ClockLane = 1} $params]} {
     lappend step6_constants impl exit_wait_q_reg 0
+  }
+}
+# step 6: the cut nets, the same name on both sides, not verified themselves
+set n_cuts 0
+if {$part ne {}} {
+  foreach net $step6_cut($part) {
+    foreach d [list $ref $impl] {
+      if {[sizeof_collection [get_nets -quiet "$d/$net"]] != 1} {
+        puts "EQUIV $cfg: no net $net in $d"
+        exit 1
+      }
+      set_cutpoint -type net "$d/$net"
+      set_dont_verify_points -type net "$d/$net"
+    }
+    incr n_cuts
   }
 }
 foreach {side pt v} $step6_constants {
@@ -569,8 +587,31 @@ if {$step == 6} {
   if {$ncon != $n_constants} {
     lappend bad "user constants: $ncon in constants.rpt, $n_constants set (step6_constants)"
   }
-  if {![regexp {Don't verify points:\s+None} [slurp dont_verify.rpt]]} {
-    lappend bad "don't-verify points (dont_verify.rpt)"
+  # don't-verify points: none, or (part ctrl) exactly the cut nets, as one matched cut point
+  # each, the same name on both sides
+  set dvtxt [slurp dont_verify.rpt]
+  if {$n_cuts == 0} {
+    if {![regexp {Don't verify points:\s+None} $dvtxt]} {
+      lappend bad "don't-verify points (dont_verify.rpt)"
+    }
+  } else {
+    set dv_names {}
+    foreach {- name} [regexp -all -inline -line {^\s+\(\w+\)\s+([ri]:/\S+)\s*$} $dvtxt] {
+      lappend dv_names $name
+    }
+    set dv_names [lsort -unique $dv_names]
+    set want {}
+    foreach net $step6_cut($part) {
+      lappend want "$ref/$net" "$impl/$net"
+    }
+    if {$dv_names ne [lsort -unique $want]} {
+      lappend bad "don't-verify points [join $dv_names {, }], want the cut nets [join [lsort -unique $want] {, }]\
+                   (dont_verify.rpt)"
+    }
+    set cut_pairs [matched_pairs -point_type cut]
+    if {[llength $cut_pairs] != $n_cuts} {
+      lappend bad "[llength $cut_pairs] matched cut points, $n_cuts cut nets"
+    }
   }
 }
 # names: the reference's after the rename rules, every pair matched by name
@@ -640,12 +681,15 @@ if {$step == 6} {
     lappend per "$k $v"
   }
   set held [expr {$part eq "ctrl" ?
-    "ErrControl / ErrControlClk 0 on both sides, dsk_last_q 0 (RxSkewCalHS a pulse, v1)" :
+    "dsk_last_q 0 (RxSkewCalHS a pulse, v1)" :
     "the new inputs at the reset configuration (HS_TMO 2^20, the rest 0), tmr_hi_q 0[expr {[regexp {ClockLane = 1} $params] ? {, exit_wait_q 0} : {}}]"}]
+  set cut [expr {$n_cuts ? "cut on both sides at [join $step6_cut($part) {, }] (a free input\
+               of the logic it drives; the cut point not verified)" :
+               "no cut point or don't-verify point"}]
   set summary "step $ref_step -> $step, part $part ($impl_top on both sides): $total compare\
                points matched and passing ($port ports, $dff flops), 0 failing / aborted /\
                unverified, $n_pairs matched pairs ($n_unread unread) with the reference's\
-               names, no black box, user match or don't-verify point; held: $held\
+               names, no black box or user match; $cut; held: $held\
                ($n_constants user constants); unmatched only the new cells and ports\
                ([join $per {, }]); not compared: $creg constant registers, $unread unread flops"
 }
