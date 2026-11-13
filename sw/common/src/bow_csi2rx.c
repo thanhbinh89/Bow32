@@ -93,6 +93,18 @@ uint32_t bow_csi2rx_lanes(void) {
   return n > max ? max : n;
 }
 
+bool bow_csi2rx_byte_clock_ok(uint32_t byte_hz) {
+  uint32_t mhz = CSI2RX_INFO_MHZ(CSI2RX->INFO);
+  return mhz >= 255u || (uint64_t)byte_hz <= (uint64_t)mhz * 1000000u;
+}
+
+/* "byte clock ... above the controller clock ...": the clock rule (bow_csi2rx_byte_clock_ok) */
+static void warn_byte_clock(const char *what, uint32_t byte_hz) {
+  bow_printf("csi2rx: warning: %s byte clock %u kHz above the controller clock %u MHz (INFO): "
+             "the lane merge FIFO drops words, bursts end with SKEW (misc)\n", what,
+             byte_hz / 1000u, CSI2RX_INFO_MHZ(CSI2RX->INFO));
+}
+
 int bow_csi2rx_start(uint32_t lanes, uint32_t dt, uint32_t lane_rate) {
   uint32_t n = lanes >= 4 ? 4u : lanes >= 2 ? 2u : 1u;
   uint32_t trail = DPHY_INFO2_TRAIL(DPHY->INFO2);
@@ -105,6 +117,7 @@ int bow_csi2rx_start(uint32_t lanes, uint32_t dt, uint32_t lane_rate) {
    * re-initialisation) and says when it is ready; the UltraScale+ PHY has
    * none (READY is 1 there). */
   rx_off();
+  if (!bow_csi2rx_byte_clock_ok(lane_rate / 8u)) warn_byte_clock("the lane rate's", lane_rate / 8u);
   if (bow_dphy_rx_self_cal() && !bow_dphy_rx_wait_ready(PHY_RDY_TIMEOUT_MS)) {
     return CSI2RX_ENOTRDY;
   }
@@ -826,6 +839,7 @@ void bow_csi2rx_print_status(void) {
   if (c.deskew) bow_printf("  deskew bursts %u\n", c.deskew);
   bow_printf("  timing: frame %u us, line %u ns, byte clock %u kHz\n", muldiv(ft, 1000000u, clk),
              muldiv(lt, 1000000000u, clk), byte_hz / 1000u);
+  if (!bow_csi2rx_byte_clock_ok(byte_hz)) warn_byte_clock("measured", byte_hz);
   bow_printf("  phy: lp clk %s", lp_state(hs & DPHY_LANE_HS_CLK, DPHY_LANE_LP_CLK(lp)));
   for (uint32_t l = 0; l < n; l++) {
     bow_printf(" d%u %s", l, lp_state(hs & DPHY_LANE_HS(l), DPHY_LANE_LP(lp, l)));

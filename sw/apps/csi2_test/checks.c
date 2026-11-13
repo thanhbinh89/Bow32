@@ -477,6 +477,12 @@ static bool check_timing(const suite_t *s) {
   if (!s->quick) bow_csi2rx_clear(); /* clock lane HS entries during the measurement */
   uint32_t byte_hz = bow_dphy_rx_byteclk_hz(s->quick ? 0u : 100u);
   uint32_t f_us = muldiv(ft, 1000000u, clk), l_ns = muldiv(lt, 1000000000u, clk);
+  /* the controller's clock rule (step 7): above its clock the lane merge drops words, which
+   * shows as SKEW (misc), not as a clock problem */
+  if (!bow_csi2rx_byte_clock_ok(byte_hz)) {
+    return fail("byte clock %u kHz above the controller clock %u MHz (INFO): the lane merge "
+                "FIFO drops words (SKEW)", byte_hz / 1000u, CSI2RX_INFO_MHZ(CSI2RX->INFO));
+  }
   if (s->quick) {
     if (lt == 0 || ft <= ct.h * lt) {
       return fail("frame %u cycles, line %u cycles: not more than %u lines", ft, lt, ct.h);
