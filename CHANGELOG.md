@@ -6,6 +6,25 @@
 ## [Unreleased]
 
 ### Added
+- Bộ thu CSI-2, bước 7 của kế hoạch chuyển MIPI RX ([docs/ip/mipi_rx_arch.md](docs/ip/mipi_rx_arch.md)
+  mục 5.4, 5.5, 6.1, 10): **controller ở clock liên tục của chính nó** (`csi_clk`; `vid_clk` trên
+  FPGA; F7 của review). FIFO 2 clock ngay sau ghép lane (`bow_csi2_lane_merge`, `u_cdc_fifo`:
+  `bow_fifo_async` 16 entry, con trỏ gray) mang word, dấu cuối burst và sự kiện aligner
+  (`ErrSotSyncHS`, `RxSkewCalHS` đã gate) theo đúng thứ tự; lớp packet, unpack, FIFO pixel (một
+  clock: `bow_fifo_ram` mới trong `hw/ip/common`), đầu ra, LOG, sự kiện về CPU, lấy mẫu lỗi lp và
+  cờ burst mất chạy ở `csi_clk`: FE, ngắt, bộ đếm, `FRAME_SUM`, `FRAME_TIME` / `LINE_TIME` và LOG
+  DONE không chờ byte clock sau burst (byte clock chỉ cần 2 cạnh sau khi `RxActiveHS` xuống). Luật
+  clock `csi_clk` ≥ byte clock cao nhất: tham số `PpiByteClkHz` của controller (không mặc định,
+  elaborate báo lỗi khi lớn hơn `PhyClkHz`), `ByteClkHz` của `bow_mipi_rx` và
+  `bow_csi2rx_ppi_flat` (mặc định `PhyClkHz`); `make lint` thêm các case âm. DV: unit test FIFO 2
+  clock `tb_csi2_merge_cdc.sv` (`make -C hw/ip/csi2rx/dv cdc`, trong `test-rx`), `BOW_SYNC_JITTER`
+  cho hai bench bộ thu (bản build jitter của `bow_fifo_async` đồng bộ con trỏ bằng `bow_sync_bus`;
+  mỗi bản build phải có lần về muộn), test `tclkpost` (lane clock dừng ngay sau burst; cả bộ thu và
+  bench PPI), bất biến `irq_fe`, checker kiểm bản ghi FE nằm trong đoạn của nó, `rxoff` thêm burst
+  deskew đang chạy lúc RX bật; `mutants-ppi` chạy unit test FIFO trước, mutant được sửa
+  `bow_fifo_async` / `bow_fifo_ram`, 9 mutant mới (29/29), `mutants-rx` 2 mới (31/31). Formality
+  `STEP=7` (mặc định, `REF=b832038`): D-PHY, máy LP, các khối controller không đổi và
+  `bow_fifo_async` tương đương bước 6 (controller thì không: đổi miền clock).
 - Bộ thu CSI-2, bước 6 của kế hoạch chuyển MIPI RX ([docs/ip/mipi_rx_arch.md](docs/ip/mipi_rx_arch.md)
   mục 4, 10; [docs/ip/dphy_rx.md](docs/ip/dphy_rx.md) mục *Chức năng v1.x*): **D-PHY v1.x**, mỗi
   chức năng sau một bit có giá trị reset = hành vi của bước 5. `T_INIT` (`TIM2[19:0]`: LP-11 liên
@@ -631,6 +650,23 @@
   144 chu kỳ, không giới hạn số lần thử.
 
 ### Changed
+- Bộ thu CSI-2, bước 7 (xem *Added*): cổng clock của `bow_csi2rx` và `bow_csi2rx_ppi_flat`
+  `vid_clk_i` / `vid_rst_ni` → `csi_clk_i` / `csi_rst_ni` (`bow_mipi_rx` giữ cổng của nó và nối
+  `vid_clk_i` vào); FIFO pixel một clock (full / almost full chính xác thay cho thận trọng); hồ sơ
+  PPI (đặc tả mục 5.4, 5.5): byte clock chỉ cần 2 cạnh sau cạnh mà `RxActiveHS` cuối cùng xuống
+  (bước 6: 4), mốc thời gian FS / dòng đúng khi word cuối của packet đã vào FIFO, 3 cạnh sau byte
+  cuối (bước 6: 8), yêu cầu mới byte clock ≤ `csi_clk`; mô hình PPI dựng theo hồ sơ mới
+  (`Ppi.POST` 2, `Ppi.EXACT` 3), `INFO[15:8]` là MHz của `csi_clk` (cùng giá trị trên FPGA). Ràng
+  buộc `set_bus_skew` của FIFO pixel trên hai bo thay bằng của FIFO 2 clock sau ghép lane
+  (`*/u_csi2rx/u_lane_merge/u_cdc_fifo/...`), số vẫn 13 (KV260) / 14 (Huins); `report_cdc` có thêm
+  dòng CDC-26 (cảnh báo: RAM LUT 2 clock, như FIFO của DDR / HyperRAM). Flop con trỏ gray của
+  `bow_fifo_async` có `DONT_TOUCH` (lần build Huins đầu của bước 7: equivalent driver rewiring của
+  `phys_opt_design` chuyển tải của bit cao con trỏ gray sang flop nhị phân tương đương và xoá flop
+  gray, kiểm tra cell của bus skew báo 4 nguồn / 5 đích). Hành vi đổi: pixel, sự kiện
+  và ngắt tới sau burst theo `csi_clk` thay vì theo byte clock (độ trễ khác, không còn chờ burst
+  sau), LOG ARM có hiệu lực ngay và DONE không chờ byte clock, lỗi lp khi RX tắt không đánh dấu
+  burst nào (cờ ở miền datapath của `csi_clk`), controller vượt luật clock (byte clock > `csi_clk`)
+  báo burst mất word là SKEW. Firmware không đổi (giống từng byte bước 6).
 - Bộ thu CSI-2, bước 6 (xem *Added*): PPI v1.x giữa D-PHY và controller: `ErrControl` /
   `ErrControlClk` là bộ đếm gray 2 bit (bước 2–5: xung một chu kỳ ở bit 0), `RxSkewCalHS` mức (bước
   2–5: xung; controller đếm cạnh lên, nên `CNT_EXT[31:16]` không đổi), `PpiLpClkHz` của controller

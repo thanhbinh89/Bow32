@@ -394,18 +394,19 @@ FRAME/LINE_INFO, FRAME_SUM, `FRAME_ERR`, FRAME/LINE_TIME, LOG và các bất bi�
 
 ```bash
 make -C hw/ip/csi2rx/dv test                          # test-rx rồi test-ppi
-make -C hw/ip/csi2rx/dv test-rx                       # unit test, rồi cả bộ thu: 110 case, song song
+make -C hw/ip/csi2rx/dv test-rx                       # unit test, rồi cả bộ thu: 114 case, song song
 make -C hw/ip/csi2rx/dv align                         # chỉ unit test của aligner
 make -C hw/ip/csi2rx/dv afe AFE_SEED=3                # chỉ unit test của phía AFE (bước 5)
+make -C hw/ip/csi2rx/dv cdc SEEDS="1 2 3"             # chỉ unit test của FIFO 2 clock của ghép lane (bước 7)
 make -C hw/ip/csi2rx/dv test-rx SEEDS="1 2 3 4 5 6 7 8"
 make -C hw/ip/csi2rx/dv run SEED=7 LANES=1 ERRORS=1   # thêm DUT_LANES=1|2|4 RAW8=1 CONTCLK=1
 make -C hw/ip/csi2rx/dv run SEED=3 LANES=4 ERRORS=1 BURSTRST=1   # PHY Versal với BurstRxRst = 1
 make -C hw/ip/csi2rx/dv run TEST=clk                  # một test directed
-make -C hw/ip/csi2rx/dv test-ppi                      # controller ở PPI: 167 case, hai chế độ, song song
+make -C hw/ip/csi2rx/dv test-ppi                      # controller ở PPI: 177 case, hai chế độ, song song
 make -C hw/ip/csi2rx/dv test-ppi SEEDS="$(seq -s ' ' 1 40)" PJOBS=8
 make -C hw/ip/csi2rx/dv run-ppi MODE=std TEST=loss LANES=4   # một case (MODE bow|std)
-make -C hw/ip/csi2rx/dv mutants-ppi                   # 20 mutant phải làm bench PPI hỏng
-make -C hw/ip/csi2rx/dv mutants-rx                    # 29 mutant: unit test AFE hay bench cả bộ thu hỏng
+make -C hw/ip/csi2rx/dv mutants-ppi                   # 29 mutant: unit test FIFO 2 clock hay bench PPI hỏng
+make -C hw/ip/csi2rx/dv mutants-rx                    # 31 mutant: unit test AFE hay bench cả bộ thu hỏng
 ```
 
 - Unit test aligner (`tb_dphy_align.sv`, chạy đầu tiên trong `test`): word
@@ -418,12 +419,39 @@ make -C hw/ip/csi2rx/dv mutants-rx                    # 29 mutant: unit test AFE
   word, lượt sau cả lúc `arm` lên, lượt cuối trước mọi word) với word rác `00`,
   `FF`, `B8` hay ngẫu nhiên: kết quả không được đổi (301 case).
 - Bản build DV định nghĩa `BOW_CDC_JITTER`: mỗi `bow_cdc_pulse` ngẫu nhiên nhận
-  toggle muộn một chu kỳ (như flop metastable), seed Verilator = seed của case.
+  toggle muộn một chu kỳ (như flop metastable), seed Verilator = seed của case. Từ bước 7 cả
+  `BOW_SYNC_JITTER` (như bench D-PHY): một đầu vào `bow_sync`, và một bit của hai bộ đồng bộ con
+  trỏ của `bow_fifo_async` (bản build này dùng `bow_sync_bus` thay flop thường), đổi trong cửa sổ
+  0,5 ns trước cạnh clock thì có thể về muộn một chu kỳ. Clock CPU và video ở đây là bội của nhau,
+  byte clock thì không: mô hình chạy trên các đường byte ↔ video (FIFO 2 clock của ghép lane,
+  `RxActiveHS` và cạnh lane clock của D-PHY). Mỗi case in số lần về muộn, `test-rx` / `test-ppi`
+  cộng theo bản build và hỏng khi một bản build không có lần nào (`build/csi2rx_dv/late_*.txt`).
+- Unit test FIFO 2 clock (`tb_csi2_merge_cdc.sv`, `make cdc`, chạy sau `afe` trong `test-rx`, mỗi
+  seed của `SEEDS`; bước 7): ghép lane 4 lane một mình, bản build `BOW_SYNC_JITTER`, clock video
+  200 MHz và byte clock 8,772 / 5,556 / 5,0013 / 4,9987 / 10,417 ns (KV260, Huins, tỉ số 1 hai
+  phía 260 ppm, 96 MHz) rồi 3,2 ns (312,5 MHz, vượt luật), byte clock khởi động lại ở pha ngẫu
+  nhiên mỗi burst: mọi entry ghi vào FIFO ra đúng một lần, đúng thứ tự (word, sop, cuối burst,
+  SKEW, sự kiện); byte clock dừng đúng 2 cạnh sau cạnh `RxActiveHS` xuống (hay 3, 6; hay 1 cạnh
+  hoặc trước cú xuống: cuối burst chờ lần chạy sau) thì mọi entry và cuối burst ra trong LP time khi
+  clock đang dừng; không word nào bị bỏ khi clock video ≥ byte clock (đầu ghi thấy tối đa 5 entry);
+  312,5 MHz: word bị bỏ, burst đó có cờ SKEW, mọi cuối burst vẫn ra; jitter phải có lần về muộn.
+  Một con trỏ không qua bằng mã gray (`cdc_ptr_binary`) chỉ hỏng ở đây khi mô hình jitter bật.
 - Random, mỗi seed 11 cấu hình: 2 lane có/không lỗi, 1 lane (`Lanes = 1`) có
   lỗi, 1 lane trên bộ thu 2 lane có/không lỗi; trên bộ thu 4 lane (PHY Versal):
   4 lane có/không lỗi với `BurstRxRst` = 0 và có lỗi với `BurstRxRst` = 1, 2 trên 4
   có/không lỗi, 1 trên 4 có lỗi; RAW8 và clock liên tục xen kẽ. Lỗi: lật bit header
   (1 và 2 bit), lật bit payload, sync sai, lệch lane, cắt packet.
+- `tclkpost` (bước 7, cả bộ thu và bench PPI): lane clock dừng ngay sau burst; thanh ghi đọc
+  và đoạn kết thúc ngay sau mỗi FE, không có clock-only burst (`Gen.clk_sync` tắt): FE, ngắt
+  (bản ghi `fe` phải nằm trong đoạn của FE, bất biến mới `irq_fe`: `irq_o` cao khi FE có
+  `IRQ_EN.FE`), `FRAME_INFO` / `FRAME_SUM` / `FRAME_ERR`, bộ đếm, LOG DONE phải xong khi byte clock
+  đã dừng. Cả bộ thu: T_CLK-POST 10 ns (30 ns với PHY Versal), dưới mức D-PHY cần để hạ
+  `RxActiveHS` (LATE_EOT). PPI: đoạn 1 dừng clock đúng 2 cạnh sau cú xuống (`std` 4), trail `std`
+  0–3 byte, có lỗi sync, SKEW, EXTRA, TRUNC (cuối burst ngay trước lần đọc); đoạn 2 dừng ngay sau
+  khi word cuối của packet vào FIFO, trước cú xuống (`Ppi.early`). Controller của bước 6 hỏng test
+  này ở bench PPI và ở cả bộ thu 2 lane (FE, `FRAME_INFO`, LOG DONE, TRUNC tới ở burst sau; ở cả bộ
+  thu 4 lane, PHY Versal với T_CLK-POST 30 ns, nó còn đủ byte clock). Checker từ bước 7 kiểm bản ghi
+  `fe` nằm đúng đoạn của FE.
 - Directed: `lp` (escape, LP-00 từ Stop, độ trễ LP-00 → `hs_en`), `watchdog`,
   `clk` (CE chỉ đổi ở HS-0, mất clock), `cmd` (lệnh LOG/RAW khi byte clock
   dừng), `ovf` (tràn FIFO khi `tready` thấp: dòng Cut có `tlast` + `tuser[1]`,
@@ -451,8 +479,10 @@ make -C hw/ip/csi2rx/dv mutants-rx                    # 29 mutant: unit test AFE
   `rxoff` (sự kiện của aligner khi RX tắt: `RX_EN` = 0 với `PHY_EN` = 1, một burst sync hỏng và
   một burst deskew không vào `CNT_SOT` / `CNT_EXT` / `ERR_STATUS` / `IRQ_STATUS`; `CTRL` = 0 quét
   từng 10 ns từ đầu một burst dòng qua cửa sổ dò sync, không lỗi SoT; `RX_EN` bật giữa một burst
-  sync hỏng, sau khi `RxActiveHS` mọi lane đã lên, không lỗi SoT; rồi RX bật thì lại đếm; trên PHY
-  Versal với `BurstRxRst` = 1).
+  sync hỏng, sau khi `RxActiveHS` mọi lane đã lên, không lỗi SoT, và (bước 7) giữa một burst deskew
+  sau khi `RxSkewCalHS` đã lên, không đếm deskew; rồi RX bật thì lại đếm; trên PHY Versal với
+  `BurstRxRst` = 1. Từ bước 7 sự kiện của aligner đi qua FIFO 2 clock, phía ghi bị reset khi RX
+  tắt: chỉ ca giữa burst còn cần cổng `stale_q`).
   Từ bước 4 mỗi lần dump đọc thanh ghi của cả hai khối và các địa chỉ PHY cũ (phải đọc 0). `cmd`, `stop`, `deskew`, `extra`, `ovf`, `ovf2`, `loss`,
   `be`, `eye` chạy thêm với 1 lane; `deskew`, `extra`, `ovf`, `ovf2`, `loss`,
   `eye` với 1 trên 2 lane; `be`, `eye`, `loss`, `rxoff` với clock liên tục (2 và 4 lane).
@@ -503,7 +533,7 @@ make -C hw/ip/csi2rx/dv mutants-rx                    # 29 mutant: unit test AFE
   chạy không có word glitch như `deskew` và `loss` (với `BurstRxRst` = 0 trễ trôi đưa cửa sổ dò
   vào nhiễu HS-PREPARE: một sync giả ở seed 1, 4 lane, sau khi luồng `$urandom` của bench dịch đi
   vì các bộ đồng bộ xung của bước 5 đã thành bộ đếm gray).
-- `make test-tools` chạy 43 unit test của mô hình (`tools/tests/test_csi2_model.py`) và 3 test
+- `make test-tools` chạy 45 unit test của mô hình (`tools/tests/test_csi2_model.py`) và 3 test
   của công thức `SETTLE` (`tools/tests/test_dphy_settle.py`, biên dịch `bow_dphy_rx_settle()` bằng
   `cc` của máy host; Versal ở mọi lane rate kể cả 0, và đích 140 ns của firmware `brst0`), và 3
   test của kiểm tra đầu vào nối rỗng (`tools/tests/test_empty_inputs.py`, cần Verilator).
@@ -519,7 +549,9 @@ make -C hw/ip/csi2rx/dv mutants-rx                    # 29 mutant: unit test AFE
   CAL_ERR đổi chỗ, XPHY giữ user mode / `RX_RST` / không xoá khi chưa ready, OWN xuống không nhả,
   không cần ổn định 2 chu kỳ, `ISERDESE3` không reset, tap bỏ qua OWN, `LOAD` mỗi chu kỳ…):
   28/28 chết, ~3 phút (`MJOBS`=2). Bước 6 thêm `reinit_starts_cal` (`CMD.REINIT` lại chạy hiệu
-  chỉnh AFE: `tb_dphy_afe`): 29/29.
+  chỉnh AFE: `tb_dphy_afe`): 29/29. Bước 7: bản build với `BOW_SYNC_JITTER`, case `tclkpost` 1 và 2
+  lane, mutant mới: LOG còn ở byte clock (chỉ `tclkpost` giết), sự kiện về CPU còn rời từ byte
+  clock (`tclkpost`, `raw`, `rxoff`, `dly`, `be`): 31/31.
 - **Bench PPI** (`tb_csi2rx_ppi.sv`, `bow_ppi_bfm.sv`; `test-ppi`, bước CI riêng): controller
   `bow_csi2rx` một mình, PHY là BFM chơi phần dựng PPI của `csi2_model.py gen --ppi bow|std` (mỗi
   item TX của test case kèm byte mỗi lane mỗi burst với chu kỳ, `RxActiveHS`, `RxSyncHS`, khe,
@@ -541,7 +573,13 @@ make -C hw/ip/csi2rx/dv mutants-rx                    # 29 mutant: unit test AFE
   [ip/mipi_rx_arch.md](ip/mipi_rx_arch.md) mục 5.5. Từ bước 6 lỗi lp trên PPI là bộ đếm gray 2 bit:
   ở `bow` BFM bước bộ đếm mỗi lỗi, ở `std` PHY vẫn phát xung và wrapper đổi thành bộ đếm
   (`bow_ppi_err_tx` ở clock 25 MHz của PHY); mutant mới: đếm `RxSkewCalHS` ở mọi chu kỳ nó cao,
-  bộ lấy mẫu chỉ thấy bit 0 (20/20).
+  bộ lấy mẫu chỉ thấy bit 0 (20/20). Từ bước 7 renderer theo hồ sơ mới (byte clock tối thiểu 2 cạnh
+  sau cú xuống, `std` 4; mốc thời gian đúng khi word cuối vào FIFO: `Ppi.EXACT` 3), bench build với
+  `BOW_SYNC_JITTER`, thêm `tclkpost`; `mutants-ppi` chạy unit test FIFO 2 clock trước (mutant có thể
+  sửa `bow_fifo_async` / `bow_fifo_ram` của `hw/ip/common`) và có 9 mutant mới (con trỏ nhị phân,
+  con trỏ ghi công bố trễ, FIFO ghi trễ một byte clock, dấu cuối burst không ghi, word chiếm slot
+  cuối, sự kiện về CPU ở byte clock, đầu đọc không reset khi RX tắt, FIFO pixel đọc sớm / almost full
+  trễ): 29/29.
 
 ### D-PHY số (`bow_dphy_rx` một mình)
 
