@@ -26,7 +26,15 @@
 //   depth     at a csi_clk at least the byte clock the writer never sees the FIFO almost full
 //             (no word dropped); the most entries it sees in flight is reported;
 //   overflow  (byte clock 312.5 MHz against 200 MHz, case 'fast') long bursts drop words:
-//             every burst still ends, the ones that dropped one with the skew flag.
+//             every burst still ends, the ones that dropped one with the skew flag;
+//   ppm       (review of step 7) the margin of the 16 entries against a csi_clk a little slower
+//             than the byte clock, as two oscillators can be: 200 ppm (csi_clk 10.002 ns,
+//             byte clock 10 ns) adds 3.3 entries over the longest packet of 4 lanes (65 541
+//             bytes = 16 386 words, case ppm_l4): no word dropped; 13 over the longest of 1
+//             lane (65 541 words, case ppm_l1): words dropped, the burst a skew error. The
+//             worst case (every synchroniser bit a cycle late, 9 entries in flight) leaves 6
+//             entries: 366 ppm with 4 lanes, 183 ppm with 2, 92 ppm with 1
+//             (docs/ip/mipi_rx_arch.md, section 6.1).
 // "tb_csi2_merge_cdc: PASS (<n> checks)" or "FAIL (<n> errors)".
 
 `timescale 1ns / 1ps
@@ -34,7 +42,7 @@
 module tb_csi2_merge_cdc;
   parameter int unsigned Lanes = 4;
   localparam int unsigned EntryW = 4 + Lanes + 1 + 8 * Lanes;
-  localparam realtime CsiNs = 5.0;                       // 200 MHz
+  realtime csi_ns = 5.0;                                  // 200 MHz (case ppm: 10.002 ns)
   localparam int unsigned CdcDepth = 16;                  // bow_csi2_lane_merge's default
 
   int unsigned errors = 0, checks = 0;
@@ -50,7 +58,7 @@ module tb_csi2_merge_cdc;
   realtime byte_ns = 8.772;
   logic    rst_n = 1'b0;
 
-  always #(CsiNs / 2.0) csi_clk = ~csi_clk;
+  always #(csi_ns / 2.0) csi_clk = ~csi_clk;
 
   initial begin : bclk
     forever begin
@@ -292,6 +300,32 @@ module tb_csi2_merge_cdc;
     end
   endtask
 
+  // a case of one long burst without gaps: csi_clk and byte clock periods, its words; overflow:
+  // words must be dropped (and the burst end with the skew flag), else none
+  task automatic run_long(input string name, input realtime cns, input realtime bns,
+                          input int unsigned words, input bit overflow);
+    int unsigned b0, s0, l0;
+    csi_ns  = cns;
+    byte_ns = bns;
+    #100;                                // csi_clk at its new period
+    occ_max = 0;
+    b0 = bursts;
+    s0 = skew_seen;
+    l0 = words_lost;
+    burst(words, 0, 2, 1'b0);
+    lp_gap(1000, 1'b0);
+    $display("tb_csi2_merge_cdc: case %s, csi_clk %0.3f ns, byte clock %0.3f ns: one burst of %0d words, at most %0d entries in flight (the writer's view), %0d words dropped, %0d ends with the skew flag",
+             name, cns, bns, words, occ_max, words_lost - l0, skew_seen - s0);
+    checks++;
+    if (overflow && (words_lost == l0 || skew_seen == s0)) begin
+      err($sformatf("case %s: %0d words dropped, %0d skew flags: the FIFO did not overflow", name,
+                    words_lost - l0, skew_seen - s0));
+    end else if (!overflow && (words_lost != l0 || skew_seen != s0)) begin
+      err($sformatf("case %s: %0d words dropped, %0d skew flags within the margin", name,
+                    words_lost - l0, skew_seen - s0));
+    end
+  endtask
+
   initial begin : watchdog
     #(20_000_000.0);
     $fatal(1, "TIMEOUT");
@@ -316,6 +350,9 @@ module tb_csi2_merge_cdc;
     run_case("equal_fast", 4.9987, 40, 600, 1'b0);         // byte clock 260 ppm faster
     run_case("slow", 10.417, 30, 200, 1'b0);               // 96 MHz
     run_case("fast", 3.2, 20, 400, 1'b1);                  // 312.5 MHz: overflow
+    // the 16 entries' margin per lane count (ppm, above): csi_clk 200 ppm slower
+    run_long("ppm_l4", 10.002, 10.0, 16386, 1'b0);         // 4 lanes' longest packet: kept
+    run_long("ppm_l1", 10.002, 10.0, 65541, 1'b1);         // 1 lane's longest packet: overflow
 
     // drain, then the checks of the whole run
     #500;

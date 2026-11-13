@@ -138,6 +138,26 @@ MUTANTS = [
                             "  assign f_push  = f_word || (ev_sot_i != '0) || ev_dsk_i;", 1)]),
     ("merge_no_reserve", [(MERGE, "  assign f_word  = m_valid_q && !f_afull;",
                            "  assign f_word  = m_valid_q;", 1)]),
+    # (review of step 7) the ErrSotSyncHS of the cycle after the fall written into the FIFO a
+    # byte clock later, as an entry of its own after the end of the burst: it needs 3 edges
+    # after the fall, not 2 (tclkpost, bow: the sync error burst right before CNT_SOT and
+    # ERR_STATUS are read)
+    ("merge_sot_event_late", [(MERGE, "  assign f_push  = f_word || m_eob_q || (ev_sot_i != '0) || ev_dsk_i;",
+                               "  assign f_push  = f_word || m_eob_q || (ev_sot_d != '0) || ev_dsk_i;", 1),
+                              (MERGE, "  assign f_wdata = {f_word, m_sop_q && f_word, m_eob_q, m_eob_q && (m_skew_q || lost_q), ev_sot_i,",
+                               "  assign f_wdata = {f_word, m_sop_q && f_word, m_eob_q, m_eob_q && (m_skew_q || lost_q), ev_sot_d,", 1),
+                              (MERGE, "  logic                  f_full, f_afull, f_empty, f_push, f_word, lost_q;",
+                               "  logic                  f_full, f_afull, f_empty, f_push, f_word, lost_q;\n"
+                               "  logic [Lanes-1:0]      ev_sot_d;\n"
+                               "  always_ff @(posedge clk_i or negedge rst_ni) if (!rst_ni) ev_sot_d <= '0; else ev_sot_d <= ev_sot_i;", 1)]),
+    # (review of step 7) irq_o through a flop of the byte clock: IRQ_STATUS.FE is set in time,
+    # irq_o only at the next byte clock edge (tclkpost: invariant irq_stop of the irqfe
+    # measurement, after the FE with the byte clock stopped; irq_fe of the FE polls)
+    ("irq_on_byte_clock", [(CTRL, "    .irq_o,\n    .cfg_o         (cfg),",
+                            "    .irq_o         (irq_c),\n    .cfg_o         (cfg),", 1),
+                           (CTRL, "  bow_csi2rx_regs #(",
+                            "  logic irq_c;\n  always_ff @(posedge rx_byte_clk_hs_i) irq_o <= irq_c;\n\n"
+                            "  bow_csi2rx_regs #(", 1)]),
     # the events to the CPU (FE, lines, errors) still leave from the byte clock, as up to step
     # 6: their csi_clk pulses are lost or doubled, FE and its interrupt wait for a byte clock
     # after the burst (every case; the FIFO mutants above show the waiting alone)

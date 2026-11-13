@@ -25,6 +25,8 @@
 //     clkburst NS                             clock lane only burst (deferred work)
 //     wait / delay NS / waitbyte BURST BYTE   wait for the TX model to finish / time / burst progress
 //     waitphy                                 wait for the PHY ready (Versal PHY model)
+//     irqfe                                   (tclkpost) after a frame's FE: irq_o without a
+//                                             byte clock (invariants irq_stop, irq_stop_n)
 //     tready PCT / knob NAME V / mark N       m_axis tready duty, TX knob, segment marker
 //   and writes
 //   DIR/out.txt   one line per m_axis transfer: pixel tuser[0] tlast tuser[1], and 'mark N'
@@ -39,7 +41,9 @@
 // lane is in an LP state or opened while it toggles (csi2_tx_model counters);
 // with the Versal AFE (AfeKind = 2) the XPHY delay contract of the model (dly_bad,
 // dly_drop, loads per lane); irq_o high whenever a poll finds IRQ_STATUS.FE with IRQ_EN.FE
-// (irq_fe); at the end irq_o = |(IRQ_STATUS & IRQ_EN).
+// (irq_fe); at an irqfe line (test tclkpost: the byte clock stopped behind a frame's FE)
+// irq_o high within 2 us (irq_stop: the misses), irq_stop_n the rises after the last byte
+// clock edge (the measurements); at the end irq_o = |(IRQ_STATUS & IRQ_EN).
 // On every video clock edge: the PPI v1 outputs of the D-PHY that the
 // controller does not use (bow_ppi_chk, bound into bow_dphy_rx; a violation
 // stops the simulation, the counts go to sim.log) and its AFE v1 outputs
@@ -232,6 +236,13 @@ module tb_bow_csi2rx;
   longint      lat_max [ML + 1], off_max [ML];
   int unsigned ce_bad0 = 0, ce_rise0 = 0, runts0 = 0, flips0 = 0, dly_bad0 = 0, dly_drop0 = 0;
   int unsigned irq_fe_bad = 0, irq_fe_bad0 = 0;      // FE polled with irq_o low (IRQ_EN.FE)
+  // irqfe (test tclkpost): irq_o after a frame's FE with the byte clock stopped
+  int unsigned irq_stop_bad = 0, irq_stop_bad0 = 0;  // did not rise with the byte clock stopped
+  int unsigned irq_stop_n = 0, irq_stop_n0 = 0;      // rose with the byte clock stopped
+  int unsigned irq_stop_pre = 0;                     // rose before its last edge
+  longint      irq_stop_lat = 0;                     // most ps from the last byte clock edge
+  realtime     bclk_t = 0.0;                         // time of the last byte clock edge
+  always @(posedge byte_clk) bclk_t = csi2_now();
   int unsigned loads0 [ML];
 
   function automatic void seg_reset();
@@ -244,6 +255,8 @@ module tb_bow_csi2rx;
     dly_bad0  = u_tx.dly_bad;
     dly_drop0 = u_tx.dly_drop;
     irq_fe_bad0 = irq_fe_bad;
+    irq_stop_bad0 = irq_stop_bad;
+    irq_stop_n0 = irq_stop_n;
     for (int i = 0; i < int'(ML); i++) loads0[i] = u_tx.dly_loads[i];
   endfunction
 
@@ -256,6 +269,8 @@ module tb_bow_csi2rx;
     $fwrite(regs_fd, "inv %0d runts %0d\n", seg, u_tx.runts - runts0);
     $fwrite(regs_fd, "inv %0d flips %0d\n", seg, u_tx.flips - flips0);
     $fwrite(regs_fd, "inv %0d irq_fe %0d\n", seg, irq_fe_bad - irq_fe_bad0);
+    $fwrite(regs_fd, "inv %0d irq_stop %0d\n", seg, irq_stop_bad - irq_stop_bad0);
+    $fwrite(regs_fd, "inv %0d irq_stop_n %0d\n", seg, irq_stop_n - irq_stop_n0);
     if (Versal) begin
       $fwrite(regs_fd, "inv %0d dly_bad %0d\n", seg, u_tx.dly_bad - dly_bad0);
       $fwrite(regs_fd, "inv %0d dly_drop %0d\n", seg, u_tx.dly_drop - dly_drop0);
@@ -304,8 +319,41 @@ module tb_bow_csi2rx;
     req   = BUS_REQ_DEFAULT;
   endtask
 
+  // irqfe (test tclkpost, IRQ_EN = FE only): the frame's FE is the last packet queued and the
+  // byte clock stops after its burst. Waits until the TX model is idle (no byte clock edge comes
+  // any more), then up to 2 us for irq_o: it must be high by then (irq_stop counts the
+  // misses), and a rise after the last byte clock edge is a measurement of the interrupt
+  // with the byte clock stopped (irq_stop_n; irq_stop_lat: the most time from that edge). A
+  // rise before it (the FE through while the clock still ran) measures nothing
+  // (irq_stop_pre); irq_o registered on the byte clock never rises after its last edge.
+  realtime irq_rise_t = -1.0;                        // time of irq_o's last rise
+  always @(posedge irq) irq_rise_t = csi2_now();
+
+  task automatic irq_stop_check();
+    realtime t0;
+    longint  d;
+    wait (!u_tx.busy());
+    t0 = csi2_now();
+    while (!irq && csi2_now() - t0 < 2000.0) @(posedge vclk);
+    if (!irq) begin
+      irq_stop_bad++;
+      $display("[%0t] irqfe: irq_o low %0.1f ns after the byte clock stopped", $time,
+               csi2_now() - bclk_t);
+    end else if (irq_rise_t > bclk_t) begin
+      irq_stop_n++;
+      d = longint'((irq_rise_t - bclk_t) * 1000.0);
+      if (d > irq_stop_lat) irq_stop_lat = d;
+    end else begin
+      irq_stop_pre++;
+    end
+  endtask
+
   // One poll of IRQ_STATUS.FE (frame end records), then `cycles` CPU cycles. With FE set,
-  // irq_o must be high when IRQ_EN.FE is (invariant irq_fe: FE polls with irq_o low).
+  // irq_o must be high when IRQ_EN.FE is (invariant irq_fe: FE polls with irq_o low). irq_o
+  // is |(IRQ_STATUS & IRQ_EN) in the CPU domain: this only fails when irq_o is decoupled from
+  // IRQ_STATUS (e.g. registered on another clock: mutant irq_on_byte_clock); that the FE
+  // and its interrupt come without a byte clock is irqfe's measurement (above) and the
+  // checker's segment rule of the FE records.
   task automatic service(input int unsigned cycles);
     logic [31:0] st, info, fsum, ferr, en, unused;
     logic        irq_now;
@@ -531,6 +579,7 @@ module tb_bow_csi2rx;
           n = $sscanf(line, "waitbyte %d %d", k, m);
           wait ((u_tx.cur_burst == k && u_tx.cur_byte >= m) || u_tx.bursts_done > k);
         end
+        "irqfe": irq_stop_check();
         "waitphy": begin
           wait (phy_rdy);
           repeat (4) @(posedge clk);
@@ -567,6 +616,10 @@ module tb_bow_csi2rx;
     $fclose(out_fd);
     if (u_tx.ce_bad != 0) $display("tb_bow_csi2rx: first CE open in an LP state of the clock lane at %0.3f ns",
                                    u_tx.t_ce_bad);
+    if (irq_stop_n + irq_stop_bad + irq_stop_pre != 0) begin
+      $display("tb_bow_csi2rx: irqfe: irq_o rose %0d times with the byte clock stopped (at most %0d ps after its last edge), %0d misses, %0d rises before it",
+               irq_stop_n, irq_stop_lat, irq_stop_bad, irq_stop_pre);
+    end
 `ifdef BOW_SYNC_JITTER
     // the jitter model of bow_sync and of the FIFO pointer synchronisers (make test sums the
     // late resolutions per build and fails a build without any)

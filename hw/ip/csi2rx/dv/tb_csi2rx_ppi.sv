@@ -14,7 +14,7 @@
 // Reads a test case of `tools/csi2/csi2_model.py gen DIR --ppi bow|std`:
 //   DIR/cfg.txt   settings ('key value': ppi, lanes, byte_ps, ...)
 //   DIR/stim.txt  the commands of tb_bow_csi2rx (rd, wr, wrbe, poll, wait, delay, waitbyte,
-//                 tready, knob, mark) and the PPI lines of the model (ppev, lperr, ppl,
+//                 tready, knob, mark, irqfe) and the PPI lines of the model (ppev, lperr, ppl,
 //                 ppb, ppclk, ppon, ppoff, ppidle: see bow_ppi_bfm), played by the BFM;
 //                 the TX items they render (pkt, lp, idle, clkon, clkburst, waitphy) and
 //                 the model-only lines (nocheck, expect) are skipped
@@ -23,8 +23,10 @@
 // which `csi2_model.py check DIR` compares with the reference model.
 //
 // Invariants per segment: ppi_overlap = lane programs of the BFM that overlap (a rendering
-// error), irq_fe = polls that found IRQ_STATUS.FE with IRQ_EN.FE and irq_o low; at the end
-// irq_bad (irq_o = |(IRQ_STATUS & IRQ_EN)).
+// error), irq_fe = polls that found IRQ_STATUS.FE with IRQ_EN.FE and irq_o low, irq_stop =
+// irqfe lines (test tclkpost: the byte clock stopped behind a frame's FE) at which irq_o was
+// still low 2 us later, irq_stop_n = those at which it rose after the last byte clock edge;
+// at the end irq_bad (irq_o = |(IRQ_STATUS & IRQ_EN)).
 //
 // Clocks: CPU 50 MHz, video 200 MHz (PhyClkHz, the lp clock of the D-PHY of Bow32), byte
 // clock and the standard PHY's lp clock from the BFM; all unrelated.
@@ -220,15 +222,26 @@ module tb_csi2rx_ppi;
   // -------------------------------------------------------------- invariants
   int unsigned overlaps0 = 0;
   int unsigned irq_fe_bad = 0, irq_fe_bad0 = 0;      // FE polled with irq_o low (IRQ_EN.FE)
+  // irqfe (test tclkpost): irq_o after a frame's FE with the byte clock stopped
+  int unsigned irq_stop_bad = 0, irq_stop_bad0 = 0;  // did not rise with the byte clock stopped
+  int unsigned irq_stop_n = 0, irq_stop_n0 = 0;      // rose with the byte clock stopped
+  int unsigned irq_stop_pre = 0;                     // rose before its last edge
+  longint      irq_stop_lat = 0;                     // most ps from the last byte clock edge
+  realtime     bclk_t = 0.0;                         // time of the last byte clock edge
+  always @(posedge byte_clk) bclk_t = csi2_now();
 
   function automatic void seg_reset();
     overlaps0   = u_bfm.overlaps;
     irq_fe_bad0 = irq_fe_bad;
+    irq_stop_bad0 = irq_stop_bad;
+    irq_stop_n0 = irq_stop_n;
   endfunction
 
   function automatic void seg_dump(int seg);
     $fwrite(regs_fd, "inv %0d ppi_overlap %0d\n", seg, u_bfm.overlaps - overlaps0);
     $fwrite(regs_fd, "inv %0d irq_fe %0d\n", seg, irq_fe_bad - irq_fe_bad0);
+    $fwrite(regs_fd, "inv %0d irq_stop %0d\n", seg, irq_stop_bad - irq_stop_bad0);
+    $fwrite(regs_fd, "inv %0d irq_stop_n %0d\n", seg, irq_stop_n - irq_stop_n0);
   endfunction
 
   // ---------------------------------------------------------------- bus BFM
@@ -250,8 +263,41 @@ module tb_csi2rx_ppi;
     req   = BUS_REQ_DEFAULT;
   endtask
 
+  // irqfe (test tclkpost, IRQ_EN = FE only): the frame's FE is the last packet queued and the
+  // byte clock stops after its burst. Waits until the BFM is idle (no byte clock edge comes
+  // any more), then up to 2 us for irq_o: it must be high by then (irq_stop counts the
+  // misses), and a rise after the last byte clock edge is a measurement of the interrupt
+  // with the byte clock stopped (irq_stop_n; irq_stop_lat: the most time from that edge). A
+  // rise before it (the FE through while the clock still ran) measures nothing
+  // (irq_stop_pre); irq_o registered on the byte clock never rises after its last edge.
+  realtime irq_rise_t = -1.0;                        // time of irq_o's last rise
+  always @(posedge irq) irq_rise_t = csi2_now();
+
+  task automatic irq_stop_check();
+    realtime t0;
+    longint  d;
+    wait (!u_bfm.busy());
+    t0 = csi2_now();
+    while (!irq && csi2_now() - t0 < 2000.0) @(posedge vclk);
+    if (!irq) begin
+      irq_stop_bad++;
+      $display("[%0t] irqfe: irq_o low %0.1f ns after the byte clock stopped", $time,
+               csi2_now() - bclk_t);
+    end else if (irq_rise_t > bclk_t) begin
+      irq_stop_n++;
+      d = longint'((irq_rise_t - bclk_t) * 1000.0);
+      if (d > irq_stop_lat) irq_stop_lat = d;
+    end else begin
+      irq_stop_pre++;
+    end
+  endtask
+
   // One poll of IRQ_STATUS.FE (frame end records), then `cycles` CPU cycles. With FE set,
-  // irq_o must be high when IRQ_EN.FE is (invariant irq_fe: FE polls with irq_o low).
+  // irq_o must be high when IRQ_EN.FE is (invariant irq_fe: FE polls with irq_o low). irq_o
+  // is |(IRQ_STATUS & IRQ_EN) in the CPU domain: this only fails when irq_o is decoupled from
+  // IRQ_STATUS (e.g. registered on another clock: mutant irq_on_byte_clock); that the FE
+  // and its interrupt come without a byte clock is irqfe's measurement (above) and the
+  // checker's segment rule of the FE records.
   task automatic service(input int unsigned cycles);
     logic [31:0] st, info, fsum, ferr, en, unused;
     logic        irq_now;
@@ -398,6 +444,7 @@ module tb_csi2rx_ppi;
           t0 = csi2_now();
           while (csi2_now() - t0 < real'(v)) service(4);
         end
+        "irqfe": irq_stop_check();
         "waitbyte": begin
           n = $sscanf(line, "waitbyte %d %d", k, m);
           wait ((u_bfm.cur_burst == k && u_bfm.cur_byte >= m) || u_bfm.bursts_done > k);
@@ -428,6 +475,10 @@ module tb_csi2rx_ppi;
     $fwrite(regs_fd, "end\n");
     $fclose(regs_fd);
     $fclose(out_fd);
+    if (irq_stop_n + irq_stop_bad + irq_stop_pre != 0) begin
+      $display("tb_csi2rx_ppi: irqfe: irq_o rose %0d times with the byte clock stopped (at most %0d ps after its last edge), %0d misses, %0d rises before it",
+               irq_stop_n, irq_stop_lat, irq_stop_bad, irq_stop_pre);
+    end
 `ifdef BOW_SYNC_JITTER
     // the jitter model of bow_sync and of the FIFO pointer synchronisers (make test sums the
     // late resolutions per build and fails a build without any)

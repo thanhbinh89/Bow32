@@ -3734,9 +3734,11 @@ def gen_tclkpost(g):
     0..3 bytes): a frame, then one with a sync error, a skew error (2 or 4 lanes), bytes after
     a packet (EXTRA) and a line cut short (TRUNC at the end of its burst); after each FE:
     FRAME_INFO, FRAME_SUM, FRAME_ERR, FRAME_TIME, LINE_TIME, LOG_CTRL (a STOP_FE capture,
-    DONE), the counters, ERR_STATUS; then between frames a line cut short and a skew error,
-    each the last burst before the counters and ERR_STATUS are read (only the end of a burst
-    reports them: its marker must be in the FIFO two edges after the fall). Segment 2, the
+    DONE), the counters, ERR_STATUS; then between frames a line cut short, a skew error and a
+    sync error, each the last burst before the counters and ERR_STATUS are read (only the end
+    of a burst reports the first two: its marker must be in the FIFO two edges after the
+    fall; bow: the D-PHY of Bow32 gives ErrSotSyncHS in the cycle after the fall, which must
+    reach the FIFO with that marker, review of step 7). Segment 2, the
     byte clock stops at the edge that writes
     a packet's last word into the lane merge's FIFO, before RxActiveHS falls (Ppi.early: the
     end of every burst comes with the next run): frames of good lines (an error waits for
@@ -3746,11 +3748,17 @@ def gen_tclkpost(g):
     words more), below what the D-PHY needs to drop RxActiveHS (LATE_EOT: the end of every
     burst comes with the next one), while the HS-TRAIL still carries a packet's last word
     into the FIFO: frames of good lines, read as above (FRAME_TIME, LINE_TIME not predicted:
-    CLK-POST below the D-PHY minimum)."""
+    CLK-POST below the D-PHY minimum).
+    Interrupt (review of step 7): IRQ_EN has FE only, and after each frame's FE burst
+    (irqfe) the bench waits until the PHY is idle (the byte clock stopped): irq_o must then
+    rise within 2 us without a byte clock edge (invariant irq_stop). The PPI's segment 2
+    stops the clock before the FE is through, so each of its frames is a measurement
+    (irq_stop_n = 1); elsewhere the clock may run on until the FE is through (irq_o is high
+    already, nothing to measure)."""
     lanes, ppi = g.cfg["lanes"], g.ppi
     g.phy_up()
     on(g)
-    g.wr("IRQ_EN", 0x1F)
+    g.wr("IRQ_EN", IRQ_FE)                           # irq_o = IRQ_STATUS.FE (irqfe below)
     g.emit("tready 100")
     wide = extra_px(extra_thr(g.rx))
     # a line cut short needs more bytes than any trail gives
@@ -3774,6 +3782,11 @@ def gen_tclkpost(g):
                 g.send(b)
                 send_lost(g, lambda: g.line(0, DT_RAW10, 4 * (n // 5)), "trunc")
         g.send(g.short(0, DT_FE, fnum))
+        # irq_o after the FE with the byte clock stopped (review of step 7): measured when the
+        # clock stops before the FE is through (PPI segment 2: right after its last word is
+        # in the FIFO), else (the clock ran on until the FE was through) nothing to measure
+        g.emit("irqfe")
+        g.emit(f"expect irq_stop_n {'=1' if ppi and ppi.early else 'any'}")
         for name in ("FRAME_INFO", "FRAME_SUM", "FRAME_ERR", "LOG_CTRL", "CNT_FRAME", "CNT_LINE",
                      "LINE_INFO", "FRAME_TIME", "LINE_TIME", "CNT_SOT", "CNT_CRC", "CNT_EXT",
                      "CNT_MISC", "ERR_STATUS", "CNT_PKT"):
@@ -3795,6 +3808,13 @@ def gen_tclkpost(g):
             send_lost(g, lambda: g.line(0, DT_RAW10, 32), "skew")
             for name in ("CNT_MISC", "ERR_STATUS", "CNT_CRC"):
                 g.rd(name)
+        # a sync error as the last burst before CNT_SOT and ERR_STATUS are read (bow: its
+        # ErrSotSyncHS comes in the cycle after the fall and must be in the FIFO two edges
+        # after it, with the end of the burst; std: where the sync would be)
+        send_lost(g, lambda: g.line(0, DT_RAW10, 32), "sync")
+        for name in ("CNT_SOT",) + (("CNT_SOT23",) if g.cfg["dut_lanes"] == 4 else ()) + \
+                    ("ERR_STATUS", "CNT_LINE"):
+            g.rd(name)
         g.mark()
         g.wr("ERR_STATUS", ERR_ALL)
         ppi.post = None
@@ -4133,6 +4153,8 @@ def check(d):
                 errs.append(f"segment {seg}: {name} = 0, expected > 0")
             elif cond.startswith("=") and v != int(cond[1:]):
                 errs.append(f"segment {seg}: {name} = {v}, expected {cond[1:]}")
+            # (cond "any": a count that is not checked, e.g. irq_stop_n where the byte clock
+            # may run until the FE is through)
     npx = sum(1 for e in out if e[0] == "px")
     return errs, f"{npx} pixels, {len(rds)} reads, {len(got_fe)} frames"
 
