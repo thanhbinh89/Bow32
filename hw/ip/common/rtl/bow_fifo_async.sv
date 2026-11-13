@@ -22,7 +22,14 @@
 // shows a pointer of 0 to the other side.
 //
 // Static timing: the gray pointer buses need a bus skew constraint
-// (set_bus_skew) of at most one period of the faster clock. The gray pointer
+// (set_bus_skew) of at most one period of the faster clock, and the paths
+// between the two clocks a data path limit of at most one destination period
+// (set_max_delay -datapath_only), not a clock group: a RAM of LUTs is read
+// through the read register (u_ram/rdata_o_reg) over fabric paths from its
+// write clock, and a word must reach that register before the write pointer
+// that announces it has passed the synchroniser (a clock group, which takes
+// precedence over set_max_delay, leaves those paths unbounded; review of step
+// 7 of docs/ip/mipi_rx_arch.md, the lane merge FIFO). The gray pointer
 // flops (wgray_q, rgray_q, the sources of those buses) are DONT_TOUCH, which
 // Vivado forwards to implementation: the top bit of a gray pointer equals the
 // top bit of its binary pointer, and phys_opt_design's equivalent driver

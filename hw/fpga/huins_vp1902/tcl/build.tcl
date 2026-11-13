@@ -136,6 +136,7 @@ if {$card eq "ram"} {
 } else {
   source [file join $script_dir timing_checks_cam.tcl]
   source [file join $repo_root hw fpga common tcl bus_skew_checks.tcl]
+  source [file join $repo_root hw fpga common tcl fifo_ram_checks.tcl]
   source [file join $script_dir cam_xphy.tcl]
 }
 

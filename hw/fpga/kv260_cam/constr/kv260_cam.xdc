@@ -32,12 +32,35 @@ create_clock -name dphy_hs_clk -period $dphy_hs_period [get_ports mipi_phy_if_ra
 
 # Every path between the three groups goes through a synchroniser, a gray
 # coded bus or a dual clock RAM (bow_sync, bow_cdc_pulse, bow_fifo_async,
-# quasi-static configuration registers). The camera clock group also covers
-# the LP receiver of the clock pin (LP levels are synchronised in clk_vid).
+# quasi-static configuration registers). clk_sys against everything else;
+# clk_vid against the HS clock itself, whose source pin also drives the LP
+# receiver of the clock pin (LP levels are synchronised in clk_vid). clk_vid and
+# the byte clock (BUFGCE_DIV u_dphy/u_byte_bufg, a generated clock of
+# dphy_hs_clk) are no clock group: their crossings get the data path limits below.
 set_clock_groups -asynchronous \
   -group [get_clocks -of_objects [get_nets clk_sys]] \
+  -group [list [get_clocks -of_objects [get_nets clk_vid]] \
+               [get_clocks -include_generated_clocks dphy_hs_clk]]
+set_clock_groups -asynchronous \
   -group [get_clocks -of_objects [get_nets clk_vid]] \
-  -group [get_clocks -include_generated_clocks dphy_hs_clk]
+  -group [get_clocks dphy_hs_clk]
+
+# Byte clock <-> clk_vid (review of step 7, docs/ip/mipi_rx_arch.md section 10): the lane
+# merge's two clock FIFO (u_csi2rx/u_lane_merge/u_cdc_fifo, step 7) has a LUTRAM written on
+# the byte clock and read through its read register (u_ram/rdata_o_reg) on clk_vid. A clock
+# group would leave these RAM -> read register paths unbounded (it takes precedence over
+# set_max_delay): every path between the two clocks gets a data path limit of one
+# destination period instead, as the DDR / HyperRAM PHY FIFOs of the MPS4 and Huins builds
+# have. A word then reaches the read register before the gray write pointer that announces
+# it has passed its two synchroniser flops (the gray pointers keep their set_bus_skew
+# below); the D-PHY's synchronisers and the CLR pins of the byte clock's reset synchronisers
+# get the same limit. ooc/rx_ooc.tcl checks that these paths are timed.
+set_max_delay -datapath_only 5.0 \
+  -from [get_clocks -of_objects [get_pins u_dphy/u_byte_bufg/O]] \
+  -to   [get_clocks -of_objects [get_nets clk_vid]]
+set_max_delay -datapath_only [expr {4 * $dphy_hs_period}] \
+  -from [get_clocks -of_objects [get_nets clk_vid]] \
+  -to   [get_clocks -of_objects [get_pins u_dphy/u_byte_bufg/O]]
 
 # Data lanes: the capture cannot meet static timing (the clock arrives
 # 0.4-1.4 ns after the data over PVT); software calibrates the IDELAY taps at

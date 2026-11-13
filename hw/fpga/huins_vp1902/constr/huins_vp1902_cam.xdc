@@ -61,19 +61,38 @@ set vid_period   5.000   ;# clk_vid
 
 # Every path between these groups goes through a synchroniser, a gray coded bus or a dual
 # clock RAM (bow_sync, bow_cdc_pulse, bow_fifo_async, quasi-static configuration
-# registers), as on the KV260. The CSI-2 controller's own crossing of its datapath is the
-# lane merge's two clock FIFO (byte -> clk_vid, step 7; its 16 x 41 bit RAM is a LUTRAM:
-# report_cdc lists it as CDC-26, a warning, as the DDR / HyperRAM PHY FIFOs). clk_sys and clk_vid come from one MMCM but are treated as
+# registers), as on the KV260. clk_sys and clk_vid come from one MMCM but are treated as
 # unrelated (all their crossings are synchronised). The LP receivers of the clock lane pad
 # are synchronised in clk_vid (dphy_hs_clk -> clk_vid). clk_in only clocks the lock-loss
-# reset of the MMCM.
+# reset of the MMCM. clk_vid and the byte clock share a group: their crossings get the data
+# path limits below instead.
 set_clock_groups -asynchronous \
   -group [get_clocks clk_in] \
   -group [get_clocks clk_sys] \
-  -group [get_clocks clk_vid] \
-  -group [get_clocks -include_generated_clocks dphy_byte_clk] \
+  -group [list [get_clocks clk_vid] [get_clocks -include_generated_clocks dphy_byte_clk]] \
   -group [get_clocks -include_generated_clocks dphy_hs_clk] \
   -group [get_clocks -include_generated_clocks dphy_pll_clk]
+
+# Byte clock <-> clk_vid (review of step 7, docs/ip/mipi_rx_arch.md section 10). The CSI-2
+# controller's crossing of its datapath is the lane merge's two clock FIFO (byte -> clk_vid,
+# step 7, u_csi2rx/u_lane_merge/u_cdc_fifo): its 16 x 41 bit RAM is a LUTRAM, written on the
+# byte clock and read through the read register u_ram/rdata_o_reg on clk_vid, so the RAM
+# data reach that register over fabric paths between the two clocks (report_cdc lists them
+# as CDC-26, a warning). A clock group would leave those paths unbounded (in Vivado the
+# group takes precedence over set_max_delay): as the read FIFOs of the DDR / HyperRAM PHYs
+# (constr/huins_vp1902.xdc), every path between the two clocks gets a data path limit of one
+# destination period instead. A word then reaches the read register before the gray write
+# pointer that announces it has passed its two synchroniser flops; the gray pointers also
+# keep their set_bus_skew below. The same limit covers the other paths of the pair: the
+# D-PHY's synchronisers (RxActiveHS, the clock lane toggle, the lp domain's arm levels and
+# CLK_TOG_DIV), the CLR pins of the byte clock's reset synchronisers and the byte clock
+# divider of the activity LED; the byte clock gate (BUFGCE CE, below) keeps its false path.
+# tcl/timing_checks_cam.tcl checks that the pair has this constraint and that the FIFO's
+# RAM paths are timed.
+set_max_delay -datapath_only $vid_period \
+  -from [get_clocks dphy_byte_clk] -to [get_clocks clk_vid]
+set_max_delay -datapath_only $dphy_byte_period \
+  -from [get_clocks clk_vid] -to [get_clocks dphy_byte_clk]
 
 # ---- D-PHY capture ---------------------------------------------------------------------------
 # The flops behind the XPHY Q outputs (4 lanes + the clock lane samples, 40) go into the

@@ -17,10 +17,17 @@
 #     BUFGCE u_dphy/u_byte_bufg;
 #   * every clock pair with paths between two different clocks is an
 #     asynchronous clock group crossing (report_clock_interaction, column
-#     Inter-Clock Constraints "Asynchronous Groups"): a "Timed" pair is a path
-#     the XDC forgot. The receiver's crossings must exist in both directions
-#     (clk_sys <-> clk_vid, clk_sys <-> dphy_byte_clk, clk_vid <-> dphy_byte_clk):
-#     a missing one means the camera path was optimised away;
+#     Inter-Clock Constraints "Asynchronous Groups"), except clk_vid <->
+#     dphy_byte_clk, which has data path limits of one destination period
+#     ("Max Delay Datapath Only", since the review of step 7 of
+#     docs/ip/mipi_rx_arch.md): a "Timed" pair is a path the XDC forgot. The
+#     receiver's crossings must exist in both directions (clk_sys <-> clk_vid,
+#     clk_sys <-> dphy_byte_clk, clk_vid <-> dphy_byte_clk): a missing one means
+#     the camera path was optimised away;
+#   * the lane merge FIFO's RAM (u_csi2rx/u_lane_merge/u_cdc_fifo, LUTRAM written on
+#     the byte clock) -> read register (clk_vid) paths: every bit timed with that
+#     data path limit and met (hw/fpga/common/tcl/fifo_ram_checks.tcl, sourced by
+#     tcl/build.tcl);
 #   * check_timing: no unclocked or multiply clocked register, no constant or
 #     pulse width clock problem, no unconstrained internal endpoint, no
 #     generated clock problem, no loop, no partial I/O delay;
@@ -161,8 +168,10 @@ proc bow32_huins_cam_timing_checks {out_dir} {
     }
     set got [lindex $cols end]
     lappend seen [list $from $to]
-    if {$got ne "Asynchronous Groups"} {
-      puts "CRITICAL WARNING: paths from $from to $to are '$got', expected 'Asynchronous Groups'\
+    set want [expr {[list $from $to] in {{clk_vid dphy_byte_clk} {dphy_byte_clk clk_vid}} ?
+                    "Max Delay Datapath Only" : "Asynchronous Groups"}]
+    if {$got ne $want} {
+      puts "CRITICAL WARNING: paths from $from to $to are '$got', expected '$want'\
             (constr/huins_vp1902_cam.xdc), see clock_interaction.rpt"
       incr failed
     }
@@ -173,6 +182,21 @@ proc bow32_huins_cam_timing_checks {out_dir} {
       puts "CRITICAL WARNING: no paths from [lindex $pair 0] to [lindex $pair 1]: the CSI-2\
             receiver crossings are missing (optimised away?)"
       incr failed
+    }
+  }
+
+  # ---- the lane merge FIFO's RAM -> read register paths (byte clock -> clk_vid): timed with
+  # the data path limit of the XDC, every read register bit reached, met
+  foreach p [bow32_fifo_ram_paths */u_csi2rx/u_lane_merge/u_cdc_fifo "lane merge FIFO"] {
+    puts "CRITICAL WARNING: $p"
+    incr failed
+  }
+  foreach pair {{dphy_byte_clk clk_vid} {clk_vid dphy_byte_clk}} {
+    set p [get_timing_paths -quiet -max_paths 1 -nworst 1 -from [get_clocks [lindex $pair 0]] \
+             -to [get_clocks [lindex $pair 1]]]
+    if {$p ne ""} {
+      puts "INFO: worst path [join $pair { -> }]: slack [get_property SLACK $p] ns, data path\
+            [get_property DATAPATH_DELAY $p] ns ([get_property EXCEPTION $p])"
     }
   }
 
