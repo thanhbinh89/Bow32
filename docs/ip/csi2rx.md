@@ -156,7 +156,7 @@ adapter FPGA dùng, [mipi_rx_arch.md](mipi_rx_arch.md) mục 3.2; bảng đầy 
 | `afe_dly_q_i[l]` (`dly_tap_i`) | bất đồng bộ | delay đang dùng (CNTVALUEOUT) → `DLYn[24:16]` |
 | `afe_ready_i` (`phy_rdy_i`) | bất đồng bộ | AFE sẵn sàng (Versal: XPLL khoá, BISC xong; về 0 khi PHY khởi động lại) → `AFE_STATUS.READY` của D-PHY (`STATUS.PHY_RDY` trước bước 4); READY = 0 xoá OWN. AFE không có trạng thái này nối `1'b1` |
 | `afe_status_i[7:0]` (`phy_status_i`) | bất đồng bộ | trạng thái thô của AFE → `AFE_STATUS[15:8]` (Versal: [0] XPLL LOCKED, [1] LOCKED_FB, [2] DLY_RDY, [3] PHY_RDY của mọi nibble; trước bước 4 là GPIO PB6 / PB7 của top camera). AFE không có nối 0 |
-| `afe_cal_start_o` (`reinit_o`) | CPU (flop) | xung 32 chu kỳ khi ghi `CMD.REINIT` của D-PHY: AFE hiệu chỉnh lại (Versal: XPLL, BISC, VT; trước bước 4 là GPIO PA4). AFE không có để trống |
+| `afe_cal_start_o` (`reinit_o`) | CPU (flop) | xung 32 chu kỳ khi ghi `CMD.AFE_CAL` của D-PHY (bước 4–5: `CMD.REINIT`; từ bước 6 `CMD.REINIT` đưa máy LP về `WaitStop`): AFE hiệu chỉnh lại (Versal: XPLL, BISC, VT; trước bước 4 là GPIO PA4). AFE không có để trống |
 
 PHY của Versal là `hw/fpga/common/rtl/bow_dphy_io_versal.sv` (XPHY chế độ
 native, lane clock làm strobe, không dùng IP D-PHY của AMD; chi tiết và ràng
@@ -174,8 +174,8 @@ thu của PHY (`BurstRxRst`; từ bước 5 là `des_rst` của giao diện AFE,
 `ready` ∧ `des_rst`, nên = ¬cổng khi `CTRL.DES_RST_DIS` = 0, từ reset; firmware ghi lại bit đó
 mỗi lần khởi động bộ thu; bước 4: cổng `burst_rst_en_i` = ¬DES_RST_DIS; trước đó GPIO PA5 của
 bản camera, 0 sau reset như PHY của AMD) giữ FIFO ở reset khi cổng byte clock đóng: mỗi burst
-bắt đầu lại với trễ 2–3 word. `CMD.REINIT` của D-PHY (`cal_start`, một xung 32 chu kỳ bus;
-bước 4 `reinit_i`, trước nữa GPIO PA4) và `AFE_CTRL.PD` = 1 (`pd`, từ bước 5, giữ tới khi xoá)
+bắt đầu lại với trễ 2–3 word. `CMD.AFE_CAL` của D-PHY (`cal_start`, một xung 32 chu kỳ bus; bước
+4–5 `CMD.REINIT`, bước 4 qua `reinit_i`, trước nữa GPIO PA4) và `AFE_CTRL.PD` = 1 (`pd`, từ bước 5, giữ tới khi xoá)
 khởi động lại PHY: `AFE_STATUS.READY` về 0, OWN mọi lane xoá, tap đã nạp bị bỏ, XPLL, BISC và
 bù VT chạy lại; `csi2_test` có lệnh `phy`, `phy reinit`, `phy burstrst 0|1`.
 
@@ -309,9 +309,11 @@ LP, cấu hình lớp packet, LOG, FIFO pixel, sự kiện miền byte). Giữa 
 4): `Enable` / `EnableClk` (flop miền CPU của controller) qua bộ đồng bộ cấu hình của D-PHY, mọi
 tín hiệu PPI khác được dùng ở miền của nó (miền lp của D-PHY là `vid_clk_i`). Các bus gray có
 ràng buộc `set_bus_skew` (mục *Ràng buộc*). Hoạt động của
-lane clock được thấy qua một flop miền byte đảo mỗi chu kỳ, lấy mẫu ở `vid_clk_i`: cần byte
-clock ≤ ~1,5 × `vid_clk_i` (ở 200 MHz: lane ≤ ~2,4 Gbit/s, xa hơn khả năng của I/O này), nếu
-không phát hiện mất clock (`CLK_MISS`) có thể đóng cổng giữa burst.
+lane clock được thấy qua một flop miền byte đảo mỗi chu kỳ (mỗi 2^`CLK_TOG_DIV` chu kỳ từ bước 6),
+lấy mẫu ở `vid_clk_i`: mỗi mức của flop phải dài hơn một chu kỳ `vid_clk_i`, tức byte clock <
+2^`CLK_TOG_DIV` × `vid_clk_i` có lề (ở 200 MHz và `CLK_TOG_DIV` 0: lane < ~1,6 Gbit/s; Huins chạy 180
+MHz, KV260 114 MHz), nếu không phát hiện mất clock (`CLK_MISS`) có thể đóng cổng giữa burst (bản
+trước ghi ~1,5 ×: sai, sửa sau review bước 6, [mipi_rx_arch.md](mipi_rx_arch.md) mục 4.3).
 
 ## Pipeline
 
@@ -968,7 +970,7 @@ bow_csi2rx_stop(34 + 10);                   /* SAU stream-off: chờ hết frame
 | `bow_csi2rx_log(e, mode, ms)`, `bow_csi2rx_print_log(e, n)` | LOG theo thứ tự thời gian, số entry (0 = hết giờ) |
 | `bow_dphy_rx_raw(w, now, ms)` | 64 word thô mỗi lane (RAW của D-PHY) |
 | `bow_dphy_rx_byteclk_hz(ms)` | tần số byte clock (max của `BYTECLK` của D-PHY trong `ms`) |
-| `bow_dphy_rx_ready()`, `bow_dphy_rx_wait_ready(ms)`, `bow_dphy_rx_reinit(ms, &us)`, `bow_dphy_rx_des_rst(on)` | `AFE_STATUS.READY`; `CMD.REINIT` rồi chờ READY xuống (≤ 20 µs, không thì PHY không có re-init) và lên lại; `CTRL.DES_RST_DIS` = ¬on |
+| `bow_dphy_rx_ready()`, `bow_dphy_rx_wait_ready(ms)`, `bow_dphy_rx_reinit(ms, &us)`, `bow_dphy_rx_des_rst(on)` | `AFE_STATUS.READY`; `CMD.AFE_CAL` cùng `CMD.REINIT` (bước 4–5: `CMD.REINIT` là hiệu chỉnh AFE) rồi chờ READY xuống (≤ 20 µs, không thì PHY không có re-init) và lên lại; `CTRL.DES_RST_DIS` = ¬on (rồi `CMD.APPLY`, từ bước 6) |
 | `bow_csi2rx_print_status()` | `csi2rx: link ok` / `link errors` / `no data` / `no lines`, bộ đếm (`frame errors` = `FRAME_ERR` của frame cuối; `errors: …` như `print_errors`, rồi số packet bị bộ lọc DT/VC bỏ), thời gian, PHY; byte clock đo trong 1 frame + 2 ms (clock không liên tục dừng suốt vertical blanking, `BYTECLK` chỉ nhìn 65536 chu kỳ CPU). Danh sách theo lane (`sot`, LP, burst, delay) có 4 giá trị khi đang dùng 4 lane, và khi bộ thu tắt (`CTRL.PHY_EN` = 0) theo số lane của bản build (`INFO`: 4 trên Huins), không theo `CTRL` đã xoá. Dòng `phy:` là một ảnh chụp dù burst đang tới: `LANE_LP` / `LANE_HS` và bộ đếm của D-PHY được đọc tới khi hai lần đọc giống nhau (`bow_dphy_rx_snapshot()`; trước bước 4 chúng nằm chung trong `STATUS` và `CNT_BURST`) |
 | `bow_dphy_rx_print_delays(n)`, `bow_dphy_rx_get_delays(taps)` | trễ đang dùng của các lane (`INFO[23]` = 1: `DLYn.Q`, trễ BISC tới khi nạp tap; 0: `DLYn.CODE`, tap đã ghi): in như `stat`, hoặc cả 4 lane vào `taps[]` (tâm của kiểm tra lề ở tap đang dùng: `csi2_test` `margin` sau `delay` hay `phy reinit`, `camera` `margin` khi chưa hiệu chỉnh) |
 
@@ -1069,7 +1071,7 @@ trước lần đọc cuối: mutant CRC chết ở hai case 4 lane, mutant burs
 Model 4 lane chạy `csi2_tx_model.sv` ở chế độ PHY Versal (`--versal` của
 mô hình Python, núm `versal` của TX model): `phy_rdy` lên sau 3 µs (trước đó
 không có byte clock), tap BISC khác 0 đọc được qua CNTVALUEOUT, tap nạp ở clock
-video, khởi động lại PHY (`CMD.REINIT` của D-PHY → `phy_reinit` của mô hình:
+video, khởi động lại PHY (`CMD.AFE_CAL` của D-PHY, bước 4–5 `CMD.REINIT` → `phy_reinit` của mô hình:
 `AFE_STATUS.READY`, CNTVALUEOUT và `DLYn.OWN` về 0, tap BISC trở lại, test `dly`). FIFO 8 word mỗi lane như XPHY: ghi mỗi cạnh strobe khi bộ
 thu HS của lane clock bật (cả khi cổng byte clock đóng), đọc mỗi byte clock khi
 FIFO có hơn `vlat` word (0–2: `FIFO_EMPTY` trễ), nên word cũ của burst trước ra
