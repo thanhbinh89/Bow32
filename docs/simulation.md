@@ -92,6 +92,14 @@ test, cuối cùng một dòng tổng kết (`make test: FAILED: ...` và mã th
 hỏng); cả 15 test ~34 phút (2043 s, chưa tính dựng hai mô hình; 2026-11-10, sau khi gộp
 PR #17).
 
+**So A/B và số chu kỳ (review bước 7).** Số chu kỳ của `TEST PASSED: <test> (N cycles)` và mọi
+dòng phụ thuộc thời điểm (thời gian dòng, số frame / burst lúc `stat`, ...) phụ thuộc chính ảnh
+firmware, không chỉ commit: `sw/mk/app.mk` lấy `sw/common/src/*.c` bằng `$(wildcard)` không sắp
+xếp, nên hai checkout của cùng một commit có thể link theo thứ tự khác (địa chỉ hàm, căn lệnh khác)
+và cho số chu kỳ khác. So hai phiên bản RTL (ví dụ trước / sau một bước) bằng **một** bộ ảnh
+firmware: build một lần, chạy mô hình của mỗi bên với cùng `+ROM` / `+FLASH` (`Vtb_bow32
++TEST=<test> +ROM=… +FLASH=…`, như `sim/Makefile` làm); số tuyệt đối của hai worktree không so được.
+
 ### Mô hình IMX219 và D-PHY
 
 `csi2_tx_model.sv` (dùng chung với test IP) đóng vai cảm biến và I/O D-PHY của
@@ -431,7 +439,7 @@ make -C hw/ip/csi2rx/dv run TEST=clk                  # một test directed
 make -C hw/ip/csi2rx/dv test-ppi                      # controller ở PPI: 177 case, hai chế độ, song song
 make -C hw/ip/csi2rx/dv test-ppi SEEDS="$(seq -s ' ' 1 40)" PJOBS=8
 make -C hw/ip/csi2rx/dv run-ppi MODE=std TEST=loss LANES=4   # một case (MODE bow|std)
-make -C hw/ip/csi2rx/dv mutants-ppi                   # 29 mutant: unit test FIFO 2 clock hay bench PPI hỏng
+make -C hw/ip/csi2rx/dv mutants-ppi                   # 31 mutant: unit test FIFO 2 clock hay bench PPI hỏng
 make -C hw/ip/csi2rx/dv mutants-rx                    # 31 mutant: unit test AFE hay bench cả bộ thu hỏng
 ```
 
@@ -461,23 +469,38 @@ make -C hw/ip/csi2rx/dv mutants-rx                    # 31 mutant: unit test AFE
   hoặc trước cú xuống: cuối burst chờ lần chạy sau) thì mọi entry và cuối burst ra trong LP time khi
   clock đang dừng; không word nào bị bỏ khi clock video ≥ byte clock (đầu ghi thấy tối đa 5 entry);
   312,5 MHz: word bị bỏ, burst đó có cờ SKEW, mọi cuối burst vẫn ra; jitter phải có lần về muộn.
-  Một con trỏ không qua bằng mã gray (`cdc_ptr_binary`) chỉ hỏng ở đây khi mô hình jitter bật.
+  Một con trỏ không qua bằng mã gray (`cdc_ptr_binary`) chỉ hỏng ở đây khi mô hình jitter bật. Từ
+  review bước 7 thêm hai case một burst dài không khe với clock video chậm hơn byte clock 200 ppm
+  (10,002 / 10 ns): packet dài nhất của 4 lane (16 386 word) thêm 3,3 entry, không word nào bị bỏ
+  (tối đa 7 đang bay); của 1 lane (65 541 word) thêm 13: word bị bỏ, burst có cờ SKEW. Lề 6 entry
+  của trường hợp xấu nhất là 366 / 183 / 92 ppm với 4 / 2 / 1 lane ([ip/mipi_rx_arch.md](ip/mipi_rx_arch.md)
+  mục 6.1).
 - Random, mỗi seed 11 cấu hình: 2 lane có/không lỗi, 1 lane (`Lanes = 1`) có
   lỗi, 1 lane trên bộ thu 2 lane có/không lỗi; trên bộ thu 4 lane (PHY Versal):
   4 lane có/không lỗi với `BurstRxRst` = 0 và có lỗi với `BurstRxRst` = 1, 2 trên 4
   có/không lỗi, 1 trên 4 có lỗi; RAW8 và clock liên tục xen kẽ. Lỗi: lật bit header
   (1 và 2 bit), lật bit payload, sync sai, lệch lane, cắt packet.
 - `tclkpost` (bước 7, cả bộ thu và bench PPI): lane clock dừng ngay sau burst; thanh ghi đọc
-  và đoạn kết thúc ngay sau mỗi FE, không có clock-only burst (`Gen.clk_sync` tắt): FE, ngắt
-  (bản ghi `fe` phải nằm trong đoạn của FE, bất biến mới `irq_fe`: `irq_o` cao khi FE có
-  `IRQ_EN.FE`), `FRAME_INFO` / `FRAME_SUM` / `FRAME_ERR`, bộ đếm, LOG DONE phải xong khi byte clock
-  đã dừng. Cả bộ thu: T_CLK-POST 10 ns (30 ns với PHY Versal), dưới mức D-PHY cần để hạ
+  và đoạn kết thúc ngay sau mỗi FE, không có clock-only burst (`Gen.clk_sync` tắt): FE (bản ghi
+  `fe` phải nằm trong đoạn của FE), `FRAME_INFO` / `FRAME_SUM` / `FRAME_ERR`, bộ đếm, LOG DONE phải
+  xong khi byte clock đã dừng. Ngắt (review bước 7): `IRQ_EN` chỉ có FE, và sau burst FE của mỗi
+  frame lệnh `irqfe` chờ PHY rảnh (byte clock đã dừng) rồi tới 2 µs cho `irq_o`: phải cao (bất biến
+  `irq_stop`), và một lần lên sau cạnh byte clock cuối là một lần đo ngắt khi byte clock đứng yên
+  (`irq_stop_n`; đoạn 2 của PPI dừng clock trước khi FE xong nên mỗi frame của nó phải có một lần
+  đo; ở chỗ khác clock có thể chạy tới khi FE xong). Mọi case `tclkpost` có lần đo (cả bộ thu 2 mỗi
+  case, PPI 2–4), tối đa mỗi case 38–117 ns từ cạnh byte clock cuối tới `irq_o`.
+  Bất biến cũ `irq_fe` (`irq_o` cao khi lần hỏi thấy FE với `IRQ_EN.FE`) chỉ kiểm `irq_o` theo
+  `IRQ_STATUS` (tổ hợp từ đó ở miền CPU: chỉ hỏng khi `irq_o` tách khỏi `IRQ_STATUS`, như mutant
+  `irq_on_byte_clock`). Cả bộ thu: T_CLK-POST 10 ns (30 ns với PHY Versal), dưới mức D-PHY cần để hạ
   `RxActiveHS` (LATE_EOT). PPI: đoạn 1 dừng clock đúng 2 cạnh sau cú xuống (`std` 4), trail `std`
-  0–3 byte, có lỗi sync, SKEW, EXTRA, TRUNC (cuối burst ngay trước lần đọc); đoạn 2 dừng ngay sau
+  0–3 byte, có lỗi sync, SKEW, EXTRA, TRUNC; giữa hai frame một dòng cắt ngắn, một lỗi lệch lane và
+  (review bước 7) một lỗi sync, mỗi cái là burst cuối ngay trước lần đọc bộ đếm và `ERR_STATUS`
+  (`bow`: `ErrSotSyncHS` ở chu kỳ sau cú xuống phải vào FIFO cùng dấu cuối burst, 2 cạnh sau cú
+  xuống: mutant `merge_sot_event_late`); đoạn 2 dừng ngay sau
   khi word cuối của packet vào FIFO, trước cú xuống (`Ppi.early`). Controller của bước 6 hỏng test
   này ở bench PPI và ở cả bộ thu 2 lane (FE, `FRAME_INFO`, LOG DONE, TRUNC tới ở burst sau; ở cả bộ
-  thu 4 lane, PHY Versal với T_CLK-POST 30 ns, nó còn đủ byte clock). Checker từ bước 7 kiểm bản ghi
-  `fe` nằm đúng đoạn của FE.
+  thu 4 lane và 2 trên 4 lane, PHY Versal với T_CLK-POST 30 ns, nó còn đủ byte clock). Checker từ
+  bước 7 kiểm bản ghi `fe` nằm đúng đoạn của FE.
 - Directed: `lp` (escape, LP-00 từ Stop, độ trễ LP-00 → `hs_en`), `watchdog`,
   `clk` (CE chỉ đổi ở HS-0, mất clock), `cmd` (lệnh LOG/RAW khi byte clock
   dừng), `ovf` (tràn FIFO khi `tready` thấp: dòng Cut có `tlast` + `tuser[1]`,
@@ -605,7 +628,10 @@ make -C hw/ip/csi2rx/dv mutants-rx                    # 31 mutant: unit test AFE
   sửa `bow_fifo_async` / `bow_fifo_ram` của `hw/ip/common`) và có 9 mutant mới (con trỏ nhị phân,
   con trỏ ghi công bố trễ, FIFO ghi trễ một byte clock, dấu cuối burst không ghi, word chiếm slot
   cuối, sự kiện về CPU ở byte clock, đầu đọc không reset khi RX tắt, FIFO pixel đọc sớm / almost full
-  trễ): 29/29.
+  trễ): 29/29. Review bước 7 thêm 2: `ErrSotSyncHS` của chu kỳ sau cú xuống ghi vào FIFO trễ một byte
+  clock (`merge_sot_event_late`, chỉ `tclkpost` `bow` giết: lỗi sync ngay trước lần đọc `CNT_SOT`),
+  `irq_o` qua một flop của byte clock (`irq_on_byte_clock`, chỉ `tclkpost` giết: `irq_stop` và
+  `irq_fe`): 31/31.
 
 ### D-PHY số (`bow_dphy_rx` một mình)
 

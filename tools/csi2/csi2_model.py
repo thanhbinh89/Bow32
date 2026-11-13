@@ -3750,11 +3750,12 @@ def gen_tclkpost(g):
     into the FIFO: frames of good lines, read as above (FRAME_TIME, LINE_TIME not predicted:
     CLK-POST below the D-PHY minimum).
     Interrupt (review of step 7): IRQ_EN has FE only, and after each frame's FE burst
-    (irqfe) the bench waits until the PHY is idle (the byte clock stopped): irq_o must then
-    rise within 2 us without a byte clock edge (invariant irq_stop). The PPI's segment 2
-    stops the clock before the FE is through, so each of its frames is a measurement
-    (irq_stop_n = 1); elsewhere the clock may run on until the FE is through (irq_o is high
-    already, nothing to measure)."""
+    (irqfe) the bench waits until the PHY is idle (the byte clock stopped): irq_o must be high
+    within 2 us (invariant irq_stop), and a rise after the last byte clock edge is a
+    measurement of the interrupt with the byte clock stopped (irq_stop_n). The PPI's segment
+    2 stops the clock before the FE is through, so each of its frames is one (irq_stop_n =
+    1); elsewhere the clock may run on until the FE is through (irq_o rose before its last
+    edge, nothing to measure)."""
     lanes, ppi = g.cfg["lanes"], g.ppi
     g.phy_up()
     on(g)

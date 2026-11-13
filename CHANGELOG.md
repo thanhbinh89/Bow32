@@ -16,7 +16,8 @@
   DONE không chờ byte clock sau burst (byte clock chỉ cần 2 cạnh sau khi `RxActiveHS` xuống). Luật
   clock `csi_clk` ≥ byte clock cao nhất: tham số `PpiByteClkHz` của controller (không mặc định,
   elaborate báo lỗi khi lớn hơn `PhyClkHz`), `ByteClkHz` của `bow_mipi_rx` và
-  `bow_csi2rx_ppi_flat` (mặc định `PhyClkHz`); `make lint` thêm các case âm. DV: unit test FIFO 2
+  `bow_csi2rx_ppi_flat` (bản đầu mặc định `PhyClkHz`; không mặc định từ review, xem *Fixed*);
+  `make lint` thêm các case âm. DV: unit test FIFO 2
   clock `tb_csi2_merge_cdc.sv` (`make -C hw/ip/csi2rx/dv cdc`, trong `test-rx`), `BOW_SYNC_JITTER`
   cho hai bench bộ thu (bản build jitter của `bow_fifo_async` đồng bộ con trỏ bằng `bow_sync_bus`;
   mỗi bản build phải có lần về muộn), test `tclkpost` (lane clock dừng ngay sau burst; cả bộ thu và
@@ -832,6 +833,36 @@
   nó (`sw/apps/camera/csi2rx.c/.h`).
 
 ### Fixed
+- Bộ thu CSI-2, bước 7 (sửa sau review, trước khi gộp; [docs/ip/mipi_rx_arch.md](docs/ip/mipi_rx_arch.md)
+  mục 10, *Sửa sau review bước 7*): **luật clock ở mọi bản dựng** — `bow32_top` có tham số
+  `CsiByteClkHz` (byte clock cao nhất trên `dphy_hs_byte_clk_i`, không mặc định, tới
+  `bow_mipi_rx.ByteClkHz`), `bow_mipi_rx` / `bow_csi2rx_ppi_flat` bỏ mặc định `ByteClkHz` =
+  `PhyClkHz` (trước: kiểm tra `PpiByteClkHz` ≤ clock của controller không chạy ở bản dựng SoC nào);
+  top KV260 camera 114 MHz, Huins camera 180 MHz, top không có PHY `VidClkHz`; mô phỏng hệ thống
+  khai 114 / 180 MHz và **clock video của bản KV260 8,3 ns** (120,5 MHz; trước 9,3 ns = 107,5 MHz,
+  dưới byte clock 114 MHz: vi phạm luật, không lộ ra chỉ vì dòng 64 px): kỳ vọng `PHY clock 120 MHz`
+  và `TIM0` `0512020b`; `make lint` từ chối thiếu / vượt (`bow32_top`, `bow_mipi_rx`, wrapper),
+  `make -C sim lint` coi `USERFATAL` là lỗi. **Đường dữ liệu RAM của FIFO 2 clock sau ghép lane có
+  giới hạn timing**: hai XDC camera bỏ nhóm clock bất đồng bộ giữa byte clock và `clk_vid` (nó
+  thắng `set_max_delay`, nên đường RAM LUT → thanh ghi đọc không bao giờ được tính), thay bằng
+  `set_max_delay -datapath_only` một chu kỳ clock đích cho mọi đường của cặp, như FIFO đọc của
+  DDR / HyperRAM; script build Huins và kiểm tra ngoài ngữ cảnh KV260 kiểm cặp đó và đường RAM
+  (`hw/fpga/common/tcl/fifo_ram_checks.tcl` mới); mục 9.3 có giới hạn đó. **Bản dựng không có PHY
+  không còn flop trên byte clock hằng**: `DONT_TOUCH` trên con trỏ gray của `bow_fifo_async` (bước 7)
+  giữ con trỏ ghi của FIFO ghép lane, tầng đồng bộ đầu của con trỏ đọc và `u_drst` trên byte clock
+  buộc 0 (`CsiPhy` = 0: KV260, MPS4, bo RAM Huins), PDI bo RAM Huins hỏng kiểm tra `check_timing`
+  (clock hằng, pulse width: 3 `CRITICAL WARNING`); `bow_csi2rx` với `HasPhy` = 0 chạy ghép lane ở
+  `csi_clk_i`, không đầu vào (có PHY: nối như cũ). Firmware: cảnh báo khi
+  byte clock (lane rate / 8 lúc start, đồng hồ đo của D-PHY ở `stat`) lớn hơn clock của controller
+  (`INFO[15:8]`), `csi2_test` `timing` hỏng với lý do đó (`bow_csi2rx_byte_clock_ok()`). DV:
+  `tclkpost` đọc `CNT_SOT` / `ERR_STATUS` ngay sau một burst lỗi sync (`ErrSotSyncHS` ở chu kỳ sau
+  cú xuống phải vào FIFO 2 cạnh sau cú xuống), đo `irq_o` lên khi byte clock đã dừng sau FE (lệnh
+  `irqfe`, bất biến `irq_stop`; `irq_fe` cũ chỉ so `irq_o` với `IRQ_STATUS`), unit test FIFO có
+  hai case 200 ppm (lề theo số lane); mutant mới `merge_sot_event_late`, `irq_on_byte_clock`
+  (`mutants-ppi` 31/31). Tài liệu: lề 16 entry theo số lane (366 / 183 / 92 ppm với 4 / 2 / 1
+  lane; cấu hình 1 lane ở tỉ số 1 cần lề hay chung tham chiếu), so A/B phải dùng một ảnh firmware
+  (thứ tự link theo checkout), hành vi đổi (4) chỉ bên trong, các chỗ còn ghi miền byte / `vid_clk_i`
+  cho cờ burst mất và mẫu lỗi lp.
 - Bộ thu CSI-2, bước 6 (sửa sau review, trước khi gộp; [docs/ip/mipi_rx_arch.md](docs/ip/mipi_rx_arch.md)
   mục 10, *Sửa sau review bước 6*): mức ULPS trên PPI theo thứ tự của PPI công khai
   (`UlpsActiveNot*` = ¬`Ulps`, lên lại ở mark thức dậy; `RxUlpsEsc` / ¬`RxUlpsClkNot` tới LP-11 cuối
