@@ -27,23 +27,27 @@
 // output line of a frame cannot be flagged on the stream: FRAME_ERR (the
 // error flags of each frame, latched at FE) holds them.
 //
-// PPI (v1, bow_ppi_pkg): the byte domain runs on rx_byte_clk_hs_i (RxByteClkHS). The lp
-// domain signals belong to the PHY's lp clock; in v1 ErrControl / ErrControlClk are one
-// cycle pulses (bit 0), sampled here on vid_clk_i, so the PHY's lp clock must be vid_clk_i
-// itself (v1.x: gray counters, section 4.11 of the spec). PpiLpClkHz (the PHY's lp clock
-// frequency) has no default: every instantiation states it, and elaboration fails unless it
-// equals PhyClkHz. That compares two numbers only; the guarantee is the connection
-// (bow_mipi_rx runs the D-PHY's lp_clk_i on vid_clk_i).
+// PPI (v1.x, bow_ppi_pkg; step 6 of docs/ip/mipi_rx_arch.md, section 10): the byte domain
+// runs on rx_byte_clk_hs_i (RxByteClkHS). The lp domain signals belong to the PHY's lp clock;
+// ErrControl / ErrControlClk are 2 bit gray counters there (section 4.11 of the spec; v1: one
+// cycle pulses of vid_clk_i), sampled here on vid_clk_i (bow_ppi_err_rx, u_lperr): every
+// change is at least one LP error. The PHY steps a counter at most once every 16 of its lp
+// cycles, so nothing is lost while vid_clk_i >= lp_clk / 32: PpiLpClkHz (the PHY's lp clock
+// frequency) has no default, every instantiation states it, and elaboration fails above 32 x
+// PhyClkHz (bow_mipi_rx runs the D-PHY's lp_clk_i on vid_clk_i itself).
 // Used here: RxActiveHS, RxValidHS, RxDataHS, RxSyncHS, ErrSotSyncHS of every lane,
-// RxSkewCalHS of lane 0, ErrControl[0] of every lane and ErrControlClk[0]: the D-PHY masks
-// them (a disabled lane, the clock lane with CLK_CONT), the controller takes their OR. The
-// other PPI signals are not used yet. Since step 4 the controller has no PHY registers, no
-// temporary band and no shared resets: irq_i is the D-PHY's interrupt (IRQ_STATUS[5]).
+// RxSkewCalHS of lane 0 (its rising edge: a level from the deskew recognition to the end of
+// the burst in v1.x, a pulse in v1, both count once), ErrControl of every lane and
+// ErrControlClk: the D-PHY masks them (a disabled lane, the clock lane with CLK_CONT), the
+// controller takes their OR. The other PPI signals are not used yet. Since step 4 the
+// controller has no PHY registers, no temporary band and no shared resets: irq_i is the
+// D-PHY's interrupt (IRQ_STATUS[5]).
 //
 // Clock domains:
 //   clk_i            CPU: registers, counters, LOG read (bow_csi2rx_regs)
-//   vid_clk_i        video: the LP error release, the lost burst request (lpl_*) and the
-//                    pixel output (in bow_mipi_rx also the D-PHY's lp clock)
+//   vid_clk_i        video: the PPI lp error counters' samples, the LP error release, the
+//                    lost burst request (lpl_*) and the pixel output (in bow_mipi_rx also the
+//                    D-PHY's lp clock)
 //   rx_byte_clk_hs_i byte clock = HS clock / 4, runs only while the clock lane is in HS
 //                    (non-continuous clock: HS bursts only)
 // Resets (asynchronous assertion, synchronous release):
@@ -76,7 +80,7 @@ module bow_csi2rx
   parameter bit          DphyWin    = 1'b1,         // INFO[6]: the D-PHY's registers are at 0xC00
                                                     // (bow_mipi_rx; 0: a PHY of its own)
   parameter int unsigned PpiLpClkHz = 0             // the PHY's lp clock (PPI lp domain), no
-                                                    // default: v1 needs vid_clk_i (see above)
+                                                    // default: at most 32 x PhyClkHz (above)
 ) (
   input  logic                  clk_i,
   input  logic                  rst_ni,
@@ -94,8 +98,8 @@ module bow_csi2rx
   // PPI (bow_ppi_pkg)
   input  logic                  rx_byte_clk_hs_i,     // RxByteClkHS
   input  ppi_hs_t [Lanes-1:0]   ppi_hs_i,             // byte domain
-  input  ppi_lp_t [Lanes-1:0]   ppi_lp_i,             // lp domain (= vid_clk_i)
-  input  ppi_lp_clk_t           ppi_lp_clk_i,         // lp domain (= vid_clk_i)
+  input  ppi_lp_t [Lanes-1:0]   ppi_lp_i,             // lp domain (sampled on vid_clk_i)
+  input  ppi_lp_clk_t           ppi_lp_clk_i,         // lp domain (sampled on vid_clk_i)
   output logic [Lanes-1:0]      enable_o,             // Enable[l] (CPU domain flops)
   output logic                  enable_clk_o,         // EnableClk (CPU domain flop)
   // D-PHY interrupt (bus clock domain level, |(IRQ_STATUS & IRQ_EN) of bow_dphy_rx_regs)
@@ -106,21 +110,21 @@ module bow_csi2rx
     $error("bow_csi2rx: Lanes must be 1, 2 or 4, not %0d", Lanes);
   end
 
-  // v1 PPI: the lp domain errors are one cycle pulses of the PHY's lp clock, sampled on
-  // vid_clk_i (see above). As below, the initial copy stops simulations that build with
-  // -Wno-fatal.
+  // PPI v1.x: the lp domain errors are gray counters of the PHY's lp clock, sampled on
+  // vid_clk_i (see above), which must be at least lp_clk / 32. As below, the initial copy
+  // stops simulations that build with -Wno-fatal.
   if (PpiLpClkHz == 0) begin : g_no_lp_clk
-    $fatal(1, "bow_csi2rx: PpiLpClkHz not set (the PHY's lp clock; v1: vid_clk_i, %0d Hz)",
+    $fatal(1, "bow_csi2rx: PpiLpClkHz not set (the PHY's lp clock, at most 32 x vid_clk_i %0d Hz)",
            PhyClkHz);
 `ifndef SYNTHESIS
-    initial $fatal(1, "bow_csi2rx: PpiLpClkHz not set (the PHY's lp clock; v1: vid_clk_i, %0d Hz)",
+    initial $fatal(1, "bow_csi2rx: PpiLpClkHz not set (the PHY's lp clock, at most 32 x vid_clk_i %0d Hz)",
                    PhyClkHz);
 `endif
-  end else if (PpiLpClkHz != PhyClkHz) begin : g_bad_lp_clk
-    $fatal(1, "bow_csi2rx: PPI lp clock %0d Hz != vid_clk_i %0d Hz (v1 PPI errors are pulses)",
+  end else if (64'(PpiLpClkHz) > 64'(PhyClkHz) * 64'd32) begin : g_bad_lp_clk
+    $fatal(1, "bow_csi2rx: PPI lp clock %0d Hz > 32 x vid_clk_i %0d Hz (PPI error counters lap)",
            PpiLpClkHz, PhyClkHz);
 `ifndef SYNTHESIS
-    initial $fatal(1, "bow_csi2rx: PPI lp clock %0d Hz != vid_clk_i %0d Hz (v1 PPI errors are pulses)",
+    initial $fatal(1, "bow_csi2rx: PPI lp clock %0d Hz > 32 x vid_clk_i %0d Hz (PPI error counters lap)",
                    PpiLpClkHz, PhyClkHz);
 `endif
   end
@@ -245,16 +249,30 @@ module bow_csi2rx
     assign al_deskew[l]   = ppi_hs_i[l].rx_skew_cal_hs;
   end
 
-  // lp domain (vid_clk_i): ErrControl[0] of every data lane and ErrControlClk[0] (one cycle
-  // pulses in v1), as the D-PHY sends them: masked there by the lane's synchronised Enable
-  // and, for the clock lane, by CTRL.CLK_CONT. Their OR sets ERR_STATUS.LP and marks a lost
-  // burst.
-  logic lp_err;
+  // lp domain: ErrControl of every data lane and ErrControlClk, gray counters as the D-PHY
+  // sends them (masked there by the lane's synchronised Enable and, for the clock lane, by
+  // CTRL.CLK_CONT), sampled on vid_clk_i (u_lperr: a change is at least one error). Their
+  // OR sets ERR_STATUS.LP and marks a lost burst.
+  logic [Lanes:0][1:0] lperr_gray;
+  logic [Lanes:0]      lperr_ev;
+  logic                lp_err;
 
   always_comb begin
-    lp_err = ppi_lp_clk_i.err_control[0];
-    for (int unsigned l = 0; l < Lanes; l++) lp_err |= ppi_lp_i[l].err_control[0];
+    lperr_gray[0] = ppi_lp_clk_i.err_control;
+    for (int unsigned l = 0; l < Lanes; l++) lperr_gray[1 + l] = ppi_lp_i[l].err_control;
   end
+
+  bow_ppi_err_rx #(
+    .N (Lanes + 1)
+  ) u_lperr (
+    .clk_i   (vid_clk_i),
+    .rst_ni  (vrst_n),
+    .gray_i  (lperr_gray),
+    .ev_o    (lperr_ev),
+    .steps_o ()
+  );
+
+  assign lp_err = |lperr_ev;
 
   // LP errors -> CPU (ERR_STATUS.LP). Released at most every 16 video cycles, so the pulse
   // synchroniser never merges two pulses (needs vid_clk_i <= 16/3 x clk_i, checked with
@@ -501,21 +519,25 @@ module bow_csi2rx
   // cycle after its RxActiveHS fell). A PHY event without RxActiveHS (a standard PHY,
   // section 5.5 of the spec) counts from the second cycle after the release. The pixel
   // datapath is not gated (px_drop): it is in reset or outside a frame then.
+  // RxSkewCalHS counts at its rising edge (dsk_last_q): one per deskew burst, a pulse (v1,
+  // a standard PHY) or a level until the burst ends (the D-PHY of Bow32 since step 6).
   logic [Lanes-1:0] arm_lo_q, stale_q, sot_ev;
-  logic             dsk_ev;
+  logic             dsk_ev, dsk_last_q;
 
   always_ff @(posedge rx_byte_clk_hs_i or negedge drst_n) begin
     if (!drst_n) begin
-      arm_lo_q <= '0;
-      stale_q  <= '1;
+      arm_lo_q   <= '0;
+      stale_q    <= '1;
+      dsk_last_q <= 1'b0;
     end else begin
-      arm_lo_q <= ~arm;
-      stale_q  <= stale_q & ~arm_lo_q;
+      arm_lo_q   <= ~arm;
+      stale_q    <= stale_q & ~arm_lo_q;
+      dsk_last_q <= al_deskew[0];
     end
   end
 
   assign sot_ev = al_sync_err & ~stale_q;
-  assign dsk_ev = al_deskew[0] & ~stale_q[0];
+  assign dsk_ev = al_deskew[0] & ~dsk_last_q & ~stale_q[0];
 
   // deskew bursts are counted on lane 0 (the other lanes then deskew too,
   // or the burst is a skew or sync error)
@@ -605,18 +627,16 @@ module bow_csi2rx
   );
 
   // PPI signals not used (yet): ErrSotHS (v2), RxSkewCalHS of lanes 1.. (deskew bursts are
-  // counted on lane 0), Stopstate*, RxClkActiveHS, the ULPS and escape signals, bit 1 of
-  // ErrControl* (v1.x gray counters)
+  // counted on lane 0), Stopstate*, RxClkActiveHS, the ULPS and escape signals (the D-PHY's
+  // registers report them)
   logic unused, unused_ppi;
 
   always_comb begin
     unused_ppi = ^{ppi_lp_clk_i.stopstate, ppi_lp_clk_i.rx_clk_active_hs,
-                   ppi_lp_clk_i.ulps_active_not, ppi_lp_clk_i.rx_ulps_clk_not,
-                   ppi_lp_clk_i.err_control[1]};
+                   ppi_lp_clk_i.ulps_active_not, ppi_lp_clk_i.rx_ulps_clk_not};
     for (int unsigned l = 0; l < Lanes; l++) begin
       unused_ppi ^= ^{ppi_hs_i[l].err_sot_hs, ppi_lp_i[l].stopstate, ppi_lp_i[l].ulps_active_not,
-                      ppi_lp_i[l].rx_ulps_esc, ppi_lp_i[l].err_control[1], ppi_lp_i[l].err_esc,
-                      ppi_lp_i[l].err_sync_esc};
+                      ppi_lp_i[l].rx_ulps_esc, ppi_lp_i[l].err_esc, ppi_lp_i[l].err_sync_esc};
     end
   end
 

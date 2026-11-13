@@ -43,8 +43,11 @@
 //     first in the next burst, long before the SoT (harmless for the aligner), unless
 //     des_rst drained them (below).
 //   * clk_hs_samp_o: deserialised clock lane samples (diagnostics: 55 / aa while it toggles).
-//   * hsrx_en, term_en: HSRX_DISABLE = ~(hsrx_en | term_en) of the IBUFDS_DPHY (one pin for
-//     the HS receiver and the termination). lprx_en is not modelled (LPRX_DISABLE = 0).
+//   * hsrx_en, term_en: HSRX_DISABLE = ~term_en of the IBUFDS_DPHY (one pin for the HS
+//     receiver and the termination, so the termination never comes on before LP-00; hsrx_en
+//     alone, the D-PHY's CTRL.HSRX_EARLY from LP-01, would terminate LP-01 and changes
+//     nothing here: without HSRX_EARLY the two enables are equal). lprx_en is not modelled
+//     (LPRX_DISABLE = 0).
 //   * ready_o (ctrl_clk_i domain flop, asynchronous for the D-PHY): XPLL locked, BISC done,
 //     PHY_RDY of every nibble. status_o = {4'b0, PHY_RDY all, DLY_RDY all, XPLL LOCKED_FB,
 //     XPLL LOCKED}, synchronised to ctrl_clk_i.
@@ -105,9 +108,10 @@
 // file; GPIO PA4 / PA5 of the Huins camera top up to step 3, the reinit_i / burst_rst_en_i
 // knobs in step 4):
 //   pd_i, cal_start_i  asynchronous levels (bus clock flops of the D-PHY: AFE_CTRL.PD, 0
-//                  after reset on the FPGA, and CMD.REINIT, a pulse of 32 bus clock cycles =
-//                  640 ns at 50 MHz), each with a two flop synchroniser to ctrl_clk_i; either
-//                  one holds the PHY in its init reset, the state after a loss of XPLL lock:
+//                  after reset on the FPGA, and CMD.AFE_CAL (CMD.REINIT in steps 4 and 5), a
+//                  pulse of 32 bus clock cycles = 640 ns at 50 MHz), each with a two flop
+//                  synchroniser to ctrl_clk_i; either one holds the PHY in its init reset,
+//                  the state after a loss of XPLL lock:
 //                  XPLL RST, XPHY RST / RX_RST / TX_RST, CLKOUTPHYEN 0, ready_o = 0, user
 //                  mode and pending loads cleared (the loaded codes are lost). The release
 //                  runs the init sequence again: XPLL lock, BISC, VT tracking, e.g. to retry
@@ -187,10 +191,10 @@ module bow_dphy_io_versal #(
   output logic [Lanes-1:0][1:0] lp_o,             // data lane LP {P, N}, async
   input  logic                  clk_lprx_en_i,    // not modelled (LP receivers always on)
   input  logic [Lanes-1:0]      lprx_en_i,
-  input  logic                  clk_hsrx_en_i,    // clock lane HS receiver + termination on
-  input  logic [Lanes-1:0]      hsrx_en_i,        // (either enable: one pin, HSRX_DISABLE)
-  input  logic                  clk_term_en_i,
-  input  logic [Lanes-1:0]      term_en_i,
+  input  logic                  clk_hsrx_en_i,    // not used: one pin for the HS receiver
+  input  logic [Lanes-1:0]      hsrx_en_i,        //   and the termination, which follows
+  input  logic                  clk_term_en_i,    // clock lane HS receiver + termination on
+  input  logic [Lanes-1:0]      term_en_i,        //   (HSRX_DISABLE = ~term_en)
   input  logic [Lanes-1:0][8:0] dly_code_i,       // asynchronous, static: the delay to load
   input  logic [Lanes-1:0]      dly_own_i,        // asynchronous: the lane uses dly_code_i
   output logic [Lanes-1:0][8:0] dly_q_o,          // ctrl domain: CNTVALUEOUT of the lane slice
@@ -368,7 +372,7 @@ module bow_dphy_io_versal #(
   ) u_clk_ibuf (
     .I            (clk_p),
     .IB           (clk_n),
-    .HSRX_DISABLE (~(clk_hsrx_en_i | clk_term_en_i)),
+    .HSRX_DISABLE (~clk_term_en_i),
     .LPRX_DISABLE (1'b0),
     .HSRX_O       (clk_hs),
     .LPRX_O_P     (clk_lp_o[1]),
@@ -381,7 +385,7 @@ module bow_dphy_io_versal #(
     ) u_ibuf (
       .I            (data_p[l]),
       .IB           (data_n[l]),
-      .HSRX_DISABLE (~(hsrx_en_i[l] | term_en_i[l])),
+      .HSRX_DISABLE (~term_en_i[l]),
       .LPRX_DISABLE (1'b0),
       .HSRX_O       (lane_hs[l]),
       .LPRX_O_P     (lp_o[l][1]),
@@ -941,7 +945,8 @@ module bow_dphy_io_versal #(
   assign clk_hs_samp_o = xphy_byte(clk_bli_q);
 
   logic unused;
-  assign unused = ^{clk_lprx_en_i, lprx_en_i, clk_to_upper, clk_to_lower, pclk_out, nclk_out,
-                    fifo_wr_clk, cntout_nib, bisc_start_in, bisc_stop_in};
+  assign unused = ^{clk_lprx_en_i, lprx_en_i, clk_hsrx_en_i, hsrx_en_i, clk_to_upper,
+                    clk_to_lower, pclk_out, nclk_out, fifo_wr_clk, cntout_nib, bisc_start_in,
+                    bisc_stop_in};
 
 endmodule

@@ -285,8 +285,9 @@ static bool start_cam(void) {
     return false;
   }
   /* the IMX219 is still in LP-11, the IMX274 in LP-00 until its start */
-  if (cam_rx_start(sen, sen->dt()) != CSI2RX_OK) {
-    bow_printf("error: D-PHY not ready (AFE_STATUS.READY = 0)\n");
+  int rs = cam_rx_start(sen, sen->dt());
+  if (rs != CSI2RX_OK) {
+    bow_printf("error: %s\n", bow_csi2rx_strerror(rs));
     return false;
   }
   uint32_t max_exp = sen->exposure_max();

@@ -53,7 +53,7 @@
 //    decodes; pd / cal_start (Reinit 1: after burst ReinitAfter with the clock lane idle in
 //    LP-11, or toggling with ContClk = 1; Reinit 2: while the transmitter toggles the clock
 //    lane in HS, BISC then runs with a toggling strobe; pd held 2 us, or a cal_start pulse
-//    of ReinitNs, e.g. the 640 ns of CMD.REINIT): ready_o falls within a few cycles and
+//    of ReinitNs, e.g. the 640 ns of CMD.AFE_CAL): ready_o falls within a few cycles and
 //    stays 0 while pd / cal_start = 1, the XPLL and the XPHYs are held in reset, user mode
 //    ends, no load, ready_o comes back with the strobe at the XPHY toggling (Reinit 2,
 //    ContClk 1) or static (Reinit 1) during the new BISC, the taps are the BISC delays of
@@ -88,8 +88,9 @@ module tb_bow_dphy_io_versal #(
   parameter int Reinit      = 0,      // 1: pd / cal_start after burst ReinitAfter; 2: the
                                       // same while the clock lane toggles in HS (see Checks)
   parameter int ReinitAfter = 2,
-  parameter int ReinitNs    = 0,      // > 0: a cal_start pulse this long (CMD.REINIT of the
-                                      // D-PHY: 32 bus clock cycles, 640 ns at 50 MHz); 0: pd
+  parameter int ReinitNs    = 0,      // > 0: a cal_start pulse this long (CMD.AFE_CAL of the
+                                      // D-PHY, CMD.REINIT in steps 4 and 5: 32 bus clock
+                                      // cycles, 640 ns at 50 MHz); 0: pd
                                       // (AFE_CTRL.PD) for 2 us
   parameter bit HsGate      = 1'b1    // 1: HS receivers on only while ready_o (0: as
                                       // bow_dphy_lp, from the LP states alone)

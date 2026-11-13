@@ -27,7 +27,7 @@
 // test patterns; see "IMX274" below) replaces the TCA9546A + IMX219.
 // PRSNT_M2C_L of the camera site (PB5) reads 0; the D-PHY's AFE interface
 // drives the PHY model as in the camera top (step 5 of
-// docs/ip/mipi_rx_arch.md): cal_start (CMD.REINIT) and pd (AFE_CTRL.PD) its
+// docs/ip/mipi_rx_arch.md): cal_start (CMD.AFE_CAL) and pd (AFE_CTRL.PD) its
 // re-init, des_rst its BurstRxRst, and AFE_STATUS[11:8] (dphy_status_i) reads
 // {PHY_RDY, DLY_RDY of every nibble, XPLL LOCKED_FB, LOCKED} = {PHY_RDY,
 // PHY_RDY, 1, 1} of the model (GPIO PA4 / PA5 / PB6 / PB7 before step 4: PB6 /
@@ -1227,7 +1227,10 @@ module tb_bow32 #(
     .lane_en_i    (lane_en),
     .lp_i         (lp_st),
     .clk_force_i  (clk_force),
-    .byte_ce_i    (byte_ce)
+    .byte_ce_i    (byte_ce),
+    .tinit_i      (cfg_lp_q.tinit),
+    .ulps_en_i    (cfg_lp_q.ulps_en),
+    .force_wait_i (force_wait)
   );
 
   // The AFE v1 outputs of the receiver's D-PHY (hw/ip/dphy_rx/dv/bow_afe_chk.sv), the same
@@ -1244,6 +1247,7 @@ module tb_bow32 #(
     .gate_i         (afe_clk_gate_en_o),
     .des_rst_i      (afe_des_rst_o),
     .des_rst_en_i   (des_rst_en),
+    .hsrx_early_i   (cfg_lp_q.hsrx_early),
     .clk_hsrx_en_i  (afe_clk_hsrx_en_o),
     .hsrx_en_i      (afe_hsrx_en_o),
     .clk_term_en_i  (afe_clk_term_en_o),
@@ -1254,6 +1258,7 @@ module tb_bow32 #(
     .clk_lane_pd_i  (afe_clk_lane_pd_o),
     .lane_pd_i      (afe_lane_pd_o),
     .ready_i        (phy_rdy_sys),
+    .ulps_act_i     (ulps_act_sys),
     .dly_own_i      (afe_dly_own_o),
     .clk_dly_code_i (afe_clk_dly_code_o),
     .clk_dly_own_i  (afe_clk_dly_own_o),
@@ -1841,7 +1846,7 @@ module tb_bow32 #(
   end
 
   // The AFE controls of the Versal PHY in the camera top (bow32_huins_vp1902_cam_top) drive
-  // the PHY model directly (its ports): cal_start (CMD.REINIT, a 32 cycle pulse) and pd
+  // the PHY model directly (its ports): cal_start (CMD.AFE_CAL, a 32 cycle pulse) and pd
   // (AFE_CTRL.PD) its re-init, des_rst its BurstRxRst (through the Versal adapter's logic in
   // the model). +S274_BURSTRST=<0|1>: BurstRxRst = 0 / 1 whatever the receiver says (the
   // model's v_brst_force). cal_start pulses are counted here.
@@ -2206,6 +2211,23 @@ module tb_bow32 #(
     expect_text(0, rsp, mark);
   endtask
 
+  // The D-PHY uses the TIM0 that its register reads (step 6: TIM0 reads back the shadow):
+  // CMD (0x4000_8C10) reads 0, no APPLY pending and not DIRTY (no shadow write since the
+  // last APPLY), and the D-PHY's applied copy of the lp domain holds the fields of tim0
+  task automatic check_tim0_applied(logic [31:0] tim0);
+    video_cmd("rd 40008c10", "40008c10: 00000000\nok\n> ");
+    if (dut.u_csi2rx.u_dphy_rx.cfg_lp_q.settle != tim0[7:0] ||
+        dut.u_csi2rx.u_dphy_rx.cfg_lp_q.lp_filter != tim0[11:8] ||
+        dut.u_csi2rx.u_dphy_rx.cfg_lp_q.clk_settle != tim0[23:16] ||
+        dut.u_csi2rx.u_dphy_rx.cfg_lp_q.clk_miss != tim0[31:24]) begin
+      $fatal(1, "D-PHY: TIM0 %08h in use (SETTLE %0d LP_FILTER %0d CLK_SETTLE %0d CLK_MISS %0d), expected %08h",
+             {dut.u_csi2rx.u_dphy_rx.cfg_lp_q.clk_miss, dut.u_csi2rx.u_dphy_rx.cfg_lp_q.clk_settle, 4'h0,
+              dut.u_csi2rx.u_dphy_rx.cfg_lp_q.lp_filter, dut.u_csi2rx.u_dphy_rx.cfg_lp_q.settle},
+             dut.u_csi2rx.u_dphy_rx.cfg_lp_q.settle, dut.u_csi2rx.u_dphy_rx.cfg_lp_q.lp_filter,
+             dut.u_csi2rx.u_dphy_rx.cfg_lp_q.clk_settle, dut.u_csi2rx.u_dphy_rx.cfg_lp_q.clk_miss, tim0);
+    end
+  endtask
+
   // Rate control of `rec n skip kbytes` (video app): the lines "frame k:
   // <bytes> bytes, QP <qp>, ..." of all n frames; the QP must move at least
   // once and never against the size error (no lower QP after a frame more
@@ -2517,9 +2539,12 @@ module tb_bow32 #(
         // simulation's 107.5 MHz video clock): SETTLE 9 (the SETTLE formula
         // with the INFO2 of the UltraScale+ PHY, 107 ns + 24 UI at 912 Mbit/s,
         // = settle_cycles() of the driver before step 4), LP_FILTER 2,
-        // CLK_SETTLE 16 (150 ns), CLK_MISS 4 (one byte clock + 3 cycles)
+        // CLK_SETTLE 16 (150 ns), CLK_MISS 4 (one byte clock + 3 cycles); TIM0 reads back
+        // the shadow, so also CMD (0x4000_8C10) = 0: no APPLY pending, not DIRTY (the D-PHY
+        // uses what TIM0 reads), and the D-PHY's applied copy itself
         mark = send_cmd("rd 40008c24");
         expect_text(0, "40008c24: 04100209\nok\n> ", mark);
+        check_tim0_applied(32'h0410_0209);
         inject_errors();
         mark = log0.len();
         uart_send_str(0, "stat\r");
@@ -2833,7 +2858,7 @@ module tb_bow32 #(
       end
       // MIPI CSI-2 receiver with sw/apps/csi2_test and the IMX274 (Imx274
       // build): the PHY knobs of the D-PHY's registers through `phy` (status
-      // with AFE_STATUS, a re-init with CMD.REINIT: one reinit_i pulse, READY
+      // with AFE_STATUS, a re-init with CMD.AFE_CAL: one cal_start pulse, READY
       // drops and comes back with the BISC delays), then 'test quick' (every check on
       // 64x48 frames: phy-idle in standby LP-00, link-up, calibration with a
       // BISC delay outside the eye, integrity with solid 555h/AAAh, packets
@@ -2902,6 +2927,7 @@ module tb_bow32 #(
         end
         mark = send_cmd("rd 40008c24");
         expect_text(0, $sformatf("40008c24: 051e02%02x\nok\n> ", (settle * 200 + 500) / 1000), mark);
+        check_tim0_applied(32'h051e_0200 | 32'((settle * 200 + 500) / 1000));
         $display("[%0t] tb   | csi2_274: receiver starts with DES_RST_DIS %0d, SETTLE %0d ns, PHY model BurstRxRst %0d",
                  $time, !dut.u_csi2rx.u_dphy_rx.u_regs.burst_rst_en_q, settle, u_csi.v_burst_rst);
         // margin at the taps in use of every lane: lane 2 moved by hand stays
@@ -2969,6 +2995,27 @@ module tb_bow32 #(
         expect_text(0, "lines/frame 8 wc 2400 dt 2b", mark);
         expect_text(0, "ok\n> ", mark);
         check_counters274(mark, 1'b0);
+        // the D-PHY v1.x commands of the board run (step 6) on the running stream: the
+        // v1.x status, then HS_TMO 2 us (cuts the line bursts: timeouts and link errors),
+        // HS_TMO at its reset value, CLK_MISS_OFF for 8 frames, T_INIT 100 us with
+        // CMD.REINIT (Stopstate no earlier, in the vertical blanking), the reset values again
+        mark = send_cmd("phy v1x");
+        expect_text(0, "phy v1x: ERR_STATUS 00000000 (CONTROL 0 HS_TMO 0 ESC 0 CLK_LOST 0 LATE_EOT 0 ESC_TMO 0)",
+                    mark);
+        expect_text(0, "CTRL 00000000, TIM1 00100000 (HS_TMO 5242 us), TIM2 00000000 (T_INIT 0 us)\nok\n> ",
+                    mark);
+        mark = send_cmd("phy check");
+        expect_text(0, "[PASS] phy HS_TMO 2 us: ", mark);
+        expect_text(0, "[PASS] phy HS_TMO reset value: 0 timeouts, 0 link errors\n", mark);
+        expect_text(0, "[PASS] phy CLK_MISS_OFF 1: 8 frames, 0 link errors, ERR_STATUS 00000000\n", mark);
+        expect_text(0, "[PASS] phy T_INIT 100 us: Stopstate ", mark);
+        expect_text(0, "[PASS] phy back at the reset values: 0 link errors\nok\n> ", mark);
+        $display("[%0t] tb   | csi2_274: %s", $time, log0_line("phy HS_TMO 2 us: ", mark));
+        $display("[%0t] tb   | csi2_274: %s", $time, log0_line("phy T_INIT 100 us: ", mark));
+        check_tim0_applied(32'h051e_0200 | 32'((settle * 200 + 500) / 1000));
+        mark = send_cmd("stat");
+        expect_text(0, "csi2rx: link ok\n", mark);
+        expect_text(0, "ok\n> ", mark);
         check_s274_end();
       end
       // Video path with sw/apps/video on the IMX274 (Imx274 build): the

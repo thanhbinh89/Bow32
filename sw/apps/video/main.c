@@ -260,8 +260,9 @@ static bool start_cam(void) {
     bow_printf("error: ISP does not take the configuration (no video clock?)\n");
     return false;
   }
-  if (cam_rx_start(sen, sen->dt()) != CSI2RX_OK) {
-    bow_printf("error: D-PHY not ready (AFE_STATUS.READY = 0)\n");
+  int rs = cam_rx_start(sen, sen->dt());
+  if (rs != CSI2RX_OK) {
+    bow_printf("error: %s\n", bow_csi2rx_strerror(rs));
     return false;
   }
   uint32_t max_exp = sen->exposure_max();

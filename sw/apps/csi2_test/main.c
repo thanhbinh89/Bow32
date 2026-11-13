@@ -21,13 +21,19 @@
  * Versal XPHY (Huins camera build) also the PHY knobs, registers of the
  * receiver's D-PHY since step 4 of docs/ip/mipi_rx_arch.md (GPIO PA4 / PA5 /
  * PB6 / PB7 before): `phy` (AFE_STATUS, DES_RST_DIS, delays in use), `phy
- * reinit` (CMD.REINIT), `phy burstrst` (CTRL.DES_RST_DIS), and the sensor
- * stream without the receiver (`sensor on`): when the PHY's self-calibration
- * (BISC) needs a running clock lane, `sensor on`, `phy reinit`, then `start`.
+ * reinit` (CMD.AFE_CAL with CMD.REINIT), `phy burstrst` (CTRL.DES_RST_DIS), and
+ * the sensor stream without the receiver (`sensor on`): when the PHY's
+ * self-calibration (BISC) needs a running clock lane, `sensor on`, `phy
+ * reinit`, then `start`. The D-PHY v1.x functions of step 6 for the board run:
+ * `phy tinit` (T_INIT; `phy reinit` then times Stopstate), `phy hstmo` (HS
+ * watchdog), `phy missoff` (CLK_MISS_OFF), `phy v1x` (their status) and `phy
+ * check` (the three on the running stream); every one at its reset value
+ * unless set here.
  */
 #include "csi2_test.h"
 
 #define PHY_RDY_MS 10u /* `phy reinit`: wait for AFE_STATUS.READY */
+#define STOP_MS    200u /* `phy reinit` with T_INIT: wait for Stopstate of the lanes */
 /* the receive path reset that every receiver start leaves on (cam_rx_start) */
 #if CAM_BURST_RST
 #define CAM_BURST_RST_STR "1"
@@ -59,8 +65,15 @@ static const char help_274[] =
     "  simfast on|off      sensor start-up waits / 64 (simulation only)\n";
 static const char help_phy[] =
     "  phy                 READY, every nibble's PHY_RDY / DLY_RDY, XPLL lock (AFE_STATUS)\n"
-    "  phy reinit          XPLL lock + BISC again (CMD.REINIT), VT tracking back on\n"
+    "  phy reinit          XPLL lock + BISC again (CMD.AFE_CAL, REINIT), VT tracking back on\n"
     "  phy burstrst 0|1    RX FIFO reset at every HS burst (DES_RST_DIS; start sets " CAM_BURST_RST_STR ")\n"
+    "  phy tinit <us>      T_INIT: LP-11 that long before Stop after reinit / READY (0: none;\n"
+    "                      at most 2^20 - 1 lp clocks)\n"
+    "  phy hstmo <us>|reset  HS watchdog of the data lanes (0: none; reset: 2^20 cycles;\n"
+    "                      at most 2^24 - 1 lp clocks)\n"
+    "  phy missoff 0|1     clock lane receiver off at the clock miss (CTRL.CLK_MISS_OFF)\n"
+    "  phy v1x             ERR_STATUS, LANE_STOP, CNT_MISC / CNT_DSK, CTRL, TIM1, TIM2\n"
+    "  phy check           T_INIT, HS_TMO, CLK_MISS_OFF on the running stream\n"
     "  sensor on|off       sensor stream without the receiver (BISC needs a clock?)\n";
 static const char help_b[] =
     "  rd <addr>  wr <addr> <val>   bus read / write (hex)\n";
@@ -159,9 +172,12 @@ static int sensor_start(bool configure) {
 bool stream_start(bool configure) {
   /* before the sensor leaves LP-11 (IMX274: LP-00 in standby); Versal XPHY:
    * the D-PHY's DES_RST_DIS = !CAM_BURST_RST (cam_sensor.h) */
-  if (cam_rx_start(ct.s, ct.s->dt()) != CSI2RX_OK) {
-    bow_printf("error: D-PHY not ready (AFE_STATUS.READY = 0)\n");
-    if (ct.vid) bow_puts("  phy: nibble status; sensor on + phy reinit: BISC with a running clock\n");
+  int rs = cam_rx_start(ct.s, ct.s->dt());
+  if (rs != CSI2RX_OK) {
+    bow_printf("error: %s\n", bow_csi2rx_strerror(rs));
+    if (ct.vid && rs == CSI2RX_ENOTRDY) {
+      bow_puts("  phy: nibble status; sensor on + phy reinit: BISC with a running clock\n");
+    }
     return false;
   }
   int r = sensor_start(configure);
@@ -302,9 +318,38 @@ static void print_phy(void) {
   bow_puts("\n");
 }
 
-/* CMD.REINIT: the PHY drops READY and its loaded codes (OWN clears), then
- * runs XPLL lock, BISC and VT tracking again. Waits up to 10 ms for READY and
- * prints the time from the command. */
+/* The lanes of the stream and the clock lane in LANE_STOP */
+static uint32_t stop_mask(void) {
+  uint32_t m = DPHY_LANE_STOP_CLK;
+  for (uint32_t l = 0; l < stream_lanes(); l++) m |= DPHY_LANE_STOP(l);
+  return m;
+}
+
+/* T_INIT (step 6): after READY or CMD.REINIT the lanes reach Stop only after
+ * that much LP-11 in a row; print when every lane of the stream did, from now
+ * (READY), against T_INIT. The receiver must be on (start). */
+static bool phy_stop_time(void) {
+  uint32_t mhz = bow_clk_hz() / 1000000u, t0 = bow_cycles(), m = stop_mask(), dt;
+  uint32_t tinit_us = DPHY_TIM2_T_INIT_OF(DPHY->TIM2) / bow_dphy_rx_lp_mhz();
+  bool stop;
+  do {
+    stop = (DPHY->LANE_STOP & m) == m;
+    dt = bow_cycles() - t0;
+  } while (!stop && dt <= STOP_MS * 1000u * mhz);
+  if (!stop) {
+    bow_printf("phy: no Stopstate on every lane %u ms after READY (T_INIT %u us; the receiver "
+               "off, or no LP-11 that long?)\n", STOP_MS, tinit_us);
+    return false;
+  }
+  bow_printf("phy: Stopstate %u us after READY, T_INIT %u us\n", dt / mhz, tinit_us);
+  return dt / mhz >= tinit_us;
+}
+
+/* CMD.AFE_CAL with CMD.REINIT: the PHY drops READY and its loaded codes (OWN
+ * clears), then runs XPLL lock, BISC and VT tracking again; the lane state
+ * machines go back to WaitStop (T_INIT due again). Waits up to 10 ms for
+ * READY and prints the time from the command, and with T_INIT the time to
+ * Stopstate. */
 static bool phy_reinit(void) {
   uint32_t us = 0;
   int r = bow_dphy_rx_reinit(PHY_RDY_MS, &us);
@@ -314,6 +359,7 @@ static bool phy_reinit(void) {
   }
   if (r == DPHY_OK) {
     bow_printf("phy: READY %u us after CMD.REINIT\n", us);
+    if (DPHY_TIM2_T_INIT_OF(DPHY->TIM2) != 0) phy_stop_time();
   } else {
     bow_printf("phy: READY still 0 %u ms after CMD.REINIT\n", PHY_RDY_MS);
   }
@@ -322,7 +368,114 @@ static bool phy_reinit(void) {
   return r == DPHY_OK;
 }
 
-/* `phy [reinit | burstrst 0|1]`: the Versal XPHY only (ct.vid, from the D-PHY's
+/* "phy v1x: ERR_STATUS 00000000 (...), LANE_STOP 0000001f, CNT_MISC 0 CNT_DSK 0,
+ * CTRL 00000000, TIM1 00100000 (HS_TMO 5242 us), TIM2 00000000 (T_INIT 0 us)" */
+static void print_v1x(void) {
+  bow_dphy_rx_v1x_t v;
+  uint32_t mhz = bow_dphy_rx_lp_mhz(), t1 = DPHY->TIM1, t2 = DPHY->TIM2;
+  bow_dphy_rx_v1x(&v);
+  bow_printf("phy v1x: ERR_STATUS %08x (CONTROL %u HS_TMO %u ESC %u CLK_LOST %u LATE_EOT %u "
+             "ESC_TMO %u), LANE_STOP %08x, CNT_MISC %u CNT_DSK %u\n        CTRL %08x, TIM1 %08x "
+             "(HS_TMO %u us), TIM2 %08x (T_INIT %u us)\n",
+             v.err, (v.err & DPHY_ERR_CONTROL) ? 1u : 0u, (v.err & DPHY_ERR_HS_TMO) ? 1u : 0u,
+             (v.err & DPHY_ERR_ESC) ? 1u : 0u, (v.err & DPHY_ERR_CLK_LOST) ? 1u : 0u,
+             (v.err & DPHY_ERR_LATE_EOT) ? 1u : 0u, (v.err & DPHY_ERR_ESC_TMO) ? 1u : 0u, v.stop,
+             v.misc, v.ulps, DPHY->CTRL, t1, DPHY_TIM1_HS_TMO_OF(t1) / mhz, t2,
+             DPHY_TIM2_T_INIT_OF(t2) / mhz);
+}
+
+/* ok, or "error: the D-PHY did not take CMD.APPLY" (its timers and CTRL keep their values
+ * before the write: they read the new ones, CMD[31] DIRTY) */
+static bool applied(bool ok) {
+  if (!ok) bow_puts("error: the D-PHY did not take CMD.APPLY (no lp clock?)\n");
+  return ok;
+}
+
+/* lp clock cycles of us microseconds into *n; false (with a line) when they do not fit
+ * a field of max cycles */
+static bool us_cycles(const char *what, uint32_t us, uint32_t max, uint32_t *n) {
+  uint32_t mhz = bow_dphy_rx_lp_mhz();
+  uint64_t c = (uint64_t)us * mhz;
+  if (c > max) {
+    bow_printf("error: %s %u us = %u lp clocks of %u MHz, the field holds %u (%u us)\n", what, us,
+               (uint32_t)(c > 0xFFFFFFFFu ? 0xFFFFFFFFu : c), mhz, max, mhz ? max / mhz : 0u);
+    return false;
+  }
+  *n = (uint32_t)c;
+  return true;
+}
+
+/* errors of the link over `frames` frames from cleared counters, and the D-PHY's v1.x
+ * status after them */
+static uint32_t link_errors_over(uint32_t frames, bow_dphy_rx_v1x_t *v) {
+  bow_csi2rx_cnt_t c;
+  bow_csi2rx_clear();
+  for (uint32_t i = 0; i < frames; i++) bow_csi2rx_wait_frame(2u * frame_ms() + 10u);
+  bow_csi2rx_counters(&c);
+  bow_dphy_rx_v1x(v);
+  return bow_csi2rx_link_errors(&c);
+}
+
+/* `phy check` (step 6, the stream running): on the board, with every other bit at its reset
+ * value, the IMX274 unharmed:
+ *   HS_TMO: a watchdog shorter than one line (2 us) fires on the lines (ERR_STATUS.HS_TMO,
+ *     CNT_MISC); back at its reset value the link is clean and no HS_TMO comes;
+ *   CLK_MISS_OFF: the clock lane receiver off at the clock miss, 8 frames without errors;
+ *   T_INIT: 100 us, then CMD.REINIT: Stopstate no earlier than T_INIT after the command
+ *     (the IMX274 holds LP-11 that long only in the vertical blanking).
+ * Everything back at its reset value at the end, counters cleared. */
+static bool phy_check(void) {
+  bow_dphy_rx_v1x_t v;
+  uint32_t e, hs_tmo = DPHY_TIM1_HS_TMO_OF(DPHY_TIM1_RESET), t0, mhz = bow_clk_hz() / 1000000u;
+  bool ok = true, pass, stop;
+  if (!ct.streaming) {
+    bow_puts("error: phy check needs the stream (start)\n");
+    return false;
+  }
+  if (!applied(bow_dphy_rx_set_hs_tmo(bow_dphy_rx_lp_cycles(2000u)))) return false;
+  e = link_errors_over(2, &v);
+  pass = (v.err & DPHY_ERR_HS_TMO) && v.misc != 0;
+  bow_printf("[%s] phy HS_TMO 2 us: %u timeouts, %u link errors, ERR_STATUS %08x\n",
+             pass ? "PASS" : "FAIL", v.misc, e, v.err);
+  ok &= pass;
+  if (!applied(bow_dphy_rx_set_hs_tmo(hs_tmo))) return false;
+  e = link_errors_over(4, &v);
+  pass = e == 0 && !(v.err & DPHY_ERR_HS_TMO) && v.misc == 0;
+  bow_printf("[%s] phy HS_TMO reset value: %u timeouts, %u link errors\n", pass ? "PASS" : "FAIL",
+             v.misc, e);
+  ok &= pass;
+  if (!applied(bow_dphy_rx_ctrl(DPHY_CTRL_CLK_MISS_OFF, 0))) return false;
+  e = link_errors_over(8, &v);
+  pass = e == 0 && v.misc == 0;
+  bow_printf("[%s] phy CLK_MISS_OFF 1: 8 frames, %u link errors, ERR_STATUS %08x\n",
+             pass ? "PASS" : "FAIL", e, v.err);
+  ok &= pass;
+  if (!applied(bow_dphy_rx_ctrl(0, DPHY_CTRL_CLK_MISS_OFF))) return false;
+  if (!applied(bow_dphy_rx_set_t_init(bow_dphy_rx_lp_cycles(100000u)))) return false;
+  t0 = bow_cycles();
+  DPHY->CMD = DPHY_CMD_REINIT;
+  do {
+    stop = (DPHY->LANE_STOP & stop_mask()) == stop_mask();
+  } while (stop && bow_cycles() - t0 < 20u * mhz);       /* the lanes leave Stop at once */
+  do {
+    stop = (DPHY->LANE_STOP & stop_mask()) == stop_mask();
+  } while (!stop && bow_cycles() - t0 < STOP_MS * 1000u * mhz);
+  e = (bow_cycles() - t0) / mhz;
+  pass = stop && e >= 100u;
+  bow_printf("[%s] phy T_INIT 100 us: Stopstate %u us after CMD.REINIT\n", pass ? "PASS" : "FAIL",
+             e);
+  ok &= pass;
+  if (!applied(bow_dphy_rx_set_t_init(0))) return false;
+  e = link_errors_over(4, &v);
+  pass = e == 0;
+  bow_printf("[%s] phy back at the reset values: %u link errors\n", pass ? "PASS" : "FAIL", e);
+  ok &= pass;
+  bow_csi2rx_clear();
+  bow_dphy_rx_clear();
+  return ok;
+}
+
+/* `phy [reinit | burstrst 0|1 | tinit | hstmo | missoff | v1x | check]`: the Versal XPHY only (ct.vid, from the D-PHY's
  * INFO; the shell takes `phy` nowhere else): on the KV260 DES_RST_DIS would
  * also stop the ISERDESE3 reset of the UltraScale+ adapter (step 5) */
 static bool phy_cmd(const char *a) {
@@ -333,11 +486,41 @@ static bool phy_cmd(const char *a) {
     return true;
   }
   if (word_is(s, "reinit")) return phy_reinit();
+  if (word_is(s, "tinit")) {
+    uint32_t n;
+    if (!parse_num(s + 5, &v)) return false;
+    if (!us_cycles("T_INIT", v, DPHY_TIM2_T_INIT_MAX, &n)) return false;
+    bool ok = applied(bow_dphy_rx_set_t_init(n));
+    print_v1x();
+    return ok;
+  }
+  if (word_is(s, "hstmo")) {
+    const char *t = skip_spaces(s + 5);
+    uint32_t n = DPHY_TIM1_HS_TMO_OF(DPHY_TIM1_RESET);
+    if (!word_is(t, "reset")) {
+      if (!parse_num(t, &v)) return false;
+      if (!us_cycles("HS_TMO", v, DPHY_TIM1_HS_TMO_MAX, &n)) return false;
+    }
+    bool ok = applied(bow_dphy_rx_set_hs_tmo(n));
+    print_v1x();
+    return ok;
+  }
+  if (word_is(s, "missoff")) {
+    if (!parse_num(s + 7, &v) || v > 1u) return false;
+    bool ok = applied(bow_dphy_rx_ctrl(v ? DPHY_CTRL_CLK_MISS_OFF : 0, v ? 0 : DPHY_CTRL_CLK_MISS_OFF));
+    print_v1x();
+    return ok;
+  }
+  if (word_is(s, "v1x")) {
+    print_v1x();
+    return true;
+  }
+  if (word_is(s, "check")) return phy_check();
   if (!word_is(s, "burstrst")) return false;
   if (!parse_num(s + 8, &v) || v > 1u) return false;
-  bow_dphy_rx_des_rst(v != 0);
+  bool ok = applied(bow_dphy_rx_des_rst(v != 0));
   print_phy();
-  return true;
+  return ok;
 }
 
 /* `sensor on|off` (Versal XPHY): the sensor streams with the receiver off,

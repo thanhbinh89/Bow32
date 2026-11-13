@@ -41,12 +41,12 @@
 // rst_n_i & locked (bow_rstmgr inside the SoC), video domain and PHY reset = the same,
 // synchronised to clk_vid (the PHY then runs XPLL lock + BISC again, AFE ready after ~40 us
 // in simulation, AM010: up to 1.3 ms). Software can re-initialise the PHY alone with
-// CMD.REINIT of the D-PHY registers (below).
+// CMD.AFE_CAL of the D-PHY registers (below; CMD.REINIT in steps 4 and 5).
 //
 // D-PHY AFE controls and status of bow_dphy_io_versal (the PA4 / PA5 / PB6 / PB7 GPIO pins
 // up to step 3 of docs/ip/mipi_rx_arch.md; registers of the receiver's D-PHY at
 // 0x4000_8C00 since step 4, docs/ip/dphy_rx.md; the AFE interface since step 5):
-//   cal_start_i     dphy_cal_start_o: CMD.REINIT, a 32 cycle clk_sys pulse (XPLL and XPHY
+//   cal_start_i     dphy_cal_start_o: CMD.AFE_CAL, a 32 cycle clk_sys pulse (XPLL and XPHY
 //                   resets, AFE_STATUS.READY = 0, loaded DLYn codes lost, then XPLL lock,
 //                   BISC and VT tracking again: ~40 us in simulation, AM010: up to 1.3 ms)
 //   pd_i            dphy_pd_o: AFE_CTRL.PD, 0 from reset: 1 holds the PHY in that reset

@@ -28,12 +28,13 @@ MODEL = os.path.join(REPO, "tools", "csi2", "csi2_model.py")
 VERILATOR = os.environ.get("VERILATOR", "verilator")
 TIMEOUT = 300    # seconds per simulation
 # csi2rx.f in order, then the wrapper (not in csi2rx.f)
-FILES = ["bow_csi2rx_pkg.sv", "bow_csi2_lane_merge.sv", "bow_csi2_packet.sv",
+FILES = ["bow_csi2rx_pkg.sv", "bow_ppi_err_rx.sv", "bow_csi2_lane_merge.sv", "bow_csi2_packet.sv",
          "bow_csi2_unpack.sv", "bow_csi2rx_out.sv", "bow_csi2_capture.sv",
          "bow_csi2rx_regs.sv", "bow_csi2rx.sv", "bow_mipi_rx.sv", "bow_csi2rx_ppi_flat.sv"]
 PARAMS = {1: ["-GLanes=1"], 2: ["-GLanes=2"], 4: ["-GLanes=4", "-GFifoDepth=512"]}
 MERGE, PACKET, CTRL, FLAT = ("bow_csi2_lane_merge.sv", "bow_csi2_packet.sv", "bow_csi2rx.sv",
                              "bow_csi2rx_ppi_flat.sv")
+ERRRX = "bow_ppi_err_rx.sv"
 
 # PPI cases: (timing, test, lanes, Lanes parameter, extra options), seed 1
 CASES = [(m, t, l, d, o) for m in ("bow", "std") for t, l, d, o in
@@ -73,15 +74,16 @@ MUTANTS = [
     # single-file build with Lanes = 1, which runs python3 (VERILATOR_ENV below)
     ("extra_off", [(PACKET, "if ((extra_i != '0) && !xev_q && (xcnt_q > {1'b0, extra_i})) begin",
                     "if (1'b0) begin", 1)]),
-    # lost burst marking at the LP level: the OR of ErrControl / ErrControlClk on the PPI
-    # (the D-PHY masks them since step 4): without ErrControlClk, lane 0 only, masked by the
-    # controller's own enables again (lpmask: an error on a lane CTRL disabled)
-    ("lost_burst_no_clk", [(CTRL, "    lp_err = ppi_lp_clk_i.err_control[0];",
-                            "    lp_err = 1'b0;", 1)]),
-    ("lost_burst_lane0_only", [(CTRL, "lp_err |= ppi_lp_i[l].err_control[0];",
-                                "lp_err |= ppi_lp_i[0].err_control[0];", 1)]),
-    ("lost_burst_lane_mask", [(CTRL, "lp_err |= ppi_lp_i[l].err_control[0];",
-                               "lp_err |= ppi_lp_i[l].err_control[0] & lane_en_sys[1 + l];", 1)]),
+    # lost burst marking at the LP level: the OR of the changes of the ErrControl /
+    # ErrControlClk gray counters on the PPI (step 6; the D-PHY masks them since step 4):
+    # without ErrControlClk, lane 0 only, masked by the controller's own enables again (lpmask:
+    # an error on a lane CTRL disabled)
+    ("lost_burst_no_clk", [(CTRL, "    lperr_gray[0] = ppi_lp_clk_i.err_control;",
+                            "    lperr_gray[0] = 2'b00;", 1)]),
+    ("lost_burst_lane0_only", [(CTRL, "lperr_gray[1 + l] = ppi_lp_i[l].err_control;",
+                                "lperr_gray[1 + l] = ppi_lp_i[0].err_control;", 1)]),
+    ("lost_burst_lane_mask", [(CTRL, "  assign lp_err = |lperr_ev;",
+                               "  assign lp_err = |(lperr_ev & lane_en_sys);", 1)]),
     ("lost_burst_off", [(CTRL, "    else if (lpl_ev && (lpl_req_q == lpl_ack_s))   lpl_req_q <= ~lpl_req_q;",
                          "    else if (1'b0)                                 lpl_req_q <= ~lpl_req_q;", 1)]),
     # the pending loss cleared by an end of burst, not by the next packet start (test loss:
@@ -89,8 +91,16 @@ MUTANTS = [
     ("lost_burst_pending_cleared_at_eob", [(CTRL, "    else if (lm_sop)                  lpl_pend_q <= 1'b0;",
                                             "    else if (lm_eob)                  lpl_pend_q <= 1'b0;", 1)]),
     ("sync_error_no_drop", [(CTRL, "lm_skew || (|al_sync_err) ||", "lm_skew ||", 1)]),
-    ("deskew_counted_on_last_lane", [(CTRL, "  assign dsk_ev = al_deskew[0] & ~stale_q[0];",
+    ("deskew_counted_on_last_lane", [(CTRL, "  assign dsk_ev = al_deskew[0] & ~dsk_last_q & ~stale_q[0];",
                                       "  assign dsk_ev = al_deskew[Lanes-1] & ~stale_q[Lanes-1];", 1)]),
+    # RxSkewCalHS counted in every cycle it is high, not at its rising edge (step 6: a level
+    # from the D-PHY of Bow32 and from a PG202 like PHY)
+    ("deskew_level_counted", [(CTRL, "  assign dsk_ev = al_deskew[0] & ~dsk_last_q & ~stale_q[0];",
+                               "  assign dsk_ev = al_deskew[0] & ~stale_q[0];", 1)]),
+    # the PPI error counters' sampler (bow_ppi_err_rx): a change of bit 0 only taken as an
+    # error (the steps 01 -> 11 and 10 -> 00 are lost)
+    ("lp_err_bit0_only", [(ERRRX, "      ev_o[i]    = (gray_s[i] != last_q[i]);",
+                           "      ev_o[i]    = (gray_s[i][0] != last_q[i][0]);", 1)]),
     # flat wrapper (standard PHY)
     ("flat_no_byte_delay", [(FLAT, "    assign ppi_hs[l].rx_valid_hs     = valid_q[l];",
                              "    assign ppi_hs[l].rx_valid_hs     = rx_valid_hs_i[l];", 1),
@@ -100,11 +110,9 @@ MUTANTS = [
                              "    assign ppi_hs[l].rx_sync_hs      = rx_sync_hs_i[l];", 1)]),
     ("flat_no_active_hold", [(FLAT, "rx_active_hs_i[l] | act_q[l] | act_q2[l];",
                               "rx_active_hs_i[l];", 1)]),
-    ("flat_skew_cal_level", [(FLAT, "    assign ppi_hs[l].rx_skew_cal_hs  = skew_edge_q[l];",
-                              "    assign ppi_hs[l].rx_skew_cal_hs  = skew_q[l];", 1)]),
-    # the wrapper's ErrControl synchronisers: lane 0's for every lane (std lpmask, loss)
-    ("flat_err_lane0_only", [(FLAT, "      .src_pulse_i (err_control_i[l]),",
-                              "      .src_pulse_i (err_control_i[0]),", 1)]),
+    # the wrapper's ErrControl gray counters: lane 0's for every lane (std lpmask, loss)
+    ("flat_err_lane0_only", [(FLAT, "    .ev_i   (err_control_i),",
+                              "    .ev_i   ({Lanes{err_control_i[0]}}),", 1)]),
 ]
 
 

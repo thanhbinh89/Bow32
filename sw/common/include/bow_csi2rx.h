@@ -185,9 +185,10 @@ _Static_assert(sizeof(bow_csi2rx_regs_t) == 0xC00, "CSI2RX controller window");
 #define CSI2_DT_RAW10 0x2Bu
 #define CSI2_DT_OB    0x37u /* user defined 8: IMX274 optical black lines */
 
-/* Return codes of bow_csi2rx_start() */
+/* Return codes of bow_csi2rx_start() (bow_csi2rx_strerror(): a line for them) */
 #define CSI2RX_OK       0
 #define CSI2RX_ENOTRDY -8 /* the D-PHY's AFE_STATUS.READY stayed 0 */
+#define CSI2RX_EAPPLY  -9 /* the D-PHY did not take CMD.APPLY of its timing (no lp clock?) */
 
 /* The counters of the receiver: the controller's, and from the D-PHY the HS
  * entries (burst, clk_burst) and the LP errors of every lane (lp_err). */
@@ -226,9 +227,13 @@ typedef struct {
 #define CSI2RX_MARGIN_MIN 40u /* smallest automatic k (taps) */
 
 /* ID check; *lanes = data lanes, *phy = a D-PHY is connected (either may be
- * NULL). false: no Bow32 CSI-2 receiver at BOW32_CSI2RX_BASE, or one built
+ * NULL). false: no Bow32 CSI-2 receiver at BOW32_CSI2RX_BASE, one built
  * before the D-PHY split (INFO[6] = 0: "csi2rx: bitstream before the D-PHY
- * split, rebuild it" is printed; this driver has no path for its registers). */
+ * split, rebuild it" is printed; this driver has no path for its registers),
+ * or a D-PHY of another register map version than this driver's (ID[7:0]:
+ * "csi2rx: D-PHY register map version 1, this firmware needs 2: bitstream
+ * older than the firmware, rebuild them from one commit" or the other way
+ * round; DPHY_MAP_VERSION). */
 bool bow_csi2rx_probe(uint32_t *lanes, bool *phy);
 
 /* Data lanes the receiver uses now (CTRL.LANES4 / LANES2, at most INFO). */
@@ -247,8 +252,11 @@ uint32_t bow_csi2rx_lanes(void);
  * PHY adds, INFO2 of the D-PHY: the XPHY FIFO); counters (the D-PHY's too),
  * ERR_STATUS and IRQ_STATUS cleared. Call BEFORE the sensor starts streaming:
  * the receiver must see LP-11 first. Lane rates below ~350 Mbit/s are not
- * supported (docs/ip/csi2rx.md). Returns CSI2RX_OK or CSI2RX_ENOTRDY. */
+ * supported (docs/ip/csi2rx.md). Returns CSI2RX_OK, CSI2RX_ENOTRDY, or
+ * CSI2RX_EAPPLY (the D-PHY did not take its timing: receiver off). */
 int bow_csi2rx_start(uint32_t lanes, uint32_t dt, uint32_t lane_rate);
+/* What a return code of bow_csi2rx_start() means, for an error line. */
+const char *bow_csi2rx_strerror(int r);
 
 /* Call AFTER the sensor stream-off: waits until the current frame has ended
  * (FE, or IN_FRAME = 0 and no new burst for 2 line times; at most timeout_ms)

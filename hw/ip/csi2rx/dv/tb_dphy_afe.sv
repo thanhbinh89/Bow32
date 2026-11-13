@@ -19,9 +19,10 @@
 //     1 after the pulse); bow_afe_chk checks lane_pd at every cycle;
 //   * DLYn: a write sets CODE always, OWN only while READY (a write while READY = 0 does
 //     not raise it); READY falling clears OWN; a write without byte 0 or 1 changes nothing;
-//   * CMD.REINIT: cal_start for 32 bus cycles, restarted by a second REINIT, none without
-//     byte 0;
-//   * CTRL.DES_RST_DIS: des_rst 0 while set (gate closed), 1 again when cleared.
+//   * CMD.AFE_CAL (CMD.REINIT up to step 5): cal_start for 32 bus cycles, restarted by a
+//     second AFE_CAL, none without byte 0, none from CMD.REINIT (step 6: the state machines);
+//   * CTRL.DES_RST_DIS (a shadow register, step 6: CMD.APPLY): des_rst 0 while set (gate
+//     closed), 1 again when cleared; nothing before the APPLY.
 // Prints "tb_dphy_afe: PASS (<n> checks)" or "tb_dphy_afe: FAIL (<n> errors)".
 
 `timescale 1ns / 1ps
@@ -138,6 +139,7 @@ module tb_dphy_afe;
     .gate_i         (afe_clk_gate_en_o),
     .des_rst_i      (afe_des_rst_o),
     .des_rst_en_i   (des_rst_en),
+    .hsrx_early_i   (cfg_lp_q.hsrx_early),
     .clk_hsrx_en_i  (afe_clk_hsrx_en_o),
     .hsrx_en_i      (afe_hsrx_en_o),
     .clk_term_en_i  (afe_clk_term_en_o),
@@ -148,6 +150,7 @@ module tb_dphy_afe;
     .clk_lane_pd_i  (afe_clk_lane_pd_o),
     .lane_pd_i      (afe_lane_pd_o),
     .ready_i        (phy_rdy_sys),
+    .ulps_act_i     (ulps_act_sys),
     .dly_own_i      (afe_dly_own_o),
     .clk_dly_code_i (afe_clk_dly_code_o),
     .clk_dly_own_i  (afe_clk_dly_own_o),
@@ -279,8 +282,9 @@ module tb_dphy_afe;
     check_reset_values("power-up reset");
     rst_n = 1'b1;
     cycles(4);
-    expect_rd("ID", AId, 32'h4450_5201);
-    info = {8'h00, 1'(AfeKind == 2), 1'b0, 4'd9, 10'd200, 3'(AfeKind), 1'b0, 4'(Lanes)};
+    expect_rd("ID (register map version 2)", AId, 32'h4450_5202);
+    // [27] ULPS (step 6)
+    info = {4'h0, 1'b1, 3'h0, 1'(AfeKind == 2), 1'b0, 4'd9, 10'd200, 3'(AfeKind), 1'b0, 4'(Lanes)};
     expect_rd("INFO", AInfo, info);
     expect_rd("AFE_CTRL after reset", AAfeCtrl, {31'h0, AfePdRst});
     expect_rd("AFE_STATUS after reset", AAfeStatus, 32'h0);
@@ -402,14 +406,19 @@ module tb_dphy_afe;
     checks++;
     if (own[0] !== 1'b1) err("DLY0 write after READY: no OWN");
 
-    // CMD.REINIT: cal_start for 32 bus cycles; a second REINIT restarts the count
+    // CMD.AFE_CAL: cal_start for 32 bus cycles; a second AFE_CAL restarts the count; CMD.REINIT
+    // (the state machines, step 6) none
     begin
       int n;
-      wr(ACmd, 32'h0000_0002, 4'hE);                // no byte 0: nothing
+      wr(ACmd, 32'h0000_0004, 4'hE);                // no byte 0: nothing
       cycles(2);
       checks++;
-      if (cal_start) err("CMD.REINIT without byte 0 started cal_start");
-      wr(ACmd, 32'h0000_0002);
+      if (cal_start) err("CMD.AFE_CAL without byte 0 started cal_start");
+      wr(ACmd, 32'h0000_0002);                      // REINIT: not the AFE
+      cycles(2);
+      checks++;
+      if (cal_start) err("CMD.REINIT started cal_start");
+      wr(ACmd, 32'h0000_0004);
       n = 0;
       while (cal_start && n < 100) begin
         n++;
@@ -418,9 +427,9 @@ module tb_dphy_afe;
       end
       checks++;
       if (n != 32) err($sformatf("cal_start for %0d bus cycles, want 32", n));
-      wr(ACmd, 32'h0000_0002);
+      wr(ACmd, 32'h0000_0004);
       cycles(10);
-      wr(ACmd, 32'h0000_0002);
+      wr(ACmd, 32'h0000_0004);
       n = 0;
       while (cal_start && n < 100) begin
         n++;
@@ -428,15 +437,20 @@ module tb_dphy_afe;
         #1;
       end
       checks++;
-      if (n != 32) err($sformatf("cal_start after a second REINIT: %0d bus cycles, want 32", n));
+      if (n != 32) err($sformatf("cal_start after a second AFE_CAL: %0d bus cycles, want 32", n));
     end
 
-    // CTRL.DES_RST_DIS: des_rst 0 while set (gate closed: clock lane off)
+    // CTRL.DES_RST_DIS: des_rst 0 while set (gate closed: clock lane off), from CMD.APPLY on
     wr(ACtrl, 32'h0000_0040);
+    cycles(4);
+    checks++;
+    if (des_rst !== 1'b1) err("DES_RST_DIS = 1 before CMD.APPLY: des_rst already 0");
+    wr(ACmd, 32'h0000_0001);
     cycles(4);
     checks++;
     if (des_rst !== 1'b0) err("DES_RST_DIS = 1: des_rst still 1");
     wr(ACtrl, 32'h0000_0000);
+    wr(ACmd, 32'h0000_0001);
     cycles(4);
     checks++;
     if (des_rst !== 1'b1) err("DES_RST_DIS = 0: des_rst not back to 1");

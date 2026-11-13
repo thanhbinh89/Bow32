@@ -7,9 +7,10 @@
 // docs/ip/mipi_rx_arch.md, docs/ip/dphy_rx.md). The D-PHY speaks the AFE interface (step 5)
 // with the model csi2_tx_model, which plays the sensor and an FPGA AFE adapter with the
 // adapter's own logic (bow_dphy_dly_xusp / bow_dphy_dly_xphy): pd and cal_start (AFE_CTRL.PD,
-// CMD.REINIT) re-initialise the Versal PHY model, des_rst (~the gate, 0 while
-// CTRL.DES_RST_DIS = 1) drives its BurstRxRst (a test case of the Versal PHY with BurstRxRst
-// 0 writes DES_RST_DIS first, the testbench checks the D-PHY's setting at every burst);
+// CMD.AFE_CAL; CMD.REINIT in steps 4 and 5) re-initialise the Versal PHY model, des_rst
+// (~the gate, 0 while CTRL.DES_RST_DIS = 1) drives its BurstRxRst (a test case of the Versal
+// PHY with BurstRxRst 0 writes DES_RST_DIS first, the testbench checks the D-PHY's setting at
+// every burst);
 // status = {4{AFE ready}} (AFE_STATUS[11:8]).
 //
 // Reads a test case written by `tools/csi2/csi2_model.py gen DIR`:
@@ -145,7 +146,10 @@ module tb_bow_csi2rx;
     .lane_en_i    (lane_en),
     .lp_i         (lp_st),
     .clk_force_i  (clk_force),
-    .byte_ce_i    (byte_ce)
+    .byte_ce_i    (byte_ce),
+    .tinit_i      (cfg_lp_q.tinit),
+    .ulps_en_i    (cfg_lp_q.ulps_en),
+    .force_wait_i (force_wait)
   );
 
   // The AFE v1 outputs of the D-PHY (hw/ip/dphy_rx/dv/bow_afe_chk.sv): des_rst = ~gate at the
@@ -161,6 +165,7 @@ module tb_bow_csi2rx;
     .gate_i         (afe_clk_gate_en_o),
     .des_rst_i      (afe_des_rst_o),
     .des_rst_en_i   (des_rst_en),
+    .hsrx_early_i   (cfg_lp_q.hsrx_early),
     .clk_hsrx_en_i  (afe_clk_hsrx_en_o),
     .hsrx_en_i      (afe_hsrx_en_o),
     .clk_term_en_i  (afe_clk_term_en_o),
@@ -171,6 +176,7 @@ module tb_bow_csi2rx;
     .clk_lane_pd_i  (afe_clk_lane_pd_o),
     .lane_pd_i      (afe_lane_pd_o),
     .ready_i        (phy_rdy_sys),
+    .ulps_act_i     (ulps_act_sys),
     .dly_own_i      (afe_dly_own_o),
     .clk_dly_code_i (afe_clk_dly_code_o),
     .clk_dly_own_i  (afe_clk_dly_own_o),

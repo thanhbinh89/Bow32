@@ -156,7 +156,7 @@ adapter FPGA dùng, [mipi_rx_arch.md](mipi_rx_arch.md) mục 3.2; bảng đầy 
 | `afe_dly_q_i[l]` (`dly_tap_i`) | bất đồng bộ | delay đang dùng (CNTVALUEOUT) → `DLYn[24:16]` |
 | `afe_ready_i` (`phy_rdy_i`) | bất đồng bộ | AFE sẵn sàng (Versal: XPLL khoá, BISC xong; về 0 khi PHY khởi động lại) → `AFE_STATUS.READY` của D-PHY (`STATUS.PHY_RDY` trước bước 4); READY = 0 xoá OWN. AFE không có trạng thái này nối `1'b1` |
 | `afe_status_i[7:0]` (`phy_status_i`) | bất đồng bộ | trạng thái thô của AFE → `AFE_STATUS[15:8]` (Versal: [0] XPLL LOCKED, [1] LOCKED_FB, [2] DLY_RDY, [3] PHY_RDY của mọi nibble; trước bước 4 là GPIO PB6 / PB7 của top camera). AFE không có nối 0 |
-| `afe_cal_start_o` (`reinit_o`) | CPU (flop) | xung 32 chu kỳ khi ghi `CMD.REINIT` của D-PHY: AFE hiệu chỉnh lại (Versal: XPLL, BISC, VT; trước bước 4 là GPIO PA4). AFE không có để trống |
+| `afe_cal_start_o` (`reinit_o`) | CPU (flop) | xung 32 chu kỳ khi ghi `CMD.AFE_CAL` của D-PHY (bước 4–5: `CMD.REINIT`; từ bước 6 `CMD.REINIT` đưa máy LP về `WaitStop`): AFE hiệu chỉnh lại (Versal: XPLL, BISC, VT; trước bước 4 là GPIO PA4). AFE không có để trống |
 
 PHY của Versal là `hw/fpga/common/rtl/bow_dphy_io_versal.sv` (XPHY chế độ
 native, lane clock làm strobe, không dùng IP D-PHY của AMD; chi tiết và ràng
@@ -174,8 +174,8 @@ thu của PHY (`BurstRxRst`; từ bước 5 là `des_rst` của giao diện AFE,
 `ready` ∧ `des_rst`, nên = ¬cổng khi `CTRL.DES_RST_DIS` = 0, từ reset; firmware ghi lại bit đó
 mỗi lần khởi động bộ thu; bước 4: cổng `burst_rst_en_i` = ¬DES_RST_DIS; trước đó GPIO PA5 của
 bản camera, 0 sau reset như PHY của AMD) giữ FIFO ở reset khi cổng byte clock đóng: mỗi burst
-bắt đầu lại với trễ 2–3 word. `CMD.REINIT` của D-PHY (`cal_start`, một xung 32 chu kỳ bus;
-bước 4 `reinit_i`, trước nữa GPIO PA4) và `AFE_CTRL.PD` = 1 (`pd`, từ bước 5, giữ tới khi xoá)
+bắt đầu lại với trễ 2–3 word. `CMD.AFE_CAL` của D-PHY (`cal_start`, một xung 32 chu kỳ bus; bước
+4–5 `CMD.REINIT`, bước 4 qua `reinit_i`, trước nữa GPIO PA4) và `AFE_CTRL.PD` = 1 (`pd`, từ bước 5, giữ tới khi xoá)
 khởi động lại PHY: `AFE_STATUS.READY` về 0, OWN mọi lane xoá, tap đã nạp bị bỏ, XPLL, BISC và
 bù VT chạy lại; `csi2_test` có lệnh `phy`, `phy reinit`, `phy burstrst 0|1`.
 
@@ -287,14 +287,15 @@ vì `arm` còn cao lúc `drst_n` nhả. Đồng bộ giữa các miền:
 
 | Tín hiệu | Cách qua | Ghi chú |
 |----------|----------|---------|
-| cấu hình (`CTRL` của controller; `CTRL`, `TIM0` của D-PHY) | `bow_sync` từng bit | gần tĩnh, không handshake: đổi LANES/VC/VC_ANY/DT khi RX_EN = 0, `TIM0` / `CLK_CONT` khi PHY_EN = 0 |
+| cấu hình (`CTRL` của controller; `CTRL`, `TIM0` của D-PHY) | `bow_sync` từng bit; D-PHY từ bước 6: shadow + `CMD.APPLY` (toggle qua `bow_sync`, miền lp chép cả bộ `CTRL`, `TIM0`–`TIM2` trong một chu kỳ, ack về) | gần tĩnh, không handshake: đổi LANES/VC/VC_ANY/DT khi RX_EN = 0, `TIM0` / `CLK_CONT` khi PHY_EN = 0 |
 | sự kiện (FS, FE, dòng, lỗi, vào HS…) | một `bow_cdc_pulse` mỗi loại | miền byte: ≤ 1 lần mỗi packet/burst (burst cách nhau ≥ ~370 ns; SKIP ≤ 1 lần mỗi frame); miền video: giới hạn 1 xung / 16 chu kỳ, nên cần `vid_clk_i` ≤ 16/3 × `clk_i` (`bow_cdc_pulse` cần 3 chu kỳ đích mỗi xung; elaborate kiểm khi `CpuClkHz` ≠ 0, `make lint` có một case âm 50/300 MHz) |
 | dữ liệu kèm sự kiện (FRAME_INFO, FRAME_SUM, LINE_INFO) | trực tiếp | nguồn giữ nguyên tới sự kiện cùng loại sau; CPU chép khi nhận xung |
 | lệnh LOG (controller), RAW (D-PHY) | bộ đếm gray 4 bit: req (CPU), ack (byte) | là mức nên chạy được khi byte clock dừng (phục vụ khi có burst); tối đa 15 lệnh treo |
 | mã delay (`DLYn` CODE, OWN; từ bước 5) | flop miền CPU, mức tĩnh tới AFE; adapter đồng bộ (`bow_sync_bus` từng bit) và chỉ nhận giá trị ổn định 2 chu kỳ: UltraScale+ ở byte clock (nạp khi tap khác tap đã nạp, chỉ khi byte clock chạy), Versal ở `CTRL_CLK` = `vid_clk_i` (nạp khi OWN lên hoặc mã đổi; `set_bus_skew` 5 ns trong XDC Huins) | CNTVALUEOUT (`afe_dly_q_i`) về CPU qua `bow_sync`. Tới bước 4: tap IDELAY qua `bow_sync` trong D-PHY; tap XPHY qua bộ đếm gray yêu cầu 2 bit mỗi lane |
 | `afe_ready_i`, `afe_status_i`, `afe_cal_done_i`, `afe_cal_err_i` | `bow_sync` từng bit | mức, cho `AFE_STATUS` của D-PHY |
 | `afe_pd_o`, `afe_cal_start_o` (Versal) | flop miền CPU; adapter: 2 flop ở `CTRL_CLK` | `cal_start` 32 chu kỳ CPU |
-| HS entry, lỗi LP (D-PHY) | một `bow_cdc_pulse` mỗi lane và loại, mỗi loại ≤ 1 xung / 16 chu kỳ lp | cho `CNT_BURSTn`, `CNT_CLK`, `CNT_LPERR`, `ERR_STATUS` / `ERR_LANE` của D-PHY (cần `lp_clk` ≤ 16/3 × `clk_i`, kiểm khi elaborate qua `BusClkHz`) |
+| HS entry, lỗi LP và sự kiện v1.x (D-PHY) | từ bước 6: một bộ đếm gray 4 bit mỗi lane và loại (`evc_gray_q`, ≤ 1 bước mỗi chu kỳ lp), `bow_sync_bus` (`u_sync_evc`), thanh ghi cộng hiệu; tới bước 5: một `bow_cdc_pulse` mỗi lane và loại, ≤ 1 xung / 16 chu kỳ lp | cho `CNT_BURSTn`, `CNT_CLK`, `CNT_LPERR`, `CNT_MISC`, `CNT_DSK[31:16]`, `ERR_STATUS` / `ERR_LANE`, `IRQ_STATUS` của D-PHY (cần `lp_clk` ≤ 12 × `clk_i`, tới bước 5 ≤ 16/3 ×, kiểm khi elaborate qua `BusClkHz`; FPGA: `set_bus_skew` một chu kỳ lp) |
+| lỗi lp trên PPI (`ErrControl*`, từ bước 6) | bộ đếm gray 2 bit của D-PHY, 2 flop từng bit ở `vid_clk_i` (`bow_ppi_err_rx`, `u_lperr`) | mỗi lần đổi là ≥ 1 lỗi; cần `vid_clk_i` ≥ `lp_clk` / 32 (`PpiLpClkHz`); trên FPGA cùng clock |
 | đồng hồ đo byte clock | bộ đếm gray 20 bit | cho `BYTECLK` của D-PHY |
 | pixel | `bow_fifo_async` (con trỏ gray) | hai phía reset cùng một nguồn |
 | RAM LOG (controller), RAW (D-PHY) | `bow_ram_sdp` (ghi ở byte, đọc ở CPU) | CPU đọc sau DONE |
@@ -308,9 +309,11 @@ LP, cấu hình lớp packet, LOG, FIFO pixel, sự kiện miền byte). Giữa 
 4): `Enable` / `EnableClk` (flop miền CPU của controller) qua bộ đồng bộ cấu hình của D-PHY, mọi
 tín hiệu PPI khác được dùng ở miền của nó (miền lp của D-PHY là `vid_clk_i`). Các bus gray có
 ràng buộc `set_bus_skew` (mục *Ràng buộc*). Hoạt động của
-lane clock được thấy qua một flop miền byte đảo mỗi chu kỳ, lấy mẫu ở `vid_clk_i`: cần byte
-clock ≤ ~1,5 × `vid_clk_i` (ở 200 MHz: lane ≤ ~2,4 Gbit/s, xa hơn khả năng của I/O này), nếu
-không phát hiện mất clock (`CLK_MISS`) có thể đóng cổng giữa burst.
+lane clock được thấy qua một flop miền byte đảo mỗi chu kỳ (mỗi 2^`CLK_TOG_DIV` chu kỳ từ bước 6),
+lấy mẫu ở `vid_clk_i`: mỗi mức của flop phải dài hơn một chu kỳ `vid_clk_i`, tức byte clock <
+2^`CLK_TOG_DIV` × `vid_clk_i` có lề (ở 200 MHz và `CLK_TOG_DIV` 0: lane < ~1,6 Gbit/s; Huins chạy 180
+MHz, KV260 114 MHz), nếu không phát hiện mất clock (`CLK_MISS`) có thể đóng cổng giữa burst (bản
+trước ghi ~1,5 ×: sai, sửa sau review bước 6, [mipi_rx_arch.md](mipi_rx_arch.md) mục 4.3).
 
 ## Pipeline
 
@@ -344,33 +347,39 @@ khối:
   ([dphy_rx.md](dphy_rx.md)): D-PHY lái `des_rst` (flop của máy LP lane clock), mã delay tĩnh +
   OWN và `pd` (thanh ghi), `bow_mipi_rx` đưa ra tập con mà hai adapter FPGA dùng; clock miền lp
   `lp_clk_i` là `vid_clk_i`.
-- **PPI v1** (`bow_ppi_pkg`, [mipi_rx_arch.md](mipi_rx_arch.md) mục 5): `rx_byte_clk_hs`
+- **PPI v1.x** (từ bước 6; `bow_ppi_pkg`, [mipi_rx_arch.md](mipi_rx_arch.md) mục 5): `rx_byte_clk_hs`
   (= `afe_hs_byte_clk_i`); mỗi data lane `ppi_hs_t` ở miền byte (`RxActiveHS` = `arm`, `RxValidHS`,
-  `RxDataHS`, `RxSyncHS`, `ErrSotSyncHS`, `RxSkewCalHS` của aligner; `ErrSotHS` = 0) và
-  `ppi_lp_t` ở miền lp (`Stopstate`, `ErrControl` = xung lỗi LP của FSM ở bit 0, từ bước 4 che
-  theo `Enable` của lane như FSM thấy nó); lane clock `ppi_lp_clk_t` (`StopstateClk`,
-  `RxClkActiveHS`, `ErrControlClk`, từ bước 4 che khi `CTRL.CLK_CONT` = 1); tín hiệu ULPS /
-  escape đứng ở giá trị nghỉ. Controller lái `Enable[l]` / `EnableClk` từ flop enable lane của
-  `bow_csi2rx_regs`. Lỗi lp là xung một chu kỳ, nên controller phải chạy cùng clock với
-  `lp_clk` của D-PHY: tham số `PpiLpClkHz` của `bow_csi2rx` phải bằng `PhyClkHz` (lỗi elaborate
-  nếu khác; `bow_mipi_rx` đặt bằng nhau).
+  `RxDataHS`, `RxSyncHS`, `ErrSotSyncHS` của aligner, `RxSkewCalHS` mức từ lúc nhận ra burst deskew
+  tới khi `RxActiveHS` xuống; `ErrSotHS` = 0) và `ppi_lp_t` ở miền lp (`Stopstate`, `ErrControl`
+  và `ErrEsc` là bộ đếm gray 2 bit: lỗi làm bộ đếm bước, các bước cách nhau ≥ 16 chu kỳ lp (lỗi dồn
+  dập gộp lại), che theo
+  `Enable` của lane như FSM thấy nó; `UlpsActiveNot`, `RxUlpsEsc`; `ErrSyncEsc` 0); lane clock
+  `ppi_lp_clk_t` (`StopstateClk`, `RxClkActiveHS`, `ErrControlClk` gray, che khi `CTRL.CLK_CONT` =
+  1; `UlpsActiveNotClk`, `RxUlpsClkNot`). Controller lái `Enable[l]` / `EnableClk` từ flop enable
+  lane của `bow_csi2rx_regs`, lấy mẫu `ErrControl*` ở `vid_clk_i` (`bow_ppi_err_rx`, `u_lperr`:
+  một lần đổi giá trị là ≥ 1 lỗi) và đếm `RxSkewCalHS` của lane 0 ở cạnh lên (`dsk_last_q`: một lần
+  mỗi burst deskew, xung hay mức, nên `CNT_EXT[31:16]` như trước). Không mất lỗi khi `vid_clk_i` ≥
+  `lp_clk` / 32: tham số `PpiLpClkHz` của `bow_csi2rx` (không có mặc định) phải ≤ 32 × `PhyClkHz`
+  (lỗi elaborate nếu lớn hơn; `bow_mipi_rx` đặt bằng nhau). PPI v1 (bước 2–5): `ErrControl*` là xung
+  một chu kỳ ở bit 0, `RxSkewCalHS` xung, `PpiLpClkHz` phải bằng `PhyClkHz`.
 - **Dải phụ tạm thời** của bước 2–3 (cổng `band_*`: reset dùng chung, `CTRL.CLK_FORCE`,
   `PHY_CFG`, tap của `DLYn`, `STATUS` của PHY, đồng hồ đo, xung vào HS, mặt nạ `ErrControl*`,
   flop word cho RAW; bảng ở [mipi_rx_arch.md](mipi_rx_arch.md) mục 10) đã bỏ ở bước 4: mọi thứ đó
   là thanh ghi, reset và RAW của D-PHY.
 - **`bow_csi2rx`** (controller) giữ lớp CSI-2: ghép lane, packet, unpack, FIFO, đầu ra, LOG,
-  sự kiện về bộ đếm, và luật đánh dấu burst mất ở mức LP: OR của `ErrControl` / `ErrControlClk`
-  trên PPI (D-PHY đã che, như controller che trước bước 4). `ERR_STATUS.LP` là OR đó; bộ đếm lỗi
+  sự kiện về bộ đếm, và luật đánh dấu burst mất ở mức LP: OR của các lần đổi của `ErrControl` /
+  `ErrControlClk` trên PPI (D-PHY đã che, như controller che trước bước 4). `ERR_STATUS.LP` là OR đó; bộ đếm lỗi
   LP là `CNT_LPERR` của D-PHY (mọi lỗi của máy LP, kể cả lỗi D-PHY che). Hệ quả của bước 4: lỗi LP
   của lane clock khi `CLK_CONT` = 1 và lỗi của một data lane ở chu kỳ enable của nó vừa xuống
   không còn vào `ERR_STATUS.LP` (`CNT_MISC[23:16]` cũ đếm cả chúng).
 
 - **`bow_csi2rx_ppi_flat`** (bước 3, `hw/ip/csi2rx/rtl/bow_csi2rx_ppi_flat.sv`, không nằm trong
   `csi2rx.f` và không có trong bản build nào): controller với cổng PPI phẳng theo tên công khai,
-  cho một D-PHY chuẩn thay D-PHY của Bow32. Nó làm thay PHY ba việc controller v1 cần (miền byte
-  trễ 1 chu kỳ trừ cạnh lên của `RxActiveHS`, `RxActiveHS` giữ thêm 2 chu kỳ khi xuống, cạnh lên của
-  `RxSkewCalHS` thành xung), đổi xung `ErrControl` ở clock lp của PHY thành xung `vid_clk_i`
-  (`bow_cdc_pulse`), không có `ErrControlClk`, đồng bộ reset của mình (`u_vrst`, `u_brst`) và
+  cho một D-PHY chuẩn thay D-PHY của Bow32. Nó làm thay PHY hai việc controller cần (miền byte
+  trễ 1 chu kỳ trừ cạnh lên của `RxActiveHS`, `RxActiveHS` giữ thêm 2 chu kỳ khi xuống; từ bước 6
+  `RxSkewCalHS` chỉ trễ, controller tự đếm cạnh lên), đổi xung `ErrControl` ở clock lp của PHY
+  thành bộ đếm gray ở chính clock đó (`bow_ppi_err_tx`, tham số `LpClkHz`; tới bước 5: xung
+  `vid_clk_i` qua `bow_cdc_pulse`), không có `ErrControlClk`, đồng bộ reset byte của mình (`u_brst`) và
   nói `INFO[6]` = 0 (`DphyWin`): không có thanh ghi D-PHY ở `0xC00` (cửa sổ đó đọc 0). Từ bước 4
   nó không che `ErrControl` nữa: PHY chuẩn không báo lỗi trên lane đã tắt
   ([mipi_rx_arch.md](mipi_rx_arch.md) mục 5.5).
@@ -378,9 +387,11 @@ khối:
 Tương đương với RTL trước khi tách được chứng minh hình thức cho bước 1 và 2 (mục *Kiểm chứng*);
 bước 4 đổi bản đồ thanh ghi nên được kiểm bằng mô phỏng (DV, `make test`, xsim); bước 5 đổi cổng
 phía PHY: bộ thu của bước 5 sau wrapper cổng của bước 4 (`hw/ip/dphy_rx/fm/bow_mipi_rx_s4.sv`)
-được chứng minh tương đương với bộ thu của bước 4 trừ đúng các thay đổi có chủ ý. `make lint` lint
-riêng `bow_mipi_rx`, controller `bow_csi2rx` với cổng PPI (1, 2, 4 lane, không PHY; từ chối
-`PpiLpClkHz` khác `PhyClkHz`), wrapper `bow_csi2rx_ppi_flat` (1, 2, 4 lane, clock video 50 MHz)
+được chứng minh tương đương với bộ thu của bước 4 trừ đúng các thay đổi có chủ ý; bước 6 (D-PHY
+v1.x) chứng minh controller (`ErrControl*` giữ 0, `RxSkewCalHS` dạng xung) và máy LP của D-PHY (đầu
+vào mới ở giá trị reset) tương đương bước 5. `make lint` lint riêng `bow_mipi_rx`, controller
+`bow_csi2rx` với cổng PPI (1, 2, 4 lane, không PHY, và `PpiLpClkHz` = 32 × `PhyClkHz`; từ chối
+`PpiLpClkHz` lớn hơn), wrapper `bow_csi2rx_ppi_flat` (1, 2, 4 lane, clock video 50 MHz)
 và `bow_dphy_rx` (1, 2, 4 lane, `AfeKind` 1 / 2, và 4 lane `AfeKind` 0 với `AfePdRst` = 1,
 `TrimW` = 32), logic của hai adapter (`bow_dphy_dly_xusp`, `bow_dphy_dly_xphy`: 1, 2, 4 lane),
 `bow_dphy_io_xusp` (stub UltraScale+ `hw/lint/xilinx_xusp_stubs.sv`) và sáu top dùng
@@ -959,7 +970,7 @@ bow_csi2rx_stop(34 + 10);                   /* SAU stream-off: chờ hết frame
 | `bow_csi2rx_log(e, mode, ms)`, `bow_csi2rx_print_log(e, n)` | LOG theo thứ tự thời gian, số entry (0 = hết giờ) |
 | `bow_dphy_rx_raw(w, now, ms)` | 64 word thô mỗi lane (RAW của D-PHY) |
 | `bow_dphy_rx_byteclk_hz(ms)` | tần số byte clock (max của `BYTECLK` của D-PHY trong `ms`) |
-| `bow_dphy_rx_ready()`, `bow_dphy_rx_wait_ready(ms)`, `bow_dphy_rx_reinit(ms, &us)`, `bow_dphy_rx_des_rst(on)` | `AFE_STATUS.READY`; `CMD.REINIT` rồi chờ READY xuống (≤ 20 µs, không thì PHY không có re-init) và lên lại; `CTRL.DES_RST_DIS` = ¬on |
+| `bow_dphy_rx_ready()`, `bow_dphy_rx_wait_ready(ms)`, `bow_dphy_rx_reinit(ms, &us)`, `bow_dphy_rx_des_rst(on)` | `AFE_STATUS.READY`; `CMD.AFE_CAL` cùng `CMD.REINIT` (bước 4–5: `CMD.REINIT` là hiệu chỉnh AFE) rồi chờ READY xuống (≤ 20 µs, không thì PHY không có re-init) và lên lại; `CTRL.DES_RST_DIS` = ¬on (rồi `CMD.APPLY`, từ bước 6) |
 | `bow_csi2rx_print_status()` | `csi2rx: link ok` / `link errors` / `no data` / `no lines`, bộ đếm (`frame errors` = `FRAME_ERR` của frame cuối; `errors: …` như `print_errors`, rồi số packet bị bộ lọc DT/VC bỏ), thời gian, PHY; byte clock đo trong 1 frame + 2 ms (clock không liên tục dừng suốt vertical blanking, `BYTECLK` chỉ nhìn 65536 chu kỳ CPU). Danh sách theo lane (`sot`, LP, burst, delay) có 4 giá trị khi đang dùng 4 lane, và khi bộ thu tắt (`CTRL.PHY_EN` = 0) theo số lane của bản build (`INFO`: 4 trên Huins), không theo `CTRL` đã xoá. Dòng `phy:` là một ảnh chụp dù burst đang tới: `LANE_LP` / `LANE_HS` và bộ đếm của D-PHY được đọc tới khi hai lần đọc giống nhau (`bow_dphy_rx_snapshot()`; trước bước 4 chúng nằm chung trong `STATUS` và `CNT_BURST`) |
 | `bow_dphy_rx_print_delays(n)`, `bow_dphy_rx_get_delays(taps)` | trễ đang dùng của các lane (`INFO[23]` = 1: `DLYn.Q`, trễ BISC tới khi nạp tap; 0: `DLYn.CODE`, tap đã ghi): in như `stat`, hoặc cả 4 lane vào `taps[]` (tâm của kiểm tra lề ở tap đang dùng: `csi2_test` `margin` sau `delay` hay `phy reinit`, `camera` `margin` khi chưa hiệu chỉnh) |
 
@@ -988,7 +999,7 @@ ngay (Versal). Ngắt: `IRQ_EN` (bit 5: ngắt của D-PHY, nguồn chọn ở `
 | Controller ở PPI (Verilator, bước 3 của [mipi_rx_arch.md](mipi_rx_arch.md) mục 10) | `make -C hw/ip/csi2rx/dv test-ppi` (CI); một case: `make -C hw/ip/csi2rx/dv run-ppi MODE=bow\|std TEST=…` | `tb_csi2rx_ppi.sv`: controller một mình, PHY là `bow_ppi_bfm.sv`; 3 model (`Lanes` 1, 2, 4, tham số như trên), mỗi model có hai DUT: `bow_csi2rx` với PPI do BFM lái (chế độ `bow`: thời gian của D-PHY Bow32; từ bước 4 không còn dải phụ, cửa sổ `0xC00` đọc 0) và wrapper `bow_csi2rx_ppi_flat` (chế độ `std`: PHY chuẩn); DUT không dùng không có clock. Kích thích: các test của controller trong `csi2_model.py` (random, `cmd`, `ovf`, `stop`, `skew`, `deskew`, `extra`, `loss`, `ovf2`, `ovf8`, `be`) do mô hình bộ thu xử lý như ở cả bộ thu rồi dựng lại ở PPI (`gen --ppi`: byte mỗi lane mỗi burst với chu kỳ, `RxActiveHS`, `RxSyncHS`, khe, lỗi, lần chạy byte clock, xung lp), thêm `clkstop` (byte clock dừng đúng 4 cạnh sau cạnh `RxActiveHS` xuống, FRAME/LINE_TIME vẫn đúng; T_CLK-POST ngắn: dừng từ sau byte cuối cần tới 3 cạnh sau, cuối burst xong khi clock chạy lại), `gaps` (tham số khe 0,4 rồi 0,75: ≈ 20 % rồi 38 % chu kỳ của burst; `bow`) và `lpmask` (từ bước 4: `ErrControl` trên PPI của mọi lane, cả lane mà `CTRL` đã tắt, đánh dấu burst mất và `ERR_STATUS.LP`: D-PHY che, controller chỉ OR; `ErrControlClk` chỉ ở `bow`). `bow`: `RxActiveHS` lên ở cuối SETTLE, khe như XPHY (chung mọi lane hay ở lane đi trước), byte còn ra khi `RxActiveHS` đã xuống, `ErrSotSyncHS` cuối burst, lỗi lp là xung `vid_clk_i`; `std`: `RxActiveHS` cùng `RxSyncHS`, xuống ngay sau byte cuối, không khe, trail 0–3 byte, `ErrSotSyncHS` sớm có hay không có `RxActiveHS`, `RxSkewCalHS` xung hay mức, `ErrSotHS`, lỗi dạng xung ở clock lp 25 MHz riêng của PHY, không `ErrControlClk`, không `PhyReady`. Kiểm như bench cả bộ thu: pixel (`tuser[0]`/`tlast`/`tuser[1]`), bộ đếm, `FRAME_ERR`, FRAME/LINE_TIME, LOG (chương trình lane chồng nhau: `ppi_overlap`). 167 case (SEEDS 1–4: 2 chế độ × 8 cấu hình random, directed trên 2 và 4 lane, một phần với 1 lane, 1 trên 2, 2 trên 4, clock liên tục; `lpmask` hai chế độ và `gaps` trên 1, 2, 4 lane) chạy song song `PJOBS` case (mặc định số CPU, như `test-rx` và bench DDR / HyperRAM; ~3 s với 24 job, ~10 s với 4, ~38 s tuần tự); `sim.log` có dòng phủ của BFM. 19 mutant (`make -C hw/ip/csi2rx/dv mutants-ppi`) đều chết. Phần dựng PHY chuẩn còn mượn bốn điều của D-PHY Bow32 ([mipi_rx_arch.md](mipi_rx_arch.md) mục 5.5, *Bước 3*): trail 9–12 byte ở burst bị bỏ vì lệch lane, trail 8–12 byte ở đoạn 1 của `clkstop`, `RxActiveHS` của lane sớm kéo dài tới khi lane muộn lên, khoá theo mô hình aligner của Bow32 (sync sai 1 bit là `ErrSotSyncHS`, `ErrSotHS` chỉ là cờ ngẫu nhiên trên sync đúng) |
 | FPGA, mức chân (xsim) | `source <Vivado>/settings64.sh; make -C hw/fpga/common/dv test` | `test-dphy` (UltraScale+): unisim `IBUFDS_DPHY`, `IDELAYE3`, `ISERDESE3`, `BUFGCE_DIV`; máy phát D-PHY từng bit ở 912 Mbit/s, clock không liên tục, `TIM0` của D-PHY và `CTRL.EXTRA` của driver: word ISERDES, không có xung runt, CE chỉ đổi ở HS-0, `RST` mỗi burst ≥ 20 byte clock trước sync, `DLYn` của D-PHY → CNTVALUEOUT (PEND tới burst sau, OWN), pixel và thanh ghi của cả hai khối (cả `CNT_EXT`, `FRAME_ERR`, `ID` / `INFO` / `INFO2` / `LANE_LP` / `CNT_BURSTn` của D-PHY, địa chỉ PHY cũ đọc 0), RAW của D-PHY; burst skew calibration (HS-zero, `FFFFh`, `0101…`) → deskew, không SOT; T_HS-TRAIL = T_EOT max không gây EXTRA; T_HS-PREPARE min và max (nhiễu tới 85 ns + 6 UI, kết thúc bằng `00 B8` giả) với T_HS-PREPARE + T_HS-ZERO đúng tối thiểu 145 ns + 10 UI trên mọi lane (pha bit ngẫu nhiên qua T_CLK-PRE); white box (probe `tb_dphy_align_probe` gắn vào mọi `bow_dphy_align` bằng `bind`, không phụ thuộc chỗ đặt aligner): cửa sổ dò đầu tiên của mỗi lane ở mỗi burst bắt đầu trong HS-zero (word cũ nhất = 0), không chỉ "không khoá vào `00 B8` giả" (vốn chỉ thấy cửa sổ lấn ≥ 16 UI vào nhiễu). Quét `SETTLE` (`+SETTLE=`, 12 seed mỗi giá trị): 20…28 đạt 12/12, 19 đạt 6/12 và ≤ 18 không đạt (cửa sổ bắt đầu trong nhiễu; ≤ 15 còn khoá vào sync giả), ≥ 29 lỡ sync thật. Mô hình không có trễ ~8 ns của bộ thu LP: trên thiết bị cửa sổ muộn hơn ~1,6 chu kỳ, dải ≈ 18…26 và 22 của driver ở giữa. `test-dphy-versal`: XPHY của Versal (25 cấu hình, thêm `reinit_pulse`: `reinit_i` chỉ 640 ns như xung `CMD.REINIT` của D-PHY; [../simulation.md](../simulation.md)). Cần Vivado, không chạy trong CI; eye không mô phỏng được (unisim không có lệch clock/data) |
 | Hệ thống | `make run TEST=camera`, `make run TEST=csi2`; bản IMX274: `camera274`, `csi2_274`, `video274` | firmware thật với `csi2_tx_model.sv` và mô hình IMX219 hoặc IMX274 + PHY Versal ([../simulation.md](../simulation.md)); `camera`: hiệu chỉnh + margin ở `cam` đầu, `cam` lại với tap giữ nguyên (link tốt; lỗi FRAME không phải lỗi tap: `taps kept`), cảm biến im lặng (không có dữ liệu: `calibration failed`, `error`) rồi khởi động lại; `csi2`: `test quick` 12/12 (có check `margin`), lỗi tiêm vào đúng ở bộ đếm, rồi eye lane 0 bị thu hẹp: `margin` báo đúng điểm lane 0 +48, các điểm khác sạch, tap giữ nguyên; lần nữa với thời gian frame như cảm biến thật (~3 ms so với 4 ms chờ một tap) và điểm lỗi là điểm thứ hai (lane 0 −48): các điểm sau vẫn đo đủ frame dù frame đang chạy mất FS; `csi2_274`: `test quick` 11/11 (có `margin` trên 4 lane, mẫu AAAh của IMX274), `margin` quanh tap đang dùng của cả 4 lane sau `delay`, `stat` với bộ thu tắt liệt kê 4 lane, `phy` in `AFE_STATUS`, `phy reinit` là đúng một xung `reinit_i`, `rd 40008c24` (`TIM0` của D-PHY) = `051e0213`; `csi2`: `rd 40008c24` = `04100209`; `camera274`: `cam` đầu luôn hiệu chỉnh, khi hiệu chỉnh hỏng `margin` đo quanh trễ đang dùng (không nạp tap 0) |
-| Tương đương hình thức | `make -C hw/ip/dphy_rx/fm equiv` (mặc định từ bước 5: `STEP=5 REF=3d3985a`; bước 1–2: `STEP=2`; Synopsys Formality, cần license, không chạy trong CI) | bộ thu của commit tham chiếu (`REF`, ở bước 1–2 `3a1e780`: `main` trước khi tách `bow_dphy_rx`; commit từ bước 1 trở đi, có `hw/ip/dphy_rx`, cũng được, ví dụ `35ef151` cuối bước 1; top là `bow_mipi_rx` nếu commit đó có, không thì `bow_csi2rx`) so với `bow_mipi_rx` hiện tại (cùng cổng), RTL với RTL, 5 cấu hình: KV260 (2 lane, FIFO 256), Huins (4 lane, FIFO 512, `DlyVid` = 1), 1 lane, `HasPhy` = 0 (50 MHz), mô phỏng hệ thống (107,5 MHz). Luật đổi tên của bước (flop đã chuyển giữ tên, thấp hơn một cấp; bước 2: `u_dphy_rx/` → rỗng và `u_csi2rx/` → rỗng, compare rule cho cả hai design), tắt khớp theo tên net, không user match, không constant, không black box (RAM đọc thành thanh ghi); đạt khi mọi compare point khớp theo tên và đều tương đương, không có điểm unmatched / aborted / unverified, và mọi cặp đã khớp có **tên giống hệt** sau luật đổi tên (`names.rpt`; `hw/ip/dphy_rx/fm/equiv.tcl`). Kiểm tên là cần: Formality xếp cả cặp khớp qua tên net vào "matched by name", và tương đương chức năng không thấy thuộc tính tổng hợp, nên một bộ đồng bộ viết lại bằng flop thường (mất `ASYNC_REG`, tên cell mà XDC và danh sách CDC không biết) vẫn *Verification SUCCEEDED*. Kết quả bước 1 và bước 2 (so với `3a1e780` và với `35ef151`) như nhau: KV260, `HasPhy` = 0 và mô phỏng 17 197 compare point, Huins 30 397, 1 lane 16 352, đều tương đương, mọi cặp cùng tên; điểm không so là thanh ghi hằng hay không được đọc theo tham số (ví dụ `ce_q` của máy LP data lane, `ev_deskew_o` của lane 1–3), giống nhau ở hai phía và giống bước 1. Mutant một bit ở controller (đảo phép che `CLK_FORCE` của `ErrControlClk`) và ở dây PPI (xung `ErrControl` sang bit 1) đều hỏng. Bước 4 đổi bản đồ thanh ghi và giao diện bus nên không có phép so tương đương ở cổng (kiểm bằng mô phỏng, [mipi_rx_arch.md](mipi_rx_arch.md) mục 10); phần sửa sau review so với bản đầu của bước 4 (`REF=a485e82`, cùng cổng) chỉ khác ở Lanes + 1 flop nguồn của bộ đồng bộ sự kiện SoT / deskew, cộng 2 × Lanes flop mới của cổng (`stale_q`, `arm_lo_q`), ở cả 5 cấu hình. Bước 5 (`STEP=5`, `REF=3d3985a`, cuối bước 4): top implementation là `hw/ip/dphy_rx/fm/bow_mipi_rx_s4.sv`, bộ thu của bước 5 sau cổng và tham số của bước 4 (cổng AFE nối một-một vào cổng PHY cũ, `DlyVid` → `AfeKind`); ngoài so sánh, có chủ ý và được đếm trong dòng PASS: 2 + 10 × `Lanes` bit cổng của bước 4 không còn (`byte_rst_o`, `burst_rst_en_o`, `dly_tap_o`, `dly_load_o`: don't-verify ở hai phía), `AFE_CTRL.PD` giữ ở giá trị reset 0 (một user constant: với PD = 0 mọi lần đọc thanh ghi như bước 4), cell không có cặp (tham chiếu: nạp tap `g_dly_byte` / `g_dly_vid`, `dly_tap_o` / `dly_load_o`, bộ đồng bộ reset ISERDES, `dly_req_q`; implementation: `pd_q`, bộ đồng bộ `u_sync_cal` của `cal_done` / `cal_err`, hằng 0); khớp chỉ theo tên (tắt signature analysis: không ghép cell khác tên). KV260, `HasPhy` = 0 và mô phỏng 17 203 compare point tương đương, Huins 30 370, 1 lane 16 379; 0 failing / aborted / unverified, mọi cặp khớp cùng tên với tham chiếu và ở đúng khối. Tín hiệu AFE không có ở bước 4 (`des_rst`, `term_en`, `lprx_en`, `lane_pd`, mã và OWN, `pd`) không phải compare point: `bow_afe_chk` và test của adapter kiểm chúng |
+| Tương đương hình thức | `make -C hw/ip/dphy_rx/fm equiv` (mặc định từ bước 6: `STEP=6 REF=1c76364`; bước 5: `STEP=5 REF=3d3985a`; bước 1–2: `STEP=2`; Synopsys Formality, cần license, không chạy trong CI) | bộ thu của commit tham chiếu (`REF`, ở bước 1–2 `3a1e780`: `main` trước khi tách `bow_dphy_rx`; commit từ bước 1 trở đi, có `hw/ip/dphy_rx`, cũng được, ví dụ `35ef151` cuối bước 1; top là `bow_mipi_rx` nếu commit đó có, không thì `bow_csi2rx`) so với `bow_mipi_rx` hiện tại (cùng cổng), RTL với RTL, 5 cấu hình: KV260 (2 lane, FIFO 256), Huins (4 lane, FIFO 512, `DlyVid` = 1), 1 lane, `HasPhy` = 0 (50 MHz), mô phỏng hệ thống (107,5 MHz). Luật đổi tên của bước (flop đã chuyển giữ tên, thấp hơn một cấp; bước 2: `u_dphy_rx/` → rỗng và `u_csi2rx/` → rỗng, compare rule cho cả hai design), tắt khớp theo tên net, không user match, không constant, không black box (RAM đọc thành thanh ghi); đạt khi mọi compare point khớp theo tên và đều tương đương, không có điểm unmatched / aborted / unverified, và mọi cặp đã khớp có **tên giống hệt** sau luật đổi tên (`names.rpt`; `hw/ip/dphy_rx/fm/equiv.tcl`). Kiểm tên là cần: Formality xếp cả cặp khớp qua tên net vào "matched by name", và tương đương chức năng không thấy thuộc tính tổng hợp, nên một bộ đồng bộ viết lại bằng flop thường (mất `ASYNC_REG`, tên cell mà XDC và danh sách CDC không biết) vẫn *Verification SUCCEEDED*. Kết quả bước 1 và bước 2 (so với `3a1e780` và với `35ef151`) như nhau: KV260, `HasPhy` = 0 và mô phỏng 17 197 compare point, Huins 30 397, 1 lane 16 352, đều tương đương, mọi cặp cùng tên; điểm không so là thanh ghi hằng hay không được đọc theo tham số (ví dụ `ce_q` của máy LP data lane, `ev_deskew_o` của lane 1–3), giống nhau ở hai phía và giống bước 1. Mutant một bit ở controller (đảo phép che `CLK_FORCE` của `ErrControlClk`) và ở dây PPI (xung `ErrControl` sang bit 1) đều hỏng. Bước 4 đổi bản đồ thanh ghi và giao diện bus nên không có phép so tương đương ở cổng (kiểm bằng mô phỏng, [mipi_rx_arch.md](mipi_rx_arch.md) mục 10); phần sửa sau review so với bản đầu của bước 4 (`REF=a485e82`, cùng cổng) chỉ khác ở Lanes + 1 flop nguồn của bộ đồng bộ sự kiện SoT / deskew, cộng 2 × Lanes flop mới của cổng (`stale_q`, `arm_lo_q`), ở cả 5 cấu hình. Bước 5 (`STEP=5`, `REF=3d3985a`, cuối bước 4): top implementation là `hw/ip/dphy_rx/fm/bow_mipi_rx_s4.sv`, bộ thu của bước 5 sau cổng và tham số của bước 4 (cổng AFE nối một-một vào cổng PHY cũ, `DlyVid` → `AfeKind`); ngoài so sánh, có chủ ý và được đếm trong dòng PASS: 2 + 10 × `Lanes` bit cổng của bước 4 không còn (`byte_rst_o`, `burst_rst_en_o`, `dly_tap_o`, `dly_load_o`: don't-verify ở hai phía), `AFE_CTRL.PD` giữ ở giá trị reset 0 (một user constant: với PD = 0 mọi lần đọc thanh ghi như bước 4), cell không có cặp (tham chiếu: nạp tap `g_dly_byte` / `g_dly_vid`, `dly_tap_o` / `dly_load_o`, bộ đồng bộ reset ISERDES, `dly_req_q`; implementation: `pd_q`, bộ đồng bộ `u_sync_cal` của `cal_done` / `cal_err`, hằng 0); khớp chỉ theo tên (tắt signature analysis: không ghép cell khác tên). KV260, `HasPhy` = 0 và mô phỏng 17 203 compare point tương đương, Huins 30 370, 1 lane 16 379; 0 failing / aborted / unverified, mọi cặp khớp cùng tên với tham chiếu và ở đúng khối. Tín hiệu AFE không có ở bước 4 (`des_rst`, `term_en`, `lprx_en`, `lane_pd`, mã và OWN, `pd`) không phải compare point: `bow_afe_chk` và test của adapter kiểm chúng. Bước 6 (`STEP=6`, `REF=1c76364`, cuối bước 5): cả bộ thu không tương đương theo thiết kế (APPLY, bộ đếm gray, thanh ghi mới), nên chứng minh hai phần, mỗi phần cùng module ở hai phía: controller `bow_csi2rx` (5 cấu hình, tham số như `bow_mipi_rx` đặt; `ErrControl*` giữ 0 ở hai phía, `dsk_last_q` giữ 0, tức `RxSkewCalHS` là xung như v1; không cặp chỉ `u_lperr/` và `dsk_last_q`): KV260, `HasPhy` = 0, mô phỏng 15 287 compare point, Huins 27 068, 1 lane 15 156; máy LP `bow_dphy_lp` (`lp_data`, `lp_clk`; đầu vào mới ở giá trị reset, `tmr_hi_q` giữ 0; không cặp chỉ flop và cổng mới): 49 và 52 compare point; 7/7 đạt, mọi cặp khớp theo tên |
 | Board | `csi2_test`, lệnh `test` | bên dưới |
 
 Mô hình Python được viết từ đặc tả và quy tắc MIPI, **không** từ RTL, để hai
@@ -1060,7 +1071,7 @@ trước lần đọc cuối: mutant CRC chết ở hai case 4 lane, mutant burs
 Model 4 lane chạy `csi2_tx_model.sv` ở chế độ PHY Versal (`--versal` của
 mô hình Python, núm `versal` của TX model): `phy_rdy` lên sau 3 µs (trước đó
 không có byte clock), tap BISC khác 0 đọc được qua CNTVALUEOUT, tap nạp ở clock
-video, khởi động lại PHY (`CMD.REINIT` của D-PHY → `phy_reinit` của mô hình:
+video, khởi động lại PHY (`CMD.AFE_CAL` của D-PHY, bước 4–5 `CMD.REINIT` → `phy_reinit` của mô hình:
 `AFE_STATUS.READY`, CNTVALUEOUT và `DLYn.OWN` về 0, tap BISC trở lại, test `dly`). FIFO 8 word mỗi lane như XPHY: ghi mỗi cạnh strobe khi bộ
 thu HS của lane clock bật (cả khi cổng byte clock đóng), đọc mỗi byte clock khi
 FIFO có hơn `vlat` word (0–2: `FIFO_EMPTY` trễ), nên word cũ của burst trước ra

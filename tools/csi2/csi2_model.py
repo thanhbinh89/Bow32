@@ -112,17 +112,18 @@ REG = {
     "LOG": 0x400, "RAW": 0x800,
     "DPHY_ID": 0xC00, "DPHY_INFO": 0xC04, "DPHY_INFO2": 0xC08, "DPHY_CTRL": 0xC0C,
     "DPHY_CMD": 0xC10, "DPHY_AFE_CTRL": 0xC14, "DPHY_AFE_STATUS": 0xC18, "DPHY_TIM0": 0xC24,
-    "DPHY_LANE_LP": 0xC30,
-    "DPHY_LANE_HS": 0xC34, "DPHY_IRQ_STATUS": 0xC3C, "DPHY_IRQ_EN": 0xC40,
+    "DPHY_TIM1": 0xC28, "DPHY_TIM2": 0xC2C, "DPHY_LANE_LP": 0xC30,
+    "DPHY_LANE_HS": 0xC34, "DPHY_LANE_STOP": 0xC38, "DPHY_IRQ_STATUS": 0xC3C, "DPHY_IRQ_EN": 0xC40,
     "DPHY_ERR_STATUS": 0xC44, "DPHY_ERR_LANE": 0xC48, "DPHY_BYTECLK": 0xC4C,
     "DPHY_CNT_BURST0": 0xC50, "DPHY_CNT_BURST1": 0xC54, "DPHY_CNT_BURST2": 0xC58,
     "DPHY_CNT_BURST3": 0xC5C, "DPHY_CNT_CLK": 0xC70, "DPHY_CNT_LPERR": 0xC74,
+    "DPHY_CNT_DSK": 0xC78, "DPHY_CNT_MISC": 0xC7C,
     "DPHY_DLY0": 0xC80, "DPHY_DLY1": 0xC84, "DPHY_DLY2": 0xC88, "DPHY_DLY3": 0xC8C,
     "DPHY_RAW_CTRL": 0xD00, "DPHY_RAW": 0xE00,
 }
 REG_NAME = {v: k for k, v in REG.items()}
 ID_VALUE = 0x43533201
-DPHY_ID_VALUE = 0x44505201
+DPHY_ID_VALUE = 0x44505202      # "DPR", register map version 2 (step 6; 1 in steps 4 and 5)
 DPHY_BASE = 0xC00
 # the PHY registers of the controller before step 4: read 0 (no alias)
 OLD_PHY_REGS = ("PHY_CFG", "CNT_BURST", "BYTECLK", "CNT_BURST23", "DLY0", "DLY1", "DLY2", "DLY3",
@@ -131,13 +132,19 @@ DLY_REGS = ("DPHY_DLY0", "DPHY_DLY1", "DPHY_DLY2", "DPHY_DLY3")
 DPHY_BURST_REGS = ("DPHY_CNT_BURST0", "DPHY_CNT_BURST1", "DPHY_CNT_BURST2", "DPHY_CNT_BURST3")
 
 CTRL_PHY_EN, CTRL_RX_EN, CTRL_LANES, CTRL_VC_ANY = 1, 2, 4, 16
-# D-PHY CTRL, CMD, IRQ / ERR bits (docs/ip/dphy_rx.md)
-DCTRL_CLK_CONT, DCTRL_DES_RST_DIS = 2, 0x40
-DCTRL_MASK = DCTRL_CLK_CONT | DCTRL_DES_RST_DIS
-DCMD_REINIT, DCMD_CNT_CLR = 2, 8
+# D-PHY CTRL, CMD, IRQ / ERR bits (docs/ip/dphy_rx.md). CTRL and TIM0..2 are shadow registers
+# since step 6: their effect begins at CMD.APPLY (Gen writes it after each of them)
+DCTRL_CLK_CONT, DCTRL_ULPS_EN, DCTRL_HSRX_EARLY, DCTRL_DES_RST_DIS = 2, 4, 8, 0x40
+DCTRL_CLK_LOST_EN, DCTRL_CLK_MISS_OFF = 0x80, 0x10000
+DCTRL_MASK = DCTRL_CLK_CONT | DCTRL_ULPS_EN | DCTRL_HSRX_EARLY | DCTRL_DES_RST_DIS | \
+    DCTRL_CLK_LOST_EN | DCTRL_CLK_MISS_OFF
+DCMD_APPLY, DCMD_REINIT, DCMD_AFE_CAL, DCMD_CNT_CLR = 1, 2, 4, 8
+DCMD_DIRTY = 1 << 31            # read: a shadow register written since the last APPLY
 DAFE_PD = 1                     # AFE_CTRL.PD (step 5)
-DIRQ_ERR, DIRQ_RAW = 1, 8
-DERR_CONTROL = 4
+DIRQ_ERR, DIRQ_ULPS, DIRQ_RAW = 1, 2, 8
+DERR_CONTROL, DERR_HS_TMO, DERR_LATE_EOT = 4, 8, 0x80
+TIM1_RESET = 1 << 20                                 # HS_TMO 2^20 (the watchdog of v1)
+SHADOW_REGS = ("DPHY_CTRL", "DPHY_TIM0", "DPHY_TIM1", "DPHY_TIM2")
 DLY_PEND, DLY_OWN = 1 << 15, 1 << 31
 SKEW_MAX = 6             # byte clocks between the first bytes of the lanes the lane merge absorbs
 CTRL_LANES4 = 0x80
@@ -630,12 +637,22 @@ class Receiver:
         self.cnt = dict.fromkeys(["frame", "pkt", "line", "ecc_corr", "ecc_err", "crc", "trunc",
                                   "sot0", "sot1", "sot2", "sot3", "drop", "ovf", "misc", "extra",
                                   "deskew"], 0)
-        # the D-PHY's registers: CTRL (CLK_CONT, DES_RST_DIS), TIM0, IRQ, ERR_STATUS
-        # (CONTROL), ERR_LANE, counters (HS entries per lane FSM, LP errors; 32 bit)
-        self.dctrl = 0
-        self.tim0 = TIM0_RESET
+        # the D-PHY's registers: CTRL, TIM0..2 (shadow registers, step 6: dctrl, tim0, tim1,
+        # tim2 as written; actrl, atim0 the applied copy of the lp domain, CMD.APPLY), IRQ,
+        # ERR_STATUS (CONTROL, HS_TMO, LATE_EOT), ERR_LANE, counters (HS entries per lane FSM,
+        # LP errors: 32 bit; CNT_MISC[31:16] HS_TMO + LATE_EOT, 16 bit)
+        self.dctrl = self.actrl = 0
+        self.tim0 = self.atim0 = TIM0_RESET
+        self.tim1, self.tim2 = TIM1_RESET, 0
+        self.ddirty = False             # CMD[31]: a shadow write since the last APPLY
         self.dirq = self.dirq_en = self.derr = self.derr_lane = 0
-        self.dcnt = dict.fromkeys(["burst0", "burst1", "burst2", "burst3", "clk", "lperr"], 0)
+        self.dcnt = dict.fromkeys(["burst0", "burst1", "burst2", "burst3", "clk", "lperr", "misc"],
+                                  0)
+        # LATE_EOT events that may or may not happen (Receiver.late_eot): CNT_MISC is a range
+        # [misc, misc + misc_unc], ERR_STATUS.LATE_EOT / IRQ_STATUS.ERR unknown when set only
+        # by them
+        self.misc_unc = 0
+        self.derr_unc = self.dirq_unc = 0
         self.frame_info = self.line_info = self.frame_sum = 0
         self.fs_prev = None            # burst index of the previous FS (reference)
         self.frame_time = (None, None)  # bursts of the interval latched in FRAME_TIME
@@ -715,8 +732,9 @@ class Receiver:
 
     @property
     def clk_cont(self):
-        """CTRL.CLK_CONT of the D-PHY (CTRL.CLK_FORCE of the controller before step 4)."""
-        return bool(self.dctrl & DCTRL_CLK_CONT)
+        """CTRL.CLK_CONT of the D-PHY as applied (CTRL.CLK_FORCE of the controller before
+        step 4; a shadow register since step 6)."""
+        return bool(self.actrl & DCTRL_CLK_CONT)
 
     @property
     def force(self):
@@ -807,6 +825,61 @@ class Receiver:
         self.ev("lp")
         self.lp_loss()
 
+    def d_event(self, bit):
+        """One event of the D-PHY counted in CNT_MISC[31:16] (step 6: HS_TMO, LATE_EOT) with
+        its ERR_STATUS bit and IRQ_STATUS.ERR."""
+        self.dcnt["misc"] = min(self.dcnt["misc"] + 1, 0xFFFF)
+        self.derr |= bit
+        self.dirq |= DIRQ_ERR
+        self.derr_unc &= ~bit
+        self.dirq_unc &= ~DIRQ_ERR
+
+    def nsteps(self, ns):
+        """Byte clock periods of an interval in csi2_tx_model (rounded, at least 1)."""
+        return max(1, int(ns * 1000 / self.cfg["byte_ps"] + 0.5))
+
+    def tx_exit_steps(self, b):
+        """Per TX lane, the byte clocks from the start of its HS part to its LP-11 (hs_steps of
+        csi2_tx_model's build_burst: HS-PREPARE, bit phase, HS-ZERO with the extra time and
+        bytes, sync, its bytes, HS-TRAIL)."""
+        n, tx, c = len(b.sent()), self.cfg["lanes"], self.cfg
+        p_zero = self.nsteps(c["t_hs_zero"] + b.zero_ns)
+        steps = []
+        for l in range(tx):
+            nl = (n - l + tx - 1) // tx if n > l else 0
+            sb = 8 * self.nsteps(c["t_hs_prepare"]) + b.phase[l] + 8 * (p_zero + b.zeros[l])
+            steps.append((sb + 8 + 8 * nl + 8 * self.nsteps(c["t_hs_trail"]) + 7) // 8)
+        return steps
+
+    def late_eot(self, b, armed):
+        """LATE_EOT of the D-PHY (step 6) for burst b: (certain, possible) numbers of armed
+        lanes whose RxActiveHS the controller has not seen low when the byte clock stops (the
+        gate then closes with it still high in the byte domain). A lane goes LP-11 at the
+        step ending its HS part (tx_exit_steps), the clock toggles until the last lane's end
+        + CLK-POST, one edge per step; the state machine drops hs_active (2 + LP_FILTER, 3 +
+        LP_FILTER] lp clocks after the LP-11 step began (synchroniser, filter, state flop),
+        and RxActiveHS needs 3 byte clock edges after that (2 synchroniser flops, the flop of
+        the controller's view). The lp sampling phase leaves one edge open, so a lane is late
+        for sure, on time for sure, or either."""
+        steps = self.tx_exit_steps(b)
+        nhs, post = max(steps), self.nsteps(self.t_clk_post)
+        # (the byte clock edge of a step comes with its pins: the edges after a lane's LP-11
+        # are those of the later steps)
+        filt = max(1, (self.atim0 >> 8) & 0xF)
+        bp, vp = self.cfg["byte_ps"], self.cfg["vid_ps"]
+        f_lo = ((2 + filt) * vp - 1000) // bp          # edges before hs_active falls
+        f_hi = ((3 + filt) * vp + 1000) // bp
+        certain = possible = 0
+        for l in range(self.lanes):
+            if not armed[l]:
+                continue
+            edges = nhs - steps[l] + post - 1          # edges after its LP-11 step began
+            if edges - f_lo < 3:
+                certain += 1
+            elif edges - f_hi < 3:
+                possible += 1
+        return certain, possible
+
     def ppi_lp_error(self, mask):
         """'lperr MASK' (PPI bench): ErrControl of the data lanes in MASK (bit 4:
         ErrControlClk, none behind the flat wrapper) on the PPI, without an LP sequence:
@@ -860,8 +933,8 @@ class Receiver:
             self.dly_cdc = [False] * MAX_LANES
 
     def phy_reinit(self):
-        """CMD.REINIT of the D-PHY (cal_start of the AFE interface; AFE_CTRL.PD = 1 too, which
-        holds it): the Versal PHY restarts its init (PHY_RDY 0, no byte clock, CNTVALUEOUT 0,
+        """CMD.AFE_CAL of the D-PHY (cal_start of the AFE interface; CMD.REINIT up to step 5;
+        AFE_CTRL.PD = 1 too, which holds it): the Versal PHY restarts its init (PHY_RDY 0, no byte clock, CNTVALUEOUT 0,
         the loaded codes lost: OWN 0); 'waitphy' then sees the BISC taps again. The
         UltraScale+ PHY has no re-init and no power down."""
         if not self.cfg.get("versal", 0):
@@ -921,7 +994,7 @@ class Receiver:
         bit 4 clock lane), the others LP-11."""
         self.lp00_hold = False
         steps = max(1, (ns * 1000 + self.cfg["byte_ps"] // 2) // self.cfg["byte_ps"])
-        filt = max(1, (self.tim0 >> 8) & 0xF)
+        filt = max(1, (self.atim0 >> 8) & 0xF)
         if steps * self.cfg["byte_ps"] < (filt - 1) * self.cfg["vid_ps"]:
             return                             # shorter than the LP filter: not seen
         for i in list(range(MAX_LANES)) + [CLK]:
@@ -932,7 +1005,8 @@ class Receiver:
         if st == "00" and ns * 1000 > (1 << 20) * self.cfg["vid_ps"] + 400_000:
             for i in range(MAX_LANES):
                 if mask >> i & 1 and self.fsm[i] == "hs":
-                    self.lp_error(i)           # HS watchdog
+                    self.lp_error(i)           # HS watchdog (HS_TMO): an LP error as in v1
+                    self.d_event(DERR_HS_TMO)  # ... and an HS timeout (step 6)
                     self.fsm[i] = "waitstop"
 
     def idle(self):
@@ -977,6 +1051,16 @@ class Receiver:
                     self.stop_line(b)
                 else:
                     self.receive(b, idx, armed)
+            # LATE_EOT (step 6): the byte clock stops before RxActiveHS of an armed lane fell
+            if not stop and not self.contclk and not self.force and not self.ppi and any(armed):
+                certain, possible = self.late_eot(b, armed)
+                for _ in range(certain):
+                    self.d_event(DERR_LATE_EOT)
+                if possible:
+                    self.misc_unc += possible
+                    if not certain:
+                        self.derr_unc |= DERR_LATE_EOT & ~self.derr
+                        self.dirq_unc |= DIRQ_ERR & ~self.dirq
         for l in range(tx):
             self.see(l, "11")
         if not self.contclk:
@@ -1311,8 +1395,10 @@ class Receiver:
         dly = REG_NAME.get(a) in DLY_REGS
         if dly and not be & 3:
             return
-        if a in (REG["DPHY_CTRL"], REG["DPHY_TIM0"], REG["DPHY_IRQ_EN"], REG["DPHY_AFE_CTRL"]) \
-                or dly:
+        if REG_NAME.get(a) in SHADOW_REGS and be & 0xF:
+            self.ddirty = True                         # any written byte, also the same value
+        if a in (REG["DPHY_CTRL"], REG["DPHY_TIM0"], REG["DPHY_TIM1"], REG["DPHY_TIM2"],
+                 REG["DPHY_IRQ_EN"], REG["DPHY_AFE_CTRL"]) or dly:
             old = self.read(a, dphy=True).value
             old = old & 0x1FF if dly else old
             d = (old & ~m) | (d & m)
@@ -1321,19 +1407,33 @@ class Receiver:
         elif not be & 1:
             return
         if a == REG["DPHY_CTRL"]:
-            self.dctrl = d & DCTRL_MASK
-            if self.clk_running and self.byte_clock_ok():
-                self.byte_clock()
+            self.dctrl = d & DCTRL_MASK                # shadow: applied by CMD.APPLY
         elif a == REG["DPHY_TIM0"]:
             self.tim0 = d & 0xFFFF0FFF
-            filt = max(1, (self.tim0 >> 8) & 0xF)
-            self.seg_filter[self.seg] = max(self.seg_filter.get(self.seg, 1), filt)
+        elif a == REG["DPHY_TIM1"]:
+            self.tim1 = d & 0x0FFFFFFF
+        elif a == REG["DPHY_TIM2"]:
+            self.tim2 = d
         elif a == REG["DPHY_CMD"]:
+            if d & DCMD_APPLY:
+                self.ddirty = False
+                self.actrl, self.atim0 = self.dctrl, self.tim0
+                filt = max(1, (self.atim0 >> 8) & 0xF)
+                self.seg_filter[self.seg] = max(self.seg_filter.get(self.seg, 1), filt)
+                if self.clk_running and self.byte_clock_ok():
+                    self.byte_clock()
             if d & DCMD_REINIT:
+                # the lane state machines back to WaitStop (T_INIT 0: Stop again on LP-11)
+                for i in self.lane_fsms():
+                    if self.fsm[i] != "off":
+                        self.fsm[i] = "waitstop"
+                        self.see(i, self.pin[i])
+            if d & DCMD_AFE_CAL:
                 self.phy_reinit()
             if d & DCMD_CNT_CLR:
                 for k in self.dcnt:
                     self.dcnt[k] = 0
+                self.misc_unc = 0
         elif a == REG["DPHY_AFE_CTRL"]:
             # PD holds the Versal PHY in its init (pd of the AFE interface); 'waitphy' only
             # after PD = 0 again
@@ -1342,10 +1442,12 @@ class Receiver:
                 self.phy_reinit()
         elif a == REG["DPHY_IRQ_STATUS"]:
             self.dirq &= ~d
+            self.dirq_unc &= ~d
         elif a == REG["DPHY_IRQ_EN"]:
-            self.dirq_en = d & (DIRQ_ERR | DIRQ_RAW)
+            self.dirq_en = d & (DIRQ_ERR | DIRQ_ULPS | DIRQ_RAW)
         elif a == REG["DPHY_ERR_STATUS"]:
             self.derr &= ~d
+            self.derr_unc &= ~d
         elif a == REG["DPHY_ERR_LANE"]:
             self.derr_lane &= ~d
         elif dly:
@@ -1402,6 +1504,8 @@ class Receiver:
             v = int(self.in_frame and self.rx_on) << 12
         elif n == "IRQ_STATUS":
             v = self.irq | self.dphy_irq() << 5
+            if not self.ppi and not self.dphy_irq() and (self.dirq_unc & self.dirq_en):
+                return Expect("exact", v, 0xFFFFFFFF & ~IRQ_PHY)   # an uncertain LATE_EOT
         elif n == "IRQ_EN":
             v = self.irq_en
         elif n == "ERR_STATUS":
@@ -1471,11 +1575,16 @@ class Receiver:
         if n == "DPHY_ID":
             v = DPHY_ID_VALUE
         elif n == "DPHY_INFO":
-            v = dl | afe << 5 | round(self.cfg["phy_hz"] / 1e6) << 8 | 9 << 18 | int(afe == 2) << 23
+            # [27] ULPS (step 6)
+            v = dl | afe << 5 | round(self.cfg["phy_hz"] / 1e6) << 8 | 9 << 18 | \
+                int(afe == 2) << 23 | 1 << 27
         elif n == "DPHY_INFO2":
             v = 0x00080078 if afe == 2 else 0x0000186B
         elif n == "DPHY_CTRL":
             v = self.dctrl
+        elif n == "DPHY_CMD":
+            # [0] APPLY pending: done long before a dump; [31] DIRTY
+            v = DCMD_DIRTY if self.ddirty else 0
         elif n == "DPHY_AFE_CTRL":
             v = int(self.afe_pd)
         elif n == "DPHY_AFE_STATUS":
@@ -1483,6 +1592,15 @@ class Receiver:
             v = 0x0F01 if self.phy_rdy else 0
         elif n == "DPHY_TIM0":
             v = self.tim0
+        elif n == "DPHY_TIM1":
+            v = self.tim1
+        elif n == "DPHY_TIM2":
+            v = self.tim2
+        elif n == "DPHY_LANE_STOP":
+            # Stopstate: [0] clock lane, [l + 1] data lane l; ULPS [16..]: none in these tests
+            v = int(self.fsm[CLK] == "stop")
+            for l in range(dl):
+                v |= int(self.fsm[l] == "stop") << (l + 1)
         elif n == "DPHY_LANE_LP":
             clk_pin = "00" if self.clk_running else self.pin[CLK]
             v = ST[clk_pin]
@@ -1498,11 +1616,11 @@ class Receiver:
             v |= ce << 16 | ce << 17
             return Expect("exact", v, 0x3001F)
         elif n == "DPHY_IRQ_STATUS":
-            v = self.dirq
+            return Expect("exact", self.dirq, 0xFFFFFFFF & ~self.dirq_unc)
         elif n == "DPHY_IRQ_EN":
             v = self.dirq_en
         elif n == "DPHY_ERR_STATUS":
-            v = self.derr
+            return Expect("exact", self.derr, 0xFFFFFFFF & ~self.derr_unc)
         elif n == "DPHY_ERR_LANE":
             v = self.derr_lane
         elif n == "DPHY_BYTECLK":
@@ -1517,6 +1635,13 @@ class Receiver:
             v = self.dcnt["clk"]
         elif n == "DPHY_CNT_LPERR":
             v = self.dcnt["lperr"]
+        elif n == "DPHY_CNT_DSK":
+            v = 0                                      # [31:16] ULPS entries: none here
+        elif n == "DPHY_CNT_MISC":
+            if self.misc_unc:
+                hi = min(self.dcnt["misc"] + self.misc_unc, 0xFFFF)
+                return Expect("range", self.dcnt["misc"] << 16, hi=hi << 16)
+            v = self.dcnt["misc"] << 16
         elif n in DLY_REGS:
             lane = (a - REG["DPHY_DLY0"]) >> 2
             if lane >= dl:
@@ -1857,6 +1982,8 @@ class Ppi:
                     level = r.random() < 0.5
                     ln["a"] = s0[l] if level else -1
                     ln["kl"] = f - s0[l] if level else 1
+                else:
+                    ln["kl"] = f - s0[l]       # v1.x: a level until RxActiveHS falls
             elif std:
                 ln["e"] = s0[l]
                 ln["a"] = s0[l] if r.random() < 0.5 else -1
@@ -1948,14 +2075,16 @@ DUMP_REGS = ["ID", "INFO", "CTRL", "STATUS", "IRQ_STATUS", "IRQ_EN", "ERR_STATUS
              "DPHY_ID", "DPHY_INFO", "DPHY_INFO2", "DPHY_CTRL", "DPHY_AFE_STATUS", "DPHY_TIM0",
              "DPHY_LANE_LP", "DPHY_LANE_HS", "DPHY_IRQ_STATUS", "DPHY_IRQ_EN", "DPHY_ERR_STATUS",
              "DPHY_ERR_LANE", "DPHY_BYTECLK", "DPHY_CNT_BURST0", "DPHY_CNT_BURST1",
-             "DPHY_CNT_CLK", "DPHY_CNT_LPERR", "DPHY_DLY0", "DPHY_DLY1", "DPHY_RAW_CTRL"]
+             "DPHY_CNT_CLK", "DPHY_CNT_LPERR", "DPHY_DLY0", "DPHY_DLY1", "DPHY_RAW_CTRL",
+             "DPHY_TIM1", "DPHY_TIM2", "DPHY_LANE_STOP", "DPHY_CNT_DSK", "DPHY_CNT_MISC",
+             "DPHY_CMD"]
 # lanes 2, 3 (0 with Lanes < 4); the old PHY registers of the controller read 0 (no alias)
 DUMP_REGS4 = ["CNT_SOT23", "CNT_BURST23", "DLY2", "DLY3", "DPHY_CNT_BURST2", "DPHY_CNT_BURST3",
               "DPHY_DLY2", "DPHY_DLY3"]
 # unmapped offsets and registers of later steps: read 0 (the old RAW at 0x800, the D-PHY's
-# TIM1, LANE_STOP, CNT_BURST4, DLY4, LANE_MAP, RAW lanes 4..7); and the D-PHY's AFE_CTRL
-# (step 5): PD, 0 at every dump (the tests that set it clear it again)
-DUMP_ZERO = (0x088, 0x0FC, 0x300, 0x800, 0x8FC, 0xC14, 0xC28, 0xC38, 0xC60, 0xC90, 0xD04, 0xE04,
+# AFE_TRIM0, CNT_BURST4, DLY4, LANE_MAP, RAW lanes 4..7); and the D-PHY's AFE_CTRL (step 5):
+# PD, 0 at every dump (the tests that set it clear it again)
+DUMP_ZERO = (0x088, 0x0FC, 0x300, 0x800, 0x8FC, 0xC14, 0xC1C, 0xC60, 0xC90, 0xD04, 0xE04,
              0xFFC)
 
 
@@ -1984,6 +2113,7 @@ class Gen:
         # of the D-PHY, 1 from reset): set before anything happens (cfg v_burst_rst)
         if cfg.get("versal") and not cfg.get("v_burst_rst"):
             self.emit(f"wr {REG['DPHY_CTRL']:03x} {DCTRL_DES_RST_DIS:08x}")
+            self.emit(f"wr {REG['DPHY_CMD']:03x} {DCMD_APPLY:08x}")
 
     # ------------------------------------------------------------ commands
     def emit(self, line):
@@ -2016,10 +2146,14 @@ class Gen:
     def wr(self, name, v, now=False):
         self.sync(now)
         self.emit(f"wr {REG[name]:03x} {v:08x}")
+        if name in SHADOW_REGS:
+            self.emit(f"wr {REG['DPHY_CMD']:03x} {DCMD_APPLY:08x}")   # as the driver does
 
     def wrbe(self, name, v, be):
         self.sync()
         self.emit(f"wrbe {REG[name]:03x} {v:08x} {be:x}")
+        if name in SHADOW_REGS:
+            self.emit(f"wr {REG['DPHY_CMD']:03x} {DCMD_APPLY:08x}")
 
     def rd(self, name, hint="", now=False):
         self.sync(now)
@@ -2748,7 +2882,7 @@ def gen_dly(g):
     PHY init, the BISC taps after it (no load after reset, OWN 0), one load per
     DLYn write that raises OWN or changes the code, without a byte clock (also
     with RX off), close writes to one lane (merged or not: the last tap wins),
-    traffic in between; then a PHY re-init with CMD.REINIT (cal_start: OWN
+    traffic in between; then a PHY re-init with CMD.AFE_CAL (cal_start: OWN
     cleared, BISC taps again); then a write of the code in use (OWN already 1:
     no load), AFE_CTRL.PD (pd: the PHY held in its init, READY 0, OWN 0, until
     PD = 0, then the BISC taps again) and the same codes written once more (OWN
@@ -2798,10 +2932,10 @@ def gen_dly(g):
     g.emit("delay 300")
     g.rd("DPHY_DLY0")
     frame(g, 0, DT_RAW10, 32, 2, fnum=3)
-    # PHY re-init (CMD.REINIT of the D-PHY -> reinit_i of bow_dphy_io_versal): READY
-    # and CNTVALUEOUT drop, the loaded taps are forgotten (OWN 0): the BISC taps come
-    # back, the FIFOs restart, the receiver keeps running
-    g.wr("DPHY_CMD", DCMD_REINIT)
+    # PHY re-init (CMD.AFE_CAL of the D-PHY, CMD.REINIT up to step 5 -> cal_start_i of
+    # bow_dphy_io_versal): READY and CNTVALUEOUT drop, the loaded taps are forgotten (OWN 0):
+    # the BISC taps come back, the FIFOs restart, the receiver keeps running
+    g.wr("DPHY_CMD", DCMD_AFE_CAL)
     g.emit("delay 300")
     g.rd("DPHY_AFE_STATUS")
     for n in DLY_REGS[:dl]:
@@ -3870,12 +4004,16 @@ def cmd_gen(args):
     if args.versal:
         cfg.update(VERSAL_CFG)
         cfg["v_burst_rst"] = args.burst_rst
-        if args.test in ("deskew", "loss"):
+        if args.test in ("deskew", "loss", "ovf2"):
             # no glitch words in the tests with deskew bursts: with BurstRxRst = 0 their
             # latency drift moves the start of the search into the HS-PREPARE noise, where
             # the deskew leader rule fails (a sync error, no CNT_EXT); the model assumes the
             # search starts in HS-ZERO. These tests failed for about 1 in 3 Verilator seeds
             # before (the directed tests run with seed 1); the random cases keep the drift.
+            # ovf2 (step 6): the same drift gave a false sync in the HS-PREPARE noise of one
+            # lane (SKEW, a line lost) once the D-PHY's events reached the bus through gray
+            # counters instead of pulse synchronisers, whose jitter draws (BOW_CDC_JITTER)
+            # share the random stream of the TX model's noise bits
             cfg["v_glitch_pct"] = 0
         if args.test == "rxoff":
             # the stops and RX_EN / PHY_EN changes in bursts add FIFO latency for good with

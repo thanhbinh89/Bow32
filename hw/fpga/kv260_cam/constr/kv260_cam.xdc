@@ -60,7 +60,8 @@ set_property CLOCK_DELAY_GROUP bow_dphy_rx_clk \
 # per source clock cycle, so the skew between its bits must stay below one
 # source clock period (byte clock = 4 x dphy_hs_period, clk_vid 5 ns); the
 # CPU <-> byte command counters change rarely and get 5 ns. Destinations are
-# the first synchroniser flops. Check report_bus_skew: 8 constraints, all met.
+# the first synchroniser flops. Check report_bus_skew: 11 constraints of the
+# receiver, all met (13 in this file with the H.264 output FIFO).
 # The cells are selected by the tail of their hierarchical name, not by their
 # full path, so that a constraint follows its flops when the receiver's
 # hierarchy changes (docs/ip/mipi_rx_arch.md, section 10, step 1): cells with
@@ -94,6 +95,45 @@ set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_captur
              -to   [get_cells -hierarchical -filter {NAME =~ */u_sync_log_ack/g_bit[*].u_sync/sync_q_reg[0]}] 5.0
 set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */u_dphy_rx/u_raw/raw_ack_o_reg[*]}] \
              -to   [get_cells -hierarchical -filter {NAME =~ */u_sync_raw_ack/g_bit[*].u_sync/sync_q_reg[0]}] 5.0
+# The D-PHY's event counters (step 6, lp -> CPU): 4 bit gray counters of the lp domain
+# (u_dphy_rx/evc_gray_q, clk_vid here), at most one step per lp clock, read by the register
+# file through u_sync_evc, which adds their differences to CNT_* / ERR_STATUS / IRQ_STATUS:
+# their bits must arrive within one lp clock period of each other
+set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */u_dphy_rx/evc_gray_q_reg[*]}] \
+             -to   [get_cells -hierarchical -filter {NAME =~ */u_sync_evc/g_bit[*].u_sync/sync_q_reg[0]}] 5.0
+# The D-PHY's configuration (step 6, CPU -> lp; review of step 6): CTRL and TIM0..2 are shadow
+# registers of the register file (u_dphy_rx/u_regs) that the lp domain copies (u_dphy_rx/
+# cfg_lp_q, one clock enable) two lp cycles after the CMD.APPLY toggle (u_regs/apply_q) reached
+# the first flop of its synchroniser (u_dphy_rx/u_sync_apply); the shadow is written at least a
+# CPU cycle before the toggle. Every copied bit and the toggle within two lp periods (less a
+# setup time) of each other: no bit is still in flight when the copy is taken (the clock groups
+# leave these delays unbounded; report_cdc lists them as CDC-15).
+set_bus_skew \
+  -from [list [get_cells -hierarchical -filter {NAME =~ */u_dphy_rx/u_regs/clk_cont_q_reg*}] \
+              [get_cells -hierarchical -filter {NAME =~ */u_dphy_rx/u_regs/burst_rst_en_q_reg*}] \
+              [get_cells -hierarchical -filter {NAME =~ */u_dphy_rx/u_regs/ulps_en_q_reg*}] \
+              [get_cells -hierarchical -filter {NAME =~ */u_dphy_rx/u_regs/hsrx_early_q_reg*}] \
+              [get_cells -hierarchical -filter {NAME =~ */u_dphy_rx/u_regs/clk_lost_en_q_reg*}] \
+              [get_cells -hierarchical -filter {NAME =~ */u_dphy_rx/u_regs/miss_off_q_reg*}] \
+              [get_cells -hierarchical -filter {NAME =~ */u_dphy_rx/u_regs/settle_q_reg*}] \
+              [get_cells -hierarchical -filter {NAME =~ */u_dphy_rx/u_regs/lp_filter_q_reg*}] \
+              [get_cells -hierarchical -filter {NAME =~ */u_dphy_rx/u_regs/clk_settle_q_reg*}] \
+              [get_cells -hierarchical -filter {NAME =~ */u_dphy_rx/u_regs/clk_miss_q_reg*}] \
+              [get_cells -hierarchical -filter {NAME =~ */u_dphy_rx/u_regs/hs_tmo_q_reg*}] \
+              [get_cells -hierarchical -filter {NAME =~ */u_dphy_rx/u_regs/tog_div_q_reg*}] \
+              [get_cells -hierarchical -filter {NAME =~ */u_dphy_rx/u_regs/tinit_q_reg*}] \
+              [get_cells -hierarchical -filter {NAME =~ */u_dphy_rx/u_regs/esc_tmo_q_reg*}] \
+              [get_cells -hierarchical -filter {NAME =~ */u_dphy_rx/u_regs/apply_q_reg}]] \
+  -to   [list [get_cells -hierarchical -filter {NAME =~ */u_dphy_rx/cfg_lp_q_reg*}] \
+              [get_cells -hierarchical -filter {NAME =~ */u_dphy_rx/u_sync_apply/sync_q_reg[0]}]] \
+  9.5
+# CLK_TOG_DIV of the applied configuration (step 6, lp -> byte clock; review of step 6): 4 bits
+# of u_dphy_rx/cfg_lp_q, each through a synchroniser of the byte clock domain (u_sync_tdiv);
+# quasi-static (they change at an APPLY), a mixed value only makes one toggle period longer or
+# shorter: bounded to one byte clock period.
+set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */u_dphy_rx/cfg_lp_q_reg[tog_div]*}] \
+             -to   [get_cells -hierarchical -filter {NAME =~ */u_dphy_rx/u_sync_tdiv/g_bit[*].u_sync/sync_q_reg[0]}] \
+             $dphy_byte_skew
 # Input delay codes (DLYn CODE and OWN, CPU -> byte clock): the AFE's dly_code / dly_own,
 # static levels of the D-PHY's register file (u_dphy_rx/u_regs), per lane 9 + 1 bits written
 # in the same CPU cycle, each through a per-bit synchroniser of the adapter's delay logic
@@ -109,7 +149,7 @@ set_bus_skew \
   $dphy_byte_skew
 
 # ---- H.264 encoder output FIFO (u_soc/u_h264/u_out, bow_fifo_async) -----------------
-# write pointer clk_vid -> clk_sys, read pointer clk_sys -> clk_vid. 10 constraints in
+# write pointer clk_vid -> clk_sys, read pointer clk_sys -> clk_vid. 13 constraints in
 # this file in total (tcl/build.tcl counts them).
 set_bus_skew -from [get_cells {u_soc/u_h264/u_out/wgray_q_reg[*]}] \
              -to   [get_cells {u_soc/u_h264/u_out/wgray_r1_q_reg[*]}] 5.0

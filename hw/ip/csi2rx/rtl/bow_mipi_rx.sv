@@ -90,7 +90,7 @@ module bow_mipi_rx import bow_bus_pkg::*; import bow_ppi_pkg::*; #(
   input  logic [Lanes-1:0][8:0] afe_dly_q_i,        // asynchronous, quasi-static
   output logic                  afe_pd_o,           // CPU domain flop (AFE_CTRL.PD)
   input  logic                  afe_ready_i,        // asynchronous (AFE_STATUS.READY)
-  output logic                  afe_cal_start_o,    // CPU domain flop (CMD.REINIT pulse)
+  output logic                  afe_cal_start_o,    // CPU domain flop (CMD.AFE_CAL pulse)
   input  logic [7:0]            afe_status_i        // asynchronous (AFE_STATUS[15:8])
 );
 

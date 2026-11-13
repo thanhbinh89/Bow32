@@ -162,7 +162,8 @@ module tb_csi2rx_ppi;
     .Lanes     (Lanes),
     .PhyClkHz  (PhyClkHz),
     .CpuClkHz  (CpuClkHz),
-    .FifoDepth (FifoDepth)
+    .FifoDepth (FifoDepth),
+    .LpClkHz   (25_000_000)                  // the standard PHY's lp clock (lp_ns of the BFM)
   ) u_flat (
     .clk_i                 (clk_s),
     .rst_ni                (rst_n),

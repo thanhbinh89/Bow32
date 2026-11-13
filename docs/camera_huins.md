@@ -11,14 +11,19 @@ trên KV260 ([camera_kv260.md](camera_kv260.md), [video_kv260.md](video_kv260.md
 
 > **Bước 4 của kế hoạch chuyển (2026-11-12, chưa chạy bo; [ip/mipi_rx_arch.md](ip/mipi_rx_arch.md)
 > mục 10, [ip/dphy_rx.md](ip/dphy_rx.md)).** Thanh ghi PHY nay ở D-PHY `0x4000_8C00`, không có
-> alias: núm PA4 thành `CMD.REINIT` (một xung 32 chu kỳ), PA5 thành `CTRL.DES_RST_DIS` (0 từ reset,
+> alias: núm PA4 thành `CMD.AFE_CAL` (một xung 32 chu kỳ; bước 4–5: `CMD.REINIT`, từ bước 6 `CMD[1]`
+> REINIT đưa máy LP về `WaitStop`), PA5 thành `CTRL.DES_RST_DIS` (0 từ reset,
 > tức `BurstRxRst` = 1 ngay từ reset), PB6 / PB7 thành `AFE_STATUS` (`rd 40008c18`: [0] READY,
 > [8] XPLL LOCKED, [9] LOCKED_FB, [10] DLY_RDY, [11] PHY_RDY của mọi nibble); top camera không
 > còn nối bốn chân đó (PA4…PA6 không ra chân, PB6 / PB7 đọc 0). `PHY_CFG` (`rd 4000800c`) thành
 > `TIM0` của D-PHY (`rd 40008c24`, cùng bố cục: vẫn `051e0213`). `phy` in
 > `phy: READY 1, every nibble PHY_RDY 1 DLY_RDY 1, XPLL LOCKED 1 LOCKED_FB 1 (AFE_STATUS 00000f01),
 > DES_RST_DIS 0`; `phy reinit` in `phy: READY n us after CMD.REINIT`. PDI và firmware phải cùng
-> commit: firmware mới trên PDI cũ in `csi2rx: bitstream before the D-PHY split, rebuild it`.
+> commit: firmware mới trên PDI trước bước 4 in `csi2rx: bitstream before the D-PHY split, rebuild
+> it`; từ bước 6 (`ID` của D-PHY `0x44505202`, bản đồ thanh ghi phiên bản 2) firmware của bước 6
+> trên PDI của bước 4–5 in `csi2rx: D-PHY register map version 1, this firmware needs 2: bitstream
+> older than the firmware, rebuild them from one commit`, firmware của bước 4–5 trên PDI của bước 6
+> in thông báo trước bước 4 ở trên; cả hai từ chối chạy.
 > Các lần chạy bo 1–3 dưới đây ghi lệnh và kết quả theo bản trước bước 4 (PA4 / PA5, `STATUS`).
 >
 > **Trạng thái: đã chạy trên bo ngày 2026-11-11 (lần chạy bo 3)**: PDI của `cd289e3` (RTL như main
@@ -263,7 +268,7 @@ kiểm tra và in `CRITICAL WARNING` khi:
 |----------|------|-----------|
 | timing | `timing_summary.rpt` | WNS ≥ 0, WHS ≥ 0 (byte clock 180 MHz, video 200 MHz, SoC 50 MHz) |
 | clock | `clocks.rpt`, `clock_interaction.rpt` | `clk_sys` 20 ns, `clk_vid` 5 ns, `dphy_hs_clk` 1,389 ns, `dphy_byte_clk` 5,556 ns (trên chân `FIFO_WR_CLK` của XPHY strobe), `dphy_pll_clk` 0,667 ns; mọi cặp clock khác nhau là *Asynchronous Groups* (`tcl/timing_checks_cam.tcl`) |
-| bus skew | `bus_skew.rpt` | 11 ràng buộc `set_bus_skew` (FIFO pixel 2, đồng hồ đo byte clock, yêu cầu / trả lời LOG và RAW 4, yêu cầu nạp tap `DLYn` + tap, đọc lại tap `DLYn` từ XPHY, FIFO ra của H.264 2), cả 11 `Slack (MET)`. Cell của bộ thu được chọn theo đuôi tên phân cấp (`get_cells -hierarchical -filter {NAME =~ */...}`), nên ràng buộc đi theo flop khi phân cấp của bộ thu đổi ([ip/mipi_rx_arch.md](ip/mipi_rx_arch.md) mục 10, bước 1); build kiểm cell của từng ràng buộc (`hw/fpga/common/tcl/bus_skew_checks.tcl`: mọi cell trong `u_soc/u_csi2rx`, `u_soc/u_h264/u_out` hay `u_dphy`, mọi flop đích có đường từ nguồn, số flop nguồn bằng số flop đích; log: `INFO: bus skew cells: 0 problems in 11 constraints`). PDI của lần chạy bo 1 (`aaf7ed4`): 11/11, slack +3,781 … +5,016 ns; PDI của bản cuối (`cd289e3`): 11/11, +3,893 … +5,004 ns |
+| bus skew | `bus_skew.rpt` | 14 ràng buộc `set_bus_skew` (FIFO pixel 2, đồng hồ đo byte clock, yêu cầu / trả lời LOG và RAW 4, bộ đếm sự kiện của D-PHY `u_dphy_rx/evc_gray_q` → `u_sync_evc` (từ bước 6 của [ip/mipi_rx_arch.md](ip/mipi_rx_arch.md), một chu kỳ `clk_vid`), bản chép shadow `CTRL` / `TIM*` + toggle APPLY → `u_dphy_rx/cfg_lp_q` + `u_sync_apply` (từ review bước 6, hai chu kỳ `clk_vid` trừ 0,5 ns) và `CLK_TOG_DIV` → `u_sync_tdiv` (từ review bước 6, một chu kỳ byte clock), mã delay `DLYn` + OWN, đọc lại tap `DLYn` từ XPHY, FIFO ra của H.264 2; trước bước 6: 11, bản đầu bước 6: 12), cả 14 `Slack (MET)`. Cell của bộ thu được chọn theo đuôi tên phân cấp (`get_cells -hierarchical -filter {NAME =~ */...}`), nên ràng buộc đi theo flop khi phân cấp của bộ thu đổi ([ip/mipi_rx_arch.md](ip/mipi_rx_arch.md) mục 10, bước 1); build kiểm cell của từng ràng buộc (`hw/fpga/common/tcl/bus_skew_checks.tcl`: mọi cell trong `u_soc/u_csi2rx`, `u_soc/u_h264/u_out` hay `u_dphy`, mọi flop đích có đường từ nguồn, số flop nguồn bằng số flop đích; log: `INFO: bus skew cells: 0 problems in 14 constraints`; 11 trước bước 6, 12 ở bản đầu bước 6). PDI của lần chạy bo 1 (`aaf7ed4`): 11/11, slack +3,781 … +5,016 ns; PDI của bản cuối (`cd289e3`): 11/11, +3,893 … +5,004 ns |
 | sơ đồ nibble | `vivado.log` | `INFO: XPHY nibble plan pins_fmc1_xphy_plan.txt: bank 705, 4 XPHY nibbles (generics of bow32_huins_vp1902_cam_top)` |
 | XPHY | `io_sites.rpt`, log | trước place: `INFO: pre_opt_cam: 4 XPHYs placed at their pins, nibble plan fits bank 705`; sau route: 4 XPHY đúng các nibble của sơ đồ, lane clock ở slice 0 của XPHY strobe, luật chuyển strobe của AM010 đúng (`tcl/cam_xphy.tcl`) |
 | chân | `io_sites.rpt` | 4 `ODDRE1` của I2C (I và T, DRC PDCN-2749) trong `XPIOLOGIC`; 40 flop bắt dữ liệu có `BLI` trong site BLI |
@@ -306,7 +311,7 @@ PDI của bản cuối: 45 mục, 1 mục có waiver):
 
 Reset SoC = `USER_RESET_N` (nút "H_RESET") AND MMCM khoá. Miền video và D-PHY reset theo cùng
 điều kiện; sau reset D-PHY tự chạy: XPLL khoá → BISC → `PHY_RDY` (LED10; trong mô phỏng
-~40 µs, AM010: tới 1,3 ms). `CMD.REINIT` của D-PHY (trước bước 4: PA4) khởi động lại riêng I/O
+~40 µs, AM010: tới 1,3 ms). `CMD.AFE_CAL` của D-PHY (bước 4–5: `CMD.REINIT`; trước bước 4: PA4) khởi động lại riêng I/O
 của D-PHY (mục 5). Trên bản này AFE của D-PHY tự hiệu chỉnh (`INFO[23]` của D-PHY; trước bước 4:
 `INFO.DLY_VID` = 1), nên `bow_csi2rx_start()` chờ `AFE_STATUS.READY` tối đa 10 ms rồi mới bật bộ
 thu (PHY UltraScale+ của KV260: không chờ).
@@ -403,7 +408,7 @@ GPIO (sau reset mọi chân PA là input; từ bước 4 các núm của D-PHY l
 | Chân | Việc |
 |------|------|
 | PA0..PA3 | LED U_LED1..4 |
-| PA4, PA5, PA6 | không ra chân (bước 4). Trước bước 4: PA4 = khởi động lại D-PHY (output 1 giữ PHY ở reset khởi động), nay `CMD.REINIT` của D-PHY (xung 32 chu kỳ, `csi2_test`: `phy reinit`); PA5 = `BurstRxRst` (output 1 = reset FIFO RX của XPHY mỗi khi cổng byte clock đóng), nay ¬`CTRL.DES_RST_DIS` của D-PHY: 1 từ reset, firmware ghi lại mỗi lần khởi động bộ thu, `csi2_test`: `phy burstrst 0\|1` |
+| PA4, PA5, PA6 | không ra chân (bước 4). Trước bước 4: PA4 = khởi động lại D-PHY (output 1 giữ PHY ở reset khởi động), nay `CMD.AFE_CAL` của D-PHY (xung 32 chu kỳ; bước 4–5: `CMD.REINIT`; `csi2_test`: `phy reinit`, ghi cùng `CMD.REINIT` của máy LP từ bước 6); PA5 = `BurstRxRst` (output 1 = reset FIFO RX của XPHY mỗi khi cổng byte clock đóng), nay ¬`CTRL.DES_RST_DIS` của D-PHY: 1 từ reset, firmware ghi lại mỗi lần khởi động bộ thu, `csi2_test`: `phy burstrst 0\|1` |
 | **PA7** | XCLR: output 1 = cảm biến chạy; sau reset PA7 là input nên cảm biến bị giữ reset (giống "PA7 = 1 → bật camera" của KV260) |
 | PB0 / PB1 | UART1 |
 | PB2..PB4 | nút U_PB SW01..03 (1 khi nhấn) |
@@ -665,7 +670,7 @@ chưa bật bộ thu rồi khởi động lại PHY (cách xử lý; lần 1 và
 > phy                     # DLY_RDY 1, PHY_RDY 0: hiệu chỉnh xong, PHY_RDY không lên; cả hai 0: BISC chưa xong
 > sensor on               # cảm biến stream, bộ thu tắt: lane clock chạy
 sensor: streaming 1920x1080, receiver off (READY 0)
-> phy reinit              # CMD.REINIT (xung 32 chu kỳ; trước bước 4 xung PA4 10 us): XPLL khoá + BISC lại, có strobe
+> phy reinit              # CMD.AFE_CAL + CMD.REINIT (xung 32 chu kỳ; bước 4–5 chỉ CMD.REINIT, trước bước 4 xung PA4 10 us): XPLL khoá + BISC lại, có strobe
 phy: READY n us after CMD.REINIT
 phy: READY 1, every nibble PHY_RDY 1 DLY_RDY 1, XPLL LOCKED 1 LOCKED_FB 1 (AFE_STATUS 00000f01), DES_RST_DIS 0
      delays in use a/b/c/d
@@ -707,7 +712,9 @@ PA5 = 1 và cho rằng PA5 = 0 chạy được với `SETTLE` ~115 ns: silicon k
 ([ip/csi2rx.md](ip/csi2rx.md), mục *Bốn lane, PHY Versal và IMX274*). `SETTLE` là `TIM0[7:0]` của
 D-PHY (`0x4000_8C24`, chu kỳ 5 ns; trước bước 4 `PHY_CFG[7:0]` ở `0x4000_800C`, cùng bố cục), chỉ
 đổi được khi `PHY_EN` = 0, và `start` / `mode` ghi lại giá trị của driver: quét lại theo các lệnh
-dưới đây (giữ `BurstRxRst` = 1).
+dưới đây (giữ `BurstRxRst` = 1). Từ bước 6 `TIM0` là shadow: giá trị mới có hiệu lực sau
+`CMD.APPLY` (`wr 40008c10 1`), và `rd 40008c24` đọc lại bản shadow, không phải bản đang dùng; `rd
+40008c10` = `00000000` (không APPLY đang chờ, không DIRTY) mới chứng minh D-PHY dùng đúng giá trị đó.
 
 ```
 > start
@@ -715,6 +722,8 @@ dưới đây (giữ `BurstRxRst` = 1).
 > rd 40008c24              # TIM0 của D-PHY: 051e0213 (SETTLE 0x13 = 19 chu kỳ = 95 ns; lần 2: rd 4000800c, PHY_CFG)
 > wr 40008008 c02b84       # CTRL: tắt PHY_EN, RX_EN, giữ các trường khác
 > wr 40008c24 051e0217     # SETTLE 0x17 = 23 chu kỳ = 115 ns, các trường khác như driver
+> wr 40008c10 1            # CMD.APPLY (từ bước 6: TIM0 là shadow)
+> rd 40008c10              # 00000000: đã áp, không DIRTY (bit 0: APPLY đang chờ, bit 31: DIRTY)
 > wr 40008008 c02b87       # bật lại PHY_EN, RX_EN
 > wr 40008020 1            # CNT_CLR (controller)
 > wr 40008c10 8            # CMD.CNT_CLR (bộ đếm của D-PHY)
@@ -1142,7 +1151,7 @@ main (đoạn trên).
 | Vivado dừng ở `pre_opt_cam: the XPHY nibble plan of u_dphy does not fit the camera pins` | dòng `ERROR: cam_xphy:` ngay trên nói chân nào sai; generic `Dphy*` của top không lấy từ sơ đồ của `make plan`, hoặc `FMC_SITE` khác 1 |
 | Vivado: `[Route 35-7]` ở dây `CLK_TO_*` / `CLK_FROM_OTHER_XPHY` | sơ đồ nibble không hợp lệ cho các chân (kiểm tra ở `cam_plan` / `pre_opt_cam` lẽ ra đã bắt) |
 | Vivado: `[Place 30-728]` / `[Place 30-1960]` (luật clock của placer) | clock vào và XPLL khác SLR: xem log `pre_place_cam` (`CLOCK_DEDICATED_ROUTE` trên 3 net của `u_clk`) |
-| Vivado: `CRITICAL WARNING` về bus skew | tên thanh ghi / cell trong `constr/huins_vp1902_cam.xdc` không còn khớp RTL (phải đủ 11) |
+| Vivado: `CRITICAL WARNING` về bus skew | tên thanh ghi / cell trong `constr/huins_vp1902_cam.xdc` không còn khớp RTL (phải đủ 14) |
 | Vivado: `CRITICAL WARNING: port ... (FMC+01 site VCCIO, SW192 = 1.2 V) has IOSTANDARD ...` | một cổng của bank 703..706 không phải `MIPI_DPHY` / `LVCMOS12`: sửa XDC |
 | Vivado: `CRITICAL WARNING: CDC-<n> from ... to ... is not a reviewed crossing` | crossing mới giữa các miền clock: xem `cdc.rpt`, sửa RTL hoặc duyệt rồi thêm vào `tcl/timing_checks_cam.tcl`. |
 | `make jtag`: `jtag: refused: ...` | bo / switch theo bảng ở mục 2; PDI không có `pdi_site.txt` (dựng trước khi có khoá) hoặc mới hơn nó (build không qua `make pdi`): build lại bằng `make pdi` hoặc `CONFIRM=1` sau khi kiểm |
@@ -1192,7 +1201,7 @@ các cổng LP / HS enable / byte clock với bộ thu:
   3 1,33 dòng mỗi frame 1080p ở 123/76/119/130, 48,6 ở 122/75/118/130; lần 2 0,2–1,5; lần 1 ~11 %
   dòng. `margin 0 2` quanh trễ BISC (lần 2, sau `phy reinit`, rồi `start`): lỗi ở tâm và ở 6 trong
   8 điểm (`csi2rx: margin low ...`); `cal 8` ngay sau đó lại cho 300/184/264/228. Vì vậy app
-  `camera` / `video` luôn hiệu chỉnh ở `cam` đầu, `csi2_test` cần `cal`. `phy reinit` (`CMD.REINIT`; trước bước 4 PA4) đưa mọi
+  `camera` / `video` luôn hiệu chỉnh ở `cam` đầu, `csi2_test` cần `cal`. `phy reinit` (`CMD.AFE_CAL`, bước 4–5 `CMD.REINIT`; trước bước 4 PA4) đưa mọi
   lane về trễ BISC mới và bật lại theo dõi VT; BISC lúc lane clock đang stream cho cùng trễ như lúc
   nghỉ.
 - **Câu hỏi mở: vì sao BISC không căn giữa** (mục 9.1). Ứng dụng luôn hiệu chỉnh từng lane nên
@@ -1205,7 +1214,7 @@ các cổng LP / HS enable / byte clock với bộ thu:
   1 từ reset); trạng thái {PHY_RDY, DLY_RDY của mọi nibble, LOCKED_FB, LOCKED} vào `AFE_STATUS[15:8]`
   của D-PHY. Trước bước 4: PA4, PA5 và PB6 / PB7. Từ bước 5 module là adapter của giao diện AFE
   ([ip/mipi_rx_arch.md](ip/mipi_rx_arch.md) mục 3.7): `pd_i` (`AFE_CTRL.PD`, mức) và `cal_start_i`
-  (xung `CMD.REINIT`) thay `reinit_i`, `des_rst_i` (flop miền lp của D-PHY = ¬cổng, 0 khi
+  (xung `CMD.AFE_CAL`; bước 5: `CMD.REINIT`) thay `reinit_i`, `des_rst_i` (flop miền lp của D-PHY = ¬cổng, 0 khi
   `DES_RST_DIS` = 1) thay `burst_rst_en_i` (`RX_RST` = `ready` ∧ `des_rst`, cùng chu kỳ như trước);
   logic nạp delay (`RX_EN_VTC`, chờ, `LD`) nằm trong `bow_dphy_dly_xphy` (`u_dly`), nạp khi OWN của
   `DLYn` lên hoặc mã đổi.

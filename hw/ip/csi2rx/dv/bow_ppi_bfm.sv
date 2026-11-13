@@ -5,15 +5,19 @@
 // (hw/ip/csi2rx/dv/tb_csi2rx_ppi.sv). It plays the PPI lines of a test case of
 // `tools/csi2/csi2_model.py gen --ppi bow|std` (their format: the PPI section of the model)
 // on the PPI of bow_ppi_pkg, in one of two timings (knob std):
-//   std = 0  the D-PHY of Bow32 (bow_dphy_rx v1, to the controller bow_csi2rx itself):
-//            ErrControl / ErrControlClk are one cycle pulses of vid_clk_i (the D-PHY's lp
-//            clock). Since step 4 of docs/ip/mipi_rx_arch.md the D-PHY masks them (a lane's
+//   std = 0  the D-PHY of Bow32 (bow_dphy_rx v1.x, to the controller bow_csi2rx itself):
+//            ErrControl / ErrControlClk are 2 bit gray counters of vid_clk_i (the D-PHY's lp
+//            clock) that step once per error (one cycle pulses up to step 5; errors here at
+//            least 20 cycles apart, the D-PHY's at least 16); RxSkewCalHS a level until
+//            RxActiveHS falls (the model renders it). Since step 4 of
+//            docs/ip/mipi_rx_arch.md the D-PHY masks them (a lane's
 //            Enable, its CTRL.CLK_CONT) and has the PHY's registers, RAW, the HS entry
 //            counters and the status; the controller takes the OR of the errors: the model
 //            renders the errors that the D-PHY passes on, the BFM plays them as they come
 //            (Enable / EnableClk are not used here)
 //   std = 1  a standard PHY, to the flat wrapper bow_csi2rx_ppi_flat: ErrControl pulses on
-//            its own lp clock (lp_clk_o, period lp_ns), no ErrControlClk
+//            its own lp clock (lp_clk_o, period lp_ns; the wrapper makes the gray counters),
+//            no ErrControlClk, RxSkewCalHS a pulse or a level
 // Both: RxClkActiveHS = the byte clock runs, StopstateClk its inverse, Stopstate[l] = no
 // burst event on lane l in the cycle; UlpsActiveNot* = 1, RxUlpsClkNot = 1, RxUlpsEsc = 0,
 // ErrEsc = ErrSyncEsc = 0 (v1). Everything of a burst (RxActiveHS, RxSyncHS and the bytes
@@ -285,6 +289,7 @@ module bow_ppi_bfm import bow_ppi_pkg::*; import csi2_tx_pkg::csi2_now; #(
   logic [N-1:0]     req_err = '0, pend_err = '0;
   logic [Lanes-1:0] req_std = '0, pend_std = '0;
   logic [N-1:0]     err_q = '0;
+  logic [N-1:0][1:0] err_gray_q = '0;      // std = 0: the gray counters (v1.x)
   logic [Lanes-1:0] err_std_q = '0;
 
   // std = 0, video clock = the D-PHY's lp clock: one cycle pulses, one of a kind at most
@@ -311,6 +316,9 @@ module bow_ppi_bfm import bow_ppi_pkg::*; import csi2_tx_pkg::csi2_now; #(
         if (hold_err[i] != 0) vid_more = 1'b1;
       end
       err_q <= std ? '0 : err;
+      for (int i = 0; i < int'(N); i++) begin
+        if (!std && err[i]) err_gray_q[i] <= {err_gray_q[i][0], ~err_gray_q[i][1]};
+      end
       if (!std) cov_lp += $countones(err);
       if (err != '0 || pend_err != '0) vid_more = 1'b1;
     end
@@ -358,7 +366,7 @@ module bow_ppi_bfm import bow_ppi_pkg::*; import csi2_tx_pkg::csi2_now; #(
       ppi_lp_o[l].stopstate       = stop_q[l];
       ppi_lp_o[l].ulps_active_not = 1'b1;
       ppi_lp_o[l].rx_ulps_esc     = 1'b0;
-      ppi_lp_o[l].err_control     = {1'b0, std ? err_std_q[l] : err_q[1 + l]};
+      ppi_lp_o[l].err_control     = std ? {1'b0, err_std_q[l]} : err_gray_q[1 + l];
       ppi_lp_o[l].err_esc         = 2'b00;
       ppi_lp_o[l].err_sync_esc    = 2'b00;
     end
@@ -366,7 +374,7 @@ module bow_ppi_bfm import bow_ppi_pkg::*; import csi2_tx_pkg::csi2_now; #(
     ppi_lp_clk_o.rx_clk_active_hs = rx_clk_active;
     ppi_lp_clk_o.ulps_active_not  = 1'b1;
     ppi_lp_clk_o.rx_ulps_clk_not  = 1'b1;
-    ppi_lp_clk_o.err_control      = {1'b0, err_q[0]};
+    ppi_lp_clk_o.err_control      = err_gray_q[0];
   end
 
   function automatic void report();
