@@ -17,8 +17,10 @@
 //               mode, receiver built with AfeKind = 2), see "Versal PHY";
 //               bow_dphy_dly_xphy (u_dly_xphy) makes the XPHY delay loads
 //               and RX_RST from des_rst_i.
-// hsrx_en_i and term_en_i of a lane act as one (the adapters' HSRX_DISABLE =
-// ~(hsrx_en | term_en)); the LP receivers are always on (no lprx_en).
+// The HS receiver and termination of a lane follow term_en_i (the adapters' HSRX_DISABLE =
+// ~term_en: one pin of IBUFDS_DPHY for both, and the termination must not come on before
+// LP-00; hsrx_en_i alone, CTRL.HSRX_EARLY of the D-PHY, changes nothing here); the LP
+// receivers are always on (no lprx_en).
 //
 //   * hs_byte_clk_o toggles (period byte_ns) only while the clock lane toggles
 //     AND clk_gate_en_i = 1 (BUFGCE CE_TYPE SYNC). With runt = 1, the gate
@@ -52,9 +54,9 @@
 //     forgotten; on release ready_o rises t_reinit ns later with the BISC
 //     taps again.
 //   * Per lane an 8 word RX FIFO, written with the word of every step in which
-//     the clock lane toggles while its HS receiver is on (clk_hsrx_en_i or
-//     clk_term_en_i = 1: HSRX_DISABLE = ~(clk_hsrx_en | clk_term_en), no
-//     strobe otherwise), whether or not the byte clock gate is open; read on
+//     the clock lane toggles while its HS receiver is on (clk_term_en_i = 1:
+//     HSRX_DISABLE = ~clk_term_en, no strobe otherwise), whether or not the
+//     byte clock gate is open; read on
 //     hs_byte_clk_o edges: hs_valid_o[l] = 1 when a word was read, else
 //     hs_data_o[l] is garbage. A word is read once the
 //     FIFO holds more than vlat[l] words (0..2: FIFO_EMPTY lags the write
@@ -585,9 +587,12 @@ module csi2_tx_model import csi2_tx_pkg::*; #(
   endfunction
 
   // ----------------------------------------------------- AFE adapter models
-  // One HS receiver and termination pin per lane (HSRX_DISABLE = ~(hsrx_en | term_en))
-  wire             clk_hs_on = clk_hsrx_en_i | clk_term_en_i;
-  wire [Lanes-1:0] hs_on     = hsrx_en_i | term_en_i;
+  // One HS receiver and termination pin per lane, HSRX_DISABLE = ~term_en (the adapters)
+  wire             clk_hs_on = clk_term_en_i;
+  wire [Lanes-1:0] hs_on     = term_en_i;
+
+  logic unused_hsrx_en;
+  assign unused_hsrx_en = ^{clk_hsrx_en_i, hsrx_en_i};
 
   // versal = 0: the UltraScale+ adapter's logic (bow_dphy_dly_xusp): ISERDESE3 reset from
   // des_rst, IDELAYE3 loads on byte clock edges

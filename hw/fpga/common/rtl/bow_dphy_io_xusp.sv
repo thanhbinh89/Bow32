@@ -26,10 +26,12 @@
 //   aligned word is the byte. Its internal /4 clock is aligned to CLKDIV only by RST: des_rst
 //   (high while the gate is closed) asserts RST, bow_dphy_dly_xusp releases it 2 byte clocks
 //   after the clock restarted, once per gate opening.
-// * hsrx_en, term_en: IBUFDS_DPHY has one pin for both, HSRX_DISABLE = ~(hsrx_en | term_en)
-//   (the termination cannot be switched on its own; the D-PHY v1 drives both from one flop).
-//   HSRX_O is then 0. The LP receivers are always on (LPRX_DISABLE = 0: lprx_en is not
-//   modelled). The pins are MIPI_DPHY_DCI with DIFF_TERM_ADV TERM_100 in the XDC.
+// * hsrx_en, term_en: IBUFDS_DPHY has one pin for the HS receiver and the termination:
+//   HSRX_DISABLE = ~term_en, so the termination never comes on before LP-00 (hsrx_en alone,
+//   the D-PHY's CTRL.HSRX_EARLY from LP-01, would terminate LP-01; it changes nothing here:
+//   without HSRX_EARLY the two enables are equal, bow_afe_chk). HSRX_O is 0 while disabled.
+//   The LP receivers are always on (LPRX_DISABLE = 0: lprx_en is not modelled). The pins are
+//   MIPI_DPHY_DCI with DIFF_TERM_ADV TERM_100 in the XDC.
 // * dly_code, dly_own, dly_q: IDELAYE3 (COUNT, VAR_LOAD, EN_VTC 0, no IDELAYCTRL), 511 taps of
 //   2.7-4.7 ps cover more than one UI at 912 Mbit/s; dly_q = CNTVALUEOUT (byte clock
 //   domain). bow_dphy_dly_xusp loads a changed code at the next byte clocks (only while the
@@ -59,10 +61,10 @@ module bow_dphy_io_xusp #(
   output logic [Lanes-1:0][1:0] lp_o,             // data lanes LP {P, N}, async
   input  logic                  clk_lprx_en_i,    // not modelled (LP receivers always on)
   input  logic [Lanes-1:0]      lprx_en_i,
-  input  logic                  clk_hsrx_en_i,    // clock lane HS receiver + termination on
-  input  logic [Lanes-1:0]      hsrx_en_i,        // (either enable: one pin, HSRX_DISABLE)
-  input  logic                  clk_term_en_i,
-  input  logic [Lanes-1:0]      term_en_i,
+  input  logic                  clk_hsrx_en_i,    // not used: one pin for the HS receiver
+  input  logic [Lanes-1:0]      hsrx_en_i,        //   and the termination, which follows
+  input  logic                  clk_term_en_i,    // clock lane HS receiver + termination on
+  input  logic [Lanes-1:0]      term_en_i,        //   (HSRX_DISABLE = ~term_en)
   input  logic [Lanes-1:0][8:0] dly_code_i,       // asynchronous, static (u_dly)
   input  logic [Lanes-1:0]      dly_own_i,        // asynchronous (u_dly)
   output logic [Lanes-1:0][8:0] dly_q_o,          // IDELAYE3 CNTVALUEOUT (byte clock domain)
@@ -106,7 +108,7 @@ module bow_dphy_io_xusp #(
   ) u_clk_ibuf (
     .I            (clk_p),
     .IB           (clk_n),
-    .HSRX_DISABLE (~(clk_hsrx_en_i | clk_term_en_i)),
+    .HSRX_DISABLE (~clk_term_en_i),
     .LPRX_DISABLE (1'b0),
     .HSRX_O       (clk_hs),
     .LPRX_O_P     (clk_lp_o[1]),
@@ -151,7 +153,7 @@ module bow_dphy_io_xusp #(
     ) u_ibuf (
       .I            (data_p[l]),
       .IB           (data_n[l]),
-      .HSRX_DISABLE (~(hsrx_en_i[l] | term_en_i[l])),
+      .HSRX_DISABLE (~term_en_i[l]),
       .LPRX_DISABLE (1'b0),
       .HSRX_O       (d_hs),
       .LPRX_O_P     (lp_o[l][1]),
@@ -206,6 +208,6 @@ module bow_dphy_io_xusp #(
   end
 
   logic unused;
-  assign unused = ^{clk_lprx_en_i, lprx_en_i, pd_i, cal_start_i};
+  assign unused = ^{clk_lprx_en_i, lprx_en_i, clk_hsrx_en_i, hsrx_en_i, pd_i, cal_start_i};
 
 endmodule
