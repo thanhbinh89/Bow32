@@ -2882,7 +2882,7 @@ def gen_dly(g):
     PHY init, the BISC taps after it (no load after reset, OWN 0), one load per
     DLYn write that raises OWN or changes the code, without a byte clock (also
     with RX off), close writes to one lane (merged or not: the last tap wins),
-    traffic in between; then a PHY re-init with CMD.REINIT (cal_start: OWN
+    traffic in between; then a PHY re-init with CMD.AFE_CAL (cal_start: OWN
     cleared, BISC taps again); then a write of the code in use (OWN already 1:
     no load), AFE_CTRL.PD (pd: the PHY held in its init, READY 0, OWN 0, until
     PD = 0, then the BISC taps again) and the same codes written once more (OWN

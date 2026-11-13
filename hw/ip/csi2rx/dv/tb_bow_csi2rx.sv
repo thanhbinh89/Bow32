@@ -7,9 +7,10 @@
 // docs/ip/mipi_rx_arch.md, docs/ip/dphy_rx.md). The D-PHY speaks the AFE interface (step 5)
 // with the model csi2_tx_model, which plays the sensor and an FPGA AFE adapter with the
 // adapter's own logic (bow_dphy_dly_xusp / bow_dphy_dly_xphy): pd and cal_start (AFE_CTRL.PD,
-// CMD.REINIT) re-initialise the Versal PHY model, des_rst (~the gate, 0 while
-// CTRL.DES_RST_DIS = 1) drives its BurstRxRst (a test case of the Versal PHY with BurstRxRst
-// 0 writes DES_RST_DIS first, the testbench checks the D-PHY's setting at every burst);
+// CMD.AFE_CAL; CMD.REINIT in steps 4 and 5) re-initialise the Versal PHY model, des_rst
+// (~the gate, 0 while CTRL.DES_RST_DIS = 1) drives its BurstRxRst (a test case of the Versal
+// PHY with BurstRxRst 0 writes DES_RST_DIS first, the testbench checks the D-PHY's setting at
+// every burst);
 // status = {4{AFE ready}} (AFE_STATUS[11:8]).
 //
 // Reads a test case written by `tools/csi2/csi2_model.py gen DIR`:

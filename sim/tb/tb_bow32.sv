@@ -27,7 +27,7 @@
 // test patterns; see "IMX274" below) replaces the TCA9546A + IMX219.
 // PRSNT_M2C_L of the camera site (PB5) reads 0; the D-PHY's AFE interface
 // drives the PHY model as in the camera top (step 5 of
-// docs/ip/mipi_rx_arch.md): cal_start (CMD.REINIT) and pd (AFE_CTRL.PD) its
+// docs/ip/mipi_rx_arch.md): cal_start (CMD.AFE_CAL) and pd (AFE_CTRL.PD) its
 // re-init, des_rst its BurstRxRst, and AFE_STATUS[11:8] (dphy_status_i) reads
 // {PHY_RDY, DLY_RDY of every nibble, XPLL LOCKED_FB, LOCKED} = {PHY_RDY,
 // PHY_RDY, 1, 1} of the model (GPIO PA4 / PA5 / PB6 / PB7 before step 4: PB6 /
@@ -1846,7 +1846,7 @@ module tb_bow32 #(
   end
 
   // The AFE controls of the Versal PHY in the camera top (bow32_huins_vp1902_cam_top) drive
-  // the PHY model directly (its ports): cal_start (CMD.REINIT, a 32 cycle pulse) and pd
+  // the PHY model directly (its ports): cal_start (CMD.AFE_CAL, a 32 cycle pulse) and pd
   // (AFE_CTRL.PD) its re-init, des_rst its BurstRxRst (through the Versal adapter's logic in
   // the model). +S274_BURSTRST=<0|1>: BurstRxRst = 0 / 1 whatever the receiver says (the
   // model's v_brst_force). cal_start pulses are counted here.
@@ -2858,7 +2858,7 @@ module tb_bow32 #(
       end
       // MIPI CSI-2 receiver with sw/apps/csi2_test and the IMX274 (Imx274
       // build): the PHY knobs of the D-PHY's registers through `phy` (status
-      // with AFE_STATUS, a re-init with CMD.REINIT: one reinit_i pulse, READY
+      // with AFE_STATUS, a re-init with CMD.AFE_CAL: one cal_start pulse, READY
       // drops and comes back with the BISC delays), then 'test quick' (every check on
       // 64x48 frames: phy-idle in standby LP-00, link-up, calibration with a
       // BISC delay outside the eye, integrity with solid 555h/AAAh, packets
