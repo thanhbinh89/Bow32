@@ -67,8 +67,9 @@ switch -- $card {
     set project  bow32_huins_vp1902_cam
     set pdi_name bow32_huins_vp1902_cam.pdi
     set xdcs     {huins_vp1902_cam.xdc cam_pads.xdc}
-    # constr/huins_vp1902_cam.xdc: CSI-2 receiver 12 (pixel FIFO 2, byte clock
-    # meter, LOG / RAW requests and acknowledges 4, D-PHY event counters,
+    # constr/huins_vp1902_cam.xdc: CSI-2 receiver 12 (the lane merge's two clock FIFO
+    # 2 (the pixel FIFO's up to step 7), byte clock meter, LOG / RAW requests and
+    # acknowledges 4, D-PHY event counters,
     # configuration copy and CLK_TOG_DIV (step 6), DLYn load requests + taps,
     # DLYn tap readback), H.264 output FIFO 2
     set bus_skew_count 14

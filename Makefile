@@ -52,10 +52,12 @@ sw:
 # 200 MHz) and with 1 lane, then two CKs that bow_ddr's
 # elaboration checks must refuse (refresh interval, CK above the core's) and
 # a lane count bow_mipi_rx must refuse. The receiver on its own (bow_mipi_rx:
-# 2, 1 and 4 lanes as on the KV260, Huins and 1 lane builds, without a PHY),
-# its CSI-2 controller on its own with the PPI ports (bow_csi2rx: the same
-# configurations, each stating the PHY's lp clock; no lp clock, or one above
-# 32 x its video clock, it must refuse, with its own message), the controller
+# 2, 1 and 4 lanes as on the KV260, Huins and 1 lane builds, without a PHY;
+# a byte clock above its video clock it must refuse), its CSI-2 controller on
+# its own with the PPI ports (bow_csi2rx: the same configurations, each
+# stating the PHY's lp clock and highest byte clock; no lp clock, one above
+# 32 x its clock csi_clk_i, no byte clock or one above csi_clk_i, step 7 of
+# docs/ip/mipi_rx_arch.md, it must refuse, with its own message), the controller
 # with flat PPI ports for a standard PHY (bow_csi2rx_ppi_flat, not in
 # csi2rx.f: 2, 1 and 4 lanes, 50 MHz video clock) and its digital
 # D-PHY on its own (bow_dphy_rx with its whole AFE interface: 1, 2 and 4 lanes,
@@ -84,15 +86,19 @@ RX_LINT = $(VERILATOR) --lint-only -Wall hw/lint/verilator_waivers.vlt -F hw/ip/
 	  -F hw/ip/bus/bus.f -F hw/ip/dphy_rx/dphy_rx.f -F hw/ip/csi2rx/csi2rx.f
 RX_CFGS = "" "-GLanes=1" "-GLanes=4 -GAfeKind=2 -GFifoDepth=512" \
 	  "-GHasPhy=1'b0 -GPhyClkHz=50000000"
-# the controller alone: the same, with the PHY's lp clock = vid_clk_i (PhyClkHz, 200 MHz default),
-# and once with an lp clock of 32 x its video clock (the PPI error counters' limit)
-CTRL_CFGS = "-GPpiLpClkHz=200000000" "-GLanes=1 -GPpiLpClkHz=200000000" \
-	  "-GLanes=4 -GFifoDepth=512 -GPpiLpClkHz=200000000" \
-	  "-GHasPhy=1'b0 -GPhyClkHz=50000000 -GPpiLpClkHz=50000000 -GDphyWin=1'b0" \
-	  "-GPhyClkHz=50000000 -GPpiLpClkHz=1600000000"
+# the controller alone: the same, with the PHY's lp clock and highest byte clock = its clock
+# csi_clk_i (PhyClkHz, 200 MHz default), once with an lp clock of 32 x its clock (the PPI
+# error counters' limit) and once with a byte clock below it (180 MHz: the Huins camera)
+CTRL_CFGS = "-GPpiLpClkHz=200000000 -GPpiByteClkHz=200000000" \
+	  "-GLanes=1 -GPpiLpClkHz=200000000 -GPpiByteClkHz=200000000" \
+	  "-GLanes=4 -GFifoDepth=512 -GPpiLpClkHz=200000000 -GPpiByteClkHz=180000000" \
+	  "-GHasPhy=1'b0 -GPhyClkHz=50000000 -GPpiLpClkHz=50000000 -GPpiByteClkHz=50000000 -GDphyWin=1'b0" \
+	  "-GPhyClkHz=50000000 -GPpiLpClkHz=1600000000 -GPpiByteClkHz=50000000"
 # arguments for bow_csi2rx alone that it must refuse, and the message it must refuse them with
-CTRL_BAD = "|PpiLpClkHz not set" \
-	  "-GPhyClkHz=50000000 -GPpiLpClkHz=1700000000|PPI lp clock 1700000000 Hz > 32 x vid_clk_i"
+CTRL_BAD = "-GPpiByteClkHz=200000000|PpiLpClkHz not set" \
+	  "-GPhyClkHz=50000000 -GPpiLpClkHz=1700000000 -GPpiByteClkHz=50000000|PPI lp clock 1700000000 Hz > 32 x csi_clk_i" \
+	  "-GPpiLpClkHz=200000000|PpiByteClkHz not set" \
+	  "-GPpiLpClkHz=200000000 -GPpiByteClkHz=200000001|PPI byte clock 200000001 Hz > csi_clk_i 200000000 Hz"
 # the flat-port wrapper of the controller (standard PHY)
 FLAT_LINT = $(RX_LINT) hw/ip/csi2rx/rtl/bow_csi2rx_ppi_flat.sv --top-module bow_csi2rx_ppi_flat
 FLAT_CFGS = "" "-GLanes=1" "-GLanes=4 -GFifoDepth=512" "-GPhyClkHz=50000000"
@@ -127,11 +133,16 @@ lint: deps
 	  { echo "lint: bow_mipi_rx accepted 3 data lanes"; exit 1; }
 	@for g in $(RX_CFGS); do echo "$(RX_LINT) --top-module bow_mipi_rx $$g"; \
 	  $(RX_LINT) --top-module bow_mipi_rx $$g || exit 1; done
+	@# bow_mipi_rx (step 7): a byte clock above vid_clk_i (the controller's clock) is refused
+	@out=$$($(RX_LINT) --top-module bow_mipi_rx -GByteClkHz=250000000 2>&1) && \
+	  { echo "lint: bow_mipi_rx accepted a 250 MHz byte clock with a 200 MHz video clock"; exit 1; }; \
+	  echo "$$out" | grep -q "PPI byte clock 250000000 Hz > csi_clk_i 200000000 Hz" || \
+	  { echo "lint: bow_mipi_rx refused 250 MHz without the clock message:"; echo "$$out"; exit 1; }
 	@for g in $(CTRL_CFGS); do echo "$(RX_LINT) --top-module bow_csi2rx $$g"; \
 	  $(RX_LINT) --top-module bow_csi2rx $$g || exit 1; done
 	@# bow_csi2rx: the PPI lp errors are gray counters of the PHY's lp clock, sampled on its
-	@# video clock (at least lp / 32), and every instantiation states the PHY's lp clock
-	@# (PpiLpClkHz has no default)
+	@# clock csi_clk_i (at least lp / 32), its lane merge FIFO needs csi_clk_i >= the byte
+	@# clock (step 7), and every instantiation states both clocks (no defaults)
 	@for c in $(CTRL_BAD); do g="$${c%%|*}"; m="$${c#*|}"; \
 	  if out="$$($(RX_LINT) --top-module bow_csi2rx $$g 2>&1)"; then \
 	    echo "lint: bow_csi2rx accepted '$$g' (expected: $$m)"; exit 1; fi; \

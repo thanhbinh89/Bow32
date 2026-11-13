@@ -2693,8 +2693,11 @@ def gen_rxoff(g):
     ERR_STATUS or IRQ_STATUS bit; (2) CTRL cleared (rx_off() of the driver) at a sweep of
     times from the start of a line burst, through its sync search: no SoT error; (3) RX_EN
     set at a sweep of times inside a burst with a bad sync, after RxActiveHS rose on every
-    lane: the burst is not the controller's, no SoT error; (4) RX on: a bad sync and a
-    deskew burst count again. Whole receiver only (the D-PHY's aligners)."""
+    lane, and inside a deskew burst after its RxSkewCalHS rose (a level until the burst ends):
+    the burst is not the controller's, no SoT error, no deskew count; (4) RX on: a bad sync
+    and a deskew burst count again. (Since step 7 the gated events go through the lane
+    merge's FIFO, whose write side is in reset while RX is off: (1) holds without the gate
+    too, (3) needs it.) Whole receiver only (the D-PHY's aligners)."""
     if g.ppi:
         raise SystemExit("test rxoff needs the D-PHY (no --ppi)")
     g.phy_up()
@@ -2758,6 +2761,17 @@ def gen_rxoff(g):
         g.wr("CTRL", ctrl, now=True)
         g.emit("wait")
         g.rd("CNT_SOT")
+        g.rd("ERR_STATUS")
+        g.wr("CTRL", off)
+    lanes = g.cfg["lanes"]
+    for d in range(0, 200, 20):                      # (3) RX on in a deskew burst
+        clear()
+        n = burst(g.deskew_burst, stop=True)
+        g.emit(f"waitbyte {n} {4 * lanes}")          # past the FFFFh: RxSkewCalHS high
+        g.emit(f"delay {d}")
+        g.wr("CTRL", ctrl, now=True)
+        g.emit("wait")
+        g.rd("CNT_EXT")
         g.rd("ERR_STATUS")
         g.wr("CTRL", off)
     g.wr("DPHY_CMD", DCMD_CNT_CLR)                   # HS entries of (2): stop dependent

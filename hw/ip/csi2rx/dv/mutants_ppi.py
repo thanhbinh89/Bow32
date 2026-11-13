@@ -84,13 +84,14 @@ MUTANTS = [
                                 "lperr_gray[1 + l] = ppi_lp_i[0].err_control;", 1)]),
     ("lost_burst_lane_mask", [(CTRL, "  assign lp_err = |lperr_ev;",
                                "  assign lp_err = |(lperr_ev & lane_en_sys);", 1)]),
-    ("lost_burst_off", [(CTRL, "    else if (lpl_ev && (lpl_req_q == lpl_ack_s))   lpl_req_q <= ~lpl_req_q;",
-                         "    else if (1'b0)                                 lpl_req_q <= ~lpl_req_q;", 1)]),
+    ("lost_burst_off", [(CTRL, "    else if (lpl_ev) lpl_pend_q <= 1'b1;",
+                         "    else if (1'b0)   lpl_pend_q <= 1'b1;", 1)]),
     # the pending loss cleared by an end of burst, not by the next packet start (test loss:
     # LP loss, a deskew burst on every lane, then the line)
-    ("lost_burst_pending_cleared_at_eob", [(CTRL, "    else if (lm_sop)                  lpl_pend_q <= 1'b0;",
-                                            "    else if (lm_eob)                  lpl_pend_q <= 1'b0;", 1)]),
-    ("sync_error_no_drop", [(CTRL, "lm_skew || (|al_sync_err) ||", "lm_skew ||", 1)]),
+    ("lost_burst_pending_cleared_at_eob", [(CTRL, "    else if (lm_sop) lpl_pend_q <= 1'b0;",
+                                            "    else if (lm_eob) lpl_pend_q <= 1'b0;", 1)]),
+    # (step 7: the sync errors come through the lane merge's FIFO, in order with the words)
+    ("sync_error_no_drop", [(CTRL, "lm_skew || (|lm_sot) ||", "lm_skew ||", 1)]),
     ("deskew_counted_on_last_lane", [(CTRL, "  assign dsk_ev = al_deskew[0] & ~dsk_last_q & ~stale_q[0];",
                                       "  assign dsk_ev = al_deskew[Lanes-1] & ~stale_q[Lanes-1];", 1)]),
     # RxSkewCalHS counted in every cycle it is high, not at its rising edge (step 6: a level

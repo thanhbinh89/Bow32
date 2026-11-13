@@ -1,7 +1,8 @@
 // Copyright Bow32 contributors.
 // SPDX-License-Identifier: Apache-2.0
 //
-// CSI-2 receiver debug capture (byte clock domain, hard reset): packet LOG into a 64 entry
+// CSI-2 receiver debug capture (the controller's clock csi_clk, hard reset; the byte clock
+// domain up to step 6 of docs/ip/mipi_rx_arch.md): packet LOG into a 64 entry
 // RAM that the CPU reads. (The RAW lane words moved into the D-PHY in step 4 of
 // docs/ip/mipi_rx_arch.md: bow_dphy_raw.)
 //
@@ -11,7 +12,7 @@
 // cycles later (they were written with the request), and when it is
 // complete sets ack = request, two cycles after its last RAM write so that
 // the RAM and log_wptr_o are stable before the CPU sees the ack. Requests
-// are levels: they work with a stopped byte clock (served when it runs).
+// are levels (up to step 6 they waited for a stopped byte clock; csi_clk runs always).
 //
 // LOG modes (one entry per packet, from bow_csi2_packet):
 //   -                 the next 64 entries
@@ -23,7 +24,7 @@
 
 module bow_csi2_capture (
   input  logic        clk_i,
-  input  logic        rst_ni,          // byte clock, hard reset
+  input  logic        rst_ni,          // csi clock, hard reset
 
   input  logic [3:0]  log_req_i,       // synchronised
   input  logic        log_trig_fs_i,

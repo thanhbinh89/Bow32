@@ -22,7 +22,20 @@
 // shows a pointer of 0 to the other side.
 //
 // Static timing: the gray pointer buses need a bus skew constraint
-// (set_bus_skew) of at most one period of the faster clock.
+// (set_bus_skew) of at most one period of the faster clock. The gray pointer
+// flops (wgray_q, rgray_q, the sources of those buses) are DONT_TOUCH, which
+// Vivado forwards to implementation: the top bit of a gray pointer equals the
+// top bit of its binary pointer, and phys_opt_design's equivalent driver
+// rewiring moved the synchroniser's load of that bit to the binary flop and
+// deleted the gray one (the lane merge FIFO of the Huins camera build, step 7
+// of docs/ip/mipi_rx_arch.md), so the bus skew constraint missed the bit.
+//
+// Simulation only, `define BOW_SYNC_JITTER: the two pointer synchronisers are bow_sync_bus
+// instances (u_sync_rptr, u_sync_wptr) with the jitter model of bow_sync (a bit that changed
+// less than 0.5 ns before the clock edge may resolve one cycle late), in place of the plain
+// flops of every other build (rgray_w1_q / rgray_w2_q, wgray_r1_q / wgray_r2_q: the cell names
+// of the FPGA constraints). A gray pointer then shows its old or its new value; a pointer
+// that crosses with more than one bit changing at a time would show values it never had.
 
 module bow_fifo_async #(
   parameter int unsigned Width = 8,
@@ -44,8 +57,10 @@ module bow_fifo_async #(
 
   localparam int unsigned AW = $clog2(Depth);
 
-  logic [AW:0] wbin_q, wbin_d, wgray_q;   // write pointer (wclk_i)
-  logic [AW:0] rbin_q, rbin_d, rgray_q;   // read pointer (rclk_i)
+  logic [AW:0] wbin_q, wbin_d;           // write pointer (wclk_i)
+  logic [AW:0] rbin_q, rbin_d;           // read pointer (rclk_i)
+  (* DONT_TOUCH = "TRUE" *) logic [AW:0] wgray_q;   // gray write pointer (to rclk_i)
+  (* DONT_TOUCH = "TRUE" *) logic [AW:0] rgray_q;   // gray read pointer (to wclk_i)
   logic [AW:0] rbin_w, wlevel;           // read pointer seen by the write side
   logic        do_push, do_pop;
 
@@ -68,17 +83,36 @@ module bow_fifo_async #(
 
   always_ff @(posedge wclk_i or negedge wrst_ni) begin
     if (!wrst_ni) begin
-      wbin_q     <= '0;
-      wgray_q    <= '0;
+      wbin_q  <= '0;
+      wgray_q <= '0;
+    end else begin
+      wbin_q  <= wbin_d;
+      wgray_q <= wbin_d ^ (wbin_d >> 1);
+    end
+  end
+
+`ifndef BOW_SYNC_JITTER
+  always_ff @(posedge wclk_i or negedge wrst_ni) begin
+    if (!wrst_ni) begin
       rgray_w1_q <= '0;
       rgray_w2_q <= '0;
     end else begin
-      wbin_q     <= wbin_d;
-      wgray_q    <= wbin_d ^ (wbin_d >> 1);
       rgray_w1_q <= rgray_q;
       rgray_w2_q <= rgray_w1_q;
     end
   end
+`else
+  bow_sync_bus #(
+    .Width (AW + 1)
+  ) u_sync_rptr (
+    .clk_i  (wclk_i),
+    .rst_ni (wrst_ni),
+    .d_i    (rgray_q),
+    .q_o    (rgray_w2_q)
+  );
+
+  assign rgray_w1_q = '0;
+`endif
 
   // ------------------------------------------------------------- read side
   assign empty_o = (rgray_q == wgray_r2_q);
@@ -87,17 +121,36 @@ module bow_fifo_async #(
 
   always_ff @(posedge rclk_i or negedge rrst_ni) begin
     if (!rrst_ni) begin
-      rbin_q     <= '0;
-      rgray_q    <= '0;
+      rbin_q  <= '0;
+      rgray_q <= '0;
+    end else begin
+      rbin_q  <= rbin_d;
+      rgray_q <= rbin_d ^ (rbin_d >> 1);
+    end
+  end
+
+`ifndef BOW_SYNC_JITTER
+  always_ff @(posedge rclk_i or negedge rrst_ni) begin
+    if (!rrst_ni) begin
       wgray_r1_q <= '0;
       wgray_r2_q <= '0;
     end else begin
-      rbin_q     <= rbin_d;
-      rgray_q    <= rbin_d ^ (rbin_d >> 1);
       wgray_r1_q <= wgray_q;
       wgray_r2_q <= wgray_r1_q;
     end
   end
+`else
+  bow_sync_bus #(
+    .Width (AW + 1)
+  ) u_sync_wptr (
+    .clk_i  (rclk_i),
+    .rst_ni (rrst_ni),
+    .d_i    (wgray_q),
+    .q_o    (wgray_r2_q)
+  );
+
+  assign wgray_r1_q = '0;
+`endif
 
   // --------------------------------------------------------------- storage
   bow_ram_sdp #(

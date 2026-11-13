@@ -61,7 +61,9 @@ set vid_period   5.000   ;# clk_vid
 
 # Every path between these groups goes through a synchroniser, a gray coded bus or a dual
 # clock RAM (bow_sync, bow_cdc_pulse, bow_fifo_async, quasi-static configuration
-# registers), as on the KV260. clk_sys and clk_vid come from one MMCM but are treated as
+# registers), as on the KV260. The CSI-2 controller's own crossing of its datapath is the
+# lane merge's two clock FIFO (byte -> clk_vid, step 7; its 16 x 41 bit RAM is a LUTRAM:
+# report_cdc lists it as CDC-26, a warning, as the DDR / HyperRAM PHY FIFOs). clk_sys and clk_vid come from one MMCM but are treated as
 # unrelated (all their crossings are synchronised). The LP receivers of the clock lane pad
 # are synchronised in clk_vid (dphy_hs_clk -> clk_vid). clk_in only clocks the lock-loss
 # reset of the MMCM.
@@ -95,15 +97,19 @@ create_waiver -type METHODOLOGY -id {TIMING-3} -user bow32 \
 # ---- Gray coded buses of the CSI-2 receiver (u_soc/u_csi2rx) --------------------------------
 # The clock groups do not cover set_bus_skew. A gray coded bus changes one bit per source
 # clock cycle, so the skew between its bits must stay below one source period (byte clock
-# 5.556 ns, clk_vid 5 ns); the CPU <-> byte command counters change rarely and get 5 ns.
+# 5.556 ns, clk_vid 5 ns); the command counters between the CPU and the LOG / RAW capture
+# (the LOG on clk_vid since step 7, the RAW on the byte clock) change rarely and get 5 ns.
 # Destinations are the first synchroniser flops. tcl/build.tcl counts the constraints of
 # report_bus_skew: 14 in this file (CSI-2 receiver 12, H.264 output FIFO 2), all met.
 # The receiver's cells are selected by the tail of their hierarchical name, not by their
 # full path, so that a constraint follows its flops when the receiver's hierarchy changes
 # (docs/ip/mipi_rx_arch.md, section 10, step 1): cells with names of their own (byte clock
-# meter, synchronisers) by those names, the pixel FIFO, register file and capture flops by
-# their path below u_csi2rx (the controller) or u_dphy_rx (the D-PHY's register file and RAW
-# capture, step 4); the adapter's delay control (step 5) by its path below u_dphy. Each tail
+# meter, synchronisers) by those names, the lane merge's FIFO, register file and capture
+# flops by their path below u_csi2rx (the controller) or u_dphy_rx (the D-PHY's register file
+# and RAW capture, step 4); the adapter's delay control (step 5) by its path below u_dphy.
+# Step 7 (docs/ip/mipi_rx_arch.md, section 10) moved the controller's crossing from the pixel
+# FIFO (one clock since then, clk_vid) to the lane merge's two clock FIFO: its two constraints
+# replace the pixel FIFO's, the count stays 14. Each tail
 # selects the same cells as the full path it replaced. Two cell groups of one side are a
 # list of two selectors (not an OR in one filter), so that Vivado warns about each one that
 # matches nothing. tcl/build.tcl also checks the cells of every constraint
@@ -111,20 +117,22 @@ create_waiver -type METHODOLOGY -id {TIMING-3} -user bow32 \
 # all in u_soc/u_csi2rx, u_soc/u_h264/u_out or u_dphy, every destination reached from
 # the sources, as many source as destination flops.
 set dphy_byte_skew [expr {$dphy_byte_period - 0.07}]
-# pixel FIFO (bow_fifo_async): write pointer byte -> vid, read pointer vid -> byte
-set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_fifo/wgray_q_reg[*]}] \
-             -to   [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_fifo/wgray_r1_q_reg[*]}] \
+# the lane merge's two clock FIFO (bow_csi2_lane_merge u_cdc_fifo, bow_fifo_async, step 7):
+# write pointer byte -> vid, read pointer vid -> byte (up to step 6 the pixel FIFO's)
+set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_lane_merge/u_cdc_fifo/wgray_q_reg[*]}] \
+             -to   [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_lane_merge/u_cdc_fifo/wgray_r1_q_reg[*]}] \
              $dphy_byte_skew
-set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_fifo/rgray_q_reg[*]}] \
-             -to   [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_fifo/rgray_w1_q_reg[*]}] \
+set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_lane_merge/u_cdc_fifo/rgray_q_reg[*]}] \
+             -to   [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_lane_merge/u_cdc_fifo/rgray_w1_q_reg[*]}] \
              $vid_period
 # byte clock meter, byte -> CPU
 set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */meter_gray_q_reg[*]}] \
              -to   [get_cells -hierarchical -filter {NAME =~ */u_sync_meter/g_bit[*].u_sync/sync_q_reg[0]}] \
              $dphy_byte_skew
-# LOG / RAW capture requests (CPU -> byte) and acknowledges (byte -> CPU); LOG in the
-# controller (u_csi2rx/u_regs, u_csi2rx/u_capture), RAW in the D-PHY since step 4
-# (u_dphy_rx/u_regs, u_dphy_rx/u_raw)
+# LOG / RAW capture requests (CPU -> capture) and acknowledges (capture -> CPU); LOG in the
+# controller (u_csi2rx/u_regs, u_csi2rx/u_capture; its capture on clk_vid since step 7, the
+# byte clock before), RAW in the D-PHY since step 4 (u_dphy_rx/u_regs, u_dphy_rx/u_raw, byte
+# clock)
 set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */u_csi2rx/u_regs/log_req_q_reg[*]}] \
              -to   [get_cells -hierarchical -filter {NAME =~ */u_sync_log_req/g_bit[*].u_sync/sync_q_reg[0]}] 5.0
 set_bus_skew -from [get_cells -hierarchical -filter {NAME =~ */u_dphy_rx/u_regs/raw_req_q_reg[*]}] \

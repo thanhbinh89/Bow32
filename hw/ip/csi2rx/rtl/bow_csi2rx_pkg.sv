@@ -39,7 +39,7 @@ package bow_csi2rx_pkg;
     logic [7:0] extra;        // bytes after a packet in its burst before ERR EXTRA, 0 = off
   } csi2_cfg_t;
 
-  // Events of the packet layer: one cycle pulses in the byte clock domain,
+  // Events of the packet layer: one cycle pulses of the controller's clock csi_clk,
   // each at most once per packet (= once per HS burst)
   typedef struct packed {
     logic pkt;        // header ok or corrected

@@ -1,7 +1,8 @@
 // Copyright Bow32 contributors.
 // SPDX-License-Identifier: Apache-2.0
 //
-// CSI-2 pixel unpacker (byte clock domain): payload bytes of the accepted
+// CSI-2 pixel unpacker (the controller's clock csi_clk; the byte clock domain up to step 6
+// of docs/ip/mipi_rx_arch.md): payload bytes of the accepted
 // lines -> groups of up to 4 pixels for the pixel FIFO.
 //
 //   RAW10: 5 bytes -> 4 pixels, P_i = {B_i, B4[2i+1:2i]}
@@ -58,7 +59,7 @@ module bow_csi2_unpack import bow_csi2rx_pkg::*; #(
   parameter int unsigned Bytes = 2      // bytes per cycle at most: 1, 2 or 4
 ) (
   input  logic                  clk_i,
-  input  logic                  rst_ni,     // byte clock, datapath reset
+  input  logic                  rst_ni,     // csi clock, datapath reset
   input  logic                  sol_i,      // an accepted line starts (no bytes in this cycle)
   input  logic                  raw10_i,    // 1: RAW10, 0: RAW8 (static during a line)
   input  logic [Bytes-1:0]      valid_i,    // payload bytes ([k] only with [k-1])

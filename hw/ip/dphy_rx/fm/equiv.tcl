@@ -103,6 +103,29 @@
 # must be matched by name and pass, as in the other steps. Not proven here: the D-PHY's
 # register file and top (APPLY, gray event counters, the new registers), the PPI signals
 # themselves: the D-PHY bench hw/ip/dphy_rx/dv and the receiver benches cover them.
+#
+# Step 7 (the CSI-2 controller on its own continuous clock csi_clk: a two clock FIFO right
+# after the lane merge, everything after it on csi_clk, the pixel FIFO on one clock). The
+# controller (bow_csi2rx) moved its packet layer, unpack, pixel FIFO, LOG and events from the
+# byte clock to csi_clk: it is not equivalent to step 6, cycle by cycle or otherwise (the
+# FIFO adds latency, the events leave on another clock), and is not compared (the receiver
+# benches, the lane merge FIFO's unit test and the system tests cover it). Step 7 proves
+# against a tree of step 6 (e.g. b832038), with every input free, no constant, cut or
+# don't-verify point and every compare point matched by name and passing (the rules of steps
+# 1 and 2):
+#   * the digital D-PHY bow_dphy_rx as a whole (configurations kv260 .. sim, the parameters
+#     bow_mipi_rx gives it: AfeKind 2 for huins, lp_clk = vid_clk, the CPU clock), with its
+#     register file, RAW, AFE interface and PPI (step 7 changed nothing of it);
+#   * the lane state machine bow_dphy_lp, data lane (lp_data) and clock lane (lp_clk);
+#   * the blocks the controller moved to csi_clk unchanged (blk_*): bow_csi2_packet (2 and 4
+#     bytes per word), bow_csi2_unpack (1 and 4), bow_csi2rx_out, bow_csi2_capture and the
+#     register file bow_csi2rx_regs (the Huins configuration): the same function on the new
+#     clock (what changed is bow_csi2rx's wiring, the lane merge with its FIFO and the pixel
+#     FIFO, which the DV covers);
+#   * the two clock FIFO bow_fifo_async (blk_afifo16: 41 bits x 16 as in the lane merge, the
+#     DDR and HyperRAM PHYs; blk_afifo512: 33 bits x 512 as the H.264 output FIFO): step 7
+#     put its pointer synchronisers into always blocks of their own, for the jitter model of
+#     simulation builds (BOW_SYNC_JITTER, not defined here): the same flops, names and logic.
 
 # Configurations: the parameter sets of the builds that instantiate the receiver
 # (hw/top/rtl/bow32_top.sv, the board tops, sim/tb/tb_bow32.sv)
@@ -114,6 +137,27 @@ array set cfg_params {
   sim     {Lanes = 2, PhyClkHz = 107526882, CpuClkHz = 50000000, HasPhy = 1, FifoDepth = 256, DlyVid = 0}
   lp_data {ClockLane = 0}
   lp_clk  {ClockLane = 1}
+  blk_packet2 {Bytes = 2}
+  blk_packet4 {Bytes = 4}
+  blk_unpack1 {Bytes = 1}
+  blk_unpack4 {Bytes = 4}
+  blk_out     {}
+  blk_capture {}
+  blk_regs    {Lanes = 4, PhyClkHz = 200000000, HasPhy = 1, FifoDepth = 512, DphyWin = 1}
+  blk_afifo16  {Width = 41, Depth = 16}
+  blk_afifo512 {Width = 33, Depth = 512}
+}
+# step 7, unchanged blocks (blk_*): the module of each configuration
+array set blk_module {
+  blk_packet2 bow_csi2_packet
+  blk_packet4 bow_csi2_packet
+  blk_unpack1 bow_csi2_unpack
+  blk_unpack4 bow_csi2_unpack
+  blk_out     bow_csi2rx_out
+  blk_capture bow_csi2_capture
+  blk_regs    bow_csi2rx_regs
+  blk_afifo16  bow_fifo_async
+  blk_afifo512 bow_fifo_async
 }
 if {![info exists cfg_params($cfg)]} {
   puts "EQUIV $cfg: unknown configuration ([lsort [array names cfg_params]])"
@@ -137,6 +181,7 @@ array set step_top {
   4 bow_mipi_rx
   5 bow_mipi_rx_s4
   6 bow_csi2rx
+  7 bow_dphy_rx
 }
 array set step_rules {
   1 {u_dphy_rx/ {}}
@@ -145,6 +190,7 @@ array set step_rules {
   4 {}
   5 {u_mipi/ {}}
   6 {}
+  7 {}
 }
 array set step_blocks {
   0 {rx {}}
@@ -154,6 +200,7 @@ array set step_blocks {
   4 {dphy u_dphy_rx/ ctrl u_csi2rx/}
   5 {dphy u_mipi/u_dphy_rx/ ctrl u_mipi/u_csi2rx/}
   6 {part {}}
+  7 {part {}}
 }
 # Step 5 (see the header):
 #   step_files        implementation files read after its file lists
@@ -163,7 +210,7 @@ array set step_blocks {
 #   step_moved        reference cells without a counterpart (name prefixes)
 #   step_new          implementation cells without a counterpart (name prefixes)
 array set step_files       {5 {hw/ip/dphy_rx/fm/bow_mipi_rx_s4.sv}}
-array set step_ref_step    {5 4 6 5}
+array set step_ref_step    {5 4 6 5 7 6}
 array set step_dont_verify {5 {byte_rst_o burst_rst_en_o dly_tap_o dly_load_o}}
 array set step_constants   {5 {u_mipi/u_dphy_rx/u_regs/pd_q_reg 0}}
 array set step_moved {5 {u_dphy_rx/g_dly_byte. u_dphy_rx/g_dly_vid. u_dphy_rx/dly_load_o_reg
@@ -194,12 +241,19 @@ if {$step < 1 || ![info exists step_top($step)]} {
   puts "EQUIV $cfg: unknown step $step ([lsort [array names step_rules]])"
   exit 1
 }
-if {[string match lp_* $cfg] && $step != 6} {
-  puts "EQUIV $cfg: configuration $cfg is a part of step 6 (STEP=6)"
+if {[string match lp_* $cfg] && $step ni {6 7}} {
+  puts "EQUIV $cfg: configuration $cfg is a part of steps 6 and 7 (STEP=6, STEP=7)"
+  exit 1
+}
+if {[string match blk_* $cfg] && $step != 7} {
+  puts "EQUIV $cfg: configuration $cfg is a part of step 7 (STEP=7)"
   exit 1
 }
 # the step of a tree, from its files (a tree of step 3 has the RTL of step 2)
 proc tree_step {root} {
+  if {[file exists [file join $root hw ip common rtl bow_fifo_ram.sv]]} {
+    return 7
+  }
   if {[file exists [file join $root hw ip csi2rx rtl bow_ppi_err_rx.sv]]} {
     return 6
   }
@@ -241,6 +295,28 @@ if {$step == 6} {
     regsub {, DlyVid = \d+} $params {} params
     append params ", DphyWin = 1, PpiLpClkHz = $phy_hz"
   }
+}
+# step 7: one part, the same module on both sides (see the header): the D-PHY with the
+# parameters bow_mipi_rx gives it, the lane state machine, or an unchanged block (of the
+# controller, or the two clock FIFO)
+if {$step == 7} {
+  if {[string match lp_* $cfg]} {
+    set part lp
+    set impl_top bow_dphy_lp
+  } elseif {[string match blk_* $cfg]} {
+    set part blk
+    set impl_top $blk_module($cfg)
+  } else {
+    set part dphy
+    set impl_top bow_dphy_rx
+    regexp {Lanes = (\d+)} $params -> lanes
+    regexp {PhyClkHz = (\d+)} $params -> phy_hz
+    regexp {CpuClkHz = (\d+)} $params -> cpu_hz
+    regexp {DlyVid = (\d+)} $params -> versal
+    set params "Lanes = $lanes, AfeKind = [expr {$versal ? 2 : 1}], LpClkHz = $phy_hz,\
+                BusClkHz = $cpu_hz"
+  }
+  set ref_top $impl_top
 }
 # the rules from the implementation's step down to the reference's
 set rename_rules {}
@@ -305,10 +381,18 @@ set_app_var hdlin_error_on_duplicate_design true
 set_app_var name_match_based_on_nets false
 
 read_sverilog -r -12 -work_library WORK $ref_files
-set_top r:/WORK/$ref_top -parameter $params
+if {$params eq {}} {
+  set_top r:/WORK/$ref_top
+} else {
+  set_top r:/WORK/$ref_top -parameter $params
+}
 
 read_sverilog -i -12 -work_library WORK $impl_files
-set_top i:/WORK/$impl_top -parameter $params
+if {$params eq {}} {
+  set_top i:/WORK/$impl_top
+} else {
+  set_top i:/WORK/$impl_top -parameter $params
+}
 
 foreach {from to} $rename_rules {
   set_compare_rule $impl -from $from -to $to
@@ -343,9 +427,9 @@ if {[info exists step_constants($step)]} {
 }
 # step 6: {side point value}, see the header
 set step6_constants {}
-if {$part eq "ctrl"} {
+if {$step == 6 && $part eq "ctrl"} {
   lappend step6_constants impl dsk_last_q_reg 0
-} elseif {$part eq "lp"} {
+} elseif {$step == 6 && $part eq "lp"} {
   foreach p {hsrx_early_i miss_off_i ulps_en_i tinit_set_i force_wait_i} {
     lappend step6_constants impl $p 0
   }
@@ -370,7 +454,7 @@ if {$part eq "ctrl"} {
 }
 # step 6: the cut nets, the same name on both sides, not verified themselves
 set n_cuts 0
-if {$part ne {}} {
+if {$step == 6} {
   foreach net $step6_cut($part) {
     foreach d [list $ref $impl] {
       if {[sizeof_collection [get_nets -quiet "$d/$net"]] != 1} {
@@ -458,7 +542,7 @@ proc check_pairs {} {
       continue
     }
     set bi [block_of $::step $i]
-    set br [block_of [expr {$::step == 6 ? 6 : $::ref_step}] $r]
+    set br [block_of [expr {$::step in {6 7} ? $::step : $::ref_step}] $r]
     dict incr count $bi
     if {$bi eq "wrapper" || ($::ref_step > 0 && $br ne $bi)} {
       incr outside
@@ -652,10 +736,18 @@ if {$step == 5 && (![info exists dv_total] || $dv_total != $n_dv_ports || $dv_po
                $n_dv_ports port bits listed"
 }
 # (no "Not Compared" section: no constant register and no unread flop, e.g. the clock lane
-# state machine of step 6)
+# state machine of step 6; a section with one of the two lines: the other is 0, e.g. the
+# packet layer of step 7 has unread flops only, the clock lane constant registers only)
 if {![regexp {Not Compared} $st]} {
   set creg 0
   set unread 0
+} else {
+  if {![regexp {Constant reg} $st]} {
+    set creg 0
+  }
+  if {![regexp {Unread} $st]} {
+    set unread 0
+  }
 }
 foreach v {total port dff creg unread} {
   if {![info exists $v]} {
@@ -692,6 +784,15 @@ if {$step == 6} {
                names, no black box or user match; $cut; held: $held\
                ($n_constants user constants); unmatched only the new cells and ports\
                ([join $per {, }]); not compared: $creg constant registers, $unread unread flops"
+}
+if {$step == 7} {
+  set what [dict get {dphy {the D-PHY} lp {the lane state machine} blk {an unchanged block}} $part]
+  set summary "step $ref_step -> $step, part $part ($what, $impl_top on both sides,\
+               [expr {$params eq {} ? {default parameters} : $params}]): $total compare points\
+               matched and passing ($port ports, $dff flops), 0 unmatched, 0 failing / aborted /\
+               unverified, $n_pairs matched pairs ($n_unread unread) with the reference's names,\
+               no black box, user match, constant, cut or don't-verify point; not compared: $creg\
+               constant registers, $unread unread flops"
 }
 if {$step == 5} {
   set per {}

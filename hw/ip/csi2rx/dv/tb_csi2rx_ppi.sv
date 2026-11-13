@@ -114,15 +114,16 @@ module tb_csi2rx_ppi;
     .HasPhy     (1'b1),
     .FifoDepth  (FifoDepth),
     .DphyWin    (1'b1),                    // as in bow_mipi_rx (INFO[6])
-    .PpiLpClkHz (PhyClkHz)
+    .PpiLpClkHz (PhyClkHz),
+    .PpiByteClkHz (PhyClkHz)               // the BFM's byte clocks: 96 .. 180 MHz
   ) u_dut (
     .clk_i            (clk_b),
     .rst_ni           (rst_n),
     .bus_req_i        (req_b),
     .bus_rsp_o        (rsp_b),
     .irq_o            (irq_b),
-    .vid_clk_i        (vclk_b),
-    .vid_rst_ni       (vrst_n),
+    .csi_clk_i        (vclk_b),
+    .csi_rst_ni       (vrst_n),
     .m_axis_tvalid_o  (mv_b),
     .m_axis_tready_i  (m_tready),
     .m_axis_tdata_o   (md_b),
@@ -170,8 +171,8 @@ module tb_csi2rx_ppi;
     .bus_req_i             (req_s),
     .bus_rsp_o             (rsp_s),
     .irq_o                 (irq_s),
-    .vid_clk_i             (vclk_s),
-    .vid_rst_ni            (vrst_n),
+    .csi_clk_i             (vclk_s),
+    .csi_rst_ni            (vrst_n),
     .m_axis_tvalid_o       (mv_s),
     .m_axis_tready_i       (m_tready),
     .m_axis_tdata_o        (md_s),

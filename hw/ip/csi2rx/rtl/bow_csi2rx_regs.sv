@@ -7,8 +7,9 @@
 //
 //   0x000 ID          R    0x43533201
 //   0x004 INFO        R    [3:0] lanes [4] PHY [5] 0 (was DLY_VID) [6] the D-PHY's
-//                          registers are at 0xC00 (DphyWin: 1 in bow_mipi_rx) [15:8] video
-//                          clock MHz (saturating at 255) [31:16] FIFO depth
+//                          registers are at 0xC00 (DphyWin: 1 in bow_mipi_rx) [15:8] MHz of
+//                          the controller's clock (csi_clk since step 7, vid_clk before; the
+//                          video clock on the FPGAs), saturating at 255 [31:16] FIFO depth
 //   0x008 CTRL        RW   [0] PHY_EN [1] RX_EN [2] LANES (2 lanes) [3] 0 (was CLK_FORCE)
 //                          [4] VC_ANY [6:5] VC [7] LANES4 (4 lanes, wins over LANES)
 //                          [13:8] DT [23:16] EXTRA (64, 0 = off)
@@ -179,8 +180,8 @@ module bow_csi2rx_regs import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
   logic       log_trig_q, log_stop_q, log_wait_q, log_done_q;
   logic       log_arm, log_fin;
 
-  // The request never steps onto the ack: 16 ARMs while the byte clock is
-  // stopped would otherwise look like a completed capture.
+  // The request never steps onto the ack: 16 ARMs before the capture side
+  // answers would otherwise look like a completed capture.
   assign log_req_n = gray_inc4(log_req_q);
 
   assign log_arm = we0 && (a == 12'h080) && wd[0];
@@ -254,7 +255,7 @@ module bow_csi2rx_regs import bow_bus_pkg::*; import bow_csi2rx_pkg::*; #(
   // FE (or the RX start) and latched at its FE together with FRAME_INFO.
   // Errors between frames (vertical blanking) count for the next frame:
   // the lost burst may have been its FS or one of its lines. Events of the
-  // FE packet itself (a corrected header) leave the byte domain in the same
+  // FE packet itself (a corrected header) leave the csi clock domain in the same
   // cycle as FE but may arrive one CPU cycle later (separate pulse
   // synchronisers): the 2 cycles after FE still go to the frame that ended.
   always_ff @(posedge clk_i or negedge rst_ni) begin
