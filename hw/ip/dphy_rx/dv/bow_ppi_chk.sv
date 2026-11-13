@@ -3,15 +3,15 @@
 //
 // Checker of the PPI v1.x outputs of bow_dphy_rx (docs/ip/mipi_rx_arch.md, sections 4.9, 5.2,
 // 5.3; step 6 of section 10) that the CSI-2 controller does not check itself, against the
-// inputs of the LP state machines: their filtered LP levels, their synchronised enables and
-// the applied configuration (CTRL.CLK_CONT, TIM2.T_INIT). A testbench binds it into every
-// bow_dphy_rx:
+// inputs of the LP state machines: their filtered LP levels, their synchronised enables, the
+// applied configuration (CTRL.CLK_CONT, CTRL.ULPS_EN, TIM2.T_INIT) and the REINIT pulse of
+// the lp domain. A testbench binds it into every bow_dphy_rx:
 //
 //   bind bow_dphy_rx bow_ppi_chk #(.Lanes (Lanes)) u_ppi_chk (
 //     .lp_clk_i, .lp_rst_ni (lrst_n), .byte_clk_i, .byte_rst_ni (brst_n),
 //     .ppi_hs_i (ppi_hs_o), .ppi_lp_i (ppi_lp_o), .ppi_lp_clk_i (ppi_lp_clk_o),
 //     .lane_en_i (lane_en), .lp_i (lp_st), .clk_force_i (clk_force), .byte_ce_i (byte_ce),
-//     .tinit_i (cfg_lp_q.tinit));
+//     .tinit_i (cfg_lp_q.tinit), .ulps_en_i (cfg_lp_q.ulps_en), .force_wait_i (force_wait));
 //
 // Properties, on every lp clock edge from the second one after a reset; t = the cycle
 // that ends at the edge, [0] = clock lane, [1 + l] = data lane l:
@@ -27,8 +27,19 @@
 //     step forward (00 01 11 10 00), at least 16 cycles after the step before; ErrControl[l]
 //     and ErrEsc[l] only step while the lane's Enable was high, ErrControlClk never while
 //     CTRL.CLK_CONT; ErrSyncEsc stays 0 (no LPDT).
-//   ULPS levels: RxUlpsEsc[l] only with UlpsActiveNot[l] low, RxUlpsClkNot low only with
-//     UlpsActiveNotClk low; never in ULPS and Stopstate together; only on an enabled lane.
+//   ULPS levels (the public PPI's order): in ULPS = RxUlpsEsc[l] high / RxUlpsClkNot low,
+//     from the ULPS command until the wake-up ends; ULPS active = UlpsActiveNot[l] /
+//     UlpsActiveNotClk low, from the command until the wake-up mark:
+//     * ULPS active only while in ULPS; in ULPS never with Stopstate, only on an enabled
+//       lane;
+//     * ULPS active rises only after LP-00 (the command's last space, the clock lane's
+//       LP-00, a wake-up mark that ended without LP-11) and falls only after the wake-up
+//       mark LP-10 or LP-11;
+//     * in ULPS but not active (waking up) only while the line shows the mark (LP-10, or
+//       LP-01 that the state machine ignores there), never after LP-00 or LP-11;
+//     * in ULPS falls only after LP-11 (the end of the wake-up);
+//     the falls also when the lane was disabled, ULPS_EN was 0 or a REINIT came the cycle
+//     before.
 //   RxClkActiveHS: equals the byte clock gate (byte_ce_o); only on an enabled clock lane;
 //     together with StopstateClk only under CLK_CONT (the gate, section 5.3).
 // Byte domain: ErrSotHS 0 (v2); RxSkewCalHS (v1.x) rises at most once per burst (RxActiveHS
@@ -52,14 +63,16 @@ module bow_ppi_chk import bow_ppi_pkg::*; #(
   input logic [Lanes:0][1:0] lp_i,          // filtered LP {P, N}, [0] clock lane
   input logic                clk_force_i,   // applied CTRL.CLK_CONT
   input logic                byte_ce_i,     // byte clock gate (byte_ce_o)
-  input logic [19:0]         tinit_i        // applied TIM2.T_INIT
+  input logic [19:0]         tinit_i,       // applied TIM2.T_INIT
+  input logic                ulps_en_i,     // applied CTRL.ULPS_EN
+  input logic                force_wait_i   // the lanes back to WaitStop (CMD.REINIT), lp
 );
 
   localparam int unsigned N = Lanes + 1;
   localparam int unsigned StopRun = 12;
   localparam int unsigned Hold = 16;        // minimum cycles between two counter steps
 
-  logic [N-1:0]      stop, en, lp11, ulps, ulps_rx;
+  logic [N-1:0]      stop, en, lp11, lp10, lp00, ulps, ulps_act;
   logic [N-1:0][1:0] err;                   // ErrControl, [0] ErrControlClk
   logic [N-1:0][1:0] esc;                   // ErrEsc, [0] unused (0)
   logic              act;
@@ -68,18 +81,22 @@ module bow_ppi_chk import bow_ppi_pkg::*; #(
     stop[0]    = ppi_lp_clk_i.stopstate;
     err[0]     = ppi_lp_clk_i.err_control;
     esc[0]     = 2'b00;
-    ulps[0]    = !ppi_lp_clk_i.ulps_active_not;
-    ulps_rx[0] = !ppi_lp_clk_i.rx_ulps_clk_not;
+    ulps[0]     = !ppi_lp_clk_i.rx_ulps_clk_not;
+    ulps_act[0] = !ppi_lp_clk_i.ulps_active_not;
     for (int unsigned l = 0; l < Lanes; l++) begin
       stop[1 + l]    = ppi_lp_i[l].stopstate;
       err[1 + l]     = ppi_lp_i[l].err_control;
       esc[1 + l]     = ppi_lp_i[l].err_esc;
-      ulps[1 + l]    = !ppi_lp_i[l].ulps_active_not;
-      ulps_rx[1 + l] = ppi_lp_i[l].rx_ulps_esc;
+      ulps[1 + l]     = ppi_lp_i[l].rx_ulps_esc;
+      ulps_act[1 + l] = !ppi_lp_i[l].ulps_active_not;
     end
     en  = lane_en_i;
     act = ppi_lp_clk_i.rx_clk_active_hs;
-    for (int unsigned i = 0; i < N; i++) lp11[i] = (lp_i[i] == 2'b11);
+    for (int unsigned i = 0; i < N; i++) begin
+      lp11[i] = (lp_i[i] == 2'b11);
+      lp10[i] = (lp_i[i] == 2'b10);
+      lp00[i] = (lp_i[i] == 2'b00);
+    end
   end
 
   function automatic logic [1:0] gray_next(logic [1:0] g);
@@ -87,16 +104,16 @@ module bow_ppi_chk import bow_ppi_pkg::*; #(
   endfunction
 
   // values of the cycles before: _q = t-1, _q2 = t-2, _q3 = t-3
-  logic [N-1:0]       en_q, lp11_q, lp11_q2, lp11_q3, stop_q;
+  logic [N-1:0]       en_q, lp11_q, lp11_q2, lp11_q3, lp10_q, lp00_q, stop_q, ulps_q, ulps_act_q;
   logic [N-1:0][1:0]  err_q, esc_q;
   logic [N-1:0][20:0] run_q;           // cycles in a row enabled in LP-11, up to t-1
   logic [N-1:0][5:0]  err_age_q, esc_age_q;   // cycles since the last step (saturating)
-  logic               force_q, valid_q;
+  logic               force_q, valid_q, ulps_en_q, force_wait_q;
   logic [19:0]        tinit_q;
   logic               armed_q = 1'b0;  // a reset was seen (two-state simulators start
                                        // with the reset already low, without an edge)
 
-  int unsigned n_cycles = 0, n_live = 0, n_act = 0, n_forced = 0, n_ulps = 0;
+  int unsigned n_cycles = 0, n_live = 0, n_act = 0, n_forced = 0, n_ulps = 0, n_wake = 0;
   int unsigned n_stop [N], n_err [N], n_esc [N];
   initial begin
     for (int unsigned i = 0; i < N; i++) begin
@@ -141,7 +158,13 @@ module bow_ppi_chk import bow_ppi_pkg::*; #(
       lp11_q    <= '0;
       lp11_q2   <= '0;
       lp11_q3   <= '0;
+      lp10_q    <= '0;
+      lp00_q    <= '0;
       stop_q    <= '0;
+      ulps_q    <= '0;
+      ulps_act_q <= '0;
+      ulps_en_q <= 1'b0;
+      force_wait_q <= 1'b0;
       err_q     <= '0;
       esc_q     <= '0;
       run_q     <= '0;
@@ -176,12 +199,32 @@ module bow_ppi_chk import bow_ppi_pkg::*; #(
           check_step(i == 0 ? "ErrControlClk" : "ErrControl", i, err[i], err_q[i], err_age_q[i],
                      (i == 0) ? !force_q : en_q[i]);
           if (i != 0) check_step("ErrEsc", i, esc[i], esc_q[i], esc_age_q[i], en_q[i]);
-          // ULPS levels
-          if (ulps_rx[i] && !ulps[i]) begin
-            fail($sformatf("RxUlps of the %s without UlpsActiveNot low", lane_name(i)));
+          // ULPS levels (the public PPI's order: active until the wake-up mark, in ULPS until
+          // its end)
+          if (ulps_act[i] && !ulps[i]) begin
+            fail($sformatf("UlpsActiveNot of the %s low while not in ULPS (RxUlps%s)", lane_name(i),
+                           (i == 0) ? "ClkNot high" : "Esc low"));
           end
           if (ulps[i] && stop[i]) fail($sformatf("ULPS and Stopstate of the %s", lane_name(i)));
           if (ulps[i] && !en_q[i]) fail($sformatf("ULPS of the %s, which was disabled", lane_name(i)));
+          if (ulps_act[i] && !ulps_act_q[i] && !lp00_q[i]) begin
+            fail($sformatf("ULPS of the %s active without LP-00 the cycle before", lane_name(i)));
+          end
+          if (ulps[i] && !ulps_act[i]) begin
+            n_wake++;
+            if (lp00_q[i] || lp11_q[i]) begin
+              fail($sformatf("the %s still waking up from ULPS after LP-%s", lane_name(i),
+                             lp00_q[i] ? "00" : "11"));
+            end
+          end
+          if ((ulps_act_q[i] && !ulps_act[i] && !(lp10_q[i] || lp11_q[i])) ||
+              (ulps_q[i] && !ulps[i] && !lp11_q[i])) begin
+            if (en_q[i] && ulps_en_q && !force_wait_q) begin
+              fail($sformatf("%s of the %s ended without %s", ulps_q[i] && !ulps[i] ? "ULPS" :
+                             "active ULPS", lane_name(i), ulps_q[i] && !ulps[i] ? "LP-11" :
+                             "the wake-up mark (LP-10) or LP-11"));
+            end
+          end
         end
         // RxClkActiveHS
         if (act) n_act++;
@@ -200,7 +243,13 @@ module bow_ppi_chk import bow_ppi_pkg::*; #(
       lp11_q  <= lp11;
       lp11_q2 <= lp11_q;
       lp11_q3 <= lp11_q2;
+      lp10_q  <= lp10;
+      lp00_q  <= lp00;
       stop_q  <= stop;
+      ulps_q  <= ulps;
+      ulps_act_q <= ulps_act;
+      ulps_en_q <= ulps_en_i;
+      force_wait_q <= force_wait_i;
       err_q   <= err;
       esc_q   <= esc;
       force_q <= clk_force_i;
@@ -252,8 +301,8 @@ module bow_ppi_chk import bow_ppi_pkg::*; #(
         per_lane = {per_lane, $sformatf(", %s %0d Stopstate / %0d ErrControl / %0d ErrEsc steps",
                                         lane_name(i), n_stop[i], n_err[i], n_esc[i])};
       end
-      $display("%m: PPI v1.x checks passed: %0d lp clock cycles (%0d lane cycles enabled in LP-11 past the Stop bound: in Stop; %0d lane cycles in ULPS), RxClkActiveHS %0d cycles (%0d with StopstateClk), RxSkewCalHS %0d rises%s",
-               n_cycles, n_live, n_ulps, n_act, n_forced, n_skew, per_lane);
+      $display("%m: PPI v1.x checks passed: %0d lp clock cycles (%0d lane cycles enabled in LP-11 past the Stop bound: in Stop; %0d lane cycles in ULPS, %0d of them waking up), RxClkActiveHS %0d cycles (%0d with StopstateClk), RxSkewCalHS %0d rises%s",
+               n_cycles, n_live, n_ulps, n_wake, n_act, n_forced, n_skew, per_lane);
     end
   end
 

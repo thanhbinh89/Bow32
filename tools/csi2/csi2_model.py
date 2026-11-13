@@ -123,7 +123,7 @@ REG = {
 }
 REG_NAME = {v: k for k, v in REG.items()}
 ID_VALUE = 0x43533201
-DPHY_ID_VALUE = 0x44505201
+DPHY_ID_VALUE = 0x44505202      # "DPR", register map version 2 (step 6; 1 in steps 4 and 5)
 DPHY_BASE = 0xC00
 # the PHY registers of the controller before step 4: read 0 (no alias)
 OLD_PHY_REGS = ("PHY_CFG", "CNT_BURST", "BYTECLK", "CNT_BURST23", "DLY0", "DLY1", "DLY2", "DLY3",
@@ -139,6 +139,7 @@ DCTRL_CLK_LOST_EN, DCTRL_CLK_MISS_OFF = 0x80, 0x10000
 DCTRL_MASK = DCTRL_CLK_CONT | DCTRL_ULPS_EN | DCTRL_HSRX_EARLY | DCTRL_DES_RST_DIS | \
     DCTRL_CLK_LOST_EN | DCTRL_CLK_MISS_OFF
 DCMD_APPLY, DCMD_REINIT, DCMD_AFE_CAL, DCMD_CNT_CLR = 1, 2, 4, 8
+DCMD_DIRTY = 1 << 31            # read: a shadow register written since the last APPLY
 DAFE_PD = 1                     # AFE_CTRL.PD (step 5)
 DIRQ_ERR, DIRQ_ULPS, DIRQ_RAW = 1, 2, 8
 DERR_CONTROL, DERR_HS_TMO, DERR_LATE_EOT = 4, 8, 0x80
@@ -643,6 +644,7 @@ class Receiver:
         self.dctrl = self.actrl = 0
         self.tim0 = self.atim0 = TIM0_RESET
         self.tim1, self.tim2 = TIM1_RESET, 0
+        self.ddirty = False             # CMD[31]: a shadow write since the last APPLY
         self.dirq = self.dirq_en = self.derr = self.derr_lane = 0
         self.dcnt = dict.fromkeys(["burst0", "burst1", "burst2", "burst3", "clk", "lperr", "misc"],
                                   0)
@@ -1393,6 +1395,8 @@ class Receiver:
         dly = REG_NAME.get(a) in DLY_REGS
         if dly and not be & 3:
             return
+        if REG_NAME.get(a) in SHADOW_REGS and be & 0xF:
+            self.ddirty = True                         # any written byte, also the same value
         if a in (REG["DPHY_CTRL"], REG["DPHY_TIM0"], REG["DPHY_TIM1"], REG["DPHY_TIM2"],
                  REG["DPHY_IRQ_EN"], REG["DPHY_AFE_CTRL"]) or dly:
             old = self.read(a, dphy=True).value
@@ -1412,6 +1416,7 @@ class Receiver:
             self.tim2 = d
         elif a == REG["DPHY_CMD"]:
             if d & DCMD_APPLY:
+                self.ddirty = False
                 self.actrl, self.atim0 = self.dctrl, self.tim0
                 filt = max(1, (self.atim0 >> 8) & 0xF)
                 self.seg_filter[self.seg] = max(self.seg_filter.get(self.seg, 1), filt)
@@ -1577,6 +1582,9 @@ class Receiver:
             v = 0x00080078 if afe == 2 else 0x0000186B
         elif n == "DPHY_CTRL":
             v = self.dctrl
+        elif n == "DPHY_CMD":
+            # [0] APPLY pending: done long before a dump; [31] DIRTY
+            v = DCMD_DIRTY if self.ddirty else 0
         elif n == "DPHY_AFE_CTRL":
             v = int(self.afe_pd)
         elif n == "DPHY_AFE_STATUS":
@@ -2068,7 +2076,8 @@ DUMP_REGS = ["ID", "INFO", "CTRL", "STATUS", "IRQ_STATUS", "IRQ_EN", "ERR_STATUS
              "DPHY_LANE_LP", "DPHY_LANE_HS", "DPHY_IRQ_STATUS", "DPHY_IRQ_EN", "DPHY_ERR_STATUS",
              "DPHY_ERR_LANE", "DPHY_BYTECLK", "DPHY_CNT_BURST0", "DPHY_CNT_BURST1",
              "DPHY_CNT_CLK", "DPHY_CNT_LPERR", "DPHY_DLY0", "DPHY_DLY1", "DPHY_RAW_CTRL",
-             "DPHY_TIM1", "DPHY_TIM2", "DPHY_LANE_STOP", "DPHY_CNT_DSK", "DPHY_CNT_MISC"]
+             "DPHY_TIM1", "DPHY_TIM2", "DPHY_LANE_STOP", "DPHY_CNT_DSK", "DPHY_CNT_MISC",
+             "DPHY_CMD"]
 # lanes 2, 3 (0 with Lanes < 4); the old PHY registers of the controller read 0 (no alias)
 DUMP_REGS4 = ["CNT_SOT23", "CNT_BURST23", "DLY2", "DLY3", "DPHY_CNT_BURST2", "DPHY_CNT_BURST3",
               "DPHY_DLY2", "DPHY_DLY3"]

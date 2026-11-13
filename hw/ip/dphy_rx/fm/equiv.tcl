@@ -90,9 +90,10 @@
 #     state value, the unreachable ones included. The upper watchdog bits (tmr_hi_q) are
 #     held at 0: with HS_TMO 2^20 the count restarts at 0 in every Hs and the watchdog
 #     fires at 2^20 - 1, so they never leave their reset value (an invariant Formality's
-#     combinational check cannot see). The new flops (these bits, the termination, the
-#     T_INIT flag, the escape decoder, the new event pulses) have no counterpart, nor do
-#     the new ports.
+#     combinational check cannot see); so is the clock lane's exit_wait_q (Exit ends in
+#     WaitStop after a REINIT: set only with the REINIT pulse). The new flops (these bits,
+#     the termination, the T_INIT flag, exit_wait_q, the escape decoder, the new event
+#     pulses) have no counterpart, nor do the new ports.
 # What step 6 changed is listed per part (step6_constants, step6_new); every other point
 # must be matched by name and pass, as in the other steps. Not proven here: the D-PHY's
 # register file and top (APPLY, gray event counters, the new registers), the PPI signals
@@ -171,9 +172,10 @@ array set step_new   {5 {u_mipi/u_dphy_rx/u_sync_cal/ u_mipi/u_dphy_rx/u_regs/pd
 array set step6_top {ctrl bow_csi2rx lp bow_dphy_lp}
 array set step6_new {
   ctrl {u_lperr/ dsk_last_q_reg}
-  lp   {tmr_hi_q_reg term_q_reg pend_q_reg esc_sr_q_reg esc_cnt_q_reg esc_mark_q_reg ev_tmo_o
-        ev_esc_o ev_esc_tmo_o ev_ulps_o ev_wake_o hsrx_early_i miss_off_i ulps_en_i hs_tmo_i
-        esc_tmo_i tinit_i tinit_set_i force_wait_i term_en_o ulps_o ulps_rx_o}
+  lp   {tmr_hi_q_reg term_q_reg pend_q_reg exit_wait_q_reg esc_sr_q_reg esc_cnt_q_reg
+        esc_mark_q_reg ev_tmo_o ev_esc_o ev_esc_tmo_o ev_ulps_o ev_wake_o hsrx_early_i miss_off_i
+        ulps_en_i hs_tmo_i esc_tmo_i tinit_i tinit_set_i force_wait_i term_en_o ulps_o
+        ulps_act_o}
 }
 if {![info exists step]} {
   set step 2
@@ -357,6 +359,10 @@ if {$part eq "ctrl"} {
   # in every Hs and the watchdog fires at 2^20 - 1, before a carry into bit 20)
   for {set b 0} {$b < 4} {incr b} {
     lappend step6_constants impl "tmr_hi_q_reg\[$b\]" 0
+  }
+  # the clock lane's REINIT exit flag: set only with force_wait_i, held 0 here
+  if {[regexp {ClockLane = 1} $params]} {
+    lappend step6_constants impl exit_wait_q_reg 0
   }
 }
 foreach {side pt v} $step6_constants {
@@ -635,7 +641,7 @@ if {$step == 6} {
   }
   set held [expr {$part eq "ctrl" ?
     "ErrControl / ErrControlClk 0 on both sides, dsk_last_q 0 (RxSkewCalHS a pulse, v1)" :
-    "the new inputs at the reset configuration (HS_TMO 2^20, the rest 0), tmr_hi_q 0"}]
+    "the new inputs at the reset configuration (HS_TMO 2^20, the rest 0), tmr_hi_q 0[expr {[regexp {ClockLane = 1} $params] ? {, exit_wait_q 0} : {}}]"}]
   set summary "step $ref_step -> $step, part $part ($impl_top on both sides): $total compare\
                points matched and passing ($port ports, $dff flops), 0 failing / aborted /\
                unverified, $n_pairs matched pairs ($n_unread unread) with the reference's\

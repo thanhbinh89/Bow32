@@ -150,7 +150,7 @@ module tb_dphy_afe;
     .clk_lane_pd_i  (afe_clk_lane_pd_o),
     .lane_pd_i      (afe_lane_pd_o),
     .ready_i        (phy_rdy_sys),
-    .ulps_rx_i      (ulps_rx_sys),
+    .ulps_act_i     (ulps_act_sys),
     .dly_own_i      (afe_dly_own_o),
     .clk_dly_code_i (afe_clk_dly_code_o),
     .clk_dly_own_i  (afe_clk_dly_own_o),
@@ -282,7 +282,7 @@ module tb_dphy_afe;
     check_reset_values("power-up reset");
     rst_n = 1'b1;
     cycles(4);
-    expect_rd("ID", AId, 32'h4450_5201);
+    expect_rd("ID (register map version 2)", AId, 32'h4450_5202);
     // [27] ULPS (step 6)
     info = {4'h0, 1'b1, 3'h0, 1'(AfeKind == 2), 1'b0, 4'd9, 10'd200, 3'(AfeKind), 1'b0, 4'(Lanes)};
     expect_rd("INFO", AInfo, info);

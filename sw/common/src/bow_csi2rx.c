@@ -68,8 +68,18 @@ bool bow_csi2rx_probe(uint32_t *lanes, bool *phy) {
   uint32_t info = CSI2RX->INFO;
   /* no alias: the PHY registers of a bitstream before the split are not
    * where this driver looks for them */
-  if (!(info & CSI2RX_INFO_DPHY) || !bow_dphy_rx_probe()) {
+  uint32_t ver = (info & CSI2RX_INFO_DPHY) ? bow_dphy_rx_version() : 0u;
+  if (ver == 0) {
     bow_puts("csi2rx: bitstream before the D-PHY split, rebuild it\n");
+    return false;
+  }
+  /* nor those of another map version of the D-PHY (step 6: CMD[1] is REINIT,
+   * CTRL / TIM0 need CMD.APPLY): bitstream and firmware from one commit */
+  if (ver != DPHY_MAP_VERSION) {
+    bow_printf("csi2rx: D-PHY register map version %u, this firmware needs %u: %s older than "
+               "the %s, rebuild them from one commit\n", ver, DPHY_MAP_VERSION,
+               ver < DPHY_MAP_VERSION ? "bitstream" : "firmware",
+               ver < DPHY_MAP_VERSION ? "firmware" : "bitstream");
     return false;
   }
   if (lanes) *lanes = CSI2RX_INFO_LANES(info);
@@ -99,12 +109,21 @@ int bow_csi2rx_start(uint32_t lanes, uint32_t dt, uint32_t lane_rate) {
     return CSI2RX_ENOTRDY;
   }
   bow_delay_us(1);
-  bow_dphy_rx_timing(lane_rate);
+  if (!bow_dphy_rx_timing(lane_rate)) return CSI2RX_EAPPLY;
   CSI2RX->CTRL = ctrl;
   CSI2RX->CTRL = ctrl | CSI2RX_CTRL_PHY_EN | CSI2RX_CTRL_RX_EN;
   bow_csi2rx_clear();
   CSI2RX->IRQ_STATUS = CSI2RX_IRQ_ALL;
   return CSI2RX_OK;
+}
+
+const char *bow_csi2rx_strerror(int r) {
+  switch (r) {
+    case CSI2RX_OK: return "ok";
+    case CSI2RX_ENOTRDY: return "D-PHY not ready (AFE_STATUS.READY = 0)";
+    case CSI2RX_EAPPLY: return "the D-PHY did not take CMD.APPLY (no lp clock?)";
+    default: return "receiver start failed";
+  }
 }
 
 void bow_csi2rx_stop(uint32_t timeout_ms) {

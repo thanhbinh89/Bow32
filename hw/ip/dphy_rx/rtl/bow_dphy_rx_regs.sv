@@ -6,7 +6,7 @@
 // docs/ip/dphy_rx.md is the map with the reset values and the fields of later steps.
 // Offsets in the D-PHY window (bow_mipi_rx: 0xC00 of CSI2RX, 0x4000_8C00):
 //
-//   0x000 ID          R    0x44505201
+//   0x000 ID          R    0x44505202 ([7:0]: the version of this map, 2 since step 6)
 //   0x004 INFO        R    [3:0] lanes [4] PPI 16 bit (0) [7:5] AfeKind [17:8] lp_clk MHz
 //                          [21:18] DlyW (9) [22] clock lane delay (0) [23] AFE self-calibrated
 //                          delay (AfeKind = 2, Versal BISC) [27] ULPS (1)
@@ -14,7 +14,7 @@
 //   0x00C CTRL        RW*  [1] CLK_CONT [2] ULPS_EN [3] HSRX_EARLY [6] DES_RST_DIS
 //                          [7] CLK_LOST_EN [16] CLK_MISS_OFF
 //   0x010 CMD         W    [0] APPLY [1] REINIT [2] AFE_CAL (cal_start_o for ReinitCycles
-//                          cycles) [3] CNT_CLR; R [0] APPLY pending
+//                          cycles) [3] CNT_CLR; R [0] APPLY pending [31] DIRTY
 //   0x014 AFE_CTRL    RW   [0] PD (AfePdRst): pd_o, lprx_en_o = ~PD, lane_pd_o
 //   0x018 AFE_STATUS  R    [0] READY [1] CAL_DONE [2] CAL_ERR [15:8] raw AFE status
 //   0x024 TIM0        RW*  [7:0] SETTLE [11:8] LP_FILTER [23:16] CLK_SETTLE [31:24] CLK_MISS
@@ -48,8 +48,12 @@
 //   takes all of them at once when CMD.APPLY toggles apply_req_o and acknowledges through
 //   apply_ack_i (bow_dphy_rx). CMD reads [0] = 1 from the APPLY until the acknowledge; an
 //   APPLY while one is pending is done after it (the latest shadow). Software writes no
-//   shadow register while CMD reads 1. Reset values: those of v1 (TIM0 0x081E020E, TIM1
-//   0x00100000, TIM2 0, CTRL 0), which the lp domain also has from its reset.
+//   shadow register while CMD[0] reads 1. CMD[31] DIRTY reads 1 from a write to one of them
+//   (at least one byte, the same value too) until an APPLY is sent: the shadow may differ
+//   from what the lp domain uses. CMD reads 0 when the lp domain uses the shadow as it reads
+//   (CTRL, TIM0..2 read back the shadow, not the applied copy). Reset values: those of v1
+//   (TIM0 0x081E020E, TIM1 0x00100000, TIM2 0, CTRL 0), which the lp domain also has from
+//   its reset.
 // * Every output is a bus clock flop: the shadow fields go to bow_dphy_rx (the copy into the
 //   lp domain), the RAW commands to its byte domain. The AFE controls of the register file go
 //   to the AFE as they are (docs/ip/mipi_rx_arch.md section 3.1: the AFE takes every control
@@ -61,7 +65,7 @@
 //   of its own), lane_pd_o[i] (one flop per lane, [0] clock lane) = 1 from reset and while PD
 //   = 1, 0 once a fresh AFE_STATUS.READY was seen with PD = 0: READY 0 at least once since PD
 //   last rose (or since reset), then 1 (section 3.6 of the spec); and 1 while the lane is in
-//   ULPS before its wake-up mark (ulps_rx_i, v1.x).
+//   ULPS before its wake-up mark (ulps_act_i, v1.x).
 // * CMD.AFE_CAL (v1.x; CMD.REINIT up to step 5): cal_start_o high for ReinitCycles cycles, the
 //   AFE's re-calibration (Versal adapter: XPLL, BISC and VT tracking again). CMD.REINIT
 //   (v1.x): reinit_o, one cycle: the lane state machines back to WaitStop and T_INIT due
@@ -149,8 +153,8 @@ module bow_dphy_rx_regs import bow_bus_pkg::*; #(
   input  logic [Lanes:0]        hs_en_i,          // HS receivers on, same order
   input  logic                  ce_i,             // byte clock gate open
   input  logic [Lanes:0]        stop_i,           // Stopstate, same order
-  input  logic [Lanes:0]        ulps_i,           // ULPS (UlpsActiveNot = 0), same order
-  input  logic [Lanes:0]        ulps_rx_i,        // ULPS before the wake-up mark, same order
+  input  logic [Lanes:0]        ulps_i,           // in ULPS until LP-11 (RxUlpsEsc), same order
+  input  logic [Lanes:0]        ulps_act_i,       // ULPS before the wake-up mark, same order
   input  logic                  ready_i,          // AFE ready
   input  logic                  cal_done_i,       // AFE internal calibration done
   input  logic                  cal_err_i,        // ... and failed
@@ -161,7 +165,9 @@ module bow_dphy_rx_regs import bow_bus_pkg::*; #(
 
   localparam int unsigned MaxLanes = 4;
   localparam int unsigned DlyW     = 9;
-  localparam logic [31:0] DphyId   = 32'h4450_5201;   // "DPR", version 1
+  // "DPR" and the version of the register map in [7:0]: 1 in steps 4 and 5, 2 since step 6
+  // (CMD[1] became REINIT, CTRL / TIM0 need CMD.APPLY): the driver refuses another version
+  localparam logic [31:0] DphyId   = 32'h4450_5202;
 
   if (Lanes > MaxLanes) begin : g_bad_lanes
     $error("bow_dphy_rx_regs: Lanes %0d > %0d", Lanes, MaxLanes);
@@ -331,11 +337,15 @@ module bow_dphy_rx_regs import bow_bus_pkg::*; #(
   assign esc_tmo_o     = esc_tmo_q;
 
   // APPLY: toggle towards the lp domain; pending until its acknowledge comes back; an APPLY
-  // while pending is done after it (apply_again_q)
-  logic apply_q, apply_again_q, apply_pend, apply_cmd;
+  // while pending is done after it (apply_again_q). DIRTY (dirty_q): a shadow register was
+  // written since the last APPLY toggle (the write wins over a toggle in the same cycle).
+  logic apply_q, apply_again_q, apply_pend, apply_cmd, apply_send, dirty_q, shadow_w;
 
   assign apply_pend = (apply_q != apply_ack_i) || apply_again_q;
   assign apply_cmd  = cmd_w && wd[0];
+  assign apply_send = (apply_q == apply_ack_i) && (apply_cmd || apply_again_q);
+  assign shadow_w   = we && (bus_req_i.be != 4'b0000) &&
+                      ((a == 10'h00C) || (a == 10'h024) || (a == 10'h028) || (a == 10'h02C));
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
@@ -347,6 +357,12 @@ module bow_dphy_rx_regs import bow_bus_pkg::*; #(
       apply_q       <= ~apply_q;
       apply_again_q <= 1'b0;
     end
+  end
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni)         dirty_q <= 1'b0;
+    else if (shadow_w)   dirty_q <= 1'b1;
+    else if (apply_send) dirty_q <= 1'b0;
   end
 
   assign apply_req_o = apply_q;
@@ -392,7 +408,7 @@ module bow_dphy_rx_regs import bow_bus_pkg::*; #(
       lprx_en_q  <= !pd_d;
       rdy_low_q  <= (pd_d && !pd_q) ? 1'b0 : (rdy_low_q || !ready_i);   // PD rises: wait again
       lane_pd_q  <= lane_pd_d;
-      lane_pdl_q <= {(Lanes + 1){lane_pd_d}} | ulps_rx_i;
+      lane_pdl_q <= {(Lanes + 1){lane_pd_d}} | ulps_act_i;
     end
   end
 
@@ -649,7 +665,7 @@ module bow_dphy_rx_regs import bow_bus_pkg::*; #(
       10'h004: rdata_d = Info;
       10'h008: rdata_d = Info2;
       10'h00C: rdata_d = ctrl_rd;
-      10'h010: rdata_d = {31'h0, apply_pend};
+      10'h010: rdata_d = {dirty_q, 30'h0, apply_pend};
       10'h014: rdata_d = afe_ctrl_rd;
       10'h018: rdata_d = {16'h0, afe_status_i, 5'h0, cal_err_i, cal_done_i, ready_i};
       10'h024: rdata_d = tim0_rd;

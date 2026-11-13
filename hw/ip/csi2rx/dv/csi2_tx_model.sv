@@ -40,12 +40,14 @@
 //     HS-0 CLK-ZERO, CLK-PRE) and its exit after it (CLK-POST, HS-0
 //     CLK-TRAIL, LP-11), unless contclk = 1 (one entry, then it toggles
 //     forever). Data lanes: LP-11 (HS-EXIT), LP-01 (T_LPX), LP-00
-//     HS-PREPARE, HS-ZERO, data, HS-TRAIL, LP-11.
+//     HS-PREPARE, HS-ZERO, data, HS-TRAIL, LP-11. clk_tog = 1 while the step
+//     being played toggles the clock lane (for checks of the gate and of the
+//     clock lane's receiver against a running clock).
 //
 // Versal PHY (versal = 1; byte clock = BUFGCE of the strobe nibble FIFO_WR_CLK):
 //   * ready_o rises t_phy_rdy ns after time 0 (XPLL lock + BISC); before
 //     that there is no byte clock at all. pd_i or cal_start_i = 1 (the AFE
-//     controls of the receiver's D-PHY: AFE_CTRL.PD, CMD.REINIT) holds the PHY
+//     controls of the receiver's D-PHY: AFE_CTRL.PD, CMD.AFE_CAL) holds the PHY
 //     in its init: no PHY_RDY, no byte clock, FIFOs empty, loaded taps
 //     forgotten; on release ready_o rises t_reinit ns later with the BISC
 //     taps again.
@@ -129,6 +131,7 @@
 // Status for checks (times in ns from csi2_now()):
 //   bursts, bursts_done           bursts started / finished
 //   cur_burst, cur_byte           burst being sent (-1: none), its packet bytes sent so far
+//   clk_tog                       the clock lane toggles in the step being played
 //   t_end[]                       per burst: last packet byte sent on all lanes (versal:
 //                                 read from the FIFOs of all lanes)
 //   t_lp00[], t_lp11[]            per lane ([4] = clock lane): last LP-01 -> LP-00,
@@ -300,6 +303,7 @@ module csi2_tx_model import csi2_tx_pkg::*; #(
   realtime     t_lp00 [ML + 1] = '{default: 0.0};
   realtime     t_lp11 [ML + 1] = '{default: 0.0};
   int unsigned ce_bad = 0, ce_rise_toggle = 0, runts = 0, flips = 0;
+  bit          clk_tog = 1'b0;
   realtime     t_ce_bad = -1.0;       // first step counted in ce_bad
   int unsigned dly_loads [ML] = '{default: 0};
   int unsigned dly_bad = 0, dly_drop = 0;
@@ -917,6 +921,7 @@ module csi2_tx_model import csi2_tx_pkg::*; #(
         ready_o = up;
       end
       apply(s);
+      clk_tog = (s.clk == ClkToggle) && (!versal || ready_o);
       if (versal && ready_o) v_gate();
       if (versal && !ready_o && s.tend) v_tend_lost();  // no PHY: the burst is lost
       ce_q = clk_gate_en_i;

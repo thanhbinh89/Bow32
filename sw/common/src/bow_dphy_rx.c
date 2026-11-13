@@ -28,20 +28,33 @@ static uint32_t lp_cycles(uint32_t ns, uint32_t mhz) {
   return n < 1u ? 1u : n > 255u ? 255u : n;
 }
 
-/* Clock miss timeout: the clock lane FSM sees one edge per byte clock
- * (8 UI), up to one lp cycle late after the synchroniser. One byte clock
- * period, rounded up, + 3 cycles of margin: 5 cycles at 912 Mbit/s and
- * 200 MHz, so the gate closes early in T_CLK-TRAIL (>= 60 ns). */
-static uint32_t clk_miss_cycles(uint32_t lane_rate, uint32_t mhz) {
-  if (lane_rate == 0) return lp_cycles(40, mhz);
-  uint64_t n = (8000000ull * mhz + lane_rate - 1u) / lane_rate + 3u;
-  return n > 255u ? 255u : (uint32_t)n;
+/* the lane rate of the last bow_dphy_rx_timing() (0: unknown), for CLK_MISS
+ * when CLK_TOG_DIV changes */
+static uint32_t timing_rate;
+
+/* Clock miss timeout: the clock lane FSM sees one edge per 2^div byte clocks
+ * (8 UI each; TIM1.CLK_TOG_DIV), up to one lp cycle late after the
+ * synchroniser. That period, rounded up, + 3 cycles of margin: 5 cycles at
+ * 912 Mbit/s, 200 MHz and div 0, so the gate closes early in T_CLK-TRAIL
+ * (>= 60 ns). Lane rate 0: 40 ns per 2^div, rounded (8 at 200 MHz). Not
+ * clamped: above 255 the field cannot hold it. */
+static uint64_t clk_miss_cycles(uint32_t lane_rate, uint32_t mhz, uint32_t div) {
+  if (lane_rate == 0) {
+    uint64_t n = ((40ull << div) * mhz + 500u) / 1000u;
+    return n < 1u ? 1u : n;
+  }
+  return ((8000000ull << div) * mhz + lane_rate - 1u) / lane_rate + 3u;
 }
 
-bool bow_dphy_rx_probe(void) {
+uint32_t bow_dphy_rx_version(void) {
   uint32_t id;
-  return bow_probe_read32(DPHY_BASE, &id) && id == DPHY_ID_VALUE;
+  if (!bow_probe_read32(DPHY_BASE, &id) || DPHY_ID_NAME(id) != DPHY_ID_NAME(DPHY_ID_VALUE)) {
+    return 0;
+  }
+  return DPHY_ID_VERSION(id);
 }
+
+bool bow_dphy_rx_probe(void) { return bow_dphy_rx_version() == DPHY_MAP_VERSION; }
 
 uint32_t bow_dphy_rx_lanes(void) {
   uint32_t n = DPHY_INFO_LANES(DPHY->INFO);
@@ -67,14 +80,16 @@ static uint32_t settle_ns(uint32_t info2) {
 #endif
 }
 
-void bow_dphy_rx_timing(uint32_t lane_rate) {
+bool bow_dphy_rx_timing(uint32_t lane_rate) {
   uint32_t mhz = bow_dphy_rx_lp_mhz(), info2 = DPHY->INFO2;
   uint32_t settle = bow_dphy_rx_settle(settle_ns(info2), DPHY_INFO2_SETTLE_UI(info2), lane_rate,
                                        mhz, 2);
+  uint64_t miss = clk_miss_cycles(lane_rate, mhz, DPHY_TIM1_CLK_TOG_DIV_OF(DPHY->TIM1));
+  timing_rate = lane_rate;
   DPHY->TIM0 = DPHY_TIM0_SETTLE(settle) | DPHY_TIM0_LP_FILTER(2) |
                DPHY_TIM0_CLK_SETTLE(lp_cycles(150, mhz)) |
-               DPHY_TIM0_CLK_MISS(clk_miss_cycles(lane_rate, mhz));
-  bow_dphy_rx_apply();
+               DPHY_TIM0_CLK_MISS(miss > 255u ? 255u : miss);
+  return bow_dphy_rx_apply();
 }
 
 bool bow_dphy_rx_apply(void) {
@@ -85,33 +100,44 @@ bool bow_dphy_rx_apply(void) {
   return false;
 }
 
-void bow_dphy_rx_ctrl(uint32_t set, uint32_t clear) {
+bool bow_dphy_rx_ctrl(uint32_t set, uint32_t clear) {
   DPHY->CTRL = (DPHY->CTRL & ~clear) | set;
-  bow_dphy_rx_apply();
+  return bow_dphy_rx_apply();
 }
 
 uint32_t bow_dphy_rx_lp_cycles(uint32_t ns) {
   return (uint32_t)(((uint64_t)ns * bow_dphy_rx_lp_mhz() + 999u) / 1000u);
 }
 
-void bow_dphy_rx_set_hs_tmo(uint32_t cycles) {
+bool bow_dphy_rx_set_hs_tmo(uint32_t cycles) {
+  if (cycles > DPHY_TIM1_HS_TMO_MAX) return false;
   DPHY->TIM1 = (DPHY->TIM1 & ~DPHY_TIM1_HS_TMO(~0u)) | DPHY_TIM1_HS_TMO(cycles);
-  bow_dphy_rx_apply();
+  return bow_dphy_rx_apply();
 }
 
-void bow_dphy_rx_set_clk_tog_div(uint32_t div) {
+/* CLK_TOG_DIV with the CLK_MISS that goes with it (a clock miss timeout made
+ * for one byte clock would close the gate in every burst with a divider) */
+bool bow_dphy_rx_set_clk_tog_div(uint32_t div) {
+  uint32_t tim0 = DPHY->TIM0;
+  uint64_t miss = clk_miss_cycles(timing_rate, bow_dphy_rx_lp_mhz(), div);
+  if (div > DPHY_TIM1_CLK_TOG_DIV_MAX || miss > 255u) return false;
+  if (tim0 & DPHY_TIM0_CLK_MISS(~0u)) {
+    DPHY->TIM0 = (tim0 & ~DPHY_TIM0_CLK_MISS(~0u)) | DPHY_TIM0_CLK_MISS(miss);
+  }
   DPHY->TIM1 = (DPHY->TIM1 & ~DPHY_TIM1_CLK_TOG_DIV(~0u)) | DPHY_TIM1_CLK_TOG_DIV(div);
-  bow_dphy_rx_apply();
+  return bow_dphy_rx_apply();
 }
 
-void bow_dphy_rx_set_t_init(uint32_t cycles) {
+bool bow_dphy_rx_set_t_init(uint32_t cycles) {
+  if (cycles > DPHY_TIM2_T_INIT_MAX) return false;
   DPHY->TIM2 = (DPHY->TIM2 & ~DPHY_TIM2_T_INIT(~0u)) | DPHY_TIM2_T_INIT(cycles);
-  bow_dphy_rx_apply();
+  return bow_dphy_rx_apply();
 }
 
-void bow_dphy_rx_set_esc_tmo(uint32_t units) {
+bool bow_dphy_rx_set_esc_tmo(uint32_t units) {
+  if (units > DPHY_TIM2_ESC_TMO_MAX) return false;
   DPHY->TIM2 = (DPHY->TIM2 & ~DPHY_TIM2_ESC_TMO(~0u)) | DPHY_TIM2_ESC_TMO(units);
-  bow_dphy_rx_apply();
+  return bow_dphy_rx_apply();
 }
 
 void bow_dphy_rx_v1x(bow_dphy_rx_v1x_t *s) {
@@ -151,12 +177,8 @@ int bow_dphy_rx_reinit(uint32_t timeout_ms, uint32_t *us) {
   return rdy ? DPHY_OK : DPHY_ENOTRDY;
 }
 
-void bow_dphy_rx_des_rst(bool on) {
-  if (on) {
-    bow_dphy_rx_ctrl(0, DPHY_CTRL_DES_RST_DIS);
-  } else {
-    bow_dphy_rx_ctrl(DPHY_CTRL_DES_RST_DIS, 0);
-  }
+bool bow_dphy_rx_des_rst(bool on) {
+  return on ? bow_dphy_rx_ctrl(0, DPHY_CTRL_DES_RST_DIS) : bow_dphy_rx_ctrl(DPHY_CTRL_DES_RST_DIS, 0);
 }
 
 bool bow_dphy_rx_des_rst_on(void) { return !(DPHY->CTRL & DPHY_CTRL_DES_RST_DIS); }

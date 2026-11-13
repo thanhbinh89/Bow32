@@ -19,12 +19,18 @@
  *
  * Since step 6 (v1.x) CTRL and TIM0..TIM2 are shadow registers: a write
  * changes what they read, the D-PHY takes them all at once at CMD.APPLY
- * (bow_dphy_rx_apply(); the functions of this driver that write them apply).
- * Every new bit is 0 (TIM1.HS_TMO 2^20) after reset, the behaviour of v1:
- * T_INIT (TIM2), the HS and escape timeouts, HSRX_EARLY, CLK_MISS_OFF,
- * CLK_TOG_DIV, ULPS_EN, CLK_LOST_EN; LATE_EOT is always reported
- * (ERR_STATUS[7], CNT_MISC). CMD.REINIT sends the lane state machines back to
- * WaitStop and makes T_INIT due again.
+ * (bow_dphy_rx_apply(); the functions of this driver that write them apply
+ * and return false when the D-PHY did not take it). CMD reads [0] while an
+ * APPLY is pending and [31] DIRTY from a shadow write until the next APPLY:
+ * CMD reads 0 when the D-PHY uses CTRL / TIM0..2 as they read. Every new bit
+ * is 0 (TIM1.HS_TMO 2^20) after reset, the behaviour of v1: T_INIT (TIM2),
+ * the HS and escape timeouts, HSRX_EARLY, CLK_MISS_OFF, CLK_TOG_DIV, ULPS_EN,
+ * CLK_LOST_EN; LATE_EOT is always reported (ERR_STATUS[7], CNT_MISC, IRQ ERR:
+ * nothing of the receiver reads them). CMD.REINIT sends the lane state
+ * machines back to WaitStop and makes T_INIT due again. ID[7:0] is the
+ * version of the register map: 2 since step 6 (CMD[1] became REINIT, CTRL /
+ * TIM0 need CMD.APPLY), 1 in steps 4 and 5; bow_csi2rx_probe() refuses a
+ * bitstream with another one.
  *
  * Kinds of PHY I/O (INFO[7:5], DPHY_AFE_*):
  *   UltraScale+ (KV260, IDELAYE3): a code written to DLYn is applied at the
@@ -32,7 +38,7 @@
  *     (AFE_STATUS.READY is 1) and no re-init.
  *   Versal (Huins, XPHY): a new DLYn code is loaded at once (no byte clock
  *     needed; the code in use written again loads nothing); after reset,
- *     CMD.REINIT or AFE_CTRL.PD the PHY keeps the delay of its self-calibration
+ *     CMD.AFE_CAL or AFE_CTRL.PD the PHY keeps the delay of its self-calibration
  *     (BISC, INFO[23]: DLYn [24:16] shows it, OWN = 0) and tracks voltage and
  *     temperature until the first load of the lane; AFE_STATUS.READY once its
  *     PLL is locked and BISC is done.
@@ -46,11 +52,11 @@
 #include "bow32_memmap.h"
 
 typedef struct {
-  volatile uint32_t ID;           /* 0x000 R   0x44505201 */
+  volatile uint32_t ID;           /* 0x000 R   0x44505202: "DPR", map version 2 */
   volatile uint32_t INFO;         /* 0x004 R   DPHY_INFO_* */
   volatile uint32_t INFO2;        /* 0x008 R   DPHY_INFO2_* */
   volatile uint32_t CTRL;         /* 0x00C RW  DPHY_CTRL_* */
-  volatile uint32_t CMD;          /* 0x010 W   DPHY_CMD_* */
+  volatile uint32_t CMD;          /* 0x010 W   DPHY_CMD_*; R [0] APPLY pending, [31] DIRTY */
   volatile uint32_t AFE_CTRL;     /* 0x014 RW  DPHY_AFE_CTRL_* */
   volatile uint32_t AFE_STATUS;   /* 0x018 R   DPHY_AFE_* */
   volatile uint32_t AFE_TRIM[2];  /* 0x01C     (later step) */
@@ -89,7 +95,10 @@ _Static_assert(__builtin_offsetof(bow_dphy_rx_regs_t, RAW) == 0x200, "DPHY RAW o
 #define DPHY_BASE (BOW32_CSI2RX_BASE + 0xC00u)
 #define DPHY      ((bow_dphy_rx_regs_t *)DPHY_BASE)
 
-#define DPHY_ID_VALUE 0x44505201u
+#define DPHY_ID_VALUE      0x44505202u /* "DPR", register map version DPHY_MAP_VERSION */
+#define DPHY_ID_NAME(i)    ((i) >> 8)  /* 0x445052: "DPR" */
+#define DPHY_ID_VERSION(i) ((i) & 0xFFu)
+#define DPHY_MAP_VERSION   2u          /* this driver's map (1: steps 4 and 5) */
 
 #define DPHY_MAX_LANES 4u /* lanes 4..7 of the map: not in v1 */
 
@@ -118,8 +127,9 @@ _Static_assert(__builtin_offsetof(bow_dphy_rx_regs_t, RAW) == 0x200, "DPHY RAW o
 #define DPHY_CTRL_CLK_MISS_OFF (1u << 16) /* clock lane HS receiver + termination off at the clock
                                            * miss (T_CLK-MISS), not at LP-11 */
 
-/* CMD (write; read [0] APPLY pending) */
+/* CMD (write; read [0] APPLY pending, [31] DIRTY) */
 #define DPHY_CMD_APPLY   (1u << 0) /* take the shadow CTRL / TIM0..2 (step 6) */
+#define DPHY_CMD_DIRTY   (1u << 31) /* read: a shadow register was written since the last APPLY */
 #define DPHY_CMD_REINIT  (1u << 1) /* lane state machines back to WaitStop, T_INIT due again (step 6;
                                     * up to step 5: the AFE re-calibration, now CMD.AFE_CAL) */
 #define DPHY_CMD_AFE_CAL (1u << 2) /* AFE re-calibration, cal_start (Versal: XPLL lock, BISC, VT
@@ -146,7 +156,10 @@ _Static_assert(__builtin_offsetof(bow_dphy_rx_regs_t, RAW) == 0x200, "DPHY RAW o
 /* TIM1, TIM2 (step 6, lp clock cycles; 0: off) */
 #define DPHY_TIM1_HS_TMO(n)      ((uint32_t)(n) & 0xFFFFFFu)   /* HS watchdog of a data lane */
 #define DPHY_TIM1_CLK_TOG_DIV(n) (((uint32_t)(n) & 0xFu) << 24) /* clock lane activity every
-                                                                * 2^n byte clocks */
+                                                                * 2^n byte clocks: 2^n byte
+                                                                * clocks must last longer
+                                                                * than one lp clock */
+#define DPHY_TIM1_CLK_TOG_DIV_OF(v) (((v) >> 24) & 0xFu)
 #define DPHY_TIM1_RESET          0x00100000u                   /* HS_TMO 2^20 (the v1 watchdog) */
 #define DPHY_TIM1_HS_TMO_OF(v)   ((v) & 0xFFFFFFu)
 #define DPHY_TIM2_T_INIT(n)      ((uint32_t)(n) & 0xFFFFFu)    /* LP-11 before Stop once ready rose
@@ -154,6 +167,10 @@ _Static_assert(__builtin_offsetof(bow_dphy_rx_regs_t, RAW) == 0x200, "DPHY RAW o
 #define DPHY_TIM2_ESC_TMO(n)     (((uint32_t)(n) & 0xFFFu) << 20) /* escape entry to command, in
                                                                   * 64 cycle units */
 #define DPHY_TIM2_T_INIT_OF(v)   ((v) & 0xFFFFFu)
+#define DPHY_TIM1_HS_TMO_MAX     0xFFFFFFu  /* field limits (cycles; ESC_TMO: 64 cycle units) */
+#define DPHY_TIM2_T_INIT_MAX     0xFFFFFu
+#define DPHY_TIM2_ESC_TMO_MAX    0xFFFu
+#define DPHY_TIM1_CLK_TOG_DIV_MAX 15u
 
 /* LANE_LP: [1:0] clock lane, [2l+3:2l+2] data lane l; LANE_HS: [0] clock
  * lane, [l+1] data lane l */
@@ -242,8 +259,13 @@ static inline uint32_t bow_dphy_rx_settle(uint32_t settle_ns, uint32_t settle_ui
   return n > 255u ? 255u : (uint32_t)n;
 }
 
-/* ID check (false: no D-PHY of Bow32 at DPHY_BASE). */
+/* ID check: true for the D-PHY of this driver's register map version (false:
+ * none at DPHY_BASE, or another version, bow_dphy_rx_version()). */
 bool bow_dphy_rx_probe(void);
+/* The version of the D-PHY's register map (ID[7:0]; DPHY_MAP_VERSION is this
+ * driver's), 0 when there is no D-PHY of Bow32 at DPHY_BASE (bus error or no
+ * "DPR" in ID[31:8]). */
+uint32_t bow_dphy_rx_version(void);
 
 /* Data lanes of the D-PHY (INFO): 1, 2 or 4. */
 uint32_t bow_dphy_rx_lanes(void);
@@ -257,26 +279,32 @@ uint32_t bow_dphy_rx_lp_mhz(void);
 
 /* TIM0 for the lane rate (bit/s per lane, 0: unknown): SETTLE of
  * bow_dphy_rx_settle() from INFO2, LP_FILTER 2, CLK_SETTLE 150 ns, CLK_MISS =
- * one byte clock period (8 UI) + 3 cycles (the clock lane activity is seen as
- * byte clock edges; 40 ns with lane rate 0); then CMD.APPLY. Only while the PHY
- * is off (CSI2RX CTRL.PHY_EN = 0). TIM1 and TIM2 keep their values. */
-void bow_dphy_rx_timing(uint32_t lane_rate);
+ * the period of the clock lane activity the clock lane state machine sees,
+ * 2^CLK_TOG_DIV byte clocks (8 UI each; TIM1 as it reads), + 3 cycles (40 ns
+ * per 2^CLK_TOG_DIV with lane rate 0; at most 255); then CMD.APPLY: false when
+ * the D-PHY did not take it. Only while the PHY is off (CSI2RX CTRL.PHY_EN =
+ * 0). TIM1 and TIM2 keep their values. */
+bool bow_dphy_rx_timing(uint32_t lane_rate);
 
 /* CMD.APPLY: the D-PHY takes the shadow CTRL / TIM0..2; waits until it has
- * (CMD reads 0, a few lp clocks; false after ~1000 CPU cycles). The fields
- * that change a running lane only while the PHY is off. */
+ * (CMD[0] reads 0, a few lp clocks; false after 64 reads: no lp clock?). The
+ * fields that change a running lane only while the PHY is off. */
 bool bow_dphy_rx_apply(void);
-/* CTRL = (CTRL & ~clear) | set, then apply (the DPHY_CTRL_* bits). */
-void bow_dphy_rx_ctrl(uint32_t set, uint32_t clear);
+/* CTRL = (CTRL & ~clear) | set, then apply (the DPHY_CTRL_* bits); false:
+ * not applied. */
+bool bow_dphy_rx_ctrl(uint32_t set, uint32_t clear);
 /* lp clock cycles of ns, rounded up (the timers of TIM0..2) */
 uint32_t bow_dphy_rx_lp_cycles(uint32_t ns);
-/* TIM1.HS_TMO (cycles, 0: no HS watchdog), TIM1.CLK_TOG_DIV, TIM2.T_INIT,
- * TIM2.ESC_TMO (64 cycle units), each with an apply; DPHY_TIM1_RESET is the
- * reset value of TIM1, TIM2 resets to 0. */
-void bow_dphy_rx_set_hs_tmo(uint32_t cycles);
-void bow_dphy_rx_set_clk_tog_div(uint32_t div);
-void bow_dphy_rx_set_t_init(uint32_t cycles);
-void bow_dphy_rx_set_esc_tmo(uint32_t units);
+/* TIM1.HS_TMO (cycles, 0: no HS watchdog), TIM1.CLK_TOG_DIV (with TIM0.CLK_MISS
+ * for it: the lane rate of the last bow_dphy_rx_timing(), CLK_MISS 0 stays 0),
+ * TIM2.T_INIT, TIM2.ESC_TMO (64 cycle units), each with an apply. false, and
+ * nothing written, when the value does not fit its field (DPHY_TIM*_MAX; for
+ * CLK_TOG_DIV also a CLK_MISS above 255), false when not applied.
+ * DPHY_TIM1_RESET is the reset value of TIM1, TIM2 resets to 0. */
+bool bow_dphy_rx_set_hs_tmo(uint32_t cycles);
+bool bow_dphy_rx_set_clk_tog_div(uint32_t div);
+bool bow_dphy_rx_set_t_init(uint32_t cycles);
+bool bow_dphy_rx_set_esc_tmo(uint32_t units);
 
 /* The v1.x status of the D-PHY in one read each (not polled by the receiver's
  * start / stop): ERR_STATUS, LANE_STOP, CNT_MISC[31:16], CNT_DSK[31:16]. */
@@ -312,8 +340,8 @@ int bow_dphy_rx_reinit(uint32_t timeout_ms, uint32_t *us);
  * (CTRL.DES_RST_DIS = 1) only to test, the Huins board broke without it, and
  * the KV260 ISERDESE3 is then never reset. The firmware turns it off only on
  * the Versal build (csi2_test `phy burstrst 0`, CAM_BURST_RST = 0). Applied
- * at once (CMD.APPLY). */
-void bow_dphy_rx_des_rst(bool on);
+ * at once (CMD.APPLY; false: not applied). */
+bool bow_dphy_rx_des_rst(bool on);
 bool bow_dphy_rx_des_rst_on(void);
 
 /* Delay code 0..DPHY_DLY_MAX of a data lane (UltraScale+: applied at the next

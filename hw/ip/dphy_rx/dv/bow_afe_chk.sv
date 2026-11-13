@@ -59,7 +59,7 @@ module bow_afe_chk #(
   input logic                       clk_lane_pd_i,
   input logic [Lanes-1:0]           lane_pd_i,
   input logic                       ready_i,         // synchronised AFE ready (bus clock)
-  input logic [Lanes:0]             ulps_rx_i,       // synchronised ULPS before wake-up, [0]
+  input logic [Lanes:0]             ulps_act_i,      // synchronised ULPS before wake-up, [0]
                                                      // clock lane (bus clock, v1.x)
   input logic [Lanes-1:0]           dly_own_i,
   input logic [8:0]                 clk_dly_code_i,
@@ -191,7 +191,7 @@ module bow_afe_chk #(
       rdy_l   <= ready_i;
       lpd_l   <= exp_rule;
       low_l   <= low_n;
-      ulps_l  <= ulps_rx_i;
+      ulps_l  <= ulps_act_i;
     end
   end
 

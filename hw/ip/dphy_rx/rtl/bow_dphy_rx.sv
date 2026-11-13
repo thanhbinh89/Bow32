@@ -65,14 +65,16 @@
 //                     RxDataHS, RxSyncHS, ErrSotSyncHS of the aligner; RxSkewCalHS: from the
 //                     aligner's recognition of a deskew burst until RxActiveHS falls (a level,
 //                     v1.x); ErrSotHS 0
-//   ppi_lp_o[l]       Stopstate, UlpsActiveNot, RxUlpsEsc (levels of the state machine);
+//   ppi_lp_o[l]       Stopstate, UlpsActiveNot (low from the ULPS command until the wake-up
+//                     mark), RxUlpsEsc (high from the command until LP-11 ends the wake-up);
 //                     ErrControl (LP errors, HS_TMO and, with CTRL.CLK_LOST_EN, CLK_LOST of
 //                     the lane) and ErrEsc (escape command other than ULPS, ESC_TMO): 2 bit
 //                     gray counters (bow_ppi_err_tx), at most one step every 16 lp cycles,
 //                     only while the lane's synchronised Enable is high; ErrSyncEsc 0
 //   ppi_lp_clk_o      StopstateClk, RxClkActiveHS (the clock lane's hs_active: gate open),
-//                     UlpsActiveNotClk, RxUlpsClkNot, ErrControlClk: the clock lane's LP
-//                     errors as a gray counter, none while CTRL.CLK_CONT (synchronised) = 1
+//                     UlpsActiveNotClk, RxUlpsClkNot (as the data lanes' two), ErrControlClk:
+//                     the clock lane's LP errors as a gray counter, none while CTRL.CLK_CONT
+//                     (synchronised) = 1
 //   enable_i[l], enable_clk_i  Enable[l], EnableClk (bus domain flops of the controller,
 //                     synchronised here)
 // The controller samples the gray counters in its own clock (bow_ppi_err_rx): its clock
@@ -112,8 +114,8 @@
 //      afe_lane_pd_o, afe_clk_lane_pd_o  bus clock flops, one per lane: 1 from reset and
 //                          while PD, 0 once a fresh READY was seen with PD = 0, i.e. READY 0
 //                          since PD last rose, then 1 (not the stale READY of the synchroniser
-//                          right after a short PD pulse); and 1 while the lane is in ULPS (from
-//                          the ULPS command until the wake-up mark, synchronised)
+//                          right after a short PD pulse); and 1 while the lane is in ULPS before
+//                          its wake-up mark (state Ulps, synchronised)
 //      afe_ready_i         asynchronous: AFE_STATUS.READY; OWN of every lane falls with it;
 //                          its rise makes T_INIT due again
 //      afe_cal_start_o     CMD.AFE_CAL, 32 bus clock cycles (CMD.REINIT up to step 5)
@@ -306,7 +308,7 @@ module bow_dphy_rx import bow_bus_pkg::*; import bow_ppi_pkg::*; #(
   logic [8*Lanes-1:0]    raw_rdata;
   logic [NumEvc-1:0][EvcW-1:0] evc_sys;
   logic [Lanes:0][1:0]   lp_sys;
-  logic [Lanes:0]        hs_en_sys, stop_sys, ulps_sys, ulps_rx_sys;
+  logic [Lanes:0]        hs_en_sys, stop_sys, ulps_sys, ulps_act_sys;
   logic                  ce_sys, phy_rdy_sys, cal_done_sys, cal_err_sys;
   logic [7:0]            phy_status_sys;
   logic [19:0]           meter_sys;
@@ -365,7 +367,7 @@ module bow_dphy_rx import bow_bus_pkg::*; import bow_ppi_pkg::*; #(
     .ce_i           (ce_sys),
     .stop_i         (stop_sys),
     .ulps_i         (ulps_sys),
-    .ulps_rx_i      (ulps_rx_sys),
+    .ulps_act_i     (ulps_act_sys),
     .ready_i        (phy_rdy_sys),
     .cal_done_i     (cal_done_sys),
     .cal_err_i      (cal_err_sys),
@@ -437,7 +439,7 @@ module bow_dphy_rx import bow_bus_pkg::*; import bow_ppi_pkg::*; #(
   // lp domain: LP state machines
   // =========================================================================
   logic [Lanes:0]      lane_en, hs_en, term_en, hs_act, ev_hs, ev_lp_err, stop;
-  logic [Lanes:0]      ev_tmo, ev_esc, ev_esc_tmo, ev_ulps, ev_wake, ulps, ulps_rx;
+  logic [Lanes:0]      ev_tmo, ev_esc, ev_esc_tmo, ev_ulps, ev_wake, ulps, ulps_act;
   logic [Lanes:0][1:0] lp_st;
   logic                clk_force, clk_edge, byte_ce, des_rst, des_rst_en;
 
@@ -490,7 +492,7 @@ module bow_dphy_rx import bow_bus_pkg::*; import bow_ppi_pkg::*; #(
     .ev_wake_o    (ev_wake[0]),
     .stop_o       (stop[0]),
     .ulps_o       (ulps[0]),
-    .ulps_rx_o    (ulps_rx[0])
+    .ulps_act_o   (ulps_act[0])
   );
 
   for (genvar l = 0; l < Lanes; l++) begin : g_lp
@@ -530,7 +532,7 @@ module bow_dphy_rx import bow_bus_pkg::*; import bow_ppi_pkg::*; #(
       .ev_wake_o    (ev_wake[1 + l]),
       .stop_o       (stop[1 + l]),
       .ulps_o       (ulps[1 + l]),
-      .ulps_rx_o    (ulps_rx[1 + l])
+      .ulps_act_o   (ulps_act[1 + l])
     );
   end
 
@@ -653,8 +655,8 @@ module bow_dphy_rx import bow_bus_pkg::*; import bow_ppi_pkg::*; #(
 
   for (genvar l = 0; l < Lanes; l++) begin : g_ppi_lp
     assign ppi_lp_o[l].stopstate       = stop[1 + l];
-    assign ppi_lp_o[l].ulps_active_not = !ulps[1 + l];
-    assign ppi_lp_o[l].rx_ulps_esc     = ulps_rx[1 + l];
+    assign ppi_lp_o[l].ulps_active_not = !ulps_act[1 + l];
+    assign ppi_lp_o[l].rx_ulps_esc     = ulps[1 + l];
     assign ppi_lp_o[l].err_control     = err_ctl_gray[l];
     assign ppi_lp_o[l].err_esc         = err_esc_gray[l];
     assign ppi_lp_o[l].err_sync_esc    = 2'b00;
@@ -662,8 +664,8 @@ module bow_dphy_rx import bow_bus_pkg::*; import bow_ppi_pkg::*; #(
 
   assign ppi_lp_clk_o.stopstate        = stop[0];
   assign ppi_lp_clk_o.rx_clk_active_hs = hs_act[0];
-  assign ppi_lp_clk_o.ulps_active_not  = !ulps[0];
-  assign ppi_lp_clk_o.rx_ulps_clk_not  = !ulps_rx[0];
+  assign ppi_lp_clk_o.ulps_active_not  = !ulps_act[0];
+  assign ppi_lp_clk_o.rx_ulps_clk_not  = !ulps[0];
   assign ppi_lp_clk_o.err_control      = err_clk_gray[0];
 
   // LP events -> bus: a 4 bit gray counter per kind ([0] clock lane, [1 + l] data lane l):
@@ -777,17 +779,17 @@ module bow_dphy_rx import bow_bus_pkg::*; import bow_ppi_pkg::*; #(
 
   // Status -> bus: the lane states as lp flops (Stopstate, ULPS: decodes of the state
   // registers) and the HS / gate / LP flops of the state machines
-  logic [Lanes:0] stop_q, ulps_q, ulps_rx_q;
+  logic [Lanes:0] stop_q, ulps_q, ulps_act_q;
 
   always_ff @(posedge lp_clk_i or negedge lrst_n) begin
     if (!lrst_n) begin
-      stop_q    <= '0;
-      ulps_q    <= '0;
-      ulps_rx_q <= '0;
+      stop_q     <= '0;
+      ulps_q     <= '0;
+      ulps_act_q <= '0;
     end else begin
-      stop_q    <= stop;
-      ulps_q    <= ulps;
-      ulps_rx_q <= ulps_rx;
+      stop_q     <= stop;
+      ulps_q     <= ulps;
+      ulps_act_q <= ulps_act;
     end
   end
 
@@ -797,8 +799,8 @@ module bow_dphy_rx import bow_bus_pkg::*; import bow_ppi_pkg::*; #(
   ) u_sync_vst (
     .clk_i,
     .rst_ni,
-    .d_i ({ulps_rx_q, ulps_q, stop_q, byte_ce, hs_en, lp_st}),
-    .q_o ({ulps_rx_sys, ulps_sys, stop_sys, ce_sys, hs_en_sys, lp_sys})
+    .d_i ({ulps_act_q, ulps_q, stop_q, byte_ce, hs_en, lp_st}),
+    .q_o ({ulps_act_sys, ulps_sys, stop_sys, ce_sys, hs_en_sys, lp_sys})
   );
 
   bow_sync u_sync_phy_rdy (

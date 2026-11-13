@@ -799,7 +799,7 @@ module tb_bow_dphy_io_xusp;
     reg_check("ID",        12'h000, 32'h4353_3201);
     // FIFO 256, 200 MHz, D-PHY at 0xC00 (INFO[6]), PHY
     reg_check("INFO",      12'h004, {16'd256, 8'd200, 1'b0, 1'b1, 1'b0, 1'b1, 4'(Lanes)});
-    reg_check("DPHY ID",   12'hC00, 32'h4450_5201);
+    reg_check("DPHY ID",   12'hC00, 32'h4450_5202);
     // ULPS (step 6), UltraScale+ AFE (1), 200 MHz lp clock, 9 bit taps; 107 ns + 24 UI, no
     // trail words
     reg_check("DPHY INFO", 12'hC04, {4'h0, 1'b1, 3'h0, 1'b0, 1'b0, 4'd9, 10'd200, 3'd1, 1'b0,
@@ -811,6 +811,14 @@ module tb_bow_dphy_io_xusp;
     reg_wr(12'hC24, phy_cfg);                                  // the driver's (PHY_EN = 0)
     reg_wr(12'hC10, 32'h1);                    // CMD.APPLY: TIM0 is a shadow (step 6)
     reg_check("DPHY TIM0", 12'hC24, phy_cfg);
+    begin : apply_done                         // CMD reads 0 once the D-PHY uses TIM0
+      logic [31:0] cmd;
+      for (int i = 0; i < 20; i++) begin
+        reg_rd(12'hC10, cmd);
+        if (!cmd[0]) break;
+      end
+      if (cmd !== 32'h0) err($sformatf("DPHY CMD 0x%08h after CMD.APPLY, expected 0 (applied, not DIRTY)", cmd));
+    end
     // EXTRA 62, DT 0x2B, 2 lanes, RX_EN, PHY_EN
     reg_wr(12'h008, {8'd0, Extra, 2'b00, 6'h2B, 5'd0, 1'b1, 1'b1, 1'b1});
     #1_000_000;

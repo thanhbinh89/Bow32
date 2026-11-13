@@ -7,48 +7,68 @@
 // lanes' LP states and HS bits, the clock lane, the UltraScale+ adapter's logic), its
 // registers on the bus, its PPI watched by a byte scoreboard and the controller's sampler of
 // the PPI error counters (bow_ppi_err_rx) on a clock of lp_clk / 32. bow_ppi_chk and
-// bow_afe_chk are bound in as in every bench (PPI and AFE rules at every cycle). Built with
-// BOW_CDC_JITTER and BOW_SYNC_JITTER: every synchroniser bit may resolve one cycle late.
+// bow_afe_chk are bound in as in every bench (PPI and AFE rules at every cycle), and the bench
+// checks the AFE controls against the transmitter at every lp clock edge (section 8.3 of the
+// spec, "AFE invariants" below: the gate only while the clock lane is static, the clock
+// lane's receiver only after the gate, the termination within its budget). Built with
+// BOW_CDC_JITTER and BOW_SYNC_JITTER: every synchroniser bit may resolve one cycle late (the
+// clocks are no multiples of each other, so every crossing sees it; each run prints how
+// often it happened, make test fails a build in which it never did). At the end of every
+// test the controller's sampler must have seen exactly the steps of every error counter
+// since the reset.
 //
 // One test per run (+TEST=<name>), each self-checking; "tb_bow_dphy_rx: PASS (<n> checks)"
 // or "tb_bow_dphy_rx: FAIL (<n> errors)". Plusargs: +LP_PS (lp clock, default 5000), +BUS_PS
-// (bus clock, 20000), +BYTE_PS (byte clock of the transmitter, 8772).
+// (bus clock, 19830), +BYTE_PS (byte clock of the transmitter, 8772); the sampler of the PPI
+// error counters runs at 31.87 lp clock periods.
 //   basic      bursts at the reset values (v1 behaviour): bytes of every lane after RxSyncHS,
 //              HS entry counters, Stopstate (LANE_STOP), the register reset values (TIM1 2^20,
 //              TIM2 0, CTRL 0, no LATE_EOT with the transmitter's CLK-POST); a deskew burst:
 //              RxSkewCalHS on every lane as a level until RxActiveHS falls, once
-//   apply      CTRL / TIM0..2 shadow registers: no effect before CMD.APPLY, all fields at once
-//              after it, CMD reads 1 while pending, an APPLY while pending is done after it (TIM0
-//              and a second APPLY 0..5 bus cycles after the first, back to back)
+//   apply      CTRL / TIM0..2 shadow registers: no effect before CMD.APPLY (CMD[31] DIRTY reads
+//              1), all fields at once after it, through the synchroniser (at least two lp
+//              edges after the toggle), CMD reads 1 while pending, an APPLY while pending is
+//              done after it (TIM0 and a second APPLY 0..5 bus cycles after the first, back to
+//              back; CMD read in every bus cycle after it: 1 until both are done, then 0), a
+//              shadow write of the same value is DIRTY too
 //   tinit      T_INIT after CMD.REINIT: LP-11 shorter than T_INIT before the first burst loses
 //              it, Stopstate T_INIT after the command, later blanking shorter than T_INIT is
 //              fine (once only), Enable off / on does not make it due, a READY rise does;
 //              REINIT in a burst sends the lanes to WaitStop (no LATE_EOT: not the
-//              transmitter's clock); T_INIT 0: at once
+//              transmitter's clock; the clock lane through Exit: gate first, receiver two
+//              cycles later, while its clock runs); T_INIT 0: at once
 //   hstmo      HS_TMO: a data lane exactly HS_TMO cycles in Hs, then an LP error and an HS
-//              timeout (ERR_STATUS[2], [3], CNT_LPERR, CNT_MISC, ErrControl); HS_TMO 0: none
+//              timeout (ERR_STATUS[2], [3], CNT_LPERR, CNT_MISC, ErrControl); HS_TMO 0: none;
+//              HS_TMO lowered by CMD.APPLY below the count of a lane in Hs: at once
 //   esctmo     ESC_TMO: an escape entry that stalls ends after ESC_TMO x 64 cycles (ERR_STATUS
-//              [10], CNT_MISC, ErrEsc); ESC_TMO 0: none
+//              [10], CNT_MISC, ErrEsc); ESC_TMO 0: none; lowered by CMD.APPLY below the count
+//              of a stalled entry: at once
 //   ulps       ULPS_EN: ULPS of the data lanes (command) and of the clock lane: LANE_STOP,
-//              UlpsActiveNot / RxUlpsEsc / RxUlpsClkNot, lane_pd per lane (falls at the wake-up
-//              mark), IRQ_STATUS.ULPS, CNT_DSK; another command: ERR_STATUS.ESC, ErrEsc; LP-11
-//              in the entry: no error; a mark without its space: CONTROL; ULPS_EN 0: LP-10 in
-//              Stop is an LP error (v1)
+//              UlpsActiveNot / UlpsActiveNotClk low from the command until the wake-up mark,
+//              RxUlpsEsc / ~RxUlpsClkNot until the LP-11 after it (the public PPI's order),
+//              lane_pd per lane (falls at the mark), IRQ_STATUS.ULPS at the entry and at the end
+//              of the wake-up (not at the mark), CNT_DSK; a stray mark (LP-10, then LP-00 again):
+//              still in ULPS, lane_pd and UlpsActiveNot back, no exit; another command:
+//              ERR_STATUS.ESC, ErrEsc; LP-11 in the entry: no error; a mark without its space:
+//              CONTROL; ULPS_EN 0: LP-10 in Stop is an LP error (v1)
 //   hsrx       HSRX_EARLY: the HS receiver from LP-01, the termination from LP-00; 0: together
 //   missoff    CLK_MISS_OFF: the clock lane's HS receiver and termination fall with the gate at
 //              the clock miss; 0: at LP-11 (v1)
-//   togdiv     CLK_TOG_DIV with a byte clock of twice the lp clock (+LP_PS=20000
-//              +BYTE_PS=10000): 0 sees no byte clock edge (the gate closes in the burst), 1 and
-//              2 receive every burst
+//   togdiv     CLK_TOG_DIV with a byte clock of about twice the lp clock (+LP_PS=20000
+//              +BYTE_PS=10037), CLK_MISS 9: 0 sees (almost) no byte clock edge (two toggle
+//              steps per lp cycle: the gate closes in the burst), 2 and 3 receive every burst
+//              (each toggle level lasts two and four lp cycles); 1 is not checked (each level
+//              about one lp cycle: a metastable sample may cancel a pair of edges, section 4.3)
 //   clklost    CLK_LOST_EN: a data lane in HS without the clock lane: ERR_STATUS[6], CNT_MISC,
 //              ErrControl; 0: nothing (v1); a normal burst: nothing
 //   lateeot    LATE_EOT: CLK-POST too short for RxActiveHS (ERR_STATUS[7], CNT_MISC, IRQ ERR),
 //              every lane of every such burst; a correct CLK-POST, a burst cut by Enable, and
 //              one cut by the clock lane's Enable alone: none
 //   gray       the error counters at the highest LP error rate: CNT_LPERR counts every error
-//              (also with +BUS_PS=50000: lp_clk 10 x clk_i), the PPI ErrControl counter steps
-//              once every 16 cycles at most, the controller's sampler at lp_clk / 32 sees
-//              every step; ErrControlClk none while CLK_CONT, counted in CNT_LPERR
+//              (also with +BUS_PS=49870: lp_clk ~10 x clk_i), the PPI ErrControl counter steps
+//              once every 16 cycles at most, the controller's sampler at ~lp_clk / 32 sees
+//              every step; an error that waits for the next step when its lane is disabled is
+//              dropped; ErrControlClk none while CLK_CONT, counted in CNT_LPERR
 
 `timescale 1ns / 1ps
 
@@ -68,7 +88,9 @@ module tb_bow_dphy_rx;
                          ACntDsk = 10'h078, ACntMisc = 10'h07C;
   localparam logic [31:0] CtrlClkCont = 32'h2, CtrlUlpsEn = 32'h4, CtrlHsrxEarly = 32'h8,
                           CtrlClkLostEn = 32'h80, CtrlMissOff = 32'h1_0000;
-  localparam logic [31:0] CmdApply = 32'h1, CmdReinit = 32'h2, CmdCntClr = 32'h8;
+  localparam logic [31:0] CmdApply = 32'h1, CmdReinit = 32'h2, CmdCntClr = 32'h8,
+                          CmdDirty = 32'h8000_0000;
+  localparam logic [31:0] DphyId = 32'h4450_5202;     // "DPR", register map version 2
   localparam logic [31:0] ErrControl = 32'h4, ErrHsTmo = 32'h8, ErrEsc = 32'h10,
                           ErrClkLost = 32'h40, ErrLateEot = 32'h80, ErrEscTmo = 32'h400;
   localparam logic [31:0] Tim0Reset = 32'h081E_020E, Tim1Reset = 32'h0010_0000;
@@ -93,17 +115,21 @@ module tb_bow_dphy_rx;
   endfunction
 
   // ---------------------------------------------------------------------------- clocks
-  realtime lp_ps = 5000.0, bus_ps = 20000.0, byte_ps = 8772.0;
+  // No period is a multiple of another (the edges of two clocks drift through each other, so
+  // the synchronisers' jitter window sees changes of every crossing); the controller's sampler
+  // of the PPI error counters runs just above its limit, lp_clk / 32
+  realtime lp_ps = 5000.0, bus_ps = 19830.0, byte_ps = 8772.0, ctl_ps;
   logic    clk = 1'b0, lp_clk = 1'b0, ctl_clk = 1'b0, rst_n = 1'b1;
 
   initial begin
     if ($value$plusargs("LP_PS=%f", lp_ps)) ;
     if ($value$plusargs("BUS_PS=%f", bus_ps)) ;
     if ($value$plusargs("BYTE_PS=%f", byte_ps)) ;
+    ctl_ps = 31.87 * lp_ps;
     fork
       forever #(bus_ps / 2000.0) clk = ~clk;
       forever #(lp_ps / 2000.0) lp_clk = ~lp_clk;
-      forever #(16.0 * lp_ps / 1000.0) ctl_clk = ~ctl_clk;   // lp_clk / 32
+      forever #(ctl_ps / 2000.0) ctl_clk = ~ctl_clk;   // just above lp_clk / 32
     join_none
   end
 
@@ -197,7 +223,9 @@ module tb_bow_dphy_rx;
     .lp_i         (lp_st),
     .clk_force_i  (clk_force),
     .byte_ce_i    (byte_ce),
-    .tinit_i      (cfg_lp_q.tinit)
+    .tinit_i      (cfg_lp_q.tinit),
+    .ulps_en_i    (cfg_lp_q.ulps_en),
+    .force_wait_i (force_wait)
   );
 
   bind bow_dphy_rx bow_afe_chk #(.Lanes (Lanes), .TrimW (TrimW), .AfePdRst (AfePdRst),
@@ -220,7 +248,7 @@ module tb_bow_dphy_rx;
     .clk_lane_pd_i  (afe_clk_lane_pd_o),
     .lane_pd_i      (afe_lane_pd_o),
     .ready_i        (phy_rdy_sys),
-    .ulps_rx_i      (ulps_rx_sys),
+    .ulps_act_i     (ulps_act_sys),
     .dly_own_i      (afe_dly_own_o),
     .clk_dly_code_i (afe_clk_dly_code_o),
     .clk_dly_own_i  (afe_clk_dly_own_o),
@@ -344,6 +372,92 @@ module tb_bow_dphy_rx;
     for (int i = 0; i <= int'(Lanes); i++) ctl_steps[i] += ctl_steps_v[i];
   end
 
+  // ------------------------------------------------- AFE invariants against the transmitter
+  // Section 8.3 of the spec, at every lp clock edge once the lp reset is over; k = the cycle
+  // that ends at the edge (the D-PHY's flops still show their values of k):
+  //   * the byte clock gate changes only while the clock lane is static (the transmitter's
+  //     clock lane in LP or HS-0: u_tx.clk_tog = 0), except as section 3.2 allows: CLK_CONT,
+  //     the clock lane's Enable low and CMD.REINIT (the gate then closes while the clock may
+  //     run; the AFE's gate is synchronous to that clock), and the misconfigured CLK_TOG_DIV
+  //     of the togdiv test (gate_run_ok);
+  //   * the clock lane's HS receiver and termination turn off only while its clock is static
+  //     or once the gate has been closed for two cycles (an AFE's HS receiver output may stop
+  //     at once and cut a byte clock pulse the gate has not closed on yet), except while
+  //     CLK_CONT changes (only while the PHY is off);
+  //   * the termination of a lane comes on (2 + F, 4 + F] lp cycles after LP-01 -> LP-00 at
+  //     its pins, F = LP_FILTER (0 counts as 1): two synchroniser flops, the filter and the
+  //     state machine after the sampling phase, plus one cycle of synchroniser jitter (the
+  //     digital part of T_D-TERM-EN and T_CLK-TERM-EN, section 3.4); not while CLK_CONT keeps
+  //     the clock lane's on.
+  bit                  gate_run_ok = 1'b0;   // test knob: the gate may change with a running clock
+  bit                  inv_valid = 1'b0;
+  logic                inv_gate_q, inv_gate_q2, inv_crx_q, inv_cterm_q, inv_en_q, inv_fw_q;
+  logic                inv_force_q, inv_force_q2;
+  logic [Lanes:0]      inv_term_q;
+  int unsigned         n_gate_chg = 0, n_gate_run = 0, n_crx_off = 0, n_crx_run = 0, n_term_on = 0;
+  realtime             term_min = 1.0e9, term_max = 0.0;
+
+  always @(posedge lp_clk) begin
+    if (!rst_n || !dut.lrst_n) begin
+      inv_valid <= 1'b0;
+    end else begin
+      if (inv_valid) begin
+        if (gate !== inv_gate_q) begin
+          n_gate_chg++;
+          if (u_tx.clk_tog) begin
+            n_gate_run++;
+            if (!(inv_force_q || inv_force_q2 || dut.clk_force) && inv_en_q && !inv_fw_q &&
+                !gate_run_ok) begin
+              err($sformatf("the byte clock gate %s while the clock lane toggles (no CLK_CONT, Enable or REINIT)",
+                            gate ? "opened" : "closed"));
+            end
+          end
+        end
+        if ((inv_crx_q && !clk_hsrx_en) || (inv_cterm_q && !clk_term_en)) begin
+          n_crx_off++;
+          if (u_tx.clk_tog) begin
+            n_crx_run++;
+            if ((gate || inv_gate_q || inv_gate_q2) &&
+                !(inv_force_q || inv_force_q2 || dut.clk_force)) begin
+              err($sformatf("the clock lane's HS receiver / termination off (%b / %b) while its clock toggles, the gate closed %s",
+                            clk_hsrx_en, clk_term_en, (gate || inv_gate_q) ? "less than a cycle before" :
+                            "one cycle before"));
+            end
+          end
+        end
+        for (int i = 0; i <= int'(Lanes); i++) begin
+          logic    t_now;
+          realtime dt, lo, hi;
+          int      f;
+          t_now = (i == 0) ? clk_term_en : term_en[i - 1];
+          if (t_now && !inv_term_q[i] && !(i == 0 && (inv_force_q || dut.clk_force))) begin
+            n_term_on++;
+            f  = (dut.cfg_lp_q.lp_filter == 4'd0) ? 1 : int'(dut.cfg_lp_q.lp_filter);
+            dt = ($realtime - lp_ps / 1000.0) - u_tx.t_lp00[(i == 0) ? CL : i - 1];
+            lo = real'(2 + f) * lp_ps / 1000.0;
+            hi = real'(4 + f) * lp_ps / 1000.0;
+            if (dt < term_min) term_min = dt;
+            if (dt > term_max) term_max = dt;
+            if (dt <= lo - 0.01 || dt > hi + 0.01) begin
+              err($sformatf("termination of the %s on %0.2f ns after LP-01 -> LP-00 at the pins, want (%0.1f, %0.1f]",
+                            (i == 0) ? "clock lane" : $sformatf("data lane %0d", i - 1), dt, lo, hi));
+            end
+          end
+        end
+      end
+      inv_valid    <= 1'b1;
+      inv_gate_q   <= gate;
+      inv_gate_q2  <= inv_gate_q;
+      inv_crx_q    <= clk_hsrx_en;
+      inv_cterm_q  <= clk_term_en;
+      inv_en_q     <= dut.lane_en[0];
+      inv_fw_q     <= dut.force_wait;
+      inv_force_q  <= dut.clk_force;
+      inv_force_q2 <= inv_force_q;
+      inv_term_q   <= {term_en, clk_term_en};
+    end
+  end
+
   // ----------------------------------------------------------------------------- bus
   task automatic bus(input bit we, input logic [9:0] a, input logic [31:0] d,
                      output logic [31:0] q);
@@ -370,10 +484,18 @@ module tb_bow_dphy_rx;
   endtask
 
   // CMD.APPLY, then gap bus cycles later TIM0 and CMD.APPLY again in two consecutive bus
-  // cycles (the register file takes a request every cycle); again: the register file kept
-  // an APPLY written while one was pending (white box, apply_again_q)
-  task automatic apply_twice(input int gap, input logic [31:0] tim0, output bit again);
+  // cycles (the register file takes a request every cycle), then CMD read in every bus cycle
+  // (a request per cycle, its data one cycle later); again: the register file kept an APPLY
+  // written while one was pending (white box, apply_again_q); reads: CMD[0] of every cycle
+  // until it read 0 for 6 cycles in a row; rise: CMD[0] read 1 again after a 0 (the pending
+  // APPLY must read 1 from its write until it is done)
+  task automatic apply_twice(input int gap, input logic [31:0] tim0, output bit again,
+                             output int reads, output bit rise);
+    int zeros;
     again = 1'b0;
+    reads = 0;
+    rise  = 1'b0;
+    zeros = 0;
     @(posedge clk);
     #1;
     req = '{req: 1'b1, we: 1'b1, be: 4'hF, addr: {20'h0, 2'b11, ACmd}, wdata: CmdApply};
@@ -388,12 +510,22 @@ module tb_bow_dphy_rx;
     @(posedge clk);
     #1;
     req = '{req: 1'b1, we: 1'b1, be: 4'hF, addr: {20'h0, 2'b11, ACmd}, wdata: CmdApply};
-    for (int i = 0; i < 12; i++) begin
+    @(posedge clk);
+    #1;
+    again = dut.u_regs.apply_again_q;
+    req   = '{req: 1'b1, we: 1'b0, be: 4'hF, addr: {20'h0, 2'b11, ACmd}, wdata: '0};
+    for (int i = 0; i < 40 && zeros < 6; i++) begin
       @(posedge clk);
       #1;
-      req   = '0;
       again = again | dut.u_regs.apply_again_q;
+      reads++;
+      if (rsp.rdata[0]) begin
+        if (zeros != 0) rise = 1'b1;
+      end else begin
+        zeros++;
+      end
     end
+    req = '0;
   endtask
 
   task automatic rd(input logic [9:0] a, output logic [31:0] q);
@@ -567,7 +699,7 @@ module tb_bow_dphy_rx;
   task automatic t_basic();
     csi2_bytes_t b;
     logic [31:0] q;
-    expect_rd("ID", AId, 32'h4450_5201);
+    expect_rd("ID (register map version 2)", AId, DphyId);
     expect_rd("INFO[27] ULPS", AInfo, 32'h0800_0000, 32'h0800_0000);
     expect_rd("CTRL reset", ACtrl, 32'h0);
     expect_rd("TIM0 reset", ATim0, Tim0Reset);
@@ -614,40 +746,55 @@ module tb_bow_dphy_rx;
   // ---------------------------------------------------------------------------- apply
   task automatic t_apply();
     logic [31:0] q;
-    int          changes, pending;
-    bit          again;
-    logic [97:0] cfg_last;
+    int          changes, pending, edges, edge_copy, reads, rises;
+    bit          again, rise, tog0;
+    logic [93:0] cfg_last;
     phy_off();
-    // a shadow write has no effect before CMD.APPLY
+    expect_rd("CMD 0 after reset (no APPLY pending, not DIRTY)", ACmd, 32'h0);
+    // a shadow write has no effect before CMD.APPLY; DIRTY until it
     wr(ATim0, 32'h0510_0233);
+    expect_rd("CMD DIRTY after a shadow write", ACmd, CmdDirty);
     wr(ATim1, 32'h0300_1234);
     wr(ATim2, 32'h0050_0321);
     wr(ACtrl, CtrlMissOff | CtrlHsrxEarly);
     bus_cycles(20);
     expect_rd("TIM0 shadow read back", ATim0, 32'h0510_0233);
+    expect_rd("CMD still DIRTY (no APPLY)", ACmd, CmdDirty);
     expect_true("TIM0 not applied before CMD.APPLY", dut.cfg_lp_q.settle == 8'd14);
     expect_true("TIM1 not applied before CMD.APPLY", dut.cfg_lp_q.hs_tmo == 24'h10_0000);
     expect_true("CTRL not applied before CMD.APPLY", !dut.cfg_lp_q.miss_off);
-    // one APPLY: every field at once (one lp cycle)
-    changes  = 0;
-    cfg_last = dut.cfg_lp_q;
+    // one APPLY: every field at once (one lp cycle), after the toggle crossed its
+    // synchroniser (edge_copy: the lp edges from the toggle up to the copy, at least two)
+    changes   = 0;
+    edges     = -1;
+    edge_copy = -1;
+    cfg_last  = dut.cfg_lp_q;
+    tog0      = dut.apply_req_sys;
     fork
       begin
         wr(ACmd, CmdApply);
         rd(ACmd, q);
         expect_true("CMD reads 1 right after APPLY", q[0]);
+        expect_true("CMD DIRTY 0 once the APPLY is sent", !q[31]);
         bus_cycles(10);
         rd(ACmd, q);
-        expect_true("CMD reads 0 once applied", !q[0]);
+        expect_true("CMD reads 0 once applied", q == 32'h0);
       end
     join_none
     repeat (100) begin
       @(posedge lp_clk);
       #0.1;
-      if (dut.cfg_lp_q != cfg_last) changes++;
+      if (edges >= 0) edges++;
+      else if (dut.apply_req_sys != tog0) edges = 1;      // the first lp edge after the toggle
+      if (dut.cfg_lp_q != cfg_last) begin
+        changes++;
+        edge_copy = edges;
+      end
       cfg_last = dut.cfg_lp_q;
     end
     expect_true($sformatf("the configuration changed in one lp cycle (%0d)", changes), changes == 1);
+    expect_true($sformatf("the copy at lp edge %0d after the APPLY toggle (through its synchroniser: 2..5)",
+                          edge_copy), edge_copy >= 2 && edge_copy <= 5);
     expect_true("TIM0 applied", dut.cfg_lp_q.settle == 8'h33 && dut.cfg_lp_q.lp_filter == 4'h2 &&
                 dut.cfg_lp_q.clk_settle == 8'h10 && dut.cfg_lp_q.clk_miss == 8'h05);
     expect_true("TIM1 applied", dut.cfg_lp_q.hs_tmo == 24'h00_1234 && dut.cfg_lp_q.tog_div == 4'd3);
@@ -658,16 +805,25 @@ module tb_bow_dphy_rx;
     // then TIM0 and CMD.APPLY again in consecutive bus cycles, 0..5 bus cycles later (some
     // of these between the lp domain's copy and its acknowledge)
     pending = 0;
+    rises   = 0;
     for (int g = 0; g < 6; g++) begin
       wr(ATim0, 32'h0510_0240 | 32'(g));
-      apply_twice(g, 32'h0510_0260 | 32'(g), again);
+      apply_twice(g, 32'h0510_0260 | 32'(g), again, reads, rise);
       if (again) pending++;
+      if (rise) rises++;
+      expect_true($sformatf("gap %0d: CMD[0] 1 from the second APPLY until both were done, then 0 (%0d reads)",
+                            g, reads), !rise && reads < 40);
       rd(ACmd, q);
-      expect_true($sformatf("gap %0d: both APPLYs acknowledged", g), !q[0]);
+      expect_true($sformatf("gap %0d: both APPLYs acknowledged, not DIRTY", g), q == 32'h0);
       expect_true($sformatf("gap %0d: the latest shadow applied (SETTLE 0x%02h)", g,
                             dut.cfg_lp_q.settle), dut.cfg_lp_q.settle == 8'h60 + 8'(g));
     end
     expect_true($sformatf("an APPLY while one was pending (%0d of 6)", pending), pending > 0);
+    // DIRTY for a write of the value in use too (it tells writes, not differences)
+    wr(ATim2, 32'h0050_0321);
+    expect_rd("CMD DIRTY after a write of the same value", ACmd, CmdDirty);
+    apply();
+    expect_rd("CMD 0 after its APPLY", ACmd, 32'h0);
     // back to the reset values
     wr(ATim0, Tim0Reset);
     wr(ATim1, Tim1Reset);
@@ -758,7 +914,24 @@ module tb_bow_dphy_rx;
     burst(b);
     wait_bytes(40);
     wr(ACmd, CmdReinit);
-    lp_cycles(20);
+    begin : reinit_watch
+      int e_gate, e_rx;
+      bit tog;
+      e_gate = -1;
+      e_rx   = -1;
+      tog    = 1'b0;
+      for (int n = 0; n < 30; n++) begin
+        @(posedge lp_clk);
+        #0.1;
+        if (e_gate < 0 && !gate) begin
+          e_gate = n;
+          tog    = u_tx.clk_tog;
+        end
+        if (e_rx < 0 && !clk_hsrx_en) e_rx = n;
+      end
+      expect_true($sformatf("REINIT in a burst: the clock lane's gate closed while its clock ran (%0d), the receiver %0d lp cycles after it (2)",
+                            tog, e_rx - e_gate), tog && e_gate >= 0 && e_rx - e_gate == 2);
+    end
     expect_true("REINIT in a burst: the data lanes left HS", p_act[Lanes:1] == '0);
     tx_wait(tinit_ns + 400.0);
     u_tx.push_clk_burst(800);                     // the byte domain ends the cut burst
@@ -823,6 +996,26 @@ module tb_bow_dphy_rx;
     expect_true($sformatf("HS_TMO 1100: lane 0 in Hs for %0d cycles", hi), hi == 1100);
     expect_rd("ERR_STATUS HS_TMO again", AErr, ErrControl | ErrHsTmo);
     expect_true("ErrControl[0] stepped once more", prod_steps[1] - n1 == 1);
+    // HS_TMO lowered by CMD.APPLY below the count of a lane in Hs: the watchdog fires at once,
+    // not after the count went round (2^24 cycles)
+    wr_apply(ATim1, 32'd0);
+    clear_counts();
+    lps(1, 2'b01, 100);
+    lps(1, 2'b00, 8000);
+    while (!p_act[1]) @(posedge lp_clk);
+    lp_cycles(400);
+    wr(ATim1, 32'd100);
+    wr(ACmd, CmdApply);
+    hi = 0;
+    while (p_act[1] && hi < 400) begin
+      @(posedge lp_clk);
+      hi++;
+    end
+    expect_true($sformatf("HS_TMO 100 applied after 400 cycles in Hs: lane 0 left Hs %0d lp cycles after the APPLY write",
+                          hi), hi < 40);
+    tx_wait(200);
+    expect_rd("HS_TMO lowered: ERR_STATUS CONTROL + HS_TMO", AErr, ErrControl | ErrHsTmo);
+    expect_rd("HS_TMO lowered: CNT_MISC one HS_TMO", ACntMisc, 32'h0001_0000);
     wr_apply(ATim1, Tim1Reset);
   endtask
 
@@ -863,10 +1056,41 @@ module tb_bow_dphy_rx;
     tx_wait(200);
     expect_rd("ESC_TMO 0: no error", AErr, 32'h0);
     expect_rd("ESC_TMO 0: back in Stop", ALaneStop, all_stop());
+    // ESC_TMO lowered by CMD.APPLY below the count of a stalled entry: at once
+    clear_counts();
+    lps(1, 2'b10, 80);
+    lps(1, 2'b00, 80);
+    lps(1, 2'b01, 80);
+    lps(1, 2'b00, 5000);
+    while (p_state[1] != 4'd11) @(posedge lp_clk);                    // EscCmd
+    lp_cycles(300);
+    wr(ATim2, 32'(2) << 20);                                           // 128 cycles
+    wr(ACmd, CmdApply);
+    t0 = $realtime;
+    while (p_state[1] != 4'd1 && $realtime - t0 < 2000.0) @(posedge lp_clk);   // WaitStop
+    expect_true($sformatf("ESC_TMO 2 applied after 300 cycles in escape: the timeout %0.0f ns after the APPLY write",
+                          $realtime - t0), $realtime - t0 < 200.0);
+    tx_wait(200);
+    expect_rd("ESC_TMO lowered: ERR_STATUS ESC_TMO", AErr, ErrEscTmo);
+    wr_apply(ATim2, 32'h0);
     wr_apply(ACtrl, 32'h0);
   endtask
 
   // ----------------------------------------------------------------------------- ulps
+  // the transmitter has started the item that is n from the end of its queue (0: the last)
+  task automatic tx_at(input int unsigned n);
+    while (u_tx.items.size() > n) #10;
+  endtask
+
+  // the ULPS levels of the data lanes: in ULPS (RxUlpsEsc), ULPS active (~UlpsActiveNot)
+  function automatic void ulps_lanes(string what, bit in, bit act);
+    for (int l = 0; l < int'(Lanes); l++) begin
+      expect_true($sformatf("%s: lane %0d RxUlpsEsc %0d, UlpsActiveNot %0d (want %0d, %0d)", what, l,
+                            ppi_lp[l].rx_ulps_esc, ppi_lp[l].ulps_active_not, in, !act),
+                  ppi_lp[l].rx_ulps_esc == in && ppi_lp[l].ulps_active_not == !act);
+    end
+  endfunction
+
   task automatic t_ulps();
     logic [31:0] q;
     int unsigned e0;
@@ -879,48 +1103,66 @@ module tb_bow_dphy_rx;
     clear_counts();
     wr_apply(ACtrl, CtrlUlpsEn);
     wr(AIrqEn, 32'h2);
-    // data lanes: escape entry, ULPS command, ULPS
+    // data lanes, one queue (the lines go to LP-11 only at its end): escape entry, ULPS
+    // command, ULPS (LP-00), a stray mark (LP-10, then LP-00 again), ULPS, the wake-up mark
+    // (LP-10), then LP-11
     escape(data_mask(), EscUlps);
-    lps(data_mask(), 2'b00, 1500);
-    while (u_tx.busy() && u_tx.items.size() != 0) #10;
-    #800;
+    lps(data_mask(), 2'b00, 2000);
+    lps(data_mask(), 2'b10, 200);
+    lps(data_mask(), 2'b00, 2000);
+    lps(data_mask(), 2'b10, 3000);
+    tx_at(3);
+    #1000;
     rd(ALaneStop, q);
     expect_eq("ULPS: LANE_STOP ULPS of the data lanes", q,
               32'(((1 << Lanes) - 1) << 17) | 32'(1));
-    for (int l = 0; l < int'(Lanes); l++) begin
-      expect_true($sformatf("ULPS: UlpsActiveNot / RxUlpsEsc of lane %0d", l),
-                  !ppi_lp[l].ulps_active_not && ppi_lp[l].rx_ulps_esc);
-    end
+    ulps_lanes("ULPS", 1'b1, 1'b1);
     expect_true("ULPS: lane_pd of the data lanes", lane_pd == '1 && !clk_lane_pd);
     expect_true("ULPS: the HS receivers off", hsrx_en == '0 && term_en == '0);
-    expect_rd("IRQ_STATUS.ULPS", AIrqSt, 32'h2, 32'h2);
+    expect_rd("IRQ_STATUS.ULPS (entry)", AIrqSt, 32'h2, 32'h2);
     expect_true("irq_o (IRQ_EN.ULPS)", irq);
-    tx_wait(0);
-    // wake-up: LP-10 (lane_pd falls at once, still in ULPS), then LP-11
-    lps(data_mask(), 2'b10, 2000);
+    wr(AIrqSt, 32'hF);
+    // a stray mark: the HS part powers up, ULPS no longer active, still in ULPS
+    tx_at(2);
+    #150;
+    ulps_lanes("stray mark", 1'b1, 1'b0);
+    expect_true("stray mark: lane_pd 0", lane_pd == '0);
+    // LP-00 again: ULPS active again, lane_pd 1, no exit and no new entry
+    tx_at(1);
+    #1000;
+    ulps_lanes("after the stray mark", 1'b1, 1'b1);
+    expect_true("after the stray mark: lane_pd 1 again", lane_pd == '1);
+    expect_rd("after the stray mark: still ULPS in LANE_STOP", ALaneStop,
+              32'(((1 << Lanes) - 1) << 17) | 32'(1));
+    expect_rd("after the stray mark: no ULPS interrupt", AIrqSt, 32'h0, 32'h2);
+    // the wake-up mark: lane_pd falls at once, RxUlpsEsc stays until LP-11
+    tx_at(0);
     #1200;
+    ulps_lanes("wake-up mark", 1'b1, 1'b0);
     expect_true("wake-up mark: lane_pd 0", lane_pd == '0);
-    for (int l = 0; l < int'(Lanes); l++) begin
-      expect_true($sformatf("wake-up mark: lane %0d UlpsActiveNot 0, RxUlpsEsc 0", l),
-                  !ppi_lp[l].ulps_active_not && !ppi_lp[l].rx_ulps_esc);
-    end
+    expect_rd("wake-up mark: no ULPS interrupt yet", AIrqSt, 32'h0, 32'h2);
     tx_wait(300);
+    ulps_lanes("out of ULPS", 1'b0, 1'b0);
     expect_rd("out of ULPS: every lane in Stop", ALaneStop, all_stop());
-    expect_rd("CNT_DSK: ULPS entries of every data lane", ACntDsk, 32'(Lanes) << 16);
+    expect_rd("out of ULPS: IRQ_STATUS.ULPS (exit)", AIrqSt, 32'h2, 32'h2);
+    expect_rd("CNT_DSK: one ULPS entry of every data lane", ACntDsk, 32'(Lanes) << 16);
     expect_rd("no error from ULPS", AErr, 32'h0);
-    // clock lane ULPS: LP-10, LP-00; wake-up LP-10, LP-11
+    // clock lane ULPS: LP-10, LP-00 (ULPS), the wake-up mark LP-10, LP-11
     wr(AIrqSt, 32'hF);
     lps(1 << CL, 2'b10, 100);
-    lps(1 << CL, 2'b00, 1500);
-    while (u_tx.items.size() != 0) #10;
-    #800;
+    lps(1 << CL, 2'b00, 2000);
+    lps(1 << CL, 2'b10, 1500);
+    tx_at(1);
+    #1000;
     expect_true("clock lane ULPS: RxUlpsClkNot 0, UlpsActiveNotClk 0",
                 !ppi_lp_clk.rx_ulps_clk_not && !ppi_lp_clk.ulps_active_not);
     expect_true("clock lane ULPS: its lane_pd", clk_lane_pd && lane_pd == '0);
     rd(ALaneStop, q);
     expect_eq("clock lane ULPS: LANE_STOP", q, 32'h0001_0000 | (all_stop() & ~32'h1));
-    tx_wait(0);
-    lps(1 << CL, 2'b10, 1000);
+    tx_at(0);
+    #800;
+    expect_true("clock lane wake-up mark: RxUlpsClkNot 0, UlpsActiveNotClk 1, its lane_pd 0",
+                !ppi_lp_clk.rx_ulps_clk_not && ppi_lp_clk.ulps_active_not && !clk_lane_pd);
     tx_wait(300);
     expect_true("clock lane out of ULPS", ppi_lp_clk.rx_ulps_clk_not && ppi_lp_clk.ulps_active_not &&
                 !clk_lane_pd);
@@ -1060,20 +1302,27 @@ module tb_bow_dphy_rx;
     int unsigned early, got;
     phy_on();
     // the timers at a 50 MHz lp clock: SETTLE 2 (the sync search from 100 + 40 ns after
-    // LP-00 at the pins, HS-ZERO 300 ns), LP_FILTER 2, CLK_SETTLE 8 (160 ns), CLK_MISS 6
-    // (120 ns: longer than 2^2 byte clocks, 40 ns)
+    // LP-00 at the pins, HS-ZERO 300 ns), LP_FILTER 2, CLK_SETTLE 8 (160 ns), CLK_MISS 9
+    // (180 ns: more than 2^3 byte clocks, 80 ns, + the sampling phase and one late cycle)
     u_tx.t_hs_zero  = 300;
     u_tx.t_clk_post = 300;                        // > LP-11 detection (100 ns) + 3 byte clocks
-    wr_apply(ATim0, 32'h0608_0202);
+    wr_apply(ATim0, 32'h0908_0202);
     wr_apply(ATim1, Tim1Reset | (32'd0 << 24));
+    // CLK_TOG_DIV 0: the toggle steps about twice per lp cycle, so the lp domain sees (almost)
+    // no change: the gate closes while the transmitter's clock runs (meant to: the AFE
+    // invariant of the gate is off here)
+    gate_run_ok = 1'b1;
     tog_bursts(3, early, got);
     $display("tb_bow_dphy_rx: CLK_TOG_DIV 0 with a byte clock of 2 x lp_clk: %0d gate closes in bursts, %0d lane bursts", early, got);
     expect_true("CLK_TOG_DIV 0: the gate closes in the bursts (no edge seen)", early > 0);
-    for (int d = 1; d <= 2; d++) begin
+    // 2 and 3: each toggle level lasts two and four lp cycles (1, about one lp cycle, is the
+    // limit of section 4.3 and not checked)
+    for (int d = 2; d <= 3; d++) begin
       wr_apply(ATim1, Tim1Reset | (32'(d) << 24));
       u_tx.push_clk_burst(1000);                  // the new divider into the byte domain, the
       tx_wait();                                  // cut bursts of CLK_TOG_DIV 0 ended
       flush_rx();
+      gate_run_ok = 1'b0;
       tog_bursts(3, early, got);
       expect_true($sformatf("CLK_TOG_DIV %0d: no gate close in a burst (%0d), every burst (%0d)", d,
                             early, got), early == 0 && got == 3 * Lanes);
@@ -1179,6 +1428,26 @@ module tb_bow_dphy_rx;
                           prod_steps[1] - p0, n), prod_steps[1] - p0 > 0 && prod_steps[1] - p0 < n);
     expect_true($sformatf("the sampler at lp_clk / 32 saw every step (%0d of %0d)",
                           ctl_steps[1] - c0, prod_steps[1] - p0), ctl_steps[1] - c0 == prod_steps[1] - p0);
+    // an error that waits for the next step of ErrControl[0] (the hold time after a step)
+    // when the lane is disabled is dropped: no step once the lane is enabled again
+    p0 = prod_steps[1];
+    lps(1, 2'b00, 20);
+    lps(1, 2'b11, 20);
+    lps(1, 2'b00, 20);
+    lps(1, 2'b11, 400);
+    n = 0;
+    while (!dut.u_ppi_err_ctl.pend_q[0] && n < 400) begin
+      @(posedge lp_clk);
+      n++;
+    end
+    expect_true($sformatf("an error waits for the next step of ErrControl[0] (%0d lp cycles)", n),
+                n < 400 && prod_steps[1] - p0 == 1);
+    enable[0] = 1'b0;
+    lp_cycles(40);
+    enable[0] = 1'b1;
+    tx_wait(400);
+    expect_true($sformatf("the waiting error dropped with the lane's Enable: %0d steps (1)",
+                          prod_steps[1] - p0), prod_steps[1] - p0 == 1);
     // ErrControlClk: none while CLK_CONT, counted in CNT_LPERR
     clear_counts();
     phy_off();
@@ -1223,6 +1492,22 @@ module tb_bow_dphy_rx;
       default:   err($sformatf("unknown test %s", test));
     endcase
     tx_wait(500);
+    // the controller's sampler saw exactly the steps of every error counter since the reset
+    repeat (4) @(posedge ctl_clk);
+    for (int i = 0; i <= int'(Lanes); i++) begin
+      expect_true($sformatf("the sampler of %s saw every step since the reset (%0d of %0d)",
+                            (i == 0) ? "ErrControlClk" : $sformatf("ErrControl[%0d]", i - 1),
+                            ctl_steps[i], prod_steps[i]), ctl_steps[i] == prod_steps[i]);
+    end
+    $display("tb_bow_dphy_rx: AFE invariants: %0d gate changes (%0d with the clock running), %0d clock lane receiver offs (%0d with the clock running), %0d termination ons %0.2f..%0.2f ns after LP-00",
+             n_gate_chg, n_gate_run, n_crx_off, n_crx_run, n_term_on,
+             (n_term_on != 0) ? term_min : 0.0, term_max);
+`ifdef BOW_SYNC_JITTER
+    // how often the jitter model of the synchronisers fired (make test sums it per build and
+    // fails a build in which it never did)
+    $display("tb_bow_dphy_rx: BOW_SYNC_JITTER: %0d synchroniser inputs changed inside the window, %0d resolved one cycle late",
+             bow_sync_jitter_pkg::n_window, bow_sync_jitter_pkg::n_late);
+`endif
     if (errors == 0) $display("tb_bow_dphy_rx: PASS (%0d checks; test %s, %0d lanes)", checks, test, Lanes);
     else             $display("tb_bow_dphy_rx: FAIL (%0d errors; test %s, %0d lanes)", errors, test, Lanes);
     $finish;

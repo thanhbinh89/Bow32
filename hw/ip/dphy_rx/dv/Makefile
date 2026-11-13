@@ -6,7 +6,8 @@
 # docs/ip/mipi_rx_arch.md (sections 4.12, 8.3, 10): the D-PHY v1.x functions, one test per run.
 #
 #   make test                    every test with 2 and with 4 lanes (+ the clock ratio cases),
-#                                PJOBS of them at a time; fails if one fails
+#                                PJOBS of them at a time; fails if one fails, or if the
+#                                synchronisers' jitter never fired in the runs of a build
 #   make run TEST=ulps LANES=4   one test (dumps nothing; the log in build/dphy_rx_dv/<name>.log)
 #   make mutants                 the mutants of mutants_dphy.py (step 6 functions): each must
 #                                make a test fail; not in test or CI
@@ -14,9 +15,13 @@
 # Options: JOBS (C++ build jobs of Verilator, default 0: all cores), PJOBS (runs at a time,
 # default: the number of CPUs), MJOBS (mutants at a time, default 4).
 #
-# The bench is built with BOW_CDC_JITTER and BOW_SYNC_JITTER: every synchroniser bit may
-# resolve a new value one cycle late at random (hw/ip/common/rtl/bow_sync.sv, bow_cdc_pulse.sv),
-# so a bus crossing that is not gray coded would show values it never had.
+# The bench is built with BOW_CDC_JITTER and BOW_SYNC_JITTER: every bow_cdc_pulse toggle and
+# every bow_sync input that changed less than 0.5 ns before the clock edge may resolve one
+# cycle late at random (hw/ip/common/rtl/bow_sync.sv, bow_cdc_pulse.sv), so a bus crossing
+# that is not gray coded would show values it never had. The bench's clocks are no multiples
+# of each other (else no edge falls into that window); each run prints how many bow_sync
+# inputs resolved late, and make test sums them per build (2, 4 lanes) and fails when a build
+# has none (the model would then test nothing).
 
 REPO      := $(abspath ../../../..)
 BUILD     := $(REPO)/build/dphy_rx_dv
@@ -32,8 +37,9 @@ SEED      ?= 1
 PLUS      ?=
 
 TESTS := basic apply tinit hstmo esctmo ulps hsrx missoff clklost lateeot gray
-# the tests at other clocks: "name:plusargs"
-CLOCKED := togdiv:+LP_PS=20000+BYTE_PS=10000 gray:+BUS_PS=50000
+# the tests at other clocks: "name:plusargs" (the byte clock of togdiv about 2 x the lp clock,
+# the bus clock of gray about lp / 10)
+CLOCKED := togdiv:+LP_PS=20000+BYTE_PS=10037 gray:+BUS_PS=49870
 
 SRCS := $(shell find $(REPO)/hw/ip/dphy_rx $(REPO)/hw/ip/common $(REPO)/hw/ip/bus \
           -name '*.sv' -o -name '*.f') $(REPO)/hw/ip/csi2rx/rtl/bow_ppi_err_rx.sv \
@@ -75,8 +81,17 @@ cases:
 	  for c in $(CLOCKED); do echo "TEST=$${c%%:*} PLUS=$${c#*:} LANES=$$l SEED=$$s"; done; \
 	done; done
 
+# the late resolutions of the synchronisers in one run: "<lanes> <count>" from its log
+late:
+	@echo "$(LANES) $$(sed -n 's/.*BOW_SYNC_JITTER: .* \([0-9]*\) resolved one cycle late.*/\1/p' \
+	  $(BUILD)/$(NAME).log | tail -1)"
+
 test: build
 	@$(MAKE) --no-print-directory -s cases | xargs -P $(PJOBS) -L 1 $(MAKE) --no-print-directory run
+	@$(MAKE) --no-print-directory -s cases | xargs -L 1 $(MAKE) --no-print-directory -s late | \
+	  awk '{ n[$$1] += $$2 } END { bad = 0; for (l in n) { \
+	    printf "BOW_SYNC_JITTER: %d late resolutions in the runs with %d lanes\n", n[l], l; \
+	    if (n[l] == 0) bad = 1 }; exit bad }'
 
 mutants:
 	$(PYTHON) mutants_dphy.py --build $(BUILD)/mutants --jobs $(MJOBS)
@@ -84,4 +99,4 @@ mutants:
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: build run cases test mutants clean
+.PHONY: build run cases late test mutants clean

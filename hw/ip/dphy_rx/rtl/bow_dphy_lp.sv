@@ -14,8 +14,8 @@
 //                  +------------------------- LP-10 -----+
 //   v1.x, ulps_en_i = 1 (CTRL.ULPS_EN; else LP-10 in Stop is an LP error as before):
 //     data lane   Stop --LP-10--> EscRqst --LP-00--> EscGo --LP-01--> EscCmd (8 command bits)
-//                 --ULPS--> Ulps --LP-10--> UlpsExit --LP-11--> Stop; another command:
-//                 EscWait --LP-11--> Stop
+//                 --ULPS--> Ulps --LP-10--> UlpsExit --LP-11--> Stop (LP-00: back to Ulps);
+//                 another command: EscWait --LP-11--> Stop
 //     clock lane  Stop --LP-10--> EscRqst --LP-00--> Ulps --LP-10--> UlpsExit --LP-11--> Stop
 //
 // * HS receiver and termination: on from the LP-00 that follows LP-01 (Settle) until LP-11.
@@ -36,19 +36,27 @@
 //   force_hs_i (continuous clock) keeps hs_en_o = term_en_o = ce_o = 1 whatever the state
 //   while en_i = 1. There is no watchdog on the clock lane.
 // * en_i = 0: the gate closes at once, the receiver 8 cycles later (Off).
+// * The receiver of the clock lane never turns off before the gate (the HS receiver output of
+//   an AFE may stop at once, cutting a byte clock pulse that the synchronous gate has not
+//   closed on yet): only after it (Exit, Disable) or together with it once the clock stopped
+//   (the clock miss of CLK_MISS_OFF).
 // * T_INIT (v1.x): tinit_set_i (the AFE's ready rose, or CMD.REINIT) makes T_INIT due once:
 //   the next time the lane goes from WaitStop to Stop, the line must have been LP-11 for
 //   tinit_i cycles in a row (TIM2.T_INIT; 0 = at once, as in v1). An HS request in WaitStop
 //   is ignored (no error), so a sensor that holds LP-11 shorter than that loses its first
 //   burst. It is due once only: Enable alone (stop / start) never makes it due again.
 //   force_wait_i (CMD.REINIT, or ready rising while T_INIT != 0) sends an enabled lane back
-//   to WaitStop from any state.
+//   to WaitStop from any state; a clock lane in Hs (gate open: its clock may still run)
+//   goes there through Exit (the gate closes first, the receiver two cycles later;
+//   exit_wait_q: then WaitStop, not Stop), one in Exit finishes it first.
 // * Escape mode and ULPS (v1.x, ulps_en_i): the entry LP-11, LP-10, LP-00, LP-01, LP-00, then
 //   8 command bits in spaced one-hot code (each bit a mark, LP-01 for 0, LP-10 for 1,
 //   followed by a space, LP-00; first bit on the wire first) [S18]. Command ULPS (EscUlps):
-//   the lane is in ULPS (ulps_o, ulps_rx_o; the AFE's lane_pd follows ulps_rx_o) until the
-//   wake-up mark LP-10 (ulps_rx_o falls at once: the AFE's HS part powers up while the
-//   transmitter holds the mark for at least T_WAKEUP) and then LP-11 (Stop). Another command
+//   the lane is in ULPS (ulps_o: PPI RxUlpsEsc, ~RxUlpsClkNot) until LP-11 ends the wake-up
+//   (Stop). ulps_act_o (ULPS active: PPI ~UlpsActiveNot, and the AFE's lane_pd) falls at the
+//   wake-up mark LP-10 (the AFE's HS part powers up while the transmitter holds the mark for
+//   at least T_WAKEUP) and rises again if the mark ends in LP-00 instead of LP-11 (a stray
+//   LP-10: the lane is still in ULPS). Another command
 //   (LPDT, triggers: not supported) is an escape error (ev_esc_o); the lane waits for LP-11.
 //   LP-11 during the entry or the command cancels the escape mode without an error. A wrong
 //   LP sequence in it (LP-01 right after LP-10, LP-10 after LP-10 LP-00, a mark followed by
@@ -57,6 +65,7 @@
 //   that long, else an escape timeout (ev_esc_tmo_o) and back to WaitStop. The clock lane
 //   enters ULPS with LP-10, LP-00 (no command) and leaves it like a data lane. ulps_en_i = 0
 //   while a lane is in one of these states sends it to Off (then WaitStop: a fresh LP-11).
+//   ev_ulps_o at the ULPS entry, ev_wake_o at the LP-11 that ends it.
 // * des_rst_o (clock lane, AFE des_rst, docs/ip/mipi_rx_arch.md section 3.2): the
 //   inverse of the gate, a flop of its own that changes at the same edge as ce_o (1 when
 //   the gate closes or at reset, 0 at the edge that opens it); held at 0 while
@@ -65,14 +74,14 @@
 // Glitch filter: lp_o takes a new level once it was seen filter_i
 // consecutive cycles (0 counts as 1). LP-00 at the pin -> hs_en_o takes
 // 2 (synchroniser) + filter_i + 1 (state machine) cycles.
-// All outputs are flops, except stop_o (PPI Stopstate), ulps_o and ulps_rx_o, decoded
+// All outputs are flops, except stop_o (PPI Stopstate), ulps_o and ulps_act_o, decoded
 // from the state register: levels for logic on clk_i only.
 //
 // Every v1.x input at its reset value (hsrx_early_i, miss_off_i, ulps_en_i 0, hs_tmo_i 2^20,
 // esc_tmo_i, tinit_i 0, tinit_set_i, force_wait_i 0) gives the state machine of v1 (step 5):
 // the registers of v1 have the same next state functions (Formality, hw/ip/dphy_rx/fm,
-// STEP=6), the new ones (term_q, the upper timer bits, the escape decoder, the T_INIT flag
-// and the new event flops) only add outputs.
+// STEP=6), the new ones (term_q, the upper timer bits, the escape decoder, the T_INIT flag,
+// exit_wait_q and the new event flops) only add outputs.
 
 module bow_dphy_lp #(
   parameter bit ClockLane = 1'b0
@@ -107,10 +116,10 @@ module bow_dphy_lp #(
   output logic        ev_esc_o,      // pulse: escape command other than ULPS
   output logic        ev_esc_tmo_o,  // pulse: escape timeout (ESC_TMO)
   output logic        ev_ulps_o,     // pulse: ULPS entered
-  output logic        ev_wake_o,     // pulse: ULPS left (wake-up mark, or LP-11)
+  output logic        ev_wake_o,     // pulse: ULPS left (the LP-11 after the wake-up mark)
   output logic        stop_o,        // the lane is in Stop (PPI Stopstate)
-  output logic        ulps_o,        // the lane is in ULPS, until Stop (PPI UlpsActiveNot = 0)
-  output logic        ulps_rx_o      // ... before the wake-up mark (RxUlpsEsc, ~RxUlpsClkNot)
+  output logic        ulps_o,        // the lane is in ULPS, until LP-11 (RxUlpsEsc, ~RxUlpsClkNot)
+  output logic        ulps_act_o     // ... before the wake-up mark (~UlpsActiveNot, lane_pd)
 );
 
   localparam logic [1:0] Lp00 = 2'b00;
@@ -173,6 +182,7 @@ module bow_dphy_lp #(
   logic        seen_q, seen_d;   // clock lane: a byte clock edge was seen in this Hs
   logic        hs_en_q, ce_q, act_q, term_q;
   logic        hs_en_d, ce_d, act_d, term_d, hs_on, trail_on;
+  logic        exit_wait_q, exit_wait_d;   // clock lane: Exit ends in WaitStop (CMD.REINIT)
   logic        ev_hs_d, ev_err_d, ev_tmo_d, ev_esc_d, ev_esc_tmo_d, ev_ulps_d, ev_wake_d;
   logic        force_hs;
   logic        pend_q, pend_d;   // T_INIT due (tinit_set_i), until the next Stop
@@ -184,8 +194,9 @@ module bow_dphy_lp #(
 
   assign force_hs    = ClockLane && force_hs_i && en_i;
   assign tinit_cnt   = pend_q && (tinit_i != 20'd0);
-  assign tmo_hit     = (hs_tmo_i != 24'd0) && ({tmr_hi_q, tmr_q} == hs_tmo_i - 24'd1);
-  assign esc_tmo_hit = (esc_tmo_i != 12'd0) && (tmr_q == {2'b00, esc_tmo_i, 6'd0} - 20'd1);
+  // (>=: a timeout that CMD.APPLY lowers below the running count fires at once)
+  assign tmo_hit     = (hs_tmo_i != 24'd0) && ({tmr_hi_q, tmr_q} >= hs_tmo_i - 24'd1);
+  assign esc_tmo_hit = (esc_tmo_i != 12'd0) && (tmr_q >= {2'b00, esc_tmo_i, 6'd0} - 20'd1);
   // the LP state of the mark in progress: the entry's LP-01, or the last command bit
   assign mark_lp     = (esc_cnt_q == 4'd0) ? Lp01 : (esc_sr_q[0] ? Lp10 : Lp01);
 
@@ -204,12 +215,21 @@ module bow_dphy_lp #(
     esc_sr_d     = esc_sr_q;
     esc_cnt_d    = esc_cnt_q;
     esc_mark_d   = esc_mark_q;
+    exit_wait_d  = exit_wait_q && (state_q == Exit);
 
     if (!en_i && (state_q != Off) && (state_q != Disable)) begin
       state_d = hs_en_q ? Disable : Off;
       tmr_d   = 20'd7;
     end else if (force_wait_i && (state_q != Off) && (state_q != Disable)) begin
-      state_d = WaitStop;          // CMD.REINIT (v1.x)
+      // CMD.REINIT (v1.x): back to WaitStop; a clock lane with the gate open (its clock may
+      // still run) through Exit: the gate closes first, the receiver two cycles later
+      if (ClockLane && ((state_q == Hs) || (state_q == Exit))) begin
+        state_d     = Exit;
+        exit_wait_d = 1'b1;
+        if (state_q != Exit) tmr_d = 20'd1;
+      end else begin
+        state_d = WaitStop;
+      end
     end else begin
       unique case (state_q)
         Off: begin
@@ -285,7 +305,7 @@ module bow_dphy_lp #(
           if (lp_q == Lp11) state_d = Stop;
         end
         Exit, Disable: begin
-          if (tmr_q == 20'd0) state_d = (state_q == Exit) ? Stop : Off;
+          if (tmr_q == 20'd0) state_d = (state_q != Exit) ? Off : exit_wait_q ? WaitStop : Stop;
           else                tmr_d   = tmr_q - 20'd1;
         end
         // ---- v1.x: escape mode entry and ULPS (ulps_en_i; without it these states are
@@ -374,16 +394,21 @@ module bow_dphy_lp #(
           if (!ulps_en_i) begin
             state_d = Off;
           end else if (lp_q == Lp10) begin
-            state_d   = UlpsExit;    // wake-up mark: the HS part powers up again
-            ev_wake_d = 1'b1;
+            state_d = UlpsExit;      // wake-up mark: the HS part powers up again
           end else if (lp_q == Lp11) begin
             state_d   = Stop;
             ev_wake_d = 1'b1;
           end
         end
         UlpsExit: begin
-          if (!ulps_en_i)        state_d = Off;
-          else if (lp_q == Lp11) state_d = Stop;
+          if (!ulps_en_i) begin
+            state_d = Off;
+          end else if (lp_q == Lp11) begin
+            state_d   = Stop;        // the end of the wake-up
+            ev_wake_d = 1'b1;
+          end else if (lp_q == Lp00) begin
+            state_d = Ulps;          // the mark ended without LP-11: still in ULPS
+          end
         end
         default: state_d = Off;
       endcase
@@ -435,6 +460,7 @@ module bow_dphy_lp #(
     if (!rst_ni) begin
       tmr_hi_q     <= '0;
       term_q       <= 1'b0;
+      exit_wait_q  <= 1'b0;
       pend_q       <= 1'b0;
       esc_sr_q     <= '0;
       esc_cnt_q    <= '0;
@@ -447,6 +473,7 @@ module bow_dphy_lp #(
     end else begin
       tmr_hi_q     <= tmr_hi_d;
       term_q       <= term_d;
+      exit_wait_q  <= ClockLane && exit_wait_d;
       pend_q       <= pend_d;
       esc_sr_q     <= esc_sr_d;
       esc_cnt_q    <= esc_cnt_d;
@@ -465,7 +492,7 @@ module bow_dphy_lp #(
   assign hs_active_o = act_q;
   assign stop_o      = (state_q == Stop);
   assign ulps_o      = (state_q == Ulps) || (state_q == UlpsExit);
-  assign ulps_rx_o   = (state_q == Ulps);
+  assign ulps_act_o  = (state_q == Ulps);
 
   // AFE des_rst: a Moore output of the next state too, so it falls at the very edge that
   // opens the gate and rises at the one that closes it
