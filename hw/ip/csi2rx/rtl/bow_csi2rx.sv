@@ -64,7 +64,8 @@
 //                    the lost burst marking (lpl_*)
 //   rx_byte_clk_hs_i byte clock = HS clock / 4, runs only while the clock lane is in HS
 //                    (non-continuous clock: HS bursts only): the lane merge and the write side
-//                    of its FIFO, the gate of the aligner events (stale_q)
+//                    of its FIFO, the gate of the aligner events (stale_q); tied off without
+//                    a PHY (HasPhy = 0), the lane merge then runs on csi_clk_i, without input
 // Resets (asynchronous assertion, synchronous release):
 //   crst_n      csi hard reset (csi_rst_ni & rst_ni): event toggles, LOG capture
 //   brst_n      byte hard reset: the configuration of the lane merge
@@ -90,7 +91,8 @@ module bow_csi2rx
   parameter int unsigned Lanes      = 2,            // physical data lanes: 1, 2 or 4
   parameter int unsigned PhyClkHz   = 200_000_000,  // csi_clk_i frequency (INFO[15:8])
   parameter int unsigned CpuClkHz   = 0,            // clk_i frequency (0: not checked)
-  parameter bit          HasPhy     = 1'b1,         // INFO.PHY: a D-PHY is connected
+  parameter bit          HasPhy     = 1'b1,         // INFO.PHY: a D-PHY is connected (0: no
+                                                    // byte clock, the lane merge on csi_clk_i)
   parameter int unsigned FifoDepth  = 256,          // pixel FIFO entries (4 px each), power of 2
   parameter bit          DphyWin    = 1'b1,         // INFO[6]: the D-PHY's registers are at 0xC00
                                                     // (bow_mipi_rx; 0: a PHY of its own)
@@ -394,24 +396,39 @@ module bow_csi2rx
   assign sot_ev = al_sync_err & ~stale_q;
   assign dsk_ev = al_deskew[0] & ~dsk_last_q & ~stale_q[0];
 
-  // The lane merge (byte domain) and its two clock FIFO: from here on csi_clk_i
+  // The lane merge (byte domain) and its two clock FIFO: from here on csi_clk_i. Without a
+  // PHY (HasPhy = 0: bow32_top's CsiPhy, the builds without a camera) the byte clock is tied
+  // off, and the lane merge runs on csi_clk_i, reset with the csi datapath and without
+  // input, so that no flop is left on a constant clock: on the byte clock, the DONT_TOUCH
+  // gray write pointer of its FIFO (bow_fifo_async) kept the write side's pointer flops and
+  // drst_n there, and check_timing found a constant clock at their pins (the Huins RAM card
+  // build; review of step 7 of docs/ip/mipi_rx_arch.md).
   logic                  lm_valid, lm_sop, lm_eob, lm_skew, lm_dsk;
   logic [Lanes-1:0][7:0] lm_data;
   logic [Lanes-1:0]      lm_sot;
+  logic                  lm_clk, lm_rst_n;
+
+  if (HasPhy) begin : g_merge_byte_clk
+    assign lm_clk   = rx_byte_clk_hs_i;
+    assign lm_rst_n = drst_n;
+  end else begin : g_merge_csi_clk
+    assign lm_clk   = csi_clk_i;
+    assign lm_rst_n = cdrst_n;
+  end
 
   bow_csi2_lane_merge #(
     .Lanes (Lanes)
   ) u_lane_merge (
-    .clk_i      (rx_byte_clk_hs_i),
-    .rst_ni     (drst_n),
-    .lanes2_i   (mlanes2),
-    .lanes4_i   (mlanes4),
-    .arm_i      (arm),
-    .valid_i    (al_valid),
-    .data_i     (al_data),
-    .sot_i      (al_sot),
-    .ev_sot_i   (sot_ev),
-    .ev_dsk_i   (dsk_ev),
+    .clk_i      (lm_clk),
+    .rst_ni     (lm_rst_n),
+    .lanes2_i   (HasPhy && mlanes2),
+    .lanes4_i   (HasPhy && mlanes4),
+    .arm_i      (HasPhy ? arm : '0),
+    .valid_i    (HasPhy ? al_valid : '0),
+    .data_i     (HasPhy ? al_data : '0),
+    .sot_i      (HasPhy ? al_sot : '0),
+    .ev_sot_i   (HasPhy ? sot_ev : '0),
+    .ev_dsk_i   (HasPhy && dsk_ev),
     .csi_clk_i,
     .csi_rst_ni (cdrst_n),
     .valid_o    (lm_valid),
