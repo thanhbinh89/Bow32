@@ -23,7 +23,8 @@
 // which `csi2_model.py check DIR` compares with the reference model.
 //
 // Invariants per segment: ppi_overlap = lane programs of the BFM that overlap (a rendering
-// error); at the end irq_bad (irq_o = |(IRQ_STATUS & IRQ_EN)).
+// error), irq_fe = polls that found IRQ_STATUS.FE with IRQ_EN.FE and irq_o low; at the end
+// irq_bad (irq_o = |(IRQ_STATUS & IRQ_EN)).
 //
 // Clocks: CPU 50 MHz, video 200 MHz (PhyClkHz, the lp clock of the D-PHY of Bow32), byte
 // clock and the standard PHY's lp clock from the BFM; all unrelated.
@@ -217,13 +218,16 @@ module tb_csi2rx_ppi;
 
   // -------------------------------------------------------------- invariants
   int unsigned overlaps0 = 0;
+  int unsigned irq_fe_bad = 0, irq_fe_bad0 = 0;      // FE polled with irq_o low (IRQ_EN.FE)
 
   function automatic void seg_reset();
-    overlaps0 = u_bfm.overlaps;
+    overlaps0   = u_bfm.overlaps;
+    irq_fe_bad0 = irq_fe_bad;
   endfunction
 
   function automatic void seg_dump(int seg);
     $fwrite(regs_fd, "inv %0d ppi_overlap %0d\n", seg, u_bfm.overlaps - overlaps0);
+    $fwrite(regs_fd, "inv %0d irq_fe %0d\n", seg, irq_fe_bad - irq_fe_bad0);
   endfunction
 
   // ---------------------------------------------------------------- bus BFM
@@ -245,11 +249,16 @@ module tb_csi2rx_ppi;
     req   = BUS_REQ_DEFAULT;
   endtask
 
-  // One poll of IRQ_STATUS.FE (frame end records), then `cycles` CPU cycles
+  // One poll of IRQ_STATUS.FE (frame end records), then `cycles` CPU cycles. With FE set,
+  // irq_o must be high when IRQ_EN.FE is (invariant irq_fe: FE polls with irq_o low).
   task automatic service(input int unsigned cycles);
-    logic [31:0] st, info, fsum, ferr, unused;
+    logic [31:0] st, info, fsum, ferr, en, unused;
+    logic        irq_now;
     bus_xfer(1'b0, 32'h014, '0, st);
+    irq_now = irq;
     if (st[1]) begin
+      bus_xfer(1'b0, 32'h018, '0, en);
+      if (en[1] && !irq_now) irq_fe_bad++;
       bus_xfer(1'b0, 32'h050, '0, info);
       bus_xfer(1'b0, 32'h058, '0, fsum);
       bus_xfer(1'b0, 32'h04C, '0, ferr);
@@ -418,6 +427,12 @@ module tb_csi2rx_ppi;
     $fwrite(regs_fd, "end\n");
     $fclose(regs_fd);
     $fclose(out_fd);
+`ifdef BOW_SYNC_JITTER
+    // the jitter model of bow_sync and of the FIFO pointer synchronisers (make test sums the
+    // late resolutions per build and fails a build without any)
+    $display("tb_csi2rx_ppi: BOW_SYNC_JITTER: %0d synchroniser inputs changed inside the window, %0d resolved one cycle late",
+             bow_sync_jitter_pkg::n_window, bow_sync_jitter_pkg::n_late);
+`endif
     u_bfm.report();
     $display("tb_csi2rx_ppi: %0d bursts, %0d lanes, %s - dumps written", u_bfm.bursts_done, Lanes,
              std ? "standard PHY through bow_csi2rx_ppi_flat" : "D-PHY of Bow32 (bow_csi2rx)");

@@ -12,8 +12,10 @@ datapath is off, and the AFE interface of step 5: des_rst, OWN, lprx_en, lane_pd
 values and the AFE status of the D-PHY (bow_afe_chk in every bench, the D-PHY's unit test
 tb_dphy_afe.sv), the delay and receive path reset logic of the two FPGA adapters
 (csi2_tx_model runs it, the unit test tb_afe_dly.sv checks it against models of the
-primitives). Each mutant is a copy of hw/ip/dphy_rx/rtl, hw/ip/csi2rx/rtl and the adapters'
-logic with one text substitution; it must make one case fail. The unit tests run first (the
+primitives); since step 7 the controller's work after a burst whose clock lane stops right
+after it (test tclkpost: the transmitter's T_CLK-POST of 10 ns, the D-PHY's own RxActiveHS).
+Each mutant is a copy of hw/ip/dphy_rx/rtl, hw/ip/csi2rx/rtl and the adapters' logic with one
+text substitution; it must make one case fail. The unit tests run first (the
 Makefile's afe target: a few seconds each), then the whole receiver cases (simulation or
 model check), generated once with tools/csi2/csi2_model.py. Everything first runs on the RTL
 as it is.
@@ -68,7 +70,7 @@ UNITS = [("afe_dly", "tb_afe_dly", [], AFE_FILES, [], "tb_afe_dly.sv"),
 
 # whole receiver cases: (test, lanes, Lanes parameter), seed 1, BurstRxRst 0 (as test-rx)
 CASES = [("raw", 4, 4), ("rxoff", 2, 2), ("rxoff", 4, 4), ("rxoff", 1, 1), ("dly", 4, 4),
-         ("be", 2, 2)]
+         ("be", 2, 2), ("tclkpost", 2, 2), ("tclkpost", 1, 1)]
 
 # name, [(file, old text, new text, occurrences)]: every old text must occur that often
 MUTANTS = [
@@ -151,6 +153,14 @@ MUTANTS = [
                                 "      if (tap_s[l] == tap_last_q[l]) begin", 1)]),
     ("xusp_no_stable_check", [(XUSP, "      if ((tap_s[l] == tap_last_q[l]) && (tap_s[l] != tap_ld_q[l])) begin",
                                "      if (tap_s[l] != tap_ld_q[l]) begin", 1)]),
+    # step 7: the controller's events to the CPU (FE, lines, errors) and its LOG capture still
+    # on the byte clock, as up to step 6: FE, its interrupt and LOG DONE wait for the byte
+    # clock of the next burst when the clock lane stops right after a burst (tclkpost; the
+    # events' csi_clk pulses sampled on the byte clock also get lost: raw, rxoff, dly, be)
+    ("events_on_byte_clock", [(CTRL, "      .src_clk_i   (csi_clk_i),\n      .src_rst_ni  (crst_n),\n      .src_pulse_i (bev[i]),",
+                               "      .src_clk_i   (rx_byte_clk_hs_i),\n      .src_rst_ni  (crst_n),\n      .src_pulse_i (bev[i]),", 1)]),
+    ("log_on_byte_clock", [(CTRL, "  bow_csi2_capture u_capture (\n    .clk_i         (csi_clk_i),",
+                            "  bow_csi2_capture u_capture (\n    .clk_i         (rx_byte_clk_hs_i),", 1)]),
 ]
 
 
@@ -187,7 +197,7 @@ def build_tb(d, lanes, files):
     """The whole receiver bench with the RTL files of a mutant, for one Lanes parameter."""
     obj = os.path.join(d, f"obj_l{lanes}")
     cmd = [VERILATOR, "--binary", "--timing", "-j", "4", "-O2", "-Wno-fatal", "-Wno-lint",
-           "-Wno-style", "-Wno-TIMESCALEMOD", "+define+BOW_CDC_JITTER",
+           "-Wno-style", "-Wno-TIMESCALEMOD", "+define+BOW_CDC_JITTER", "+define+BOW_SYNC_JITTER",
            "--top-module", "tb_bow_csi2rx", *PARAMS[lanes], "-Mdir", obj, "-o", "Vtb_bow_csi2rx",
            "-F", COMMON_F, "-F", BUS_F, *files,
            os.path.join(HERE, "csi2_tx_model.sv"),

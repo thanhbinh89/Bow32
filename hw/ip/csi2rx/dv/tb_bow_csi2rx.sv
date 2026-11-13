@@ -38,7 +38,8 @@
 // (data and clock lanes) and LP-11 to hsrx_en low, the gate open while the clock
 // lane is in an LP state or opened while it toggles (csi2_tx_model counters);
 // with the Versal AFE (AfeKind = 2) the XPHY delay contract of the model (dly_bad,
-// dly_drop, loads per lane); at the end irq_o = |(IRQ_STATUS & IRQ_EN).
+// dly_drop, loads per lane); irq_o high whenever a poll finds IRQ_STATUS.FE with IRQ_EN.FE
+// (irq_fe); at the end irq_o = |(IRQ_STATUS & IRQ_EN).
 // On every video clock edge: the PPI v1 outputs of the D-PHY that the
 // controller does not use (bow_ppi_chk, bound into bow_dphy_rx; a violation
 // stops the simulation, the counts go to sim.log) and its AFE v1 outputs
@@ -229,6 +230,7 @@ module tb_bow_csi2rx;
   // counters at the segment start
   longint      lat_max [ML + 1], off_max [ML];
   int unsigned ce_bad0 = 0, ce_rise0 = 0, runts0 = 0, flips0 = 0, dly_bad0 = 0, dly_drop0 = 0;
+  int unsigned irq_fe_bad = 0, irq_fe_bad0 = 0;      // FE polled with irq_o low (IRQ_EN.FE)
   int unsigned loads0 [ML];
 
   function automatic void seg_reset();
@@ -240,6 +242,7 @@ module tb_bow_csi2rx;
     flips0    = u_tx.flips;
     dly_bad0  = u_tx.dly_bad;
     dly_drop0 = u_tx.dly_drop;
+    irq_fe_bad0 = irq_fe_bad;
     for (int i = 0; i < int'(ML); i++) loads0[i] = u_tx.dly_loads[i];
   endfunction
 
@@ -251,6 +254,7 @@ module tb_bow_csi2rx;
     $fwrite(regs_fd, "inv %0d ce_rise_toggle %0d\n", seg, u_tx.ce_rise_toggle - ce_rise0);
     $fwrite(regs_fd, "inv %0d runts %0d\n", seg, u_tx.runts - runts0);
     $fwrite(regs_fd, "inv %0d flips %0d\n", seg, u_tx.flips - flips0);
+    $fwrite(regs_fd, "inv %0d irq_fe %0d\n", seg, irq_fe_bad - irq_fe_bad0);
     if (Versal) begin
       $fwrite(regs_fd, "inv %0d dly_bad %0d\n", seg, u_tx.dly_bad - dly_bad0);
       $fwrite(regs_fd, "inv %0d dly_drop %0d\n", seg, u_tx.dly_drop - dly_drop0);
@@ -299,11 +303,16 @@ module tb_bow_csi2rx;
     req   = BUS_REQ_DEFAULT;
   endtask
 
-  // One poll of IRQ_STATUS.FE (frame end records), then `cycles` CPU cycles
+  // One poll of IRQ_STATUS.FE (frame end records), then `cycles` CPU cycles. With FE set,
+  // irq_o must be high when IRQ_EN.FE is (invariant irq_fe: FE polls with irq_o low).
   task automatic service(input int unsigned cycles);
-    logic [31:0] st, info, fsum, ferr, unused;
+    logic [31:0] st, info, fsum, ferr, en, unused;
+    logic        irq_now;
     bus_xfer(1'b0, 32'h014, '0, st);
+    irq_now = irq;
     if (st[1]) begin
+      bus_xfer(1'b0, 32'h018, '0, en);
+      if (en[1] && !irq_now) irq_fe_bad++;
       bus_xfer(1'b0, 32'h050, '0, info);
       bus_xfer(1'b0, 32'h058, '0, fsum);
       bus_xfer(1'b0, 32'h04C, '0, ferr);
@@ -557,6 +566,12 @@ module tb_bow_csi2rx;
     $fclose(out_fd);
     if (u_tx.ce_bad != 0) $display("tb_bow_csi2rx: first CE open in an LP state of the clock lane at %0.3f ns",
                                    u_tx.t_ce_bad);
+`ifdef BOW_SYNC_JITTER
+    // the jitter model of bow_sync and of the FIFO pointer synchronisers (make test sums the
+    // late resolutions per build and fails a build without any)
+    $display("tb_bow_csi2rx: BOW_SYNC_JITTER: %0d synchroniser inputs changed inside the window, %0d resolved one cycle late",
+             bow_sync_jitter_pkg::n_window, bow_sync_jitter_pkg::n_late);
+`endif
     $display("tb_bow_csi2rx: %0d bursts, %0d lanes - dumps written", u_tx.bursts_done, Lanes);
     if (u_tx.versal) begin
       $display("tb_bow_csi2rx: Versal PHY FIFOs (BurstRxRst %0d, per lane latency %0d): %0d glitch words, %0d read gaps, at most %0d words, wraps %0d/%0d/%0d/%0d",
